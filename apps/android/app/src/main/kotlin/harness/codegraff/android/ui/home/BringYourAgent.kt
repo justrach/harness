@@ -67,8 +67,8 @@ fun BringYourAgent(
                 if (index > 0) Box(Modifier.fillMaxWidth().padding(start = 16.dp).heightIn(min = 1.dp).background(p.hairline(0.06f)).padding(top = 1.dp))
                 AgentRow(
                     row, readiness.state == OnboardingState.NoComputer, deviceName,
-                    // Graff can also run on a ChatGPT plan; the sign-in happens on the computer that has it.
-                    showChatGPT = chatGPT && row.agent.id == "graff" && row.status >= AgentStatus.Off,
+                    // OpenAI Codex can run on a ChatGPT plan; the sign-in happens on the computer that has it.
+                    showChatGPT = chatGPT && row.agent.id == "codex" && row.status >= AgentStatus.Off,
                 ) { onChatGPT(row.deviceIds.map { ChatGPTComputer(it, deviceName(it)) }) }
             }
         }

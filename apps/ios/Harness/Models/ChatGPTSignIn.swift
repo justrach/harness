@@ -1,6 +1,6 @@
-// Sign in with ChatGPT (plan usage) as Graff's login, driven from the phone (ChatGPTSignIn.kt on Android). The browser
-// step runs on the computer that hosts Graff: OpenAI's redirect is a loopback on that machine and there is no device
-// code, so the phone starts the sign-in there, shows the wait and shows the outcome. It never opens the browser and
+// Sign in with ChatGPT (plan usage) for OpenAI Codex, driven from the phone (ChatGPTSignIn.kt on Android). Harness on the
+// computer does the sign-in itself. The browser step runs there: OpenAI's redirect is a loopback on that machine and there
+// is no device code, so the phone starts the sign-in, shows the wait and shows the outcome. It never opens the browser and
 // never sees a token. The rules are pinned in `apps/parity/vectors/chatgpt-sign-in.json`.
 
 import Foundation
@@ -24,23 +24,27 @@ enum ChatGPTAction: String {
     case start, cancel, done, retry
 }
 
-/// The computer's answer to a poll: the engine's agent-login status, and whether plan usage was granted.
+/// The computer's answer to a poll: the engine's agent-login status (pending, done or error), whether plan usage was
+/// granted once done, and the message of an error.
 struct ChatGPTPoll: Equatable {
     var status: String
     var planUsage: Bool?
+    var message: String?
 }
 
 enum ChatGPTSignIn {
     /// OpenAI's page for the plan's usage, linked as "Manage usage".
     static let manageUsageURL = "https://chatgpt.com/settings/usage"
 
+    /// What the computer says when the person declined in its browser; any other error is a failed sign-in.
+    static let declinedMessage = "ChatGPT sign-in was declined."
+
     /// Plan usage counts only when the computer says it was granted; a sign-in that does not say is not treated as ready.
     static func phase(for poll: ChatGPTPoll) -> ChatGPTPhase {
         switch poll.status {
         case "pending": .waiting
-        case "succeeded": poll.planUsage == true ? .connected : .planUsageOff
-        case "plan-not-allowed": .planUsageOff
-        case "declined": .declined
+        case "done": poll.planUsage == true ? .connected : .planUsageOff
+        case "error": poll.message == declinedMessage ? .declined : .failed
         default: .failed
         }
     }
@@ -66,13 +70,13 @@ enum ChatGPTSignIn {
     }
 }
 
-/// A computer that can run the sign-in: online, with Graff on it.
+/// A computer that can run the sign-in: online, with OpenAI Codex on it.
 struct ChatGPTComputer: Identifiable, Equatable {
     let id: String
     let name: String
 }
 
-/// The calls the sign-in makes on a computer. Demo only until the engine ships them; with no client the phone offers nothing.
+/// The calls the sign-in makes on a computer. Demo only until the phone talks to the engine's login calls; with no client the phone offers nothing.
 protocol ChatGPTSignInClient: Sendable {
     var pollInterval: Duration { get }
     /// Starts the sign-in on the computer, which opens its browser.
@@ -129,10 +133,10 @@ actor DemoChatGPTSignIn: ChatGPTSignInClient {
     /// `name` is a phase: connected, planUsageOff, declined or failed.
     init(outcome name: String) {
         switch name {
-        case "planUsageOff": outcome = ChatGPTPoll(status: "succeeded", planUsage: false)
-        case "declined": outcome = ChatGPTPoll(status: "declined")
-        case "failed": outcome = ChatGPTPoll(status: "error")
-        default: outcome = ChatGPTPoll(status: "succeeded", planUsage: true)
+        case "planUsageOff": outcome = ChatGPTPoll(status: "done", planUsage: false)
+        case "declined": outcome = ChatGPTPoll(status: "error", message: ChatGPTSignIn.declinedMessage)
+        case "failed": outcome = ChatGPTPoll(status: "error", message: "ChatGPT sign-in failed.")
+        default: outcome = ChatGPTPoll(status: "done", planUsage: true)
         }
     }
 

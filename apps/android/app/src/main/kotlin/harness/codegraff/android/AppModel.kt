@@ -106,11 +106,11 @@ data class WorkspaceState(
         AgentReadiness.evaluate(devices.map { DeviceAgents(it.id, it.name, deviceOnline(it.id), agents[it.id].orEmpty()) })
     }
 
-    /** The online computers that have Graff, which is where the ChatGPT sign-in can run. */
+    /** The online computers that have OpenAI Codex, which is where the ChatGPT sign-in can run. */
     fun chatGPTComputers(): List<ChatGPTComputer> {
-        val graff = agentReadiness.rows.firstOrNull { it.agent.id == "graff" } ?: return emptyList()
-        if (graff.status < AgentStatus.Off) return emptyList()
-        return graff.deviceIds.map { ChatGPTComputer(it, deviceName(it)) }
+        val codex = agentReadiness.rows.firstOrNull { it.agent.id == "codex" } ?: return emptyList()
+        if (codex.status < AgentStatus.Off) return emptyList()
+        return codex.deviceIds.map { ChatGPTComputer(it, deviceName(it)) }
     }
 
     fun chatsIn(spaceId: String): List<Chat> =

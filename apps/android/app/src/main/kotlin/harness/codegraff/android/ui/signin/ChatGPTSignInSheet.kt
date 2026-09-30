@@ -27,9 +27,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -53,7 +50,7 @@ import harness.codegraff.android.ui.components.SheetSeparator
 import harness.codegraff.android.ui.components.pressWashClickable
 
 /**
- * "Use your ChatGPT plan" (ChatGPTSignInSheet.swift): sign in to Graff with a ChatGPT account so requests run on the
+ * "Use your ChatGPT plan" (ChatGPTSignInSheet.swift): sign in to ChatGPT so OpenAI Codex's requests run on the
  * person's plan. The browser step happens on the computer, so this only picks the computer, starts it there, shows the
  * wait and shows the outcome, in the wording OpenAI's guidelines ask for. The rules are in [ChatGPTSignIn]; the copy is
  * pinned in apps/parity/ux-contract.json.
@@ -86,7 +83,7 @@ fun ChatGPTSignInContent(computers: List<ChatGPTComputer>, client: ChatGPTSignIn
 
     SheetBody {
         Text(
-            "Graff can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.",
+            "OpenAI Codex can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.",
             style = sans(14f), color = p.textMuted,
         )
         SheetCard {
@@ -107,7 +104,6 @@ fun ChatGPTSignInContent(computers: List<ChatGPTComputer>, client: ChatGPTSignIn
                 }
             }
         }
-        Terminal()
         if (flow.phase != ChatGPTPhase.Idle) {
             Column(
                 Modifier.fillMaxWidth().testTag("chatgpt-status").semantics { stateDescription = flow.phase.wireName },
@@ -140,30 +136,11 @@ fun ChatGPTSignInContent(computers: List<ChatGPTComputer>, client: ChatGPTSignIn
     }
 }
 
-/** The same thing from a shell, for someone who would rather type it on the computer. */
-@Composable
-private fun Terminal() {
-    val p = Theme.palette
-    val clipboard = LocalClipboardManager.current
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Prefer the terminal? Run", style = sans(13f), color = p.textMuted)
-        Text(
-            "graff login chatgpt", style = sans(13f).copy(fontFamily = FontFamily.Monospace), color = p.text,
-            modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(p.ink(0.045f)).padding(horizontal = 8.dp, vertical = 5.dp),
-        )
-        Box(
-            Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(24.dp)).pressWashClickable({ clipboard.setText(AnnotatedString("graff login chatgpt")) }, cornerRadius = 24.dp)
-                .padding(horizontal = 10.dp).testTag("chatgpt-copy-command"),
-            contentAlignment = Alignment.Center,
-        ) { Text("Copy", style = sans(13f, FontWeight.Medium), color = p.textMuted) }
-    }
-}
-
 private fun outcomeCopy(phase: ChatGPTPhase): Pair<String, String?> = when (phase) {
     ChatGPTPhase.Connected ->
         "You're using your ChatGPT plan" to "Eligible AI requests in this app use your ChatGPT plan. You can manage usage in ChatGPT settings."
     ChatGPTPhase.PlanUsageOff ->
-        "Signed in, but plan usage is off" to "Graff can't use your ChatGPT plan yet. Sign in again and allow plan usage, or use an API key."
+        "Signed in, but plan usage is off" to "OpenAI Codex can't use your ChatGPT plan yet. Sign in again and allow plan usage."
     ChatGPTPhase.Declined -> "You didn't approve the sign-in" to "Nothing was changed. Try again when you're ready."
     ChatGPTPhase.Failed -> "Sign-in didn't finish" to "Something went wrong on your computer. Try again."
     ChatGPTPhase.Idle, ChatGPTPhase.Waiting -> "" to null

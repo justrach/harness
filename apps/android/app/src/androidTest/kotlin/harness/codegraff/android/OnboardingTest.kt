@@ -49,9 +49,9 @@ class OnboardingTest {
         launch("onboarding-noagent")
         rule.onNodeWithText("Bring in your agent").assertExists()
         rule.onNodeWithText("Get Harness on your computer").assertDoesNotExist()
-        rule.onNodeWithTag("onboarding-agent-graff").assertTextContains("Switched off on MacBook Pro", substring = true)
+        rule.onNodeWithTag("onboarding-agent-graff").assertTextContains("Not found on MacBook Pro", substring = true)
         rule.onNodeWithTag("onboarding-agent-claude-code").assertTextContains("Not installed on MacBook Pro", substring = true)
-        rule.onNodeWithTag("onboarding-agent-codex").assertTextContains("Not found on MacBook Pro", substring = true)
+        rule.onNodeWithTag("onboarding-agent-codex").assertTextContains("Switched off on MacBook Pro", substring = true)
     }
 
     @Test

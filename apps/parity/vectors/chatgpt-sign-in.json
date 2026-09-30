@@ -1,5 +1,5 @@
 {
-  "$comment": "Sign in with ChatGPT (plan usage) as driven from the phone. The browser step runs on the computer; the phone starts it, shows the wait and the outcome. `polls` maps the computer's poll answer to the screen the phone shows, `actions` says what the one main button does on each screen. An account that cannot use plan usage is only found when a request runs, not at sign-in, so it is not a screen here. Poll status names follow the engine's agent-login shape and change here first if it differs.",
+  "$comment": "Sign in with ChatGPT (plan usage) as driven from the phone. The browser step runs on the computer; the phone starts it, shows the wait and the outcome. `polls` maps the computer's poll answer (the engine's agent-login shape: status pending, done or error, plus `planUsage` once done and a `message` on an error) to the screen the phone shows, `actions` says what the one main button does on each screen. The computer says a declined approval in `declinedMessage`; any other error is a failed sign-in. An account that cannot use plan usage is only found when a request runs, not at sign-in, so it is not a screen here.",
   "manageUsageUrl": "https://chatgpt.com/settings/usage",
   "phases": [
     "idle",
@@ -31,33 +31,35 @@
     },
     {
       "name": "signed in with plan usage granted",
-      "status": "succeeded",
+      "status": "done",
       "planUsage": true,
       "phase": "connected"
     },
     {
       "name": "signed in without plan usage",
-      "status": "succeeded",
+      "status": "done",
       "planUsage": false,
       "phase": "planUsageOff"
     },
     {
       "name": "signed in, plan usage not reported: not counted as granted",
-      "status": "succeeded",
+      "status": "done",
       "phase": "planUsageOff"
     },
     {
-      "name": "declined on the computer",
-      "status": "declined",
+      "name": "the approval was declined on the computer",
+      "status": "error",
+      "message": "ChatGPT sign-in was declined.",
       "phase": "declined"
     },
     {
-      "name": "the computer reports plan usage was not allowed",
-      "status": "plan-not-allowed",
-      "phase": "planUsageOff"
+      "name": "the computer reports an error",
+      "status": "error",
+      "message": "ChatGPT sign-in failed: the approval expired; try again",
+      "phase": "failed"
     },
     {
-      "name": "the computer reports an error",
+      "name": "an error with no message",
       "status": "error",
       "phase": "failed"
     },
@@ -121,5 +123,6 @@
         "limit": false
       }
     ]
-  }
+  },
+  "declinedMessage": "ChatGPT sign-in was declined."
 }

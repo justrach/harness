@@ -353,13 +353,18 @@ class ParityTest {
     fun theChatGPTSignInRulesMatch() {
         val v = load("vectors/chatgpt-sign-in.json")
         assertEquals(v.getString("manageUsageUrl"), ChatGPTSignIn.MANAGE_USAGE_URL)
+        assertEquals(v.getString("declinedMessage"), ChatGPTSignIn.DECLINED_MESSAGE)
         assertEquals(v.getJSONArray("phases").strings(), ChatGPTPhase.entries.map { it.wireName })
         val actions = v.getJSONObject("actions")
         for (phase in ChatGPTPhase.entries) {
             assertEquals(phase.wireName, actions.getString(phase.wireName), ChatGPTSignIn.action(phase).wireName)
         }
         for (c in v.rows("polls")) {
-            val poll = ChatGPTPoll(c.getString("status"), if (c.has("planUsage")) c.getBoolean("planUsage") else null)
+            val poll = ChatGPTPoll(
+                c.getString("status"),
+                if (c.has("planUsage")) c.getBoolean("planUsage") else null,
+                if (c.has("message")) c.getString("message") else null,
+            )
             assertEquals(c.getString("name"), c.getString("phase"), ChatGPTSignIn.phase(poll).wireName)
         }
         val plan = v.getJSONObject("plan")

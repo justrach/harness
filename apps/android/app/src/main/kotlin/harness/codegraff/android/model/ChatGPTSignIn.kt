@@ -9,9 +9,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Sign in with ChatGPT (plan usage) as Graff's login, driven from the phone (ChatGPTSignIn.swift on iOS). The browser
- * step runs on the computer that hosts Graff: OpenAI's redirect is a loopback on that machine and there is no device
- * code, so the phone starts the sign-in there, shows the wait and shows the outcome. It never opens the browser and
+ * Sign in with ChatGPT (plan usage) for OpenAI Codex, driven from the phone (ChatGPTSignIn.swift on iOS). Harness on the
+ * computer does the sign-in itself. The browser step runs there: OpenAI's redirect is a loopback on that machine and
+ * there is no device code, so the phone starts the sign-in, shows the wait and shows the outcome. It never opens the browser and
  * never sees a token. The rules are pinned in `apps/parity/vectors/chatgpt-sign-in.json`.
  */
 
@@ -34,22 +34,27 @@ enum class ChatGPTPhase(val wireName: String) {
 /** What the one main button does on a screen. */
 enum class ChatGPTAction(val wireName: String) { Start("start"), Cancel("cancel"), Done("done"), Retry("retry") }
 
-/** The computer's answer to a poll: the engine's agent-login status, and whether plan usage was granted. */
-data class ChatGPTPoll(val status: String, val planUsage: Boolean? = null)
+/**
+ * The computer's answer to a poll: the engine's agent-login status (pending, done or error), whether plan usage was
+ * granted once done, and the message of an error.
+ */
+data class ChatGPTPoll(val status: String, val planUsage: Boolean? = null, val message: String? = null)
 
-/** A computer that can run the sign-in: online, with Graff on it. */
+/** A computer that can run the sign-in: online, with OpenAI Codex on it. */
 data class ChatGPTComputer(val id: String, val name: String)
 
 object ChatGPTSignIn {
     /** OpenAI's page for the plan's usage, linked as "Manage usage". */
     const val MANAGE_USAGE_URL = "https://chatgpt.com/settings/usage"
 
+    /** What the computer says when the person declined in its browser; any other error is a failed sign-in. */
+    const val DECLINED_MESSAGE = "ChatGPT sign-in was declined."
+
     /** Plan usage counts only when the computer says it was granted; a sign-in that does not say is not treated as ready. */
     fun phase(poll: ChatGPTPoll): ChatGPTPhase = when (poll.status) {
         "pending" -> ChatGPTPhase.Waiting
-        "succeeded" -> if (poll.planUsage == true) ChatGPTPhase.Connected else ChatGPTPhase.PlanUsageOff
-        "plan-not-allowed" -> ChatGPTPhase.PlanUsageOff
-        "declined" -> ChatGPTPhase.Declined
+        "done" -> if (poll.planUsage == true) ChatGPTPhase.Connected else ChatGPTPhase.PlanUsageOff
+        "error" -> if (poll.message == DECLINED_MESSAGE) ChatGPTPhase.Declined else ChatGPTPhase.Failed
         else -> ChatGPTPhase.Failed
     }
 
@@ -71,7 +76,7 @@ object ChatGPTSignIn {
     }
 }
 
-/** The calls the sign-in makes on a computer. Demo only until the engine ships them; with no client the phone offers nothing. */
+/** The calls the sign-in makes on a computer. Demo only until the phone talks to the engine's login calls; with no client the phone offers nothing. */
 interface ChatGPTSignInClient {
     val pollIntervalMs: Long
 
@@ -129,10 +134,10 @@ class ChatGPTSignInFlow(private val client: ChatGPTSignInClient, private val sco
 class DemoChatGPTSignIn(outcome: String) : ChatGPTSignInClient {
     override val pollIntervalMs = 500L
     private val outcome = when (outcome) {
-        "planUsageOff" -> ChatGPTPoll("succeeded", planUsage = false)
-        "declined" -> ChatGPTPoll("declined")
-        "failed" -> ChatGPTPoll("error")
-        else -> ChatGPTPoll("succeeded", planUsage = true)
+        "planUsageOff" -> ChatGPTPoll("done", planUsage = false)
+        "declined" -> ChatGPTPoll("error", message = ChatGPTSignIn.DECLINED_MESSAGE)
+        "failed" -> ChatGPTPoll("error", message = "ChatGPT sign-in failed.")
+        else -> ChatGPTPoll("done", planUsage = true)
     }
     private var polls = 0
 

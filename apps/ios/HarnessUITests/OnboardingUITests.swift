@@ -32,12 +32,12 @@ final class OnboardingUITests: XCTestCase {
         // A computer is online, so there is no download prompt.
         XCTAssertFalse(app.staticTexts["Get Harness on your computer"].exists)
         XCTAssertTrue(agent(app, "graff").waitForExistence(timeout: 5))
-        XCTAssertEqual(agent(app, "graff").value as? String, "off")
-        XCTAssertTrue(agent(app, "graff").label.contains("Switched off on MacBook Pro"))
+        XCTAssertEqual(agent(app, "graff").value as? String, "missing")
+        XCTAssertTrue(agent(app, "graff").label.contains("Not found on MacBook Pro"))
         XCTAssertEqual(agent(app, "claude-code").value as? String, "canInstall")
         XCTAssertTrue(agent(app, "claude-code").label.contains("Not installed on MacBook Pro"))
-        XCTAssertEqual(agent(app, "codex").value as? String, "missing")
-        XCTAssertTrue(agent(app, "codex").label.contains("Not found on MacBook Pro"))
+        XCTAssertEqual(agent(app, "codex").value as? String, "off")
+        XCTAssertTrue(agent(app, "codex").label.contains("Switched off on MacBook Pro"))
     }
 
     func testOnceAnAgentIsReadyHomeShowsItsPlainEmptyLine() {

@@ -43,9 +43,10 @@ final class DemoDataset {
         let now = nowMs()
         let mac = DeviceRow(id: "dev-mac", name: "MacBook Pro", platform: "macos",
                             lastSeenAt: computerOnline ? now : now - 86_400_000, createdAt: now - 86_400_000 * 2)
+        // One agent of each unready kind: Graff not found, Claude Code installable, OpenAI Codex found but off.
         let agents: [AgentDescriptor] = agentReady ? allAgentsReady : [
-            AgentDescriptor(id: "graff", installed: true, enabled: false),
             AgentDescriptor(id: "claude-code", installed: false, canInstall: true),
+            AgentDescriptor(id: "codex", installed: true, enabled: false),
         ]
         return DemoDataset(devices: [mac], spaces: [], chats: [], sessions: [:], agents: ["dev-mac": agents])
     }

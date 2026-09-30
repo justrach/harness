@@ -112,6 +112,17 @@ fn pkce_challenge_is_the_sha256_of_the_verifier() {
     assert_ne!(pkce().0, verifier, "fresh every time");
 }
 
+#[test]
+fn the_declined_message_is_the_one_the_phones_key_on() {
+    // The phone shows its "you didn't approve" screen for exactly this message.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../apps/parity/vectors/chatgpt-sign-in.json"
+    );
+    let vector: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(vector["declinedMessage"], SignInError::Declined.to_string());
+}
+
 // ---------------------------------------------------------------------------
 // A small HTTP server standing in for OpenAI
 // ---------------------------------------------------------------------------

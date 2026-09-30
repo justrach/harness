@@ -8,7 +8,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDeleteAccount = false
-    /// Computers that can sign in to ChatGPT for Graff; empty hides the row.
+    /// Computers that can sign in to ChatGPT for OpenAI Codex; empty hides the row.
     @State private var chatGPTComputers: [ChatGPTComputer] = []
     @State private var showChatGPT = false
 

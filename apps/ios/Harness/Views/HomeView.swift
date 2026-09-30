@@ -22,7 +22,7 @@ struct HomeView: View {
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
     @State private var showSettings = false
-    /// Computers that can sign in to ChatGPT for Graff, for the Home banner.
+    /// Computers that can sign in to ChatGPT for OpenAI Codex, for the Home banner.
     @State private var chatGPTComputers: [ChatGPTComputer] = []
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""

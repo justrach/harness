@@ -124,8 +124,8 @@ struct BringYourAgentView: View {
                         .foregroundStyle(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // Graff can also run on a ChatGPT plan; the sign-in happens on the computer that has it.
-                if row.agent.id == "graff", model.chatGPTSignIn != nil, row.status >= .off {
+                // OpenAI Codex can run on a ChatGPT plan; the sign-in happens on the computer that has it.
+                if row.agent.id == "codex", model.chatGPTSignIn != nil, row.status >= .off {
                     Button {
                         model.chatGPTSheetComputers = row.deviceIds.map { ChatGPTComputer(id: $0, name: model.deviceName($0)) }
                     } label: {

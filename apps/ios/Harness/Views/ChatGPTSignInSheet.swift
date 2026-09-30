@@ -1,5 +1,5 @@
-// "Use your ChatGPT plan" (ChatGPTSignInSheet.kt on Android): sign in to Graff with a ChatGPT account so requests run on
-// the person's plan. The browser step happens on the computer, so this sheet only picks the computer, starts it there,
+// "Use your ChatGPT plan" (ChatGPTSignInSheet.kt on Android): sign in to ChatGPT so OpenAI Codex's requests run on the
+// person's plan. The browser step happens on the computer, so this sheet only picks the computer, starts it there,
 // shows the wait and shows the outcome, in the wording OpenAI's guidelines ask for. The rules are in ChatGPTSignIn; the
 // copy is pinned in apps/parity/ux-contract.json.
 
@@ -40,7 +40,6 @@ struct ChatGPTSignInSheet: View {
                     header
                     steps
                     outcome
-                    terminal
                 }
                 .padding(20)
             }
@@ -64,7 +63,7 @@ struct ChatGPTSignInSheet: View {
             Text("Use your ChatGPT plan")
                 .font(Theme.sans(22, weight: .semibold))
                 .foregroundStyle(Theme.text)
-            Text("Graff can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.")
+            Text("OpenAI Codex can run on your ChatGPT plan. This doesn't give it access to your ChatGPT conversations.")
                 .font(Theme.sans(14))
                 .foregroundStyle(Theme.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -122,28 +121,6 @@ struct ChatGPTSignInSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The same thing from a shell, for someone who would rather type it on the computer.
-    private var terminal: some View {
-        HStack(spacing: 8) {
-            Text("Prefer the terminal? Run")
-                .font(Theme.sans(13))
-                .foregroundStyle(Theme.textMuted)
-            Text("graff login chatgpt")
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(Theme.text)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(SheetStyle.cardFill, in: RoundedRectangle(cornerRadius: 8))
-            Button {
-                UIPasteboard.general.string = "graff login chatgpt"
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-            } label: {
-                Text("Copy").font(Theme.sans(13, weight: .medium)).foregroundStyle(Theme.textMuted).frame(minHeight: 44)
-            }
-            .accessibilityIdentifier("chatgpt-copy-command")
-        }
-    }
-
     /// The wait, then what happened.
     @ViewBuilder private var outcome: some View {
         if flow.phase != .idle {
@@ -191,7 +168,7 @@ struct ChatGPTSignInSheet: View {
              "Eligible AI requests in this app use your ChatGPT plan. You can manage usage in ChatGPT settings.")
         case .planUsageOff:
             ("Signed in, but plan usage is off",
-             "Graff can't use your ChatGPT plan yet. Sign in again and allow plan usage, or use an API key.")
+             "OpenAI Codex can't use your ChatGPT plan yet. Sign in again and allow plan usage.")
         case .declined: ("You didn't approve the sign-in", "Nothing was changed. Try again when you're ready.")
         case .failed: ("Sign-in didn't finish", "Something went wrong on your computer. Try again.")
         case .idle, .waiting: ("", nil)

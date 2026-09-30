@@ -652,12 +652,12 @@ final class AppModel {
         return AgentReadiness.evaluate(devicesAgents)
     }
 
-    /// The online computers that have Graff, which is where the ChatGPT sign-in can run.
+    /// The online computers that have OpenAI Codex, which is where the ChatGPT sign-in can run.
     func chatGPTComputers() async -> [ChatGPTComputer] {
         guard chatGPTSignIn != nil else { return [] }
         let readiness = await agentReadiness()
-        guard let graff = readiness.rows.first(where: { $0.agent.id == "graff" }), graff.status >= .off else { return [] }
-        return graff.deviceIds.map { ChatGPTComputer(id: $0, name: deviceName($0)) }
+        guard let codex = readiness.rows.first(where: { $0.agent.id == "codex" }), codex.status >= .off else { return [] }
+        return codex.deviceIds.map { ChatGPTComputer(id: $0, name: deviceName($0)) }
     }
 
     /// Live model catalog from the selected execution device (the desktop's

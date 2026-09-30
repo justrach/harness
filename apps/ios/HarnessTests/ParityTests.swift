@@ -420,13 +420,14 @@ final class ParityTests: XCTestCase {
     func testTheChatGPTSignInRulesMatch() throws {
         let v = try load("vectors/chatgpt-sign-in.json")
         XCTAssertEqual(v["manageUsageUrl"] as? String, ChatGPTSignIn.manageUsageURL)
+        XCTAssertEqual(v["declinedMessage"] as? String, ChatGPTSignIn.declinedMessage)
         XCTAssertEqual(v["phases"] as? [String], ChatGPTPhase.allCases.map(\.rawValue))
         let actions = try XCTUnwrap(v["actions"] as? [String: String])
         for phase in ChatGPTPhase.allCases {
             XCTAssertEqual(ChatGPTSignIn.action(in: phase).rawValue, actions[phase.rawValue], phase.rawValue)
         }
         for c in try rows(v, "polls") {
-            let poll = ChatGPTPoll(status: c["status"] as! String, planUsage: c["planUsage"] as? Bool)
+            let poll = ChatGPTPoll(status: c["status"] as! String, planUsage: c["planUsage"] as? Bool, message: c["message"] as? String)
             XCTAssertEqual(ChatGPTSignIn.phase(for: poll).rawValue, c["phase"] as? String, "\(c["name"] ?? "")")
         }
         let plan = try XCTUnwrap(v["plan"] as? [String: Any])

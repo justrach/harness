@@ -46,9 +46,10 @@ class DemoDataset(
          */
         fun onboarding(now: Long, computerOnline: Boolean, agentReady: Boolean): DemoDataset {
             val mac = DeviceRow("dev-mac", "MacBook Pro", "macos", if (computerOnline) now else now - DAY, now - 2 * DAY)
+            // One agent of each unready kind: Graff not found, Claude Code installable, OpenAI Codex found but off.
             val agents = if (agentReady) allAgentsReady else listOf(
-                AgentDescriptor("graff", installed = true, enabled = false),
                 AgentDescriptor("claude-code", installed = false, canInstall = true),
+                AgentDescriptor("codex", installed = true, enabled = false),
             )
             return DemoDataset(listOf(mac), emptyList(), emptyList(), emptyMap(), emptyMap(), emptyMap(), mapOf(mac.id to agents))
         }

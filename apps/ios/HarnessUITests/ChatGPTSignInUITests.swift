@@ -28,7 +28,7 @@ final class ChatGPTSignInUITests: XCTestCase {
         entry.tap()
         XCTAssertTrue(app.staticTexts["Use your ChatGPT plan"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Choose the computer"].exists)
-        XCTAssertTrue(app.staticTexts["Prefer the terminal? Run"].exists)
+        XCTAssertFalse(app.buttons["chatgpt-copy-command"].exists, "no terminal command: Harness signs in itself")
         app.buttons["chatgpt-continue"].tap()
     }
 
