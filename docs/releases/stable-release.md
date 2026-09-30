@@ -77,6 +77,11 @@ stable release.
   still being staged switched on; a stable build keeps them off until they are
   promoted. `HARNESS_CHATGPT_PLAN=0` or `=1` overrides that for the ChatGPT
   plan sign-in.
+- **Phone betas.** The iOS beta is a TestFlight build from the release branch
+  (`gh workflow run testflight.yml --ref release/v<version>-beta.<n> -f audience=internal`).
+  The TestFlight workflow only accepts a `release/*` branch for the internal
+  audience. The Android beta is the release build's APK, downloaded from the
+  run (`gh workflow run android-release.yml --ref release/v<version>-beta.<n>`).
 - **Updating.** A beta install updates itself to the next stable release: a
   release outranks its own betas (`0.2.100` > `0.2.100-beta.2` > `0.2.99`).
   Moving between betas is manual: install the newer prerelease.

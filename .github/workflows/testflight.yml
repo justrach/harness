@@ -22,7 +22,9 @@ concurrency:
 
 jobs:
   upload:
-    if: github.ref == 'refs/heads/main'
+    # main builds go to either audience. A release/* branch (a beta) goes to the
+    # internal group only, so a branch can never reach external testers or beta review.
+    if: github.ref == 'refs/heads/main' || (startsWith(github.ref, 'refs/heads/release/') && inputs.audience == 'internal')
     runs-on: macos-latest
     timeout-minutes: 45
     env:
