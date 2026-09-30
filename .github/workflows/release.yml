@@ -11,6 +11,12 @@ name: release
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
 # workflow_dispatch (builds + uploads artifacts, no release/R2 publish).
+#
+# Beta channel: a tag `v<version>-beta.<n>` (Cargo.toml at the same
+# `<version>-beta.<n>`) publishes a GitHub prerelease ONLY. It never touches the
+# stable download aliases, the R2 bucket, `manifest.json` or `latest.txt`, so
+# stable installs and the auto-updater cannot see it. A beta install updates to
+# the next stable release on its own (a release outranks its own betas).
 
 on:
   push:
@@ -185,6 +191,16 @@ jobs:
       - name: version guard (tag == artifact version)
         run: |
           ver="${GITHUB_REF_NAME#v}"
+          # `-beta.<n>` is the only prerelease channel; any other suffix would
+          # publish as a stable release, so refuse it.
+          if [[ "$ver" == *-beta.* ]]; then
+            beta=true
+          elif [[ "$ver" == *-* ]]; then
+            echo "unsupported prerelease tag v$ver (only -beta.<n> is a channel)"; exit 1
+          else
+            beta=false
+          fi
+          echo "BETA=$beta" >> "$GITHUB_ENV"
           ls dist/
           for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
               windows-x86_64.zip windows-x86_64.exe; do
@@ -197,9 +213,14 @@ jobs:
           done
           # This is a byte-for-byte alias of the notarized, stapled DMG from
           # the macOS job. The stable download link does not change per tag.
-          cp "dist/harness-$ver-macos-arm64.dmg" dist/Harness-macos-arm64.dmg
-          # The stable Windows link the site and the Windows updater use.
-          cp "dist/harness-$ver-windows-x86_64.zip" dist/Harness-windows-x86_64.zip
+          # A beta never replaces the stable links, so it skips both aliases.
+          if [ "$beta" = false ]; then
+            cp "dist/harness-$ver-macos-arm64.dmg" dist/Harness-macos-arm64.dmg
+            # The stable Windows link the site and the Windows updater use.
+            cp "dist/harness-$ver-windows-x86_64.zip" dist/Harness-windows-x86_64.zip
+          else
+            echo "Beta v$ver: prerelease only; stable links and update pointers are untouched." >> "$GITHUB_STEP_SUMMARY"
+          fi
           test -f "docs/releases/v$ver.md" \
             || { echo "missing docs/releases/v$ver.md (the release notes)"; exit 1; }
           echo "VERSION=$ver" >> "$GITHUB_ENV"
@@ -216,11 +237,13 @@ jobs:
         with:
           name: Harness v${{ env.VERSION }}
           body_path: docs/releases/v${{ env.VERSION }}.md
+          prerelease: ${{ env.BETA == 'true' }}
+          make_latest: ${{ env.BETA == 'true' && 'false' || 'legacy' }}
           files: |
             dist/*
             manifest.json
       - name: upload to R2 (edge.codegraff.com/releases/*)
-        if: env.CLOUDFLARE_API_TOKEN != ''
+        if: env.CLOUDFLARE_API_TOKEN != '' && env.BETA != 'true'
         run: |
           for f in dist/*; do
             npx wrangler@4 r2 object put "harness-releases/$(basename "$f")" \

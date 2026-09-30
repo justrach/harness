@@ -1,7 +1,7 @@
 //! Live check of the ChatGPT-plan provider against the real `codex` CLI.
 //!
 //! Ignored by default: it needs this host signed in to ChatGPT from Harness
-//! (`cargo run -p harness-adapters --example chatgpt_sign_in`).
+//! (`harness chatgpt login`).
 //! Run with an empty CODEX_HOME so Codex has no login of its own and only the
 //! plan token can work:
 //!

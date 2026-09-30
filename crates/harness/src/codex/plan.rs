@@ -2,12 +2,12 @@
 //!
 //! Harness signs in itself ([`super::chatgpt_signin`]) and keeps the result in
 //! its own credential store under `~/.harness/chatgpt`; it never reads another
-//! app's login. With `HARNESS_CHATGPT_PLAN=1` and a stored sign-in whose scopes
-//! include `chatgpt.tokens.use.direct`, `codex app-server` is started with a
-//! Responses provider that authenticates with that OAuth access token instead
-//! of Codex's own login, and asks OpenAI for the account's model list. Anything
-//! else (flag off, not signed in, plan usage not granted) leaves the harness
-//! exactly as before.
+//! app's login. In a beta build (or with `HARNESS_CHATGPT_PLAN=1`) and with a
+//! stored sign-in whose scopes include `chatgpt.tokens.use.direct`, `codex
+//! app-server` is started with a Responses provider that authenticates with
+//! that OAuth access token instead of Codex's own login, and asks OpenAI for
+//! the account's model list. Anything else (stable build, not signed in, plan
+//! usage not granted) leaves the harness exactly as before.
 //!
 //! Tokens are only ever read here, handed to the child through its environment
 //! and refreshed in place; they never reach a log, an event or the phone.
@@ -54,9 +54,28 @@ impl PlanAuth {
     }
 }
 
+/// Whether Codex runs on the ChatGPT plan when a plan sign-in exists. Beta
+/// builds (the staging channel) have it on and stable builds keep it off until
+/// it is promoted; `HARNESS_CHATGPT_PLAN` (`1`/`on` or `0`/`off`) overrides
+/// either. With no sign-in stored it never changes anything.
 pub(crate) fn enabled() -> bool {
-    std::env::var("HARNESS_CHATGPT_PLAN")
-        .is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
+    enabled_for(
+        std::env::var("HARNESS_CHATGPT_PLAN").ok().as_deref(),
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// Whether this build runs Codex on a stored ChatGPT plan sign-in (see [`enabled`]).
+pub fn plan_usage_enabled() -> bool {
+    enabled()
+}
+
+fn enabled_for(flag: Option<&str>, version: &str) -> bool {
+    match flag.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("1" | "true" | "on") => true,
+        Some("0" | "false" | "off") => false,
+        _ => version.contains("-beta"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +399,23 @@ pub(crate) fn iso8601(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_beta_channel_has_plan_usage_on_and_stable_has_it_off() {
+        // Stable: off unless asked for.
+        assert!(!enabled_for(None, "0.2.99"));
+        assert!(enabled_for(Some("1"), "0.2.99"));
+        assert!(enabled_for(Some("on"), "0.2.99"));
+        // Beta: on unless switched off.
+        assert!(enabled_for(None, "0.2.100-beta.1"));
+        assert!(!enabled_for(Some("0"), "0.2.100-beta.1"));
+        assert!(!enabled_for(Some("off"), "0.2.100-beta.1"));
+        // An unrecognised value falls back to the channel's default.
+        assert!(!enabled_for(Some("maybe"), "0.2.99"));
+        assert!(enabled_for(Some("maybe"), "0.2.100-beta.1"));
+        // Only the beta tag turns it on, not any prerelease.
+        assert!(!enabled_for(None, "0.2.100-rc.1"));
+    }
 
     #[test]
     fn plan_scope_gates_the_provider() {

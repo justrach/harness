@@ -364,6 +364,36 @@ pub(crate) async fn sign_out_with(endpoints: &Endpoints) -> Result<bool, SignInE
     Ok(revoked)
 }
 
+/// Open `url` in the default browser on this computer. Best effort: the sign-in
+/// keeps waiting either way. `HARNESS_NO_BROWSER` turns it off (tests).
+pub fn open_in_browser(url: &str) {
+    if std::env::var_os("HARNESS_NO_BROWSER").is_some() {
+        return;
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Ok(mut child) = command.spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Callback listener
 // ---------------------------------------------------------------------------

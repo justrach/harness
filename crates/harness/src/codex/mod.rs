@@ -38,10 +38,12 @@
 
 pub(crate) mod catalog;
 mod chatgpt_signin;
-pub use chatgpt_signin::{SignInError, SignInOutcome, SignInProgress, sign_in, sign_out};
+pub use chatgpt_signin::{
+    SignInError, SignInOutcome, SignInProgress, open_in_browser, sign_in, sign_out,
+};
 mod normalize;
 mod plan;
-pub use plan::{Status as ChatGptStatus, status as chatgpt_status};
+pub use plan::{Status as ChatGptStatus, plan_usage_enabled, status as chatgpt_status};
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};

@@ -6,6 +6,7 @@
 
 mod auth_cli;
 mod bundled_graff;
+mod chatgpt_cli;
 mod daemon;
 mod launch;
 mod paths;
@@ -60,12 +61,27 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Sign in to ChatGPT so OpenAI Codex runs on your plan (beta).
+    Chatgpt {
+        #[command(subcommand)]
+        command: ChatgptCommand,
+    },
     /// Check for a newer release and apply it (download → verify → swap →
     /// service restart). `--check` only reports (exits 1 when one is available).
     Update {
         #[arg(long)]
         check: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ChatgptCommand {
+    /// Open the browser on this computer and sign in to ChatGPT.
+    Login,
+    /// Show whether ChatGPT is signed in and whether Codex runs on the plan.
+    Status,
+    /// End the ChatGPT session and forget its tokens.
+    Logout,
 }
 
 #[derive(Subcommand)]
@@ -247,6 +263,17 @@ fn main() -> anyhow::Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(update_cli::update(&edge_url_from_env(), check))
         }
+        Some(Command::Chatgpt { command }) => match command {
+            ChatgptCommand::Login => {
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(chatgpt_cli::login())
+            }
+            ChatgptCommand::Status => chatgpt_cli::status(),
+            ChatgptCommand::Logout => {
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(chatgpt_cli::logout())
+            }
+        },
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),
             DaemonCommand::Uninstall => daemon::uninstall(),

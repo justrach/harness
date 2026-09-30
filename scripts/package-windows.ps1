@@ -25,7 +25,7 @@ try {
             $process.Kill()
             throw 'Executable version probe timed out'
         }
-        $versionMatch = [regex]::Match($stdout.Result.Trim(), '\Aharness (\d+\.\d+\.\d+)\z')
+        $versionMatch = [regex]::Match($stdout.Result.Trim(), '\Aharness (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\z')
         if ($process.ExitCode -ne 0 -or -not $versionMatch.Success) {
             throw "Cannot read executable version: $($stderr.Result)"
         }

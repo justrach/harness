@@ -17,6 +17,7 @@ harness-ui.workspace = true
 harness-update.workspace = true
 harness-mcp.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 libc.workspace = true

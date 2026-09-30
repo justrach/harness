@@ -123,23 +123,70 @@ pub fn mac_app_artifact(version: &str) -> String {
     format!("harness-{version}-macos-{arch}-app.tar.gz")
 }
 
-/// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
+/// One dot-separated piece of a prerelease tag. Numbers sort below text, as in semver.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PreId {
+    Num(u64),
+    Text(String),
+}
+
+/// `0.2.100` or `0.2.100-beta.1`: dotted numbers plus an optional prerelease tag.
+struct ParsedVersion {
+    nums: Vec<u64>,
+    pre: Vec<PreId>,
+}
+
+fn parse_version(v: &str) -> Option<ParsedVersion> {
+    let v = v.trim().trim_start_matches('v');
+    // Build metadata never takes part in ordering.
+    let v = v.split('+').next()?;
+    let (core, pre) = match v.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (v, None),
+    };
+    let nums: Vec<u64> = core
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    if nums.is_empty() {
+        return None;
+    }
+    let pre = match pre {
+        None => Vec::new(),
+        Some(pre) => pre
+            .split('.')
+            .map(|id| {
+                if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                    None
+                } else if id.chars().all(|c| c.is_ascii_digit()) {
+                    id.parse().ok().map(PreId::Num)
+                } else {
+                    Some(PreId::Text(id.to_owned()))
+                }
+            })
+            .collect::<Option<_>>()?,
+    };
+    Some(ParsedVersion { nums, pre })
+}
+
+/// Strictly-newer compare: dotted numbers (`0.1.10` > `0.1.9` > `0.1`), then a
+/// prerelease tag as in semver, so a release outranks its own betas
+/// (`0.2.100` > `0.2.100-beta.2` > `0.2.100-beta.1` > `0.2.99`).
 /// Unparseable versions never count as newer — a garbage `latest.txt` must not
 /// trigger an update loop.
 pub fn version_newer(latest: &str, current: &str) -> bool {
-    fn parts(v: &str) -> Option<Vec<u64>> {
-        let nums: Vec<u64> = v
-            .trim()
-            .trim_start_matches('v')
-            .split('.')
-            .map(|p| p.parse().ok())
-            .collect::<Option<_>>()?;
-        (!nums.is_empty()).then_some(nums)
-    }
-    match (parts(latest), parts(current)) {
-        (Some(l), Some(c)) => l > c,
-        _ => false,
-    }
+    let (Some(l), Some(c)) = (parse_version(latest), parse_version(current)) else {
+        return false;
+    };
+    l.nums
+        .cmp(&c.nums)
+        .then_with(|| match (l.pre.is_empty(), c.pre.is_empty()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => l.pre.cmp(&c.pre),
+        })
+        .is_gt()
 }
 
 /// Fetch the newest release metadata: `manifest.json`, falling back to
@@ -1075,6 +1122,31 @@ mod tests {
         // Garbage never counts as newer.
         assert!(!version_newer("", "0.1.0"));
         assert!(!version_newer("nightly", "0.1.0"));
+    }
+
+    #[test]
+    fn a_release_outranks_its_own_betas_and_betas_order_among_themselves() {
+        // A stable release replaces the beta it came from.
+        assert!(version_newer("0.2.100", "0.2.100-beta.2"));
+        assert!(!version_newer("0.2.100-beta.2", "0.2.100"));
+        // Betas order by their number, numerically, and by text after that.
+        assert!(version_newer("0.2.100-beta.2", "0.2.100-beta.1"));
+        assert!(version_newer("0.2.100-beta.10", "0.2.100-beta.9"));
+        assert!(version_newer("0.2.100-rc.1", "0.2.100-beta.9"));
+        assert!(version_newer("0.2.100-beta.1.1", "0.2.100-beta.1"));
+        assert!(!version_newer("0.2.100-beta.1", "0.2.100-beta.1"));
+        // A beta of the next release is newer than the current stable, never older than it.
+        assert!(version_newer("0.2.100-beta.1", "0.2.99"));
+        assert!(!version_newer("0.2.99", "0.2.100-beta.1"));
+        // The stable feed never offers a beta to someone already on the release it precedes.
+        assert!(!version_newer("0.2.100-beta.1", "0.2.100"));
+        assert!(version_newer("v0.2.100-beta.1", "0.2.99"));
+        // Build metadata is ignored; malformed tags never count as newer.
+        assert!(!version_newer("0.2.100-beta.1+abc", "0.2.100-beta.1"));
+        assert!(!version_newer("0.2.100-", "0.2.99"));
+        assert!(!version_newer("0.2.100-beta..1", "0.2.99"));
+        assert!(!version_newer("0.2.x-beta.1", "0.2.99"));
+        assert!(!version_newer("0.2.100-be ta", "0.2.99"));
     }
 
     #[test]

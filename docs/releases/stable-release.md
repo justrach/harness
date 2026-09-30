@@ -59,3 +59,40 @@ stages the assets and publishes. Run it with an arm64 Python 3.12 or newer
 The macOS app and the Windows updater read the latest GitHub release. The
 managed `curl | sh` installer reads the `harness-releases` bucket, which only
 the tag workflow's publish job writes when signing secrets are configured.
+
+## Beta releases
+
+A beta is a GitHub prerelease for testing a change before it ships to everyone.
+Use it to try something on real machines first; promote it by cutting the next
+stable release.
+
+- **Version and tag.** The next stable is `0.2.100`; its betas are
+  `0.2.100-beta.1`, `0.2.100-beta.2`, and so on. `-beta.<n>` is the only
+  prerelease suffix the workflow accepts; anything else fails the tag build.
+- **What a beta touches.** Only a GitHub prerelease, marked not-latest. It never
+  writes the stable aliases (`Harness-macos-arm64.dmg`,
+  `Harness-windows-x86_64.zip`), `manifest.json`, `latest.txt` or the
+  `curl | sh` bucket, so stable installs and the auto-updater cannot see it.
+- **What the build does differently.** A beta build has features that are
+  still being staged switched on; a stable build keeps them off until they are
+  promoted. `HARNESS_CHATGPT_PLAN=0` or `=1` overrides that for the ChatGPT
+  plan sign-in.
+- **Updating.** A beta install updates itself to the next stable release: a
+  release outranks its own betas (`0.2.100` > `0.2.100-beta.2` > `0.2.99`).
+  Moving between betas is manual: install the newer prerelease.
+
+To cut one, on the branch you want to test:
+
+1. Set `version` in `Cargo.toml` to `0.2.100-beta.1` (`cargo metadata`
+   refreshes `Cargo.lock`) and add `docs/releases/v0.2.100-beta.1.md`.
+2. Commit, push, then tag and push the tag. The tag workflow builds, signs and
+   notarizes everything and publishes the prerelease.
+
+   ```sh
+   git tag -a v0.2.100-beta.1 -m "Harness v0.2.100-beta.1" && git push origin v0.2.100-beta.1
+   ```
+
+Do not use `scripts/stable_macos_release.py` for a beta: it marks the release
+latest and stages the stable aliases. Betas ship through the tag workflow only.
+
+To promote, merge the change, then cut `0.2.100` as a stable release above.
