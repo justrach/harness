@@ -837,7 +837,7 @@ impl AgentAccounts {
             let outcome = harness_adapters::codex::sign_in(&cancel, move |progress| {
                 let harness_adapters::codex::SignInProgress::OpenBrowser(url) = progress;
                 harness_adapters::codex::open_in_browser(&url);
-                lock(&progress_state).message = Some("Finish signing in in your browser.".into());
+                lock(&progress_state).message = Some("Waiting for approval in your browser.".into());
             })
             .await;
             let mut state = lock(&task_state);
@@ -876,6 +876,8 @@ impl AgentAccounts {
         ChatGptPlanStatus {
             signed_in: status.signed_in,
             plan_usage: status.plan_usage,
+            registered: status.registered,
+            enabled: status.enabled,
             email: status.email,
         }
     }
@@ -913,7 +915,7 @@ impl AgentAccounts {
                     let mut state = lock(&progress_state);
                     match progress {
                         harness_adapters::acp::SignInProgress::OpenBrowser(url) => {
-                            state.message = Some("Finish signing in in your browser.".into());
+                            state.message = Some("Waiting for approval in your browser.".into());
                             state.url = Some(url);
                         }
                     }

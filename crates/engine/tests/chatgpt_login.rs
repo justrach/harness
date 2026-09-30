@@ -38,6 +38,7 @@ async fn the_chatgpt_sign_in_runs_inside_harness() {
     // Not signed in yet.
     let status = accounts.chatgpt_plan_status();
     assert!(!status.signed_in && !status.plan_usage);
+    assert!(!status.registered, "never signed in on this computer");
 
     // Starting needs no CLI and no url: the browser opens on this computer.
     let start = accounts.start_chatgpt_login();
@@ -57,7 +58,7 @@ async fn the_chatgpt_sign_in_runs_inside_harness() {
     }
     assert_eq!(
         waiting.as_deref(),
-        Some("Finish signing in in your browser.")
+        Some("Waiting for approval in your browser.")
     );
 
     // Cancelling ends it, and nothing was stored.

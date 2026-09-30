@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use harness_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, GRAFF_LOGIN_PROVIDERS, GraffLoginProvider, HarnessId,
+    AgentLoginStatus, CHATGPT_PLAN_PROVIDER, ChatGptPlanStatus, GRAFF_LOGIN_PROVIDERS,
+    GraffLoginProvider, HarnessId,
 };
 use harness_rpc::methods;
 
@@ -203,6 +204,101 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Pure: the ChatGPT plan card (Sign in with ChatGPT, plan usage)
+// ---------------------------------------------------------------------------
+
+/// OpenAI's page for the plan's usage, linked as "Manage usage".
+const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/settings/usage";
+
+/// Whether a login is Harness's own ChatGPT plan sign-in for Codex.
+fn is_chatgpt_login(harness: HarnessId, provider: Option<&str>) -> bool {
+    harness == HarnessId::Codex && provider == Some(CHATGPT_PLAN_PROVIDER)
+}
+
+/// What the ChatGPT plan card shows for a device's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatGptCard {
+    /// Not signed in: offer "Continue with ChatGPT".
+    SignedOut,
+    /// Signed in with plan usage, and this build runs Codex on it.
+    OnPlan { who: Option<String> },
+    /// Signed in with plan usage, but this build keeps Codex off it.
+    OffInThisBuild { who: Option<String> },
+    /// Signed in, but plan usage was not allowed.
+    PlanUsageOff { who: Option<String> },
+}
+
+/// `None` keeps the card out of sight: a build that has the feature off, with
+/// nobody signed in. Pure.
+pub fn chatgpt_card(status: &ChatGptPlanStatus) -> Option<ChatGptCard> {
+    if !status.signed_in {
+        return status.enabled.then_some(ChatGptCard::SignedOut);
+    }
+    let who = status.email.clone();
+    Some(match (status.plan_usage, status.enabled) {
+        (false, _) => ChatGptCard::PlanUsageOff { who },
+        (true, true) => ChatGptCard::OnPlan { who },
+        (true, false) => ChatGptCard::OffInThisBuild { who },
+    })
+}
+
+/// A card's title and detail line, in the wording OpenAI's guidelines ask for.
+pub fn chatgpt_copy(card: &ChatGptCard) -> (&'static str, String) {
+    let signed_in_as = |who: &Option<String>| {
+        who.as_deref()
+            .map(|who| format!("Signed in as {who}. "))
+            .unwrap_or_default()
+    };
+    match card {
+        ChatGptCard::SignedOut => (
+            "Use your ChatGPT plan",
+            "Complete eligible AI requests in this app with usage included in your ChatGPT plan \
+             or credits balance."
+                .into(),
+        ),
+        ChatGptCard::OnPlan { who } => (
+            "Using ChatGPT plan",
+            format!(
+                "{}Eligible AI requests in this app use your ChatGPT plan. You can manage usage \
+                 in ChatGPT settings.",
+                signed_in_as(who)
+            ),
+        ),
+        ChatGptCard::OffInThisBuild { who } => (
+            "Signed in to ChatGPT",
+            format!("{}Plan usage is off in this build.", signed_in_as(who)),
+        ),
+        ChatGptCard::PlanUsageOff { who } => (
+            "Signed in, but plan usage is off",
+            format!(
+                "{}OpenAI Codex can't use your ChatGPT plan yet. Sign in again and allow plan \
+                 usage.",
+                signed_in_as(who)
+            ),
+        ),
+    }
+}
+
+/// The notice shown once a ChatGPT sign-in finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatGptNotice {
+    /// "You're using your ChatGPT plan", for the first sign-in only.
+    Welcome,
+    /// Signed in without plan usage.
+    PlanUsageOff,
+}
+
+/// Pure. Plan usage counts only when the engine says it was allowed; a sign-in
+/// that does not say is not treated as granted.
+pub fn chatgpt_notice(first_sign_in: bool, plan_usage: Option<bool>) -> Option<ChatGptNotice> {
+    match plan_usage {
+        Some(true) if first_sign_in => Some(ChatGptNotice::Welcome),
+        Some(true) => None,
+        Some(false) | None => Some(ChatGptNotice::PlanUsageOff),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
 
@@ -240,6 +336,9 @@ impl LoginFlow {
             } => (*harness, provider.as_deref()),
             LoginFlow::PasteCode { harness, .. } => (*harness, None),
         };
+        if is_chatgpt_login(harness, provider) {
+            return "Continue with ChatGPT".into();
+        }
         match harness {
             HarnessId::Codex => "Add Codex account".into(),
             HarnessId::Cursor => "Connect Cursor".into(),
@@ -273,6 +372,16 @@ pub struct AccountsPage {
     graff_task: Option<Task<()>>,
     /// Provider id with an in-flight sign-out.
     busy_graff: Option<String>,
+    /// Whether this computer is signed in to ChatGPT for plan usage.
+    chatgpt: Loadable<ChatGptPlanStatus>,
+    chatgpt_task: Option<Task<()>>,
+    /// The sign-in that is running is the first on this computer (a welcome
+    /// follows it).
+    chatgpt_first: bool,
+    /// A ChatGPT sign-out is in flight.
+    busy_chatgpt: bool,
+    /// The notice to show once a ChatGPT sign-in finished.
+    chatgpt_notice: Option<ChatGptNotice>,
     login: Option<LoginFlow>,
     /// The sign-in link was just copied (the button reads "Copied").
     login_url_copied: bool,
@@ -311,6 +420,11 @@ impl AccountsPage {
             graff_logins: Loadable::Idle,
             graff_task: None,
             busy_graff: None,
+            chatgpt: Loadable::Idle,
+            chatgpt_task: None,
+            chatgpt_first: false,
+            busy_chatgpt: false,
+            chatgpt_notice: None,
             login: None,
             login_url_copied: false,
             copy_task: None,
@@ -355,8 +469,11 @@ impl AccountsPage {
         self.login = None;
         self.busy_account = None;
         self.busy_graff = None;
+        self.busy_chatgpt = false;
+        self.chatgpt_notice = None;
         // Another device's sign-ins: never show the last device's rows.
         self.graff_logins = Loadable::Idle;
+        self.chatgpt = Loadable::Idle;
         self.error = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
@@ -548,6 +665,7 @@ impl AccountsPage {
         self.load_codegraff_usage(cx);
         self.load_codegraff_jobs(cx);
         self.load_graff_logins(cx);
+        self.load_chatgpt(cx);
         let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -562,6 +680,86 @@ impl AccountsPage {
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Whether the shown device is signed in to ChatGPT for plan usage. An
+    /// older engine without the call leaves the card out of sight.
+    fn load_chatgpt(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.chatgpt = Loadable::Error("Engine not connected".into());
+            return;
+        };
+        if !matches!(self.chatgpt, Loadable::Ready(_)) {
+            self.chatgpt = Loadable::Loading;
+        }
+        let params = self.params(serde_json::json!({}));
+        self.chatgpt_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::GET_CHATGPT_PLAN, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.chatgpt = match result {
+                    Ok(value) => match serde_json::from_value::<ChatGptPlanStatus>(value) {
+                        Ok(status) => Loadable::Ready(status),
+                        Err(err) => Loadable::Error(err.to_string()),
+                    },
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// "Continue with ChatGPT": Harness signs in itself, in a browser window
+    /// that opens on the shown device.
+    fn start_chatgpt_login(&mut self, cx: &mut Context<Self>) {
+        // The one-time welcome is for the first sign-in on a computer.
+        self.chatgpt_first = self
+            .chatgpt
+            .ready()
+            .is_some_and(|status| !status.registered);
+        self.chatgpt_notice = None;
+        self.begin_login(
+            HarnessId::Codex,
+            Some(CHATGPT_PLAN_PROVIDER.to_string()),
+            cx,
+        );
+    }
+
+    fn sign_out_chatgpt(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.busy_chatgpt = true;
+        self.error = None;
+        let params = self.params(serde_json::json!({}));
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::SIGN_OUT_CHATGPT_PLAN, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.busy_chatgpt = false;
+                match result {
+                    Ok(value) => {
+                        if value.get("revoked").and_then(|v| v.as_bool()) == Some(false) {
+                            page.error = Some(
+                                "Signed out here, but OpenAI did not confirm ending the session. \
+                                 You can disconnect Harness in your ChatGPT settings."
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(err) => page.error = Some(format!("Sign out failed: {err}").into()),
+                }
+                page.load_chatgpt(cx);
                 cx.notify();
             })
             .ok();
@@ -873,7 +1071,11 @@ impl AccountsPage {
                         .map_err(|e| harness_rpc::RpcError::Failed(e.to_string()))
                 }) {
                     Ok(start) => {
-                        cx.open_url(&start.url);
+                        // The ChatGPT sign-in opens its own browser window on
+                        // the device that runs it and returns no url.
+                        if !start.url.is_empty() {
+                            cx.open_url(&start.url);
+                        }
                         match start.mode {
                             AgentLoginMode::PasteCode => {
                                 page.code_input
@@ -985,7 +1187,16 @@ impl AccountsPage {
                     }) {
                         Some(poll) => match poll.status {
                             AgentLoginStatus::Done => {
+                                let chatgpt = matches!(
+                                    &page.login,
+                                    Some(LoginFlow::Browser { harness, provider, .. })
+                                        if is_chatgpt_login(*harness, provider.as_deref())
+                                );
                                 page.login = None;
+                                if chatgpt {
+                                    page.chatgpt_notice =
+                                        chatgpt_notice(page.chatgpt_first, poll.plan_usage);
+                                }
                                 page.load(force_usage_for(LoadTrigger::PostLogin), cx);
                                 cx.notify();
                                 true
@@ -1688,6 +1899,169 @@ impl AccountsPage {
         cx.notify();
     }
 
+    /// The "Use your ChatGPT plan" card. Out of sight in a build that keeps the
+    /// feature off until someone is signed in.
+    fn render_chatgpt_section(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let card = chatgpt_card(self.chatgpt.ready()?)?;
+        let (title, detail) = chatgpt_copy(&card);
+        let busy = self.busy_chatgpt;
+        let sign_out = |theme: &Theme, cx: &mut Context<Self>| {
+            popover::btn_ghost(theme, "Sign out", "chatgpt-sign-out")
+                .id("chatgpt-sign-out")
+                .px(px(8.0))
+                .py(px(4.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .when(busy, |el| el.opacity(0.5))
+                .on_click(cx.listener(|this, _, _, cx| this.sign_out_chatgpt(cx)))
+        };
+        let primary = |theme: &Theme, label: &str, cx: &mut Context<Self>| {
+            popover::btn_primary(theme, label)
+                .id("chatgpt-continue")
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(6.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .when(busy, |el| el.opacity(0.5))
+                .on_click(cx.listener(|this, _, _, cx| this.start_chatgpt_login(cx)))
+        };
+        let actions = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .map(|el| match &card {
+                ChatGptCard::SignedOut => el.child(primary(theme, "Continue with ChatGPT", cx)),
+                ChatGptCard::OnPlan { .. } => el
+                    .child(
+                        popover::btn_ghost(theme, "Manage usage", "chatgpt-manage-usage")
+                            .id("chatgpt-manage-usage")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .on_click(cx.listener(|_, _, _, cx| cx.open_url(CHATGPT_USAGE_URL))),
+                    )
+                    .child(sign_out(theme, cx)),
+                ChatGptCard::OffInThisBuild { .. } => el.child(sign_out(theme, cx)),
+                ChatGptCard::PlanUsageOff { .. } => el
+                    .child(primary(theme, "Sign in again", cx))
+                    .child(sign_out(theme, cx)),
+            });
+        let signed_in = !matches!(card, ChatGptCard::SignedOut);
+        let row = div()
+            .px(px(20.0))
+            .py(px(14.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(widgets::row_title(theme, SharedString::from(title)))
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .line_height(px(17.0))
+                            .text_color(theme.text_muted.opacity(0.6))
+                            .child(SharedString::from(detail)),
+                    ),
+            )
+            .when(signed_in, |el| {
+                el.child(widgets::badge_active(theme, "Signed in"))
+            })
+            .child(actions);
+        Some(
+            div()
+                .id("chatgpt-plan-section")
+                .mt(px(24.0))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(14.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("ChatGPT plan"),
+                )
+                .child(widgets::section_card(theme).mt(px(8.0)).child(row))
+                .into_any_element(),
+        )
+    }
+
+    /// The notice after a ChatGPT sign-in: the one-time "You're using your
+    /// ChatGPT plan", or that plan usage is off.
+    fn render_chatgpt_notice(
+        &mut self,
+        viewport: gpui::Size<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let notice = self.chatgpt_notice?;
+        let theme = Theme::of(cx).for_popup();
+        let (title, body) = match notice {
+            ChatGptNotice::Welcome => (
+                "You're using your ChatGPT plan",
+                "Eligible AI requests in this app use your ChatGPT plan. You can manage usage \
+                 in ChatGPT settings.",
+            ),
+            ChatGptNotice::PlanUsageOff => (
+                "Signed in, but plan usage is off",
+                "OpenAI Codex can't use your ChatGPT plan yet. Sign in again and allow plan \
+                 usage.",
+            ),
+        };
+        let buttons = match notice {
+            ChatGptNotice::Welcome => div()
+                .child(
+                    popover::btn_ghost(&theme, "Manage usage", "chatgpt-notice-manage")
+                        .id("chatgpt-notice-manage")
+                        .on_click(cx.listener(|_, _, _, cx| cx.open_url(CHATGPT_USAGE_URL))),
+                )
+                .child(
+                    popover::btn_primary(&theme, "Got it")
+                        .id("chatgpt-notice-done")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.chatgpt_notice = None;
+                            cx.notify();
+                        })),
+                ),
+            ChatGptNotice::PlanUsageOff => div()
+                .child(
+                    popover::btn_ghost(&theme, "Close", "chatgpt-notice-close")
+                        .id("chatgpt-notice-close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.chatgpt_notice = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    popover::btn_primary(&theme, "Sign in again")
+                        .id("chatgpt-notice-retry")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.chatgpt_notice = None;
+                            this.start_chatgpt_login(cx);
+                        })),
+                ),
+        };
+        let card = popover::dialog_card(&theme)
+            .child(popover::dialog_title(&theme, title))
+            .child(div().mt(px(8.0)).child(popover::dialog_body(&theme, body)))
+            .child(
+                buttons
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0)),
+            )
+            .into_any_element();
+        Some(popover::modal("chatgpt-notice-dialog", viewport, card))
+    }
+
     fn render_login_dialog(
         &mut self,
         viewport: gpui::Size<gpui::Pixels>,
@@ -1763,9 +2137,9 @@ impl AccountsPage {
                             .id("login-copy-url")
                             .flex_none()
                             .py(px(3.0))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.copy_login_url(copy_url.clone(), cx)
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.copy_login_url(copy_url.clone(), cx),
+                            )),
                         ),
                 )
         };
@@ -1855,23 +2229,30 @@ impl AccountsPage {
                 error,
             } => {
                 let has_error = error.is_some();
-                let body: SharedString = match harness {
-                    HarnessId::Cursor => {
-                        "Finish signing in to Cursor in your browser. This mints a \
+                let chatgpt = is_chatgpt_login(*harness, provider.as_deref());
+                let body: SharedString = if chatgpt {
+                    "Approve the sign-in in the browser window that opened on this computer. \
+                     Harness keeps the sign-in on this computer."
+                        .into()
+                } else {
+                    match harness {
+                        HarnessId::Cursor => {
+                            "Finish signing in to Cursor in your browser. This mints a \
                          harness-named API key you can revoke any time from Cursor's \
                          dashboard — it is separate from `cursor-agent login`."
-                            .into()
-                    }
-                    HarnessId::Graff => format!(
-                        "Finish signing in to {} in your browser. graff saves the login \
+                                .into()
+                        }
+                        HarnessId::Graff => format!(
+                            "Finish signing in to {} in your browser. graff saves the login \
                          itself, so nothing is copied into Harness.",
-                        graff_provider_name(provider.as_deref())
-                    )
-                    .into(),
-                    _ => "Finish signing in to OpenAI in your browser. The new login is \
+                            graff_provider_name(provider.as_deref())
+                        )
+                        .into(),
+                        _ => "Finish signing in to OpenAI in your browser. The new login is \
                          captured in an isolated profile — your current session is untouched \
                          until you switch."
-                        .into(),
+                            .into(),
+                    }
                 };
                 div()
                     .flex()
@@ -1908,13 +2289,17 @@ impl AccountsPage {
                                 ),
                         )
                     })
-                    .child(url_link(
-                        "login-open-url-browser",
-                        "Reopen the sign-in page",
-                        &start.url,
-                        cx,
-                    ))
-                    .child(url_field(&start.url, cx))
+                    // The ChatGPT sign-in has no page to reopen: the browser
+                    // window is on the computer that runs it.
+                    .when(!start.url.is_empty(), |el| {
+                        el.child(url_link(
+                            "login-open-url-browser",
+                            "Reopen the sign-in page",
+                            &start.url,
+                            cx,
+                        ))
+                        .child(url_field(&start.url, cx))
+                    })
                     .when(!has_error, |el| {
                         el.child(
                             div()
@@ -2070,6 +2455,7 @@ impl Render for AccountsPage {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
+        let chatgpt_notice = self.render_chatgpt_notice(window.viewport_size(), cx);
         let refreshing = matches!(self.snapshot, Loadable::Loading);
         let account_count = self
             .snapshot
@@ -2343,6 +2729,7 @@ impl Render for AccountsPage {
                             })
                             .child(self.render_codegraff_section(&theme, now, cx))
                             .child(self.render_graff_logins_section(&theme, cx))
+                            .children(self.render_chatgpt_section(&theme, cx))
                             .children(sections)
                             // Footer note (harness: `mt-6 text-[12px] leading-relaxed
                             // text-muted-foreground/60`).
@@ -2363,6 +2750,36 @@ impl Render for AccountsPage {
             )
             .children(scrollbar)
             .when_some(dialog, |el, dialog| el.child(dialog))
+            .when_some(chatgpt_notice, |el, dialog| el.child(dialog))
+    }
+}
+
+/// Visual QA (`examples/chatgpt-plan-fixture.rs`) drives the page without clicks.
+#[cfg(feature = "appshots-fixture")]
+impl AccountsPage {
+    /// Ask the engine again whether this computer is signed in to ChatGPT.
+    pub fn fixture_chatgpt_reload(&mut self, cx: &mut Context<Self>) {
+        self.load_chatgpt(cx);
+    }
+
+    /// Tap "Continue with ChatGPT".
+    pub fn fixture_chatgpt_start(&mut self, cx: &mut Context<Self>) {
+        self.start_chatgpt_login(cx);
+    }
+
+    /// Cancel the dialog, as its Cancel button does.
+    pub fn fixture_chatgpt_cancel(&mut self, cx: &mut Context<Self>) {
+        self.cancel_login(cx);
+    }
+
+    /// Show a notice (`welcome`, `plan-off`) or clear it (anything else).
+    pub fn fixture_chatgpt_notice(&mut self, kind: &str, cx: &mut Context<Self>) {
+        self.chatgpt_notice = match kind {
+            "welcome" => Some(ChatGptNotice::Welcome),
+            "plan-off" => Some(ChatGptNotice::PlanUsageOff),
+            _ => None,
+        };
+        cx.notify();
     }
 }
 
@@ -2552,6 +2969,118 @@ mod tests {
             warnings: vec![],
         };
         assert_eq!(openai_login(&anonymous), (true, None));
+    }
+
+    fn chatgpt_status(signed_in: bool, plan_usage: bool, enabled: bool) -> ChatGptPlanStatus {
+        ChatGptPlanStatus {
+            signed_in,
+            plan_usage,
+            registered: signed_in,
+            enabled,
+            email: signed_in.then(|| "me@example.com".to_string()),
+        }
+    }
+
+    #[test]
+    fn the_chatgpt_card_stays_out_of_sight_until_the_build_or_a_sign_in_asks_for_it() {
+        // A stable build with nobody signed in shows nothing.
+        assert_eq!(chatgpt_card(&chatgpt_status(false, false, false)), None);
+        // A beta build offers the sign-in.
+        assert_eq!(
+            chatgpt_card(&chatgpt_status(false, false, true)),
+            Some(ChatGptCard::SignedOut)
+        );
+        // Someone already signed in sees their state, even in a stable build.
+        assert!(chatgpt_card(&chatgpt_status(true, true, false)).is_some());
+    }
+
+    #[test]
+    fn the_chatgpt_card_follows_the_sign_in_and_the_build() {
+        let who = Some("me@example.com".to_string());
+        assert_eq!(
+            chatgpt_card(&chatgpt_status(true, true, true)),
+            Some(ChatGptCard::OnPlan { who: who.clone() })
+        );
+        assert_eq!(
+            chatgpt_card(&chatgpt_status(true, true, false)),
+            Some(ChatGptCard::OffInThisBuild { who: who.clone() })
+        );
+        // Without plan usage it is never shown as on the plan, in any build.
+        for enabled in [true, false] {
+            assert_eq!(
+                chatgpt_card(&chatgpt_status(true, false, enabled)),
+                Some(ChatGptCard::PlanUsageOff { who: who.clone() })
+            );
+        }
+    }
+
+    #[test]
+    fn the_chatgpt_card_uses_openais_wording() {
+        let (title, detail) = chatgpt_copy(&ChatGptCard::SignedOut);
+        assert_eq!(title, "Use your ChatGPT plan");
+        assert_eq!(
+            detail,
+            "Complete eligible AI requests in this app with usage included in your ChatGPT plan \
+             or credits balance."
+        );
+        let (title, detail) = chatgpt_copy(&ChatGptCard::OnPlan {
+            who: Some("me@example.com".into()),
+        });
+        assert_eq!(title, "Using ChatGPT plan");
+        assert!(detail.starts_with("Signed in as me@example.com. "));
+        assert!(detail.contains("manage usage in ChatGPT settings"));
+        let (title, detail) = chatgpt_copy(&ChatGptCard::PlanUsageOff { who: None });
+        assert_eq!(title, "Signed in, but plan usage is off");
+        assert!(detail.starts_with("OpenAI Codex can't use your ChatGPT plan yet."));
+    }
+
+    #[test]
+    fn the_welcome_is_for_the_first_sign_in_with_plan_usage_only() {
+        assert_eq!(
+            chatgpt_notice(true, Some(true)),
+            Some(ChatGptNotice::Welcome)
+        );
+        // A later sign-in just closes.
+        assert_eq!(chatgpt_notice(false, Some(true)), None);
+        // Without plan usage, or when the engine does not say, plan usage is off.
+        assert_eq!(
+            chatgpt_notice(true, Some(false)),
+            Some(ChatGptNotice::PlanUsageOff)
+        );
+        assert_eq!(
+            chatgpt_notice(false, Some(false)),
+            Some(ChatGptNotice::PlanUsageOff)
+        );
+        assert_eq!(
+            chatgpt_notice(true, None),
+            Some(ChatGptNotice::PlanUsageOff)
+        );
+    }
+
+    #[test]
+    fn the_chatgpt_sign_in_dialog_is_titled_continue_with_chatgpt() {
+        let starting = |harness, provider: Option<&str>| LoginFlow::Starting {
+            harness,
+            provider: provider.map(str::to_string),
+        };
+        assert_eq!(
+            starting(HarnessId::Codex, Some(CHATGPT_PLAN_PROVIDER)).title(),
+            "Continue with ChatGPT"
+        );
+        // Adding a Codex account through the CLI login keeps its title.
+        assert_eq!(
+            starting(HarnessId::Codex, None).title(),
+            "Add Codex account"
+        );
+        assert!(is_chatgpt_login(
+            HarnessId::Codex,
+            Some(CHATGPT_PLAN_PROVIDER)
+        ));
+        assert!(!is_chatgpt_login(
+            HarnessId::Graff,
+            Some(CHATGPT_PLAN_PROVIDER)
+        ));
+        assert!(!is_chatgpt_login(HarnessId::Codex, None));
     }
 
     #[test]

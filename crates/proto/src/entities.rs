@@ -998,6 +998,13 @@ pub struct ChatGptPlanStatus {
     pub signed_in: bool,
     /// Signed in AND the user allowed ChatGPT plan usage.
     pub plan_usage: bool,
+    /// This device has signed in before, so the next sign-in is not the first.
+    #[serde(default)]
+    pub registered: bool,
+    /// This build runs Codex on the plan once signed in. Stable builds report
+    /// `false` and the apps keep the option out of sight.
+    #[serde(default)]
+    pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
 }

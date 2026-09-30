@@ -175,17 +175,31 @@ pub(crate) async fn save_credentials(record: &Value) -> Result<(), HarnessError>
 pub struct Status {
     pub signed_in: bool,
     pub plan_usage: bool,
+    /// This computer has signed in before (the registration outlives a sign-out),
+    /// so a sign-in now is not the first one.
+    pub registered: bool,
+    /// This build runs Codex on the plan when signed in (beta builds, or the
+    /// `HARNESS_CHATGPT_PLAN` switch); stable builds keep the feature out of sight.
+    pub enabled: bool,
     pub email: Option<String>,
 }
 
 pub fn status() -> Status {
+    let registered = read_registration().is_some();
+    let enabled = enabled();
     let Some(record) = read_credentials() else {
-        return Status::default();
+        return Status {
+            registered,
+            enabled,
+            ..Status::default()
+        };
     };
     Status {
         signed_in: str_field(&record, "refresh_token").is_some()
             || str_field(&record, "access_token").is_some(),
         plan_usage: grants_plan(&record),
+        registered,
+        enabled,
         email: str_field(&record, "email").map(str::to_owned),
     }
 }

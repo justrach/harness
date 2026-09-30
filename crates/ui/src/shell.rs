@@ -15433,6 +15433,22 @@ impl Shell {
         self.open_settings(SettingsSection::Harnesses, cx);
     }
 
+    /// ChatGPT plan QA (`examples/chatgpt-plan-fixture.rs`): the Accounts page.
+    pub fn fixture_chatgpt_settings(&mut self, cx: &mut Context<Self>) {
+        self.open_settings(SettingsSection::Agents, cx);
+    }
+
+    /// ChatGPT plan QA: act on the open Accounts page.
+    pub fn fixture_chatgpt_page(
+        &mut self,
+        act: impl FnOnce(&mut AccountsPage, &mut Context<AccountsPage>),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(page) = self.accounts_page.clone() {
+            page.update(cx, act);
+        }
+    }
+
     pub fn fixture_appshots_settings(&mut self, open: bool, cx: &mut Context<Self>) {
         if open {
             self.open_settings(SettingsSection::Appshots, cx);
