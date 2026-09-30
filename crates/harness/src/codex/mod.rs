@@ -37,8 +37,11 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+mod chatgpt_signin;
+pub use chatgpt_signin::{SignInError, SignInOutcome, SignInProgress, sign_in, sign_out};
 mod normalize;
 mod plan;
+pub use plan::{Status as ChatGptStatus, status as chatgpt_status};
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -231,7 +234,7 @@ impl CodexHarness {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
-        if let Some(plan) = plan::prepare(&exe).await? {
+        if let Some(plan) = plan::prepare().await? {
             plan.apply(&mut cmd);
         }
         crate::compose_child_path(&mut cmd, &exe);
@@ -698,7 +701,7 @@ impl CodexHarness {
         };
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
-        if let Some(plan) = plan::prepare(&exe).await? {
+        if let Some(plan) = plan::prepare().await? {
             plan.apply(&mut cmd);
         }
         crate::compose_child_path(&mut cmd, &exe);

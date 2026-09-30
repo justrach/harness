@@ -3743,6 +3743,7 @@ dependencies = [
  "harness-proto",
  "libc",
  "reqwest",
+ "ring",
  "semver",
  "serde",
  "serde_json",
