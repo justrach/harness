@@ -397,6 +397,11 @@ impl Harness for ClaudeHarness {
     fn deterministic_turn_end(&self) -> bool {
         true
     }
+    /// A resumed session with a lingering background task makes the CLI answer
+    /// its own notification first and drop the user's prompt (see the trait).
+    fn retries_empty_first_turn(&self) -> bool {
+        true
+    }
 
     /// Credential and executable identity scopes both initialize and catalog caches.
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {

@@ -1683,6 +1683,17 @@ fn apply_reasoning_update(
     workspace.set_chat_config(chat_id, &config)
 }
 
+/// `HARNESS_EMPTY_TURN_RETRY=0` (or `off`/`false`/`no`) turns the empty-first-turn
+/// recovery off, for comparing against the old behavior.
+fn empty_turn_recovery_enabled() -> bool {
+    !std::env::var("HARNESS_EMPTY_TURN_RETRY").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_run(
     inner: Arc<Inner>,
@@ -1793,6 +1804,16 @@ async fn drive_run(
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
     let mut interrupted = false;
     let mut saw_session_started = false;
+    // Empty-first-turn recovery (`Harness::retries_empty_first_turn`): a fresh
+    // run whose first turn "completes" with no output and zero tokens has not
+    // answered the user's prompt — the agent swallowed it. Re-send it once
+    // into this live run, and say so if that comes back empty too.
+    let recover_empty_turn = harness.retries_empty_first_turn() && empty_turn_recovery_enabled();
+    let mut turn_tokens = false;
+    let mut run_steered = false;
+    let mut turns_parked = 0u32;
+    let mut empty_turn_resent = false;
+    let mut empty_turn_reported = false;
     // Liveness heartbeat: this loop RUNNING is proof the harness stream is
     // open, so freshness must not depend on events arriving. Silent stretches
     // are normal and UNBOUNDED — a long tool call, redacted thinking, an
@@ -2454,6 +2475,7 @@ async fn drive_run(
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
+            run_steered = true;
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
@@ -2482,6 +2504,80 @@ async fn drive_run(
             {
                 lock(&h.routed_steers).pop_front();
             }
+            continue;
+        }
+
+        if let AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+        } = &event
+            && (*input_tokens > 0 || *output_tokens > 0)
+        {
+            turn_tokens = true;
+        }
+        // An empty first turn (see `recover_empty_turn`): started, no output,
+        // no tokens, not interrupted, no steer yet, not a slash command (those
+        // can legitimately produce nothing). The prompt's user entry already
+        // exists under `user_message_id`, so re-sending it is idempotent in the
+        // transcript, and the empty Done is swallowed so the chat never shows
+        // (or notifies) a completed turn that never happened.
+        let empty_first_turn = recover_empty_turn
+            && matches!(
+                &event,
+                AgentEvent::Done { status: DoneStatus::Completed, result, .. }
+                    if result.as_deref().is_none_or(str::is_empty)
+            )
+            && saw_session_started
+            && folded.is_empty()
+            && !turn_tokens
+            && !interrupted
+            && !self_continued_turn
+            // Our own re-send raises the steer flag; any OTHER steer means the
+            // user already moved on, so the first turn is no longer the question.
+            && (!run_steered || empty_turn_resent)
+            && turns_parked == 0
+            && !user_prompt.trim().is_empty()
+            && !user_prompt.trim_start().starts_with('/');
+        if empty_first_turn && !empty_turn_resent {
+            let ours = lock(&inner.runs)
+                .get(&chat_id)
+                .is_some_and(|h| h.run_id == run_id);
+            if ours && let Some(retry) = retry_request.as_ref() {
+                let engine = SessionsEngine {
+                    inner: inner.clone(),
+                };
+                match engine
+                    .steer_with_attachments(
+                        &chat_id,
+                        &user_prompt,
+                        Some(resume_state.user_message_id.clone()),
+                        retry.attachments.clone(),
+                    )
+                    .await
+                {
+                    Ok(SteerOutcome::Accepted) => {
+                        tracing::warn!(
+                            chat = %chat_id,
+                            "first turn ended with no output; re-sent the prompt once"
+                        );
+                        empty_turn_resent = true;
+                        continue;
+                    }
+                    Ok(SteerOutcome::NotSteerable) | Err(_) => {}
+                }
+            }
+        } else if empty_first_turn && empty_turn_resent && !empty_turn_reported {
+            // The re-send came back empty too: end the turn with a visible
+            // reason instead of a silent "completed".
+            tracing::warn!(chat = %chat_id, "re-sent prompt also ended with no output");
+            empty_turn_reported = true;
+            prepared_events.push_front(event);
+            prepared_events.push_front(AgentEvent::Error {
+                message: format!(
+                    "{} returned no answer to this message. Send it again.",
+                    harness.display_name()
+                ),
+            });
             continue;
         }
 
@@ -2622,6 +2718,7 @@ async fn drive_run(
                 segment_started = now_ms();
                 // Resume-retry is strictly a first-turn concern.
                 saw_session_started = true;
+                turns_parked += 1;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
                 inner.set_status_with_completion(
