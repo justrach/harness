@@ -223,6 +223,10 @@ pub mod methods {
     // `provider` for the sign-in itself). Same per-device forwarding.
     pub const LIST_GRAFF_LOGINS: &str = "ListGraffLogins";
     pub const SIGN_OUT_GRAFF_LOGIN: &str = "SignOutGraffLogin";
+    // Harness's own ChatGPT plan sign-in (`StartAgentLogin` with the
+    // `chatgpt-plan` provider on the Codex harness). Same per-device forwarding.
+    pub const GET_CHATGPT_PLAN: &str = "GetChatGptPlan";
+    pub const SIGN_OUT_CHATGPT_PLAN: &str = "SignOutChatGptPlan";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";

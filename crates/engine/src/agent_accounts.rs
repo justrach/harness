@@ -54,8 +54,8 @@ use sha2::{Digest, Sha256};
 
 use harness_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode,
-    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, GraffLoginProvider,
-    HarnessId,
+    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, ChatGptPlanStatus,
+    GraffLoginProvider, HarnessId,
 };
 
 use crate::graff_logins;
@@ -250,6 +250,8 @@ struct TaskLoginState {
     url: Option<String>,
     message: Option<String>,
     outcome: Option<Result<(), String>>,
+    /// ChatGPT plan sign-ins: whether plan usage was allowed, once done.
+    plan_usage: Option<bool>,
 }
 
 impl LoginFlow {
@@ -260,6 +262,36 @@ impl LoginFlow {
             | LoginFlow::Task { started_at, .. }
             | LoginFlow::Graff { started_at, .. } => *started_at,
         }
+    }
+}
+
+/// Open `url` in the default browser on this computer. Best effort: the sign-in
+/// keeps waiting either way. `HARNESS_NO_BROWSER` turns it off (tests).
+fn open_in_browser(url: &str) {
+    if std::env::var_os("HARNESS_NO_BROWSER").is_some() {
+        return;
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Ok(mut child) = command.spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 
@@ -818,6 +850,74 @@ impl AgentAccounts {
         })
     }
 
+    /// Harness's own ChatGPT sign-in for plan usage on the Codex harness: an
+    /// engine-driven loopback OAuth flow, no CLI login and nothing of any other
+    /// app's. The browser opens on THIS computer (the callback lands here), so
+    /// a phone only starts it, polls it and can cancel it. The start replies at
+    /// once with no url; the poll carries progress and, once done, whether the
+    /// user allowed plan usage.
+    pub fn start_chatgpt_login(&self) -> AgentLoginStart {
+        self.reap_spawned_flows(HarnessId::Codex);
+        let login_id = new_id();
+        let state = Arc::new(Mutex::new(TaskLoginState::default()));
+        let task_state = state.clone();
+        let handle = tokio::spawn(async move {
+            let progress_state = task_state.clone();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let outcome = harness_adapters::codex::sign_in(&cancel, move |progress| {
+                let harness_adapters::codex::SignInProgress::OpenBrowser(url) = progress;
+                open_in_browser(&url);
+                lock(&progress_state).message = Some("Finish signing in in your browser.".into());
+            })
+            .await;
+            let mut state = lock(&task_state);
+            match outcome {
+                Ok(harness_adapters::codex::SignInOutcome::Connected { .. }) => {
+                    state.plan_usage = Some(true);
+                    state.outcome = Some(Ok(()));
+                }
+                Ok(harness_adapters::codex::SignInOutcome::PlanUsageOff { .. }) => {
+                    state.plan_usage = Some(false);
+                    state.outcome = Some(Ok(()));
+                }
+                Err(error) => state.outcome = Some(Err(error.to_string())),
+            }
+        });
+        lock(&self.inner.flows).insert(
+            login_id.clone(),
+            LoginFlow::Task {
+                harness: HarnessId::Codex,
+                started_at: Instant::now(),
+                state,
+                handle,
+            },
+        );
+        AgentLoginStart {
+            login_id,
+            url: String::new(),
+            mode: AgentLoginMode::Browser,
+            code: None,
+        }
+    }
+
+    /// Whether this computer is signed in to ChatGPT for plan usage.
+    pub fn chatgpt_plan_status(&self) -> ChatGptPlanStatus {
+        let status = harness_adapters::codex::chatgpt_status();
+        ChatGptPlanStatus {
+            signed_in: status.signed_in,
+            plan_usage: status.plan_usage,
+            email: status.email,
+        }
+    }
+
+    /// Sign out of ChatGPT plan usage. `true` when OpenAI confirmed the session
+    /// ended; the tokens are cleared here either way.
+    pub async fn sign_out_chatgpt(&self) -> Result<bool, EngineError> {
+        harness_adapters::codex::sign_out()
+            .await
+            .map_err(|e| EngineError::Other(e.to_string()))
+    }
+
     /// antigravity: the acp server's own google sign-in, run when the agent is
     /// turned on rather than mid-chat. the start replies at once because a
     /// first sign-in downloads a large server; polls carry the browser url
@@ -1062,6 +1162,7 @@ impl AgentAccounts {
                 status: AgentLoginStatus::Pending,
                 message: None,
                 url: None,
+                plan_usage: None,
             });
         };
         let output = lock(&output).clone();
@@ -1076,12 +1177,14 @@ impl AgentAccounts {
                 status: AgentLoginStatus::Done,
                 message: None,
                 url: None,
+                plan_usage: None,
             }
         } else {
             AgentLoginPoll {
                 status: AgentLoginStatus::Error,
                 message: Some(graff_logins::failure_message(&output)),
                 url: None,
+                plan_usage: None,
             }
         })
     }
@@ -1269,6 +1372,7 @@ impl AgentAccounts {
                     status: AgentLoginStatus::Pending,
                     message: None,
                     url: None,
+                    plan_usage: None,
                 });
             }
             Some(LoginFlow::Task { .. }) => unreachable!("task logins poll above"),
@@ -1300,6 +1404,7 @@ impl AgentAccounts {
                 status: AgentLoginStatus::Done,
                 message: None,
                 url: None,
+                plan_usage: None,
             });
         }
         let exited = *lock(&exit);
@@ -1324,12 +1429,14 @@ impl AgentAccounts {
                 status: AgentLoginStatus::Error,
                 message: Some(message),
                 url: None,
+                plan_usage: None,
             });
         }
         Ok(AgentLoginPoll {
             status: AgentLoginStatus::Pending,
             message: None,
             url: None,
+            plan_usage: None,
         })
     }
 
@@ -1347,17 +1454,20 @@ impl AgentAccounts {
                         status: AgentLoginStatus::Pending,
                         message: state.message.clone(),
                         url: state.url.clone(),
+                        plan_usage: None,
                     });
                 }
                 Some(Ok(())) => AgentLoginPoll {
                     status: AgentLoginStatus::Done,
                     message: None,
                     url: None,
+                    plan_usage: state.plan_usage,
                 },
                 Some(Err(message)) => AgentLoginPoll {
                     status: AgentLoginStatus::Error,
                     message: Some(message.clone()),
                     url: None,
+                    plan_usage: None,
                 },
             }
         };

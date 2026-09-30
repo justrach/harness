@@ -1288,6 +1288,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_AGENT_LOGIN
             | methods::LIST_GRAFF_LOGINS
             | methods::SIGN_OUT_GRAFF_LOGIN
+            | methods::GET_CHATGPT_PLAN
+            | methods::SIGN_OUT_CHATGPT_PLAN
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -3110,10 +3112,22 @@ impl RpcService for EngineRpc {
                     (HarnessId::Graff, None) => Err(crate::EngineError::Other(
                         "Say which graff provider to sign in to.".into(),
                     )),
+                    (HarnessId::Codex, Some(harness_proto::CHATGPT_PLAN_PROVIDER)) => {
+                        Ok(self.agent_accounts.start_chatgpt_login())
+                    }
                     (harness, _) => self.agent_accounts.start_login(harness).await,
                 }
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&start)
+            }
+            methods::GET_CHATGPT_PLAN => RpcReply::value(&self.agent_accounts.chatgpt_plan_status()),
+            methods::SIGN_OUT_CHATGPT_PLAN => {
+                let revoked = self
+                    .agent_accounts
+                    .sign_out_chatgpt()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "revoked": revoked }))
             }
             methods::LIST_GRAFF_LOGINS => RpcReply::value(&self.agent_accounts.list_graff_logins()),
             methods::SIGN_OUT_GRAFF_LOGIN => {

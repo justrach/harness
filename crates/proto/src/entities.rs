@@ -968,6 +968,10 @@ pub struct AgentLoginPoll {
     /// agent had to install first); the app opens it once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// ChatGPT plan sign-ins only, once done: whether the user allowed plan
+    /// usage. `Some(false)` means signed in but plan usage is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_usage: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -982,6 +986,21 @@ pub enum AgentLoginStatus {
 /// CodeGraff's own account and the Codex (ChatGPT) login are managed elsewhere.
 pub const GRAFF_LOGIN_PROVIDERS: &[(&str, &str)] =
     &[("xai", "xAI"), ("kimi", "Kimi"), ("zai", "Z.AI")];
+
+/// The `StartAgentLogin` provider id for Harness's own ChatGPT plan sign-in on
+/// the Codex harness (no CLI login is involved).
+pub const CHATGPT_PLAN_PROVIDER: &str = "chatgpt-plan";
+
+/// Whether this device is signed in to ChatGPT for plan usage (`GetChatGptPlan`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGptPlanStatus {
+    pub signed_in: bool,
+    /// Signed in AND the user allowed ChatGPT plan usage.
+    pub plan_usage: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
 
 /// One graff sign-in provider on a device (`ListGraffLogins` row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
