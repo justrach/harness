@@ -38,6 +38,7 @@
 
 pub(crate) mod catalog;
 mod normalize;
+mod plan;
 mod subagents;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -230,6 +231,9 @@ impl CodexHarness {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
+        if let Some(plan) = plan::prepare(&exe).await? {
+            plan.apply(&mut cmd);
+        }
         crate::compose_child_path(&mut cmd, &exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -578,7 +582,13 @@ impl Harness for CodexHarness {
     /// discovery call is unavailable and no last-good catalog exists. Explicit
     /// picker refreshes bypass cooldowns while overlapping callers coalesce.
     fn model_context(&self) -> Result<Option<crate::ModelContext>, HarnessError> {
-        crate::model_context::context(self.id(), &self.resolve_executable()?, &[]).map(Some)
+        let mut context =
+            crate::model_context::context(self.id(), &self.resolve_executable()?, &[])?;
+        // A plan sign-in serves its own catalog; key it by account, not by token.
+        if let Some(subject) = plan::subject() {
+            context.hash = format!("{}:chatgpt-plan:{subject}", context.hash);
+        }
+        Ok(Some(context))
     }
     fn fallback_models(&self) -> Vec<Model> {
         static_models()
@@ -688,6 +698,9 @@ impl CodexHarness {
         };
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
+        if let Some(plan) = plan::prepare(&exe).await? {
+            plan.apply(&mut cmd);
+        }
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
