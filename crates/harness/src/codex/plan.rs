@@ -13,8 +13,9 @@
 use crate::HarnessError;
 use crate::process::Command;
 use serde_json::Value;
+use sha2::Digest;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/api/accounts/oauth/token";
 const RESOURCE: &str = "https://api.openai.com/v1";
@@ -127,27 +128,95 @@ pub(crate) async fn prepare(exe: &Path) -> Result<Option<PlanAuth>, HarnessError
     };
     Ok(Some(PlanAuth {
         access_token: token.to_owned(),
-        catalog: catalog(exe).await,
+        catalog: catalog(exe, token, str_field(&record, "subject")).await,
     }))
 }
 
-/// Plan usage accepts only `web_search` and function/custom tools, and Codex
-/// adds its `tool_search` tool per model (`supports_search_tool`), which the
-/// API then rejects with `subscription_sharing_unsupported_capability`. There
-/// is no global switch, so hand Codex its own bundled catalog with that flag
-/// off. Cached per CLI version under `~/.harness/codex-plan`.
-async fn catalog(exe: &Path) -> Option<PathBuf> {
-    let version = crate::executable::binary_version(exe)
-        .map_or_else(|| "unknown".to_owned(), |v| v.to_string());
-    let path = crate::executable::home_or_current_dir()
-        .join(".harness/codex-plan")
-        .join(format!("catalog-{version}.json"));
-    if path.is_file() {
-        return Some(path);
+/// How long an account's model list is reused before it is fetched again.
+const CATALOG_TTL: Duration = Duration::from_secs(600);
+
+/// The model catalog Codex is pointed at (`model_catalog_json`).
+///
+/// It is the signed-in account's own `GET /v1/models`, which is both the picker
+/// source (`model/list` then reflects exactly what this account can use) and a
+/// complete Codex model record. Plan usage accepts only `web_search` and
+/// function/custom tools, and Codex adds its `tool_search` tool per model
+/// (`supports_search_tool`), which the API then rejects with
+/// `subscription_sharing_unsupported_capability`. There is no global switch, so
+/// every record is written with that flag off. If the account list can't be
+/// fetched, the last good copy is used, then Codex's bundled catalog.
+async fn catalog(exe: &Path, token: &str, subject: Option<&str>) -> Option<PathBuf> {
+    let dir = crate::executable::home_or_current_dir().join(".harness/codex-plan");
+    let key = format!("{:x}", sha2::Sha256::digest(subject.unwrap_or("default")));
+    let account = dir.join(format!("catalog-{}.json", &key[..16]));
+    let fresh = std::fs::metadata(&account)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|age| age < CATALOG_TTL);
+    if fresh {
+        return Some(account);
     }
+    let built = match account_models(token).await {
+        Ok(catalog) => Ok((catalog, account.clone())),
+        Err(error) => {
+            tracing::warn!(%error, "could not fetch the account's models");
+            if account.is_file() {
+                return Some(account);
+            }
+            let version = crate::executable::binary_version(exe)
+                .map_or_else(|| "unknown".to_owned(), |v| v.to_string());
+            bundled_models(exe)
+                .await
+                .map(|catalog| (catalog, dir.join(format!("catalog-bundled-{version}.json"))))
+        }
+    };
+    let (mut catalog, path) = match built {
+        Ok(built) => built,
+        Err(error) => {
+            tracing::warn!(%error, "could not build the plan model catalog");
+            return None;
+        }
+    };
+    for model in catalog["models"].as_array_mut()? {
+        model["supports_search_tool"] = false.into();
+    }
+    let written = std::fs::create_dir_all(&dir)
+        .map_err(HarnessError::from)
+        .and_then(|()| write_atomic(&path, &catalog));
+    match written {
+        Ok(()) => Some(path),
+        Err(error) => {
+            tracing::warn!(%error, "could not save the plan model catalog");
+            None
+        }
+    }
+}
+
+/// `GET /v1/models` with the plan token: the account-specific model list.
+async fn account_models(token: &str) -> Result<Value, String> {
+    let response = reqwest::Client::new()
+        .get(format!("{RESOURCE}/models"))
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let body = response.bytes().await.map_err(|e| e.to_string())?;
+    let catalog: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    match catalog["models"].as_array() {
+        Some(models) if !models.is_empty() => Ok(catalog),
+        _ => Err("the account has no models".into()),
+    }
+}
+
+/// Codex's bundled catalog, for when the account list is unreachable.
+async fn bundled_models(exe: &Path) -> Result<Value, String> {
     let exe = exe.to_owned();
-    let target = path.clone();
-    let built = tokio::task::spawn_blocking(move || -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
         let out = std::process::Command::new(&exe)
             .args(["debug", "models", "--bundled"])
             .stdin(std::process::Stdio::null())
@@ -157,25 +226,10 @@ async fn catalog(exe: &Path) -> Option<PathBuf> {
         if !out.status.success() {
             return Err(format!("codex debug models exited with {}", out.status));
         }
-        let mut catalog: Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
-        let models = catalog["models"]
-            .as_array_mut()
-            .ok_or("bundled catalog has no models")?;
-        for model in models {
-            model["supports_search_tool"] = false.into();
-        }
-        std::fs::create_dir_all(target.parent().ok_or("no parent")?).map_err(|e| e.to_string())?;
-        write_atomic(&target, &catalog).map_err(|e| e.to_string())
+        serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
     })
-    .await;
-    match built {
-        Ok(Ok(())) => Some(path),
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "could not build the plan model catalog");
-            None
-        }
-        Err(_) => None,
-    }
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 async fn refresh(path: &Path, mut record: Value) -> Result<Value, HarnessError> {
@@ -204,9 +258,18 @@ async fn refresh(path: &Path, mut record: Value) -> Result<Value, HarnessError> 
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(Value::Null);
     if !status.is_success() {
-        // invalid_grant means the 30-day session is gone; anything else is
+        // These codes mean the renewable session is gone; anything else is
         // transient and the old file stays untouched.
-        return Err(if body["error"] == "invalid_grant" {
+        const DEAD: [&str; 6] = [
+            "invalid_grant",
+            "invalid_refresh_token",
+            "token_expired",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+            "refresh_token_reused",
+        ];
+        let code = body["error"].as_str().or(body["error"]["code"].as_str());
+        return Err(if code.is_some_and(|c| DEAD.contains(&c)) {
             expired()
         } else {
             HarnessError::Protocol(format!("ChatGPT token refresh failed (HTTP {status})"))
