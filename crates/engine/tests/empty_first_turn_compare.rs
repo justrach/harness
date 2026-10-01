@@ -314,7 +314,7 @@ async fn compare_the_recovery_against_the_old_behavior() {
         let doubles = all.iter().filter(|t| t.pongs > 1).count();
         let resent = all.iter().filter(|t| t.engine_resent).count();
         let gap = all.iter().filter(|t| t.idle_secs >= 1.0).count();
-        let mut secs: Vec<f32> = all.iter().filter(|t| t.answered).map(|t| t.secs).collect();
+        let secs: Vec<f32> = all.iter().filter(|t| t.answered).map(|t| t.secs).collect();
         let mut idle: Vec<f32> = all.iter().map(|t| t.idle_secs).collect();
         let bubbles = all.iter().map(|t| t.user_bubbles).sum::<usize>() as f32 / n.max(1) as f32;
         let fmt = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.1}s"));
