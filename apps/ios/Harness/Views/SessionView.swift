@@ -76,6 +76,10 @@ struct SessionView: View {
                     // real room and truncates them properly.
                     .frame(width: max(140, viewWidth - Self.headerChromeInset),
                            alignment: .leading)
+                    // Swipe the header to page to the neighbouring session.
+                    .pagerSwipe()
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("session-header")
                 }
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
