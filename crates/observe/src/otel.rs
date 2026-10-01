@@ -303,7 +303,8 @@ impl Converter {
                 ms,
                 is_error,
                 from_sub,
-            } => self.tool(name, t, *ms, *is_error, *from_sub),
+                result_bytes,
+            } => self.tool(name, t, *ms, *is_error, *from_sub, *result_bytes),
             EventKind::Subagent(run) => self.subagent(run, t),
             EventKind::Turn(outcome) => self.turn_done(outcome, t),
             EventKind::Recipe {
@@ -414,7 +415,15 @@ impl Converter {
         self.done.push(span);
     }
 
-    fn tool(&mut self, name: &str, t: u64, ms: u64, is_error: bool, from_sub: bool) {
+    fn tool(
+        &mut self,
+        name: &str,
+        t: u64,
+        ms: u64,
+        is_error: bool,
+        from_sub: bool,
+        result_bytes: u64,
+    ) {
         self.tools += 1;
         let start = t.saturating_sub(ms);
         // A child's tool line names no agent: nest it under the child when only one is running.
@@ -442,6 +451,7 @@ impl Converter {
             attrs: vec![
                 s("gen_ai.operation.name", "execute_tool"),
                 s("gen_ai.tool.name", name),
+                n("graff.tool.result_bytes", result_bytes),
             ],
             events: Vec::new(),
             status: Status::Unset,

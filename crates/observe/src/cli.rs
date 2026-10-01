@@ -41,6 +41,9 @@ pub enum Command {
     /// Export runs as OpenTelemetry traces (OTLP/HTTP JSON, GenAI semantic
     /// conventions), once or live with --follow.
     Otel(crate::cli_otel::OtelArgs),
+    /// Where tool-output tokens go in a session, and what compacting them
+    /// would save, from graff's session transcripts.
+    Xray(crate::cli_xray::XrayArgs),
 }
 
 #[derive(Debug, Args)]
@@ -104,6 +107,7 @@ pub fn run(command: Command) -> anyhow::Result<()> {
         Command::Watch(args) => watch(args),
         Command::Stats(args) => stats(args),
         Command::Otel(args) => crate::cli_otel::run(args),
+        Command::Xray(args) => crate::cli_xray::run(args),
     }
 }
 

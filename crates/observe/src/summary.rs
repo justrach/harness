@@ -101,6 +101,8 @@ pub struct ToolStat {
     pub calls: u64,
     pub errors: u64,
     pub ms: u64,
+    /// Output bytes the tool produced (before graff's handle threshold).
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -295,6 +297,7 @@ impl Observer {
                 ms,
                 is_error,
                 from_sub,
+                result_bytes,
             } => {
                 self.tool_calls += 1;
                 self.tool_errors += u64::from(*is_error);
@@ -306,6 +309,7 @@ impl Observer {
                 stat.calls += 1;
                 stat.errors += u64::from(*is_error);
                 stat.ms += ms;
+                stat.bytes += result_bytes;
                 match name.as_str() {
                     "jev_effort" => {
                         self.jev.calls += 1;

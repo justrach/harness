@@ -93,6 +93,35 @@ Requests are OTLP/HTTP with JSON bodies. `--out` writes one request per line, th
 
 Library: `otel::Converter` turns trace lines into spans, `otlp::export_request` encodes them, and `otlp::Sink` sends or writes them.
 
+## Tool-output x-ray
+
+`graff-observe xray` shows where a session's tool-output tokens go and what compacting them would save. It needs no new capture: graff already keeps each session's transcript in `.graff/sessions/<session>.transcript.jsonl`, with every tool call's arguments and the exact output the model received. Both transcript shapes are read: Responses items and chat rows.
+
+```bash
+graff-observe xray                       # the newest session in this folder
+graff-observe xray session-1790 --in ~/app
+graff-observe xray --since 7d --in ~     # totals across every session
+```
+
+- **Sizes:** each output's estimated tokens, `ceil(characters / 4)`. This is a size, not billing data.
+- **By tool:** calls, tokens, share of all tool output, and the largest single output.
+- **Carried:** each output's tokens times the model requests made after it. It is an upper bound on re-sending, since a compaction drops outputs sooner.
+- **Measured:** for an ACP session, the graff runs that served it supply the model's real input tokens and request count. The report then says what share of that input tool outputs can account for.
+
+Findings, each with the tokens a compact form would save:
+
+| Finding | What it flags | Estimated saving |
+| --- | --- | --- |
+| large output | an output of 2k+ tokens (graff already turns anything over 16 KiB into a preview plus a file) | for command logs: what keeping errors and warnings (±1 line) plus the first and last five lines would drop; otherwise none |
+| repeated content | a line of 8+ characters appearing 3+ times in one output | every copy after the first |
+| repeated keys | a JSON array whose 3+ objects share the same fields | the field names after the first object |
+| repeated paths | a directory prefix of 12+ characters written 5+ times in one output | every copy after the first |
+| repeated calls | a tool returning an output (100+ characters) it already returned | the whole repeat |
+
+The total counts each output once, at its largest saving.
+
+The outputs are the user's data. The report quotes short snippets of them, prints locally, and sends nothing anywhere.
+
 ## Library
 
 ```rust

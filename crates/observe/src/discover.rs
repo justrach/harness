@@ -35,7 +35,12 @@ impl TraceFile {
             path: path.to_path_buf(),
             run_id: path
                 .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
+                .map(|s| {
+                    let stem = s.to_string_lossy();
+                    stem.strip_suffix(".transcript")
+                        .unwrap_or(&stem)
+                        .to_string()
+                })
                 .unwrap_or_default(),
             modified,
             modified_unix: modified
@@ -60,18 +65,29 @@ impl TraceFile {
 /// projects (searched a few levels deep, skipping hidden folders other than
 /// `.worktrees`).
 pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<TraceFile>> {
+    find(roots, "traces", ".jsonl")
+}
+
+/// Session transcripts (`.graff/sessions/<session>.transcript.jsonl`) under
+/// `roots`, newest first; roots work as for [`discover`].
+pub fn discover_transcripts(roots: &[PathBuf]) -> anyhow::Result<Vec<TraceFile>> {
+    find(roots, "sessions", ".transcript.jsonl")
+}
+
+/// Files ending in `suffix` inside `.graff/<sub>` folders under `roots`.
+fn find(roots: &[PathBuf], sub: &str, suffix: &str) -> anyhow::Result<Vec<TraceFile>> {
     let mut dirs = BTreeSet::new();
     let mut files = BTreeSet::new();
     for root in roots {
         let meta = fs::metadata(root).with_context(|| format!("{}", root.display()))?;
         if meta.is_file() {
             files.insert(root.clone());
-        } else if root.file_name().is_some_and(|n| n == "traces") {
+        } else if root.file_name().is_some_and(|n| n == sub) {
             dirs.insert(root.clone());
         } else if root.file_name().is_some_and(|n| n == ".graff") {
-            dirs.insert(root.join("traces"));
+            dirs.insert(root.join(sub));
         } else {
-            walk(root, 0, &mut dirs);
+            walk(root, sub, 0, &mut dirs);
         }
     }
     for dir in &dirs {
@@ -80,7 +96,10 @@ pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<TraceFile>> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "jsonl") {
+            if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(suffix))
+            {
                 files.insert(path);
             }
         }
@@ -97,10 +116,10 @@ pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<TraceFile>> {
     Ok(out)
 }
 
-fn walk(dir: &Path, depth: usize, out: &mut BTreeSet<PathBuf>) {
-    let traces = dir.join(".graff").join("traces");
-    if traces.is_dir() {
-        out.insert(traces);
+fn walk(dir: &Path, sub: &str, depth: usize, out: &mut BTreeSet<PathBuf>) {
+    let found = dir.join(".graff").join(sub);
+    if found.is_dir() {
+        out.insert(found);
     }
     if depth >= MAX_DEPTH {
         return;
@@ -118,7 +137,7 @@ fn walk(dir: &Path, depth: usize, out: &mut BTreeSet<PathBuf>) {
         if (name.starts_with('.') && name != ".worktrees") || SKIP.contains(&name.as_ref()) {
             continue;
         }
-        walk(&entry.path(), depth + 1, out);
+        walk(&entry.path(), sub, depth + 1, out);
     }
 }
 
@@ -223,6 +242,19 @@ pub fn find_by_acp_session(roots: &[PathBuf], acp_session_id: &str) -> Option<Tr
         .find(|f| served(&f.path, acp_session_id))
 }
 
+/// Every run that served the ACP session `acp_session_id`, newest first. A
+/// session outlives a graff process: each restart is a new run.
+pub fn find_all_by_acp_session(roots: &[PathBuf], acp_session_id: &str) -> Vec<TraceFile> {
+    discover(roots)
+        .map(|files| {
+            files
+                .into_iter()
+                .filter(|f| served(&f.path, acp_session_id))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn served(path: &Path, acp_session_id: &str) -> bool {
     let Ok(file) = File::open(path) else {
         return false;
@@ -290,6 +322,26 @@ mod tests {
         assert!(resolve(&roots, Some("run-")).is_err());
         assert!(resolve(&roots, Some("zzz")).is_err());
         assert!(discover(&[root.join("missing")]).is_err());
+    }
+
+    #[test]
+    fn transcripts_are_found_by_session_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("app/.graff/sessions/session-17-42.transcript.jsonl"),
+            "{}\n",
+        );
+        write(
+            &root.join("app/.graff/sessions/session-17-42.session.json"),
+            "{}",
+        );
+        write(&root.join("app/.graff/traces/run.jsonl"), "{}\n");
+        let found = discover_transcripts(&[root.to_path_buf()]).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].run_id, "session-17-42");
+        assert_eq!(found[0].project().as_deref(), Some("app"));
+        assert_eq!(discover(&[root.to_path_buf()]).unwrap()[0].run_id, "run");
     }
 
     #[test]

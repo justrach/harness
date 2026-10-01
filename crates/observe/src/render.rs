@@ -43,6 +43,15 @@ pub fn percent(v: Option<f64>) -> String {
     v.map_or_else(|| "-".into(), |x| format!("{:.0}%", x * 100.0))
 }
 
+/// A byte count: `60 B`, `4.1 KB`, `1.2 MB`.
+pub fn bytes(v: u64) -> String {
+    match v {
+        0..1_000 => format!("{v} B"),
+        1_000..1_000_000 => format!("{:.1} KB", v as f64 / 1e3),
+        _ => format!("{:.1} MB", v as f64 / 1e6),
+    }
+}
+
 fn kb(v: u64) -> String {
     match v {
         0..1_024 => format!("{v} KB"),
@@ -63,7 +72,7 @@ pub fn age(modified: SystemTime) -> String {
     }
 }
 
-fn clip(text: &str, width: usize) -> String {
+pub(crate) fn clip(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         text.to_string()
     } else {
@@ -246,8 +255,8 @@ pub fn run_report(w: &mut dyn Write, file: &TraceFile, s: &RunSummary) -> io::Re
         .iter()
         .take(10)
         .map(|t| match t.errors {
-            0 => format!("{} {}", t.name, t.calls),
-            e => format!("{} {} ({e} failed)", t.name, t.calls),
+            0 => format!("{} {} ({})", t.name, t.calls, bytes(t.bytes)),
+            e => format!("{} {} ({}, {e} failed)", t.name, t.calls, bytes(t.bytes)),
         })
         .collect();
     if !top.is_empty() {
@@ -389,6 +398,7 @@ pub fn event_line(e: &Event, all: bool) -> Option<String> {
             ms: took,
             is_error,
             from_sub,
+            result_bytes,
         } => {
             let who = if *from_sub { "  (child)" } else { "" };
             let failed = if *is_error { "  failed" } else { "" };
@@ -397,7 +407,11 @@ pub fn event_line(e: &Event, all: bool) -> Option<String> {
             } else {
                 "tool    "
             };
-            format!("{label} {name}  {}{failed}{who}", ms(*took))
+            format!(
+                "{label} {name}  {}  {}{failed}{who}",
+                ms(*took),
+                bytes(*result_bytes)
+            )
         }
         EventKind::FirstToken {
             agent, ms: took, ..
@@ -619,6 +633,7 @@ mod tests {
                 ms: 550,
                 is_error: false,
                 from_sub: true,
+                result_bytes: 60,
             },
         };
         let line = event_line(&jev, false).unwrap();

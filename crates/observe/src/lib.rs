@@ -16,11 +16,14 @@
 //! - [`StatsBuilder`] totals many runs.
 //! - [`otel::Converter`] turns a run into OpenTelemetry spans (GenAI semantic
 //!   conventions) and [`otlp`] sends them to any OTLP/HTTP backend.
+//! - [`xray::XrayBuilder`] sizes every tool output in a session transcript and
+//!   flags what bloats the context.
 //!
 //! The `graff-observe` binary ([`cli`]) puts all of it on the command line.
 
 pub mod cli;
 mod cli_otel;
+mod cli_xray;
 mod delegation;
 mod discover;
 mod event;
@@ -31,11 +34,15 @@ mod process;
 pub mod render;
 mod stats;
 mod summary;
+pub mod transcript;
+pub mod xray;
 
 pub use cli_otel::OtelArgs;
+pub use cli_xray::XrayArgs;
 pub use delegation::{ChildRun, Delegation};
 pub use discover::{
-    TraceFile, discover, find_by_acp_session, find_by_pid, parse_since, resolve, written_since,
+    TraceFile, discover, discover_transcripts, find_by_acp_session, find_by_pid, parse_since,
+    resolve, written_since,
 };
 pub use event::{Event, EventKind, Stamp, SubagentRun, TurnOutcome, Usage, parse_line};
 pub use follow::Follower;

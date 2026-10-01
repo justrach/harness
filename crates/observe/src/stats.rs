@@ -126,6 +126,7 @@ impl StatsBuilder {
             t.calls += tool.calls;
             t.errors += tool.errors;
             t.ms += tool.ms;
+            t.bytes += tool.bytes;
         }
 
         let jev = &mut st.jev;

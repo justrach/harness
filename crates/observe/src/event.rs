@@ -43,6 +43,8 @@ pub enum EventKind {
         ms: u64,
         is_error: bool,
         from_sub: bool,
+        /// Bytes of output the tool produced, before graff's handle threshold.
+        result_bytes: u64,
     },
     /// Time from sending a request to its first model output (`first_token`).
     FirstToken {
@@ -171,6 +173,7 @@ struct Raw {
     output_tokens: Option<u64>,
     reasoning_tokens: Option<u64>,
     prefix_bust: Option<String>,
+    result_bytes: Option<u64>,
     harness_version: Option<String>,
     success: Option<bool>,
     latency_ms: Option<u64>,
@@ -217,6 +220,7 @@ fn typed(raw: Raw) -> Option<(Stamp, Event)> {
         output_tokens,
         reasoning_tokens,
         prefix_bust,
+        result_bytes,
         harness_version,
         success,
         latency_ms,
@@ -260,6 +264,7 @@ fn typed(raw: Raw) -> Option<(Stamp, Event)> {
             ms,
             is_error,
             from_sub,
+            result_bytes: result_bytes.unwrap_or(0),
         },
         "first_token" => EventKind::FirstToken {
             agent: agent.unwrap_or_default(),
