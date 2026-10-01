@@ -3830,6 +3830,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-observe"
+version = "0.2.99"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "harness-preview"
 version = "0.2.99"
 dependencies = [
