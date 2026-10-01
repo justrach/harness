@@ -45,5 +45,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 harness-adapters = { workspace = true, features = ["installer-fixture"] }
 zip.workspace = true
 tokio-tungstenite.workspace = true
+# Captures the engine's own log lines in the live comparison test.
+tracing-subscriber.workspace = true
 # In-process registry server for the two-engine workspace integration tests.
 harness-sync = { workspace = true, features = ["mock-server"] }

@@ -117,12 +117,14 @@ pub trait Harness: Send + Sync {
         self.deterministic_turn_end()
     }
     /// Whether a FRESH run's first turn that "completes" with no output at all
-    /// and zero tokens means the agent swallowed the user's prompt rather than
-    /// answered it. Claude Code does this when it resumes a session that still
-    /// has a background task with no completion record: it runs its own
-    /// synthetic notification turn first, and the prompt behind it goes
-    /// unanswered until another line arrives. The engine then re-sends the
-    /// prompt once into the live run and, if that comes back empty too, says so.
+    /// and zero tokens is not really the end of the user's prompt. Claude Code
+    /// does this when it resumes a session that still has a background task
+    /// with no completion record: it runs its own synthetic notification turn
+    /// first, and the prompt behind it is answered a moment later or, now and
+    /// then, not at all. The engine holds the chat as Working for a grace
+    /// window instead of announcing a completion, re-sends the prompt once
+    /// into the live run only if nothing follows, and says so if that comes
+    /// back empty too.
     fn retries_empty_first_turn(&self) -> bool {
         false
     }

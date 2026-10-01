@@ -1683,6 +1683,48 @@ fn apply_reasoning_update(
     workspace.set_chat_config(chat_id, &config)
 }
 
+/// How long an empty first turn is held open for the real answer to follow
+/// before the prompt is sent again. Long on purpose: the answer to a large
+/// session can be slow to start, and sending the prompt twice because a slow
+/// answer looked late would answer it twice. `HARNESS_EMPTY_TURN_GRACE_MS`
+/// overrides.
+fn empty_turn_grace() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        std::env::var("HARNESS_EMPTY_TURN_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000),
+    )
+}
+
+/// Send `prompt` into this run's live mailbox again, under its original
+/// message id (the transcript's user entry is idempotent by id). True when the
+/// run took it.
+async fn resend_into_live_run(
+    inner: &Arc<Inner>,
+    chat_id: &str,
+    run_id: &str,
+    prompt: &str,
+    message_id: &str,
+    attachments: Vec<String>,
+) -> bool {
+    let ours = lock(&inner.runs)
+        .get(chat_id)
+        .is_some_and(|h| h.run_id == run_id);
+    if !ours {
+        return false;
+    }
+    let engine = SessionsEngine {
+        inner: inner.clone(),
+    };
+    matches!(
+        engine
+            .steer_with_attachments(chat_id, prompt, Some(message_id.to_owned()), attachments)
+            .await,
+        Ok(SteerOutcome::Accepted)
+    )
+}
+
 /// `HARNESS_EMPTY_TURN_RETRY=0` (or `off`/`false`/`no`) turns the empty-first-turn
 /// recovery off, for comparing against the old behavior.
 fn empty_turn_recovery_enabled() -> bool {
@@ -1808,12 +1850,17 @@ async fn drive_run(
     // run whose first turn "completes" with no output and zero tokens has not
     // answered the user's prompt — the agent swallowed it. Re-send it once
     // into this live run, and say so if that comes back empty too.
-    let recover_empty_turn = harness.retries_empty_first_turn() && empty_turn_recovery_enabled();
+    let empty_turn_opt_in = harness.retries_empty_first_turn();
+    let recover_empty_turn = empty_turn_opt_in && empty_turn_recovery_enabled();
     let mut turn_tokens = false;
     let mut run_steered = false;
     let mut turns_parked = 0u32;
     let mut empty_turn_resent = false;
     let mut empty_turn_reported = false;
+    // Set while a swallowed empty first Done is waiting to see whether the
+    // real answer follows (the agent often answers its pending prompt a moment
+    // later); at the deadline with nothing after it, the prompt is re-sent.
+    let mut empty_wait: Option<tokio::time::Instant> = None;
     // Liveness heartbeat: this loop RUNNING is proof the harness stream is
     // open, so freshness must not depend on events arriving. Silent stretches
     // are normal and UNBOUNDED — a long tool call, redacted thinking, an
@@ -1975,6 +2022,44 @@ async fn drive_run(
                         session_id: None,
                     },
                 },
+                // Empty-first-turn grace ran out with nothing after the swallowed
+                // Done: the prompt really was dropped. Events win a tie (above).
+                _ = tokio::time::sleep_until(
+                    empty_wait.unwrap_or_else(tokio::time::Instant::now)
+                ), if empty_wait.is_some() && !interrupted => {
+                    empty_wait = None;
+                    let attachments = retry_request
+                        .as_ref()
+                        .map(|r| r.attachments.clone())
+                        .unwrap_or_default();
+                    if resend_into_live_run(
+                        &inner,
+                        &chat_id,
+                        &run_id,
+                        &user_prompt,
+                        &resume_state.user_message_id,
+                        attachments,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            chat = %chat_id,
+                            "nothing followed the empty first turn; re-sent the prompt once"
+                        );
+                        empty_turn_resent = true;
+                    } else {
+                        // No live run to take it: end the turn as completed, as
+                        // it would have without the hold.
+                        tracing::warn!(chat = %chat_id, "empty first turn could not be re-sent");
+                        prepared_events.push_back(AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            result: None,
+                            error: None,
+                            session_id: None,
+                        });
+                    }
+                    continue;
+                }
                 _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
                     // (parent + any dirty subagent docs).
@@ -2476,6 +2561,8 @@ async fn drive_run(
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
             run_steered = true;
+            // A steer (the user's own, or ours) takes over from the hold.
+            empty_wait = None;
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
@@ -2521,7 +2608,7 @@ async fn drive_run(
         // exists under `user_message_id`, so re-sending it is idempotent in the
         // transcript, and the empty Done is swallowed so the chat never shows
         // (or notifies) a completed turn that never happened.
-        let empty_first_turn = recover_empty_turn
+        let empty_turn_signature = empty_turn_opt_in
             && matches!(
                 &event,
                 AgentEvent::Done { status: DoneStatus::Completed, result, .. }
@@ -2538,33 +2625,50 @@ async fn drive_run(
             && turns_parked == 0
             && !user_prompt.trim().is_empty()
             && !user_prompt.trim_start().starts_with('/');
+        let empty_first_turn = recover_empty_turn && empty_turn_signature;
+        if empty_turn_signature && !recover_empty_turn {
+            tracing::warn!(
+                chat = %chat_id,
+                "first turn ended with no output (empty-turn recovery is off)"
+            );
+        }
         if empty_first_turn && !empty_turn_resent {
-            let ours = lock(&inner.runs)
-                .get(&chat_id)
-                .is_some_and(|h| h.run_id == run_id);
-            if ours && let Some(retry) = retry_request.as_ref() {
-                let engine = SessionsEngine {
-                    inner: inner.clone(),
-                };
-                match engine
-                    .steer_with_attachments(
-                        &chat_id,
-                        &user_prompt,
-                        Some(resume_state.user_message_id.clone()),
-                        retry.attachments.clone(),
-                    )
-                    .await
-                {
-                    Ok(SteerOutcome::Accepted) => {
-                        tracing::warn!(
-                            chat = %chat_id,
-                            "first turn ended with no output; re-sent the prompt once"
-                        );
-                        empty_turn_resent = true;
-                        continue;
-                    }
-                    Ok(SteerOutcome::NotSteerable) | Err(_) => {}
-                }
+            if empty_wait.is_none() {
+                // The first empty completion is not the end of the turn: the
+                // agent usually answers its pending prompt a moment later.
+                // Hold the chat as Working (no completed notice, no idle gap)
+                // for a grace window and only re-send if nothing follows.
+                let grace = empty_turn_grace();
+                empty_wait = Some(tokio::time::Instant::now() + grace);
+                tracing::warn!(
+                    chat = %chat_id,
+                    grace_ms = grace.as_millis() as u64,
+                    "first turn ended with no output; holding the turn open for the answer"
+                );
+                continue;
+            }
+            // A second empty completion while holding: nothing is coming.
+            empty_wait = None;
+            let attachments = retry_request
+                .as_ref()
+                .map(|r| r.attachments.clone())
+                .unwrap_or_default();
+            if resend_into_live_run(
+                &inner,
+                &chat_id,
+                &run_id,
+                &user_prompt,
+                &resume_state.user_message_id,
+                attachments,
+            )
+            .await
+            {
+                tracing::warn!(
+                    chat = %chat_id,
+                    "first turn ended with no output twice; re-sent the prompt once"
+                );
+                empty_turn_resent = true;
+                continue;
             }
         } else if empty_first_turn && empty_turn_resent && !empty_turn_reported {
             // The re-send came back empty too: end the turn with a visible
@@ -2630,6 +2734,10 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
+            // Real output after a swallowed empty Done: the answer is coming.
+            if empty_wait.is_some() && !folded.is_empty() {
+                empty_wait = None;
+            }
             // R2 sidecar PARKED (2026-08-10, product call): the fold's
             // summary/stats ARE the doc's whole record — no refs stamped, no
             // uploads. Full outputs survive only in the host's local run

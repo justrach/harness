@@ -1,9 +1,13 @@
 //! A fresh run whose first turn "completes" with no output and zero tokens has
 //! not answered the user's prompt: Claude Code, resuming a session that still
 //! has a background task with no completion record, runs its own synthetic
-//! notification turn first and drops the prompt behind it. The engine re-sends
-//! the prompt once into the live run (the user entry is idempotent by id, so
-//! no second bubble), and ends with a visible reason if that comes back empty.
+//! notification turn first, and the prompt behind it is answered a moment later
+//! or, now and then, not at all. The engine does not announce that empty turn
+//! as a completion: it keeps the chat Working for a grace window. If the answer
+//! follows, nothing else happens (no double answer). If the window passes in
+//! silence, it re-sends the prompt once into the live run (the user entry is
+//! idempotent by id, so no second bubble), and ends with a visible reason if
+//! that comes back empty too.
 //!
 //! The scripted stream is the one seen in a real run journal:
 //! `sessionStarted`, `usage 0/0`, `done completed ""`.
@@ -26,6 +30,16 @@ use harness_proto::{
 
 const CHAT: &str = "chat-empty-turn";
 const PROMPT: &str = "pull the app and benchmark it";
+/// The hold, shortened for tests (process-global, set before any engine runs).
+const GRACE_MS: u64 = 400;
+
+fn init_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: before any engine exists in this test process.
+        unsafe { std::env::set_var("HARNESS_EMPTY_TURN_GRACE_MS", GRACE_MS.to_string()) };
+    });
+}
 
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
@@ -176,6 +190,7 @@ struct Rig {
 }
 
 fn assemble(main_prompt: &str, opt_in: bool) -> Rig {
+    init_env();
     let (feed, rx) = mpsc::unbounded_channel();
     let steers = Arc::new(StdMutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
@@ -271,24 +286,60 @@ where
     }
 }
 
-/// A short pause for "and nothing else happens" assertions.
+/// Long enough for the hold to have run out, for "and nothing else happens" assertions.
 async fn settle() {
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(GRACE_MS + 400)).await;
 }
 
 #[tokio::test]
-async fn an_empty_first_turn_is_re_sent_once_and_the_answer_lands() {
+async fn an_empty_first_turn_followed_by_the_answer_is_not_re_sent() {
+    // The common case: the agent answers its pending prompt right after the
+    // empty turn. The chat must read Working throughout (no completed notice,
+    // no idle gap) and the prompt must not be sent a second time.
     let rig = assemble(PROMPT, true);
     rig.send(PROMPT).await;
 
     rig.feed_all(empty_turn());
-    wait_for(|| rig.steers().len() == 1, "the prompt is re-sent").await;
-    assert_eq!(rig.steers(), vec![PROMPT.to_string()]);
-    // The empty Done was swallowed: the chat never read "completed".
-    assert_eq!(rig.status(), Some(SessionStatus::Working));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(rig.status(), Some(SessionStatus::Working), "no idle gap");
     assert_eq!(rig.completions(), None, "no completed turn was announced");
 
-    // The re-sent prompt gets a real answer.
+    rig.feed_all(vec![text("pong"), usage(10, 4), done(Some("pong"))]);
+    wait_for(
+        || rig.status() == Some(SessionStatus::Idle) && rig.assistant_text() == "pong",
+        "the answer lands and the chat parks",
+    )
+    .await;
+    settle().await;
+
+    assert!(
+        rig.steers().is_empty(),
+        "the answer came on its own: no re-send"
+    );
+    assert_eq!(rig.user_entries(), 1);
+    assert_eq!(rig.assistant_text(), "pong", "answered once");
+    assert!(rig.errors().is_empty(), "{:?}", rig.errors());
+    assert!(
+        rig.completions().is_some(),
+        "the real answer completes the turn"
+    );
+    rig.core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_empty_first_turn_with_nothing_after_it_is_re_sent_once_and_answered() {
+    let rig = assemble(PROMPT, true);
+    rig.send(PROMPT).await;
+
+    rig.feed_all(empty_turn());
+    // Held open, then — in silence — the prompt goes again.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(rig.steers().is_empty(), "not before the grace window");
+    assert_eq!(rig.status(), Some(SessionStatus::Working));
+    wait_for(|| rig.steers().len() == 1, "the prompt is re-sent").await;
+    assert_eq!(rig.steers(), vec![PROMPT.to_string()]);
+    assert_eq!(rig.completions(), None, "no completed turn was announced");
+
     rig.feed_all(vec![text("pong"), usage(10, 4), done(Some("pong"))]);
     wait_for(
         || rig.status() == Some(SessionStatus::Idle) && rig.assistant_text() == "pong",
@@ -299,10 +350,7 @@ async fn an_empty_first_turn_is_re_sent_once_and_the_answer_lands() {
     assert_eq!(rig.steers().len(), 1, "one re-send, never more");
     assert_eq!(rig.user_entries(), 1, "the message is not drawn twice");
     assert!(rig.errors().is_empty(), "{:?}", rig.errors());
-    assert!(
-        rig.completions().is_some(),
-        "the real answer completes the turn"
-    );
+    assert!(rig.completions().is_some());
     rig.core.sessions.shutdown().await;
 }
 
