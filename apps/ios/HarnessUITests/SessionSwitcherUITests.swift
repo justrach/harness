@@ -27,26 +27,23 @@ final class SessionSwitcherUITests: XCTestCase {
         app.buttons.matching(identifier: id).firstMatch
     }
 
-    /// The demo has sessions running and waiting on you. The pill lists them
-    /// in one fixed order; in a session the open one stays in its place,
-    /// marked, and picking another swaps it in.
+    /// The demo has sessions running and waiting on you. Home shows them as the
+    /// Now strip; in a session the pill lists them in one fixed order, the open
+    /// one stays in its place, marked, and picking another swaps it in.
     func testPillListsSessionsInOneOrderAndJumpsBetweenThem() {
+        let card = app.buttons["now-card-chat-veil"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        card.tap()
+
         let pill = app.buttons["session-switcher"]
         XCTAssertTrue(pill.waitForExistence(timeout: 10))
         pill.tap()
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
         let order = self.order
         XCTAssertGreaterThan(order.count, 1)
-        row(order[0]).tap()
-
-        // In the session: same list, same order, the open one marked.
-        let inSession = app.buttons["session-switcher"]
-        XCTAssertTrue(inSession.waitForExistence(timeout: 10))
-        inSession.tap()
-        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 5))
-        XCTAssertEqual(self.order, order)
-        XCTAssertEqual(row(order[0]).value as? String, "Open")
-        row(order[1]).tap()
+        XCTAssertEqual(row("switcher-chat-veil").value as? String, "Open")
+        let other = order.first { $0 != "switcher-chat-veil" }!
+        row(other).tap()
 
         // Jumping swaps the session: one Back returns Home.
         XCTAssertTrue(app.buttons["session-switcher"].waitForExistence(timeout: 10))

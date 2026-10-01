@@ -82,6 +82,7 @@ struct SessionSwitcherPill: View {
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 2)
                 .accessibilityLabel(accessibilityText(juggled))
                 .accessibilityIdentifier("session-switcher")
+                .pagerSwipe()
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
         }
