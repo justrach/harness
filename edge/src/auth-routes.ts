@@ -3,6 +3,7 @@
  *
  *  - POST /auth/exchange     — CodeGraff code + PKCE → Harness tokens.
  *  - POST /auth/refresh      — rotate CodeGraff refresh token.
+ *  - POST /auth/sandbox      — a cloud sandbox's lease-bound token → Harness access token.
  *  - GET  /auth/orgs         — the caller's personal workspace.
  *  - POST /auth/account/delete — delete the caller's account (account-delete.ts).
  *  - GET  /auth/cli/callback — headless sign-in: shows a paste-able code.
@@ -13,7 +14,7 @@
  */
 import { bearerFromRequest, personalOrgId, verifyToken } from "./auth";
 import type { Env } from "./env";
-import { CodegraffAuthFailed, exchange, refresh } from "./codegraff";
+import { CodegraffAuthFailed, exchange, refresh, sandboxExchange } from "./codegraff";
 import { deleteAccount } from "./account-delete";
 
 const json = (value: unknown, status = 200): Response =>
@@ -74,6 +75,17 @@ export const handleAuthRoute = async (
         request.headers.get("cf-connecting-ip") ?? "unknown-ip",
         e instanceof CodegraffAuthFailed ? e.message : String(e)
       );
+      return authFailed(e);
+    }
+  }
+
+  if (parts[1] === "sandbox" && parts.length === 2 && request.method === "POST") {
+    if (!env.HARNESS_AUTH_SIGNING_KEY) return notConfigured();
+    const body = await bodyJson<{ token?: string }>(request);
+    if (typeof body?.token !== "string") return json({ error: "token is required" }, 400);
+    try {
+      return json(await sandboxExchange(env, body.token));
+    } catch (e) {
       return authFailed(e);
     }
   }
