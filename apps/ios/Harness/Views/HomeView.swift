@@ -24,7 +24,9 @@ struct HomeView: View {
     @State private var showSettings = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
-    @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
+    // Start with Time each launch; a saved grouping can hide recent sessions
+    // inside collapsed projects. Project/device views are opt-in for this visit.
+    @State private var groupByRaw = HomeGroupBy.none.rawValue
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
@@ -324,9 +326,9 @@ struct HomeView: View {
             .pickerStyle(.inline)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: grouped ? grouping.symbol : "square.stack.3d.up")
+                Image(systemName: grouping.symbol)
                     .font(.system(size: 11, weight: .medium))
-                Text(grouped ? grouping.label : "Group")
+                Text(grouping.label)
                     .font(Theme.sans(13, weight: grouped ? .semibold : .medium))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
