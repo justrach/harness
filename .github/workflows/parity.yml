@@ -1,0 +1,62 @@
+name: parity
+
+# The Swift half of the iOS/Android parity guard. The Kotlin half runs in the android workflow. The full iOS unit
+# suite is switched off in ui-tests.yml, so this runs only the parity tests: they read apps/parity and the SwiftUI
+# sources, and fail when either app moves away from the shared rules and copy.
+
+on:
+  pull_request:
+    paths:
+      - "apps/parity/**"
+      - "apps/ios/**"
+      - ".github/workflows/parity.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/parity/**"
+      - "apps/ios/**"
+      - ".github/workflows/parity.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-parity:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Select an available iPhone simulator
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          devices = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "--json"]))["devices"]
+          iphones = [device for runtime, group in devices.items() if "iOS" in runtime
+                     for device in group if device["name"].startswith("iPhone")]
+          if not iphones:
+              raise SystemExit("No iPhone simulator is installed")
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("IOS_SIMULATOR_ID=" + iphones[0]["udid"] + "\n")
+          PYTHON
+      - name: Parity tests
+        working-directory: apps/ios
+        run: |
+          xcodebuild -project Harness.xcodeproj -scheme Harness \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -resultBundlePath "$RUNNER_TEMP/parity.xcresult" \
+            -only-testing:HarnessTests/ParityTests CODE_SIGNING_ALLOWED=NO test
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-test-results
+          path: ${{ runner.temp }}/parity.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

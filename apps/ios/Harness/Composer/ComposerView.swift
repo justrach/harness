@@ -634,7 +634,7 @@ struct ComposerView: View {
         guard !prompt.isEmpty || !staged.isEmpty else { return }
 
         if staged.isEmpty {
-            deliver(content: prompt, paths: [])
+            Perf.measure(PerfSpan.sendApply) { deliver(content: prompt, paths: []) }
             clearDraft(matching: submittedText)
             return
         }

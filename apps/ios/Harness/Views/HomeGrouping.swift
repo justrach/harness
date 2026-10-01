@@ -9,13 +9,11 @@ import SwiftUI
 enum HomeGroupBy: String, CaseIterable, Identifiable {
     case none, project, device
 
-    static let storageKey = "homeGroupBy"
-
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .none: return "None"
+        case .none: return "Time"
         case .project: return "Project"
         case .device: return "Device"
         }
@@ -23,7 +21,7 @@ enum HomeGroupBy: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .none: return "list.bullet"
+        case .none: return "clock"
         case .project: return "folder"
         case .device: return "laptopcomputer"
         }

@@ -308,6 +308,40 @@ enum DocDisk {
         }
     }
 
+    private struct CachedHarness: Codable {
+        var id: String
+        var label: String
+        var supportsSteering: Bool?
+        var steeringMode: String?
+    }
+
+    static func harnessesURL(deviceId: String) -> URL {
+        let safe = deviceId.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" }
+            .reduce(into: "") { $0.append($1) }
+        return directory.appendingPathComponent("harnesses_\(safe).json")
+    }
+
+    /// The device's last-seen agent list, so the model picker still offers
+    /// every agent (Graff included) while the device is unreachable.
+    @discardableResult
+    static func saveHarnesses(_ harnesses: [HarnessInfo], deviceId: String) -> Bool {
+        let cached = harnesses.map {
+            CachedHarness(id: $0.id, label: $0.label,
+                          supportsSteering: $0.supportsSteering, steeringMode: $0.steeringMode)
+        }
+        guard let data = try? JSONEncoder().encode(cached) else { return false }
+        return saveRegistry(data: data, to: harnessesURL(deviceId: deviceId))
+    }
+
+    static func loadHarnesses(deviceId: String) -> [HarnessInfo]? {
+        guard let data = try? Data(contentsOf: harnessesURL(deviceId: deviceId)),
+              let cached = try? JSONDecoder().decode([CachedHarness].self, from: data) else { return nil }
+        return cached.map {
+            HarnessInfo(id: $0.id, label: $0.label,
+                        supportsSteering: $0.supportsSteering, steeringMode: $0.steeringMode)
+        }
+    }
+
     /// LRU-prune session snapshots (the workspace registry blob is always
     /// kept; a leftover `ws3_` Loro snapshot is retained for rollback).
     static func prune(keep: Int) {

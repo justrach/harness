@@ -1,0 +1,91 @@
+{
+  "$comment": "Copy and layout numbers that must match between the SwiftUI and Compose apps. ParityTests.swift and ParityTest.kt each check their own source tree against this file; change a value here and both must follow.",
+  "strings": {
+    "queuePanel": [
+      "Updating…",
+      "Editing below",
+      "Needs review",
+      "Send now, interrupting the response",
+      "More queue actions",
+      "Move up",
+      "Move down",
+      "Remove",
+      "Edit",
+      "Stop editing",
+      "Preview image"
+    ],
+    "composer": [
+      "Queue message",
+      "Send message",
+      "Save queued message",
+      "Edit queued message",
+      "Copy edit and stop editing",
+      "That queued message is being edited on another device.",
+      "That queued message is no longer available.",
+      "Connect to the chat host to edit this message.",
+      "This message changed on another device; your edit is still here.",
+      "Message removed. Stop editing to copy your text and restore your draft.",
+      "Edit protection changed. Stop editing to copy your text and restore your draft.",
+      "Couldn't save the protected edit.",
+      "Couldn't cancel the protected edit.",
+      "Edit protection may have expired — review before sending.",
+      "The host did not confirm the action. The message may have already left the queue."
+    ],
+    "settings": [
+      "Signed in with",
+      "CodeGraff",
+      "Signed in",
+      "Demo mode",
+      "Sign out",
+      "Delete account…",
+      "Delete your account?",
+      "Account not deleted",
+      "Delete",
+      "Cancel",
+      "OK",
+      "Deleting account…",
+      "Permanently deletes your CodeGraff account and everything Harness keeps for it.",
+      "This permanently deletes your CodeGraff account and everything Harness keeps for it: chats, sessions, devices, and the agent rooms you made. Your posts in other people's rooms lose their text. This can't be undone.",
+      "Sign in with CodeGraff to delete your account.",
+      "Couldn't reach Harness. Check your connection and try again."
+    ],
+    "home": [
+      "Pinned",
+      "Search sessions",
+      "Filter by space",
+      "Group by",
+      "New session"
+    ],
+    "onboarding": [
+      "Bring in your agent",
+      "Harness runs your agent on your computer, and this app is the remote. Add one of these there, then start a session from here.",
+      "Graff",
+      "Claude Code",
+      "OpenAI Codex",
+      "CodeGraff's own agent, built into the Harness app.",
+      "Anthropic's coding agent. Install Claude Code and sign in on your computer.",
+      "OpenAI's coding agent. Install Codex and sign in with ChatGPT on your computer.",
+      "Ready on",
+      "Switched off on",
+      "Not installed on",
+      "Not found on",
+      "Needs a computer",
+      "Turn it on in Settings → Agents on that computer.",
+      "Install it from Settings → Agents on that computer.",
+      "Install it on that computer and it will appear here.",
+      "Get Harness on your computer",
+      "Open the link on your computer, install Harness, and sign in with the same CodeGraff account. Your computer shows up here once it's online.",
+      "Send the link to your computer",
+      "Copy link",
+      "Get Harness for your computer"
+    ]
+  },
+  "queuePanelLayout": {
+    "rowHeightDp": 56,
+    "rowGapDp": 6,
+    "maxVisibleRows": 3,
+    "controlSizeDp": 44,
+    "horizontalPaddingDp": 16,
+    "swiftSource": "apps/ios/Harness/Composer/QueuePanelView.swift"
+  }
+}

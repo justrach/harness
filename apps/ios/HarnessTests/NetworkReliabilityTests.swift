@@ -130,6 +130,19 @@ final class NetworkReliabilityTests: XCTestCase {
         XCTAssertEqual(DocDisk.loadModels(deviceId: deviceId, harness: harness), models)
     }
 
+    func testHarnessListCacheRoundTrips() throws {
+        let deviceId = "cache-device-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(at: DocDisk.harnessesURL(deviceId: deviceId)) }
+        XCTAssertNil(DocDisk.loadHarnesses(deviceId: deviceId))
+        let list = [
+            HarnessInfo(id: "claude-code", label: "Claude Code", supportsSteering: true,
+                        steeringMode: "step-boundary"),
+            HarnessInfo(id: "graff", label: "Graff"),
+        ]
+        XCTAssertTrue(DocDisk.saveHarnesses(list, deviceId: deviceId))
+        XCTAssertEqual(DocDisk.loadHarnesses(deviceId: deviceId), list)
+    }
+
     @MainActor
     func testRestartedSessionRetainsOutboxIdsAndRetiresThem() throws {
         let id = "session-outbox-\(UUID().uuidString)"

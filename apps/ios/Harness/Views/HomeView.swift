@@ -24,7 +24,9 @@ struct HomeView: View {
     @State private var showSettings = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
-    @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
+    // Start with Time each launch; a saved grouping can hide recent sessions
+    // inside collapsed projects. Project/device views are opt-in for this visit.
+    @State private var groupByRaw = HomeGroupBy.none.rawValue
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
@@ -80,16 +82,22 @@ struct HomeView: View {
 
     @ViewBuilder
     private func destination(_ route: Route) -> some View {
-        switch route {
-        case .space(let id): SpaceView(spaceId: id, path: $path)
-        case .chat(let id): SessionView(chatId: id)
-        case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+        Group {
+            switch route {
+            case .space(let id): SpaceView(spaceId: id, path: $path)
+            case .chat(let id): SessionView(chatId: id)
+            case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+            }
         }
+        // Tap to the page it opened.
+        .onAppear { Perf.shared.finishInteraction(PerfSpan.navigationOpen) }
     }
 
     /// Open a route from the list. In the split layout the sidebar replaces
     /// what the detail shows instead of stacking behind it.
     private func open(_ route: Route) {
+        // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
+        if case .chat = route { Perf.shared.startInteraction(PerfSpan.navigationOpen) }
         if splitLayout { path = [route] } else { path.append(route) }
     }
 
@@ -143,35 +151,55 @@ struct HomeView: View {
                     // recovery hides instantly) and quiet — a bare
                     // grayscale spinner or dot with a faint caption, no
                     // surface, no border (shell.rs render_connection_pill).
-                    switch model.connectivity.state {
-                    case .offline:
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(Theme.warning)
-                                .frame(width: 5, height: 5)
-                            Text("Offline — sends are saved")
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.textFaint)
+                    if model.sessionExpired {
+                        // The edge rejected the stored sign-in: say so, with the way out, instead of a
+                        // quiet "connecting" that never ends.
+                        Button {
+                            model.signInAgain()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Theme.warning)
+                                    .frame(width: 5, height: 5)
+                                Text(model.signInBusy ? "Signing in…" : "Signed out — tap to sign in")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textMuted)
+                            }
                         }
-                        .transition(.opacity)
-                    case .reconnecting:
-                        HStack(spacing: 5) {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(Theme.textMuted)
-                            Text("Reconnecting…")
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.textFaint)
-                        }
-                        .transition(.opacity)
-                    case .connected:
-                        // Initial catch-up (within the grace): the old
-                        // quiet "connecting" spinner, gone on first sync.
-                        if !model.connected {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(Theme.textMuted)
-                                .accessibilityLabel("Connecting")
+                        .buttonStyle(.plain)
+                        .disabled(model.signInBusy)
+                        .accessibilityIdentifier("session-expired")
+                    } else {
+                        switch model.connectivity.state {
+                        case .offline:
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Theme.warning)
+                                    .frame(width: 5, height: 5)
+                                Text("Offline — sends are saved")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textFaint)
+                            }
+                            .transition(.opacity)
+                        case .reconnecting:
+                            HStack(spacing: 5) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(Theme.textMuted)
+                                Text("Reconnecting…")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textFaint)
+                            }
+                            .transition(.opacity)
+                        case .connected:
+                            // Initial catch-up (within the grace): the old
+                            // quiet "connecting" spinner, gone on first sync.
+                            if !model.connected {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(Theme.textMuted)
+                                    .accessibilityLabel("Connecting")
+                            }
                         }
                     }
                 }
@@ -298,9 +326,9 @@ struct HomeView: View {
             .pickerStyle(.inline)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: grouped ? grouping.symbol : "square.stack.3d.up")
+                Image(systemName: grouping.symbol)
                     .font(.system(size: 11, weight: .medium))
-                Text(grouped ? grouping.label : "Group")
+                Text(grouping.label)
                     .font(Theme.sans(13, weight: grouped ? .semibold : .medium))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
@@ -407,17 +435,24 @@ struct HomeView: View {
                 && !model.archivedMatches(in: selectedSpace?.id, query: searchText).isEmpty
             if !archivedHit {
                 Section {
-                    Text(scoped.isEmpty ? "No sessions yet — start one with +" : "No matching sessions")
-                        .font(Theme.sans(12))
-                        .foregroundStyle(Theme.textFaint)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .accessibilityIdentifier("home-empty")
+                    if scoped.isEmpty {
+                        // Nothing started yet: until an agent is ready on a computer, say how to bring one in.
+                        BringYourAgentView()
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    } else {
+                        Text("No matching sessions")
+                            .font(Theme.sans(12))
+                            .foregroundStyle(Theme.textFaint)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .accessibilityIdentifier("home-empty")
+                    }
                 }
             }
         } else {
             let pinned = Set(chats.map(\.id).filter(model.isPinned(chatId:)))
-            ForEach(HomeGrouping.groups(chats, by: grouping, pinned: pinned)) { group in
+            ForEach(Perf.measure(PerfSpan.homeGroup) { HomeGrouping.groups(chats, by: grouping, pinned: pinned) }) { group in
                 let collapsed = grouping != .none && collapsedGroups.contains(group.id)
                 Section {
                     if !collapsed {

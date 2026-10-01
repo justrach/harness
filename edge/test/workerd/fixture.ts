@@ -6,6 +6,7 @@ export { RegistryRoom } from "../../src/registry-room";
 export { VaultRoom } from "../../src/vault-room";
 export { RoomActor } from "../../src/room-actor";
 export { AccountPurge } from "../../src/account-purge";
+export { RefreshLeeway } from "../../src/refresh-leeway";
 import { DurableObject } from "cloudflare:workers";
 
 /** Bare SQLite-backed DO; tests reach its real `ctx.storage.sql` via

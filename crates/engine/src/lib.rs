@@ -107,6 +107,10 @@ pub(crate) fn new_id() -> String {
 /// The device-nudge id meaning "room wakes are waiting" (edge
 /// `room-actor.ts` `ROOM_WAKES_NUDGE`); chat ids are UUIDs, so it never names a chat.
 pub const ROOM_WAKES_NUDGE: &str = "rooms-wakes";
+
+/// Tries (3 s apart) a starting cloud sandbox makes to reach the edge before it gives up and starts
+/// signed out; the sign-in loop keeps trying afterwards.
+const SANDBOX_SIGN_IN_ATTEMPTS: u32 = 10;
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Data directory (default `~/.harness`, dev `~/.harness-dev`).
@@ -647,6 +651,30 @@ impl Engine {
         );
         if let Some(token) = &config.edge_token {
             auth_config.dev_user_id = token.clone();
+        }
+        // A Codegraff cloud sandbox signs in with its lease token, not an OAuth session. The identity is
+        // fixed before the scope is chosen, so the engine opens the synced workspace on its first start.
+        if let Some(file) = std::env::var_os("HARNESS_SANDBOX_TOKEN_FILE")
+            .map(std::path::PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            auth_config.sandbox_token_file = Some(file.clone());
+            for attempt in 0..SANDBOX_SIGN_IN_ATTEMPTS {
+                match crate::auth::sandbox_sign_in(&config.edge_url, &file).await {
+                    Ok(Some(session)) => {
+                        auth_config = auth_config.with_sandbox_session(session);
+                        break;
+                    }
+                    Ok(None) => {
+                        tracing::warn!("sandbox token file has no token yet; starting signed out");
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(attempt, error = %err, "sandbox sign-in failed");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                }
+            }
         }
         Auth::new(auth_config)
     }

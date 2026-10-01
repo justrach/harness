@@ -54,6 +54,15 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings-appearance")
                 }
 
+                Section("Diagnostics") {
+                    NavigationLink {
+                        PerformanceView()
+                    } label: {
+                        LabeledContent("Performance", value: Perf.shared.startupMs.map { "Started in \($0) ms" } ?? "")
+                    }
+                    .accessibilityIdentifier("settings-performance")
+                }
+
                 Section("About") {
                     LabeledContent("Version", value: version)
                 }

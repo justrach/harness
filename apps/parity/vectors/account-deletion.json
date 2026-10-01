@@ -1,0 +1,152 @@
+{
+  "$comment": "Shared by apps/ios/HarnessTests/ParityTests.swift and apps/android/app/src/test/.../ParityTest.kt. Expected values are what the SwiftUI app does; the Android port must agree.",
+  "cases": [
+    {
+      "name": "deleted only when the edge says so",
+      "status": 200,
+      "body": "{\"deleted\":true}",
+      "expect": {
+        "kind": "deleted"
+      }
+    },
+    {
+      "name": "200 without the flag is a refusal",
+      "status": 200,
+      "body": "{}",
+      "expect": {
+        "kind": "refused",
+        "message": "Couldn't delete your account (HTTP 200). Try again in a moment.",
+        "tokens": null
+      }
+    },
+    {
+      "name": "the flag on a failed status is a refusal",
+      "status": 500,
+      "body": "{\"deleted\":true}",
+      "expect": {
+        "kind": "refused",
+        "message": "Couldn't delete your account (HTTP 500). Try again in a moment.",
+        "tokens": null
+      }
+    },
+    {
+      "name": "a blocker is shown in CodeGraff's words and keeps the rotated tokens",
+      "status": 409,
+      "body": "{\"error\":\"active_subscription\",\"message\":\"Cancel your plan first.\",\"tokens\":{\"accessToken\":\"access-2\",\"refreshToken\":\"refresh-2\"}}",
+      "expect": {
+        "kind": "refused",
+        "message": "Cancel your plan first.",
+        "tokens": {
+          "accessToken": "access-2",
+          "refreshToken": "refresh-2"
+        }
+      }
+    },
+    {
+      "name": "a blocker without words falls back",
+      "status": 409,
+      "body": "{\"error\":\"active_subscription\"}",
+      "expect": {
+        "kind": "refused",
+        "message": "Your account can't be deleted yet.",
+        "tokens": null
+      }
+    },
+    {
+      "name": "unavailable says nothing was deleted",
+      "status": 501,
+      "body": "{\"error\":\"account_deletion_unavailable\",\"tokens\":{\"accessToken\":\"access-2\",\"refreshToken\":\"refresh-2\"}}",
+      "expect": {
+        "kind": "refused",
+        "message": "Account deletion isn't available yet. Nothing was deleted.",
+        "tokens": {
+          "accessToken": "access-2",
+          "refreshToken": "refresh-2"
+        }
+      }
+    },
+    {
+      "name": "rooms unavailable",
+      "status": 503,
+      "body": "{\"error\":\"rooms_unavailable\",\"tokens\":{\"accessToken\":\"access-2\",\"refreshToken\":\"refresh-2\"}}",
+      "expect": {
+        "kind": "refused",
+        "message": "Couldn't reach your agent rooms, so nothing was deleted. Try again in a moment.",
+        "tokens": {
+          "accessToken": "access-2",
+          "refreshToken": "refresh-2"
+        }
+      }
+    },
+    {
+      "name": "CodeGraff unavailable",
+      "status": 502,
+      "body": "{\"error\":\"codegraff_unavailable\",\"tokens\":{\"accessToken\":\"access-2\",\"refreshToken\":\"refresh-2\"}}",
+      "expect": {
+        "kind": "refused",
+        "message": "Couldn't reach CodeGraff, so your account wasn't deleted. Try again in a moment.",
+        "tokens": {
+          "accessToken": "access-2",
+          "refreshToken": "refresh-2"
+        }
+      }
+    },
+    {
+      "name": "an expired sign-in keeps the rotated tokens",
+      "status": 401,
+      "body": "{\"error\":\"signed_out\",\"tokens\":{\"accessToken\":\"access-2\",\"refreshToken\":\"refresh-2\"}}",
+      "expect": {
+        "kind": "refused",
+        "message": "Your sign-in has expired. Sign out, sign back in, then try again.",
+        "tokens": {
+          "accessToken": "access-2",
+          "refreshToken": "refresh-2"
+        }
+      }
+    },
+    {
+      "name": "a refusal before the edge spends the token carries none",
+      "status": 403,
+      "body": "{\"error\":\"wrong_account\"}",
+      "expect": {
+        "kind": "refused",
+        "message": "This sign-in belongs to a different account. Sign out, sign back in, then try again.",
+        "tokens": null
+      }
+    },
+    {
+      "name": "a gateway error with no JSON",
+      "status": 502,
+      "body": "Bad gateway",
+      "expect": {
+        "kind": "refused",
+        "message": "Couldn't delete your account (HTTP 502). Try again in a moment.",
+        "tokens": null
+      }
+    },
+    {
+      "name": "an empty 401",
+      "status": 401,
+      "body": "",
+      "expect": {
+        "kind": "refused",
+        "message": "Your sign-in has expired. Sign out, sign back in, then try again.",
+        "tokens": null
+      }
+    },
+    {
+      "name": "an unknown status",
+      "status": 418,
+      "body": "{}",
+      "expect": {
+        "kind": "refused",
+        "message": "Couldn't delete your account (HTTP 418). Try again in a moment.",
+        "tokens": null
+      }
+    }
+  ],
+  "model": {
+    "noAccount": "Sign in with CodeGraff to delete your account.",
+    "unreachable": "Couldn't reach Harness. Check your connection and try again."
+  }
+}
