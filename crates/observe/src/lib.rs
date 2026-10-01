@@ -3,8 +3,9 @@
 //! graff writes one JSONL trace per process to
 //! `<project>/.graff/traces/<run-id>.jsonl`: model requests, token usage, tool
 //! calls, turn outcomes, sub-agents and retries. This crate reads those files
-//! (it never writes them and sends nothing anywhere) and turns them into
-//! summaries for a person or a Harness surface:
+//! (it never writes them, and sends nothing unless asked to export
+//! OpenTelemetry) and turns them into summaries for a person or a Harness
+//! surface:
 //!
 //! - [`discover`] finds runs under project folders; [`find_by_pid`] and
 //!   [`find_by_acp_session`] map a live graff process or ACP session to its run.
@@ -13,19 +14,25 @@
 //! - [`Follower`] tails a trace graff is still writing.
 //! - [`sample_process`] reads the memory and CPU of a live graff process tree.
 //! - [`StatsBuilder`] totals many runs.
+//! - [`otel::Converter`] turns a run into OpenTelemetry spans (GenAI semantic
+//!   conventions) and [`otlp`] sends them to any OTLP/HTTP backend.
 //!
 //! The `graff-observe` binary ([`cli`]) puts all of it on the command line.
 
 pub mod cli;
+mod cli_otel;
 mod delegation;
 mod discover;
 mod event;
 mod follow;
+pub mod otel;
+pub mod otlp;
 mod process;
 pub mod render;
 mod stats;
 mod summary;
 
+pub use cli_otel::OtelArgs;
 pub use delegation::{ChildRun, Delegation};
 pub use discover::{
     TraceFile, discover, find_by_acp_session, find_by_pid, parse_since, resolve, written_since,

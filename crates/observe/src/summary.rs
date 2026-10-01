@@ -13,10 +13,10 @@ use crate::event::{Event, EventKind, Stamp, SubagentRun, parse_line};
 
 /// graff's root agent: `main` in the TUI, ACP and `-p`; `repl` in scripted
 /// `graff repl`; `root` in a few session paths.
-const ROOT_LABELS: &[&str] = &["main", "repl", "root"];
+pub(crate) const ROOT_LABELS: &[&str] = &["main", "repl", "root"];
 /// graff's own side agents (titles, recaps, judges, side questions,
 /// pre-compaction notes, reviews). They are not sub-agents.
-const HELPER_LABELS: &[&str] = &[
+pub(crate) const HELPER_LABELS: &[&str] = &[
     "title",
     "recap",
     "judge",

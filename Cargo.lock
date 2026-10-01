@@ -3835,9 +3835,11 @@ version = "0.2.99"
 dependencies = [
  "anyhow",
  "clap",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

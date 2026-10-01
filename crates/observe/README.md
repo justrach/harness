@@ -2,7 +2,7 @@
 
 A read-only observer for graff runs, outside the graff binary.
 
-graff writes one JSONL trace per process to `<project>/.graff/traces/<run-id>.jsonl`, whether it runs in its TUI, with `-p`, or over ACP inside Harness. This crate reads those files and reports what each run did. It never writes to them and sends nothing anywhere.
+graff writes one JSONL trace per process to `<project>/.graff/traces/<run-id>.jsonl`, whether it runs in its TUI, with `-p`, or over ACP inside Harness. This crate reads those files and reports what each run did. It never writes to them. It sends nothing anywhere unless you run `otel` with an endpoint.
 
 ## Command line
 
@@ -12,6 +12,7 @@ cargo run -p harness-observe --release -- show                 # the newest run 
 cargo run -p harness-observe --release -- show 47e0 --in ~/app # a run by id prefix
 cargo run -p harness-observe --release -- watch                # follow the newest run live
 cargo run -p harness-observe --release -- stats ~ --since 2026-09-23
+cargo run -p harness-observe --release -- otel --endpoint http://localhost:4318   # OpenTelemetry, below
 ```
 
 The binary is `graff-observe`. Paths may be projects, folders of projects (searched four levels deep, skipping hidden folders except `.worktrees`), `.graff/traces` folders, or trace files. `--json` prints the same data as JSON. `runs` and `stats` skip runs that never made a request unless `--all` is given.
@@ -49,6 +50,48 @@ For a run with children, `show` splits the time:
 | tail | last child finish to the parent's last request |
 
 Children come from graff's per-child `subagent` trace line (status, time, tools, effort). On traces written before that line, each child's span comes from its own model requests and its status is unknown.
+
+## OpenTelemetry
+
+`graff-observe otel` turns runs into OpenTelemetry traces and sends them to any OTLP/HTTP backend: an OpenTelemetry Collector, Jaeger, Grafana Tempo, Honeycomb, Langfuse, Phoenix and so on. Spans are named and attributed after the OpenTelemetry GenAI semantic conventions.
+
+```bash
+graff-observe otel --endpoint http://localhost:4318               # the newest run in this folder
+graff-observe otel 47e0 --in ~/app --endpoint http://localhost:4318
+graff-observe otel --since 7d --in ~ --out runs.otlp.jsonl        # backfill into a file instead
+graff-observe otel --follow --in ~/app                            # stream spans while graff runs
+```
+
+The endpoint and headers follow the standard OpenTelemetry environment variables:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (`/v1/traces` is added);
+- `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (used as is);
+- `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_TRACES_HEADERS`;
+- `--header key=value` adds more.
+
+Requests are OTLP/HTTP with JSON bodies. `--out` writes one request per line, the format the collector's `otlpjsonfile` receiver reads.
+
+| Span | Kind | One per | Main attributes |
+| --- | --- | --- | --- |
+| `invoke_agent graff` | internal | root turn (the trace root) | `gen_ai.request.reasoning.level` (effort when the turn ended), `gen_ai.conversation.id` (the ACP session, else graff's session), `graff.turn.cost_usd`, `graff.turn.success`, `graff.turn.model_calls`, `graff.turn.tool_errors` |
+| `chat {model}` | client | model request | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.reasoning.output_tokens`, `gen_ai.response.time_to_first_chunk`, `graff.agent`, `graff.context_tokens` |
+| `execute_tool {name}` | internal | tool call, `jev_effort` included | `gen_ai.tool.name`, `error.type` on failure |
+| `invoke_agent {label}` | internal | sub-agent; its requests and tool calls nest under it | `gen_ai.request.reasoning.level` (the child's effort), `graff.agent.tool_calls`, `error.type` when it failed |
+
+- **Notes** (retries, stalls, compactions, interrupts) are events on the turn span.
+- **Resource attributes:** `service.name=graff`, `service.version`, `service.instance.id` (the run id), `process.pid`, `graff.project`.
+- **What leaves the machine:**
+  - model and tool names, sub-agent labels;
+  - token counts, timings, costs and effort levels;
+  - error flags;
+  - the details of notes graff writes from fixed text.
+- **What doesn't:** prompts, tool arguments and results; graff's traces do not hold them. A note kind that may carry user text is sent by name only.
+- **Timing:** traces record milliseconds since the run started, so a run's wall-clock start is the trace file's last write minus the run's latest event time.
+- **A child's tool calls:** the trace line doesn't name the agent. The call nests under the child while exactly one child is running, and otherwise under the turn, with `graff.from_sub=true`.
+- **Span ids** derive from the run id, so exporting a run twice produces the same ids.
+- **`--follow`** sends each span as it finishes. A turn's root span goes when the turn ends. Anything still open goes when the graff process exits or a newer run starts. Spans that fail to send are retried on the next poll.
+
+Library: `otel::Converter` turns trace lines into spans, `otlp::export_request` encodes them, and `otlp::Sink` sends or writes them.
 
 ## Library
 
