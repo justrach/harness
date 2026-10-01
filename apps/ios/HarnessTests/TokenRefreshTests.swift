@@ -1,4 +1,5 @@
 import XCTest
+import Security
 @testable import Harness
 
 final class TokenRefreshTests: XCTestCase {
@@ -68,7 +69,18 @@ final class TokenRefreshTests: XCTestCase {
         XCTAssertEqual(calls.value, 2)
     }
 
-    func testKeychainUpdatesInPlaceAndKeepsBothHalves() {
+    func testKeychainUpdatesInPlaceAndKeepsBothHalves() throws {
+        // An unsigned simulator test host has no keychain entitlement (errSecMissingEntitlement): the
+        // keychain is simply not there to test, which says nothing about the code.
+        let probe: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "harness.keychain-probe",
+            kSecAttrAccount as String: UUID().uuidString,
+            kSecValueData as String: Data("x".utf8),
+        ]
+        let status = SecItemAdd(probe as CFDictionary, nil)
+        try XCTSkipIf(status == errSecMissingEntitlement, "no keychain entitlement in this test host")
+        SecItemDelete(probe as CFDictionary)
         let key = "testToken-\(UUID().uuidString)"
         defer { Keychain.delete(key: key) }
         Keychain.save("one", key: key)
