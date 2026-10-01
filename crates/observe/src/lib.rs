@@ -41,8 +41,8 @@ pub use cli_otel::OtelArgs;
 pub use cli_xray::XrayArgs;
 pub use delegation::{ChildRun, Delegation};
 pub use discover::{
-    TraceFile, discover, discover_transcripts, find_by_acp_session, find_by_pid, parse_since,
-    resolve, written_since,
+    TraceFile, discover, discover_transcripts, find_all_by_acp_session, find_by_acp_session,
+    find_by_pid, parse_since, resolve, written_since,
 };
 pub use event::{Event, EventKind, Stamp, SubagentRun, TurnOutcome, Usage, parse_line};
 pub use follow::Follower;
