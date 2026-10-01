@@ -1,7 +1,6 @@
 //! OpenTelemetry for graff runs: trace events in, OTLP spans out, named and
 //! attributed after the OpenTelemetry GenAI semantic conventions so any OTel
-//! backend (a collector, Jaeger, Tempo, Honeycomb, Langfuse, Phoenix…) can
-//! show a run.
+//! backend (an OpenTelemetry Collector, Jaeger, and others) can show a run.
 //!
 //! One root turn is one trace:
 //!

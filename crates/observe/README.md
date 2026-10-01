@@ -53,7 +53,7 @@ Children come from graff's per-child `subagent` trace line (status, time, tools,
 
 ## OpenTelemetry
 
-`graff-observe otel` turns runs into OpenTelemetry traces and sends them to any OTLP/HTTP backend: an OpenTelemetry Collector, Jaeger, Grafana Tempo, Honeycomb, Langfuse, Phoenix and so on. Spans are named and attributed after the OpenTelemetry GenAI semantic conventions.
+`graff-observe otel` turns runs into OpenTelemetry traces and sends them to any OTLP/HTTP backend, such as an OpenTelemetry Collector or Jaeger. Spans are named and attributed after the OpenTelemetry GenAI semantic conventions.
 
 ```bash
 graff-observe otel --endpoint http://localhost:4318               # the newest run in this folder
@@ -99,7 +99,7 @@ Library: `otel::Converter` turns trace lines into spans, `otlp::export_request` 
 
 ```bash
 graff-observe xray                       # the newest session in this folder
-graff-observe xray session-1790 --in ~/app
+graff-observe xray <session> --in ~/app  # a session name or its prefix
 graff-observe xray --since 7d --in ~     # totals across every session
 ```
 
