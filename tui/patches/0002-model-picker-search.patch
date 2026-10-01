@@ -1,0 +1,33 @@
+--- a/codex-rs/tui/src/chatwidget/model_popups.rs
++++ b/codex-rs/tui/src/chatwidget/model_popups.rs
+@@ -263,6 +263,13 @@
+                     model: preset_for_event,
+                 });
+             })];
++            // Typing filters the list: match on the name, the model id and the provider text.
++            let search_value = format!(
++                "{} {} {}",
++                preset.display_name,
++                preset.model,
++                description.as_deref().unwrap_or_default()
++            );
+             items.push(SelectionItem {
+                 name: preset.display_name.clone(),
+                 description,
+@@ -274,6 +281,7 @@
+                 actions,
+                 dismiss_on_select: single_supported_effort,
+                 dismiss_parent_on_child_accept: !single_supported_effort,
++                search_value: Some(search_value),
+                 ..Default::default()
+             });
+         }
+@@ -285,6 +293,8 @@
+                 view_id: Some(view_id),
+                 items,
+                 header,
++                is_searchable: true,
++                search_placeholder: Some("Type to filter models...".to_string()),
+                 ..SelectionViewParams::picker()
+             },
+         );
