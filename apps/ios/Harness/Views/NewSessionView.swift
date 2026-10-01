@@ -219,10 +219,12 @@ struct NewSessionView: View {
                 }
             }
         }
-        .task(id: deviceId) {
+        .task(id: "\(deviceId ?? "")|\(deviceId.map(model.deviceOnline) ?? false)") {
             // Live harness list + a model catalog per harness, all from the
             // device that will run the session (the picker shows one sectioned
             // list across harnesses, so it needs every catalog up front).
+            // Keyed on reachability too: opened offline, it reloads once the
+            // device comes back instead of staying on the fallback.
             liveHarnesses = nil
             catalogs = [:]
             optionSelections = [:]
