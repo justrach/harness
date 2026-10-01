@@ -55,6 +55,29 @@
       "Filter by space",
       "Group by",
       "New session"
+    ],
+    "onboarding": [
+      "Bring in your agent",
+      "Harness runs your agent on your computer, and this app is the remote. Add one of these there, then start a session from here.",
+      "Graff",
+      "Claude Code",
+      "OpenAI Codex",
+      "CodeGraff's own agent, built into the Harness app.",
+      "Anthropic's coding agent. Install Claude Code and sign in on your computer.",
+      "OpenAI's coding agent. Install Codex and sign in with ChatGPT on your computer.",
+      "Ready on",
+      "Switched off on",
+      "Not installed on",
+      "Not found on",
+      "Needs a computer",
+      "Turn it on in Settings → Agents on that computer.",
+      "Install it from Settings → Agents on that computer.",
+      "Install it on that computer and it will appear here.",
+      "Get Harness on your computer",
+      "Open the link on your computer, install Harness, and sign in with the same CodeGraff account. Your computer shows up here once it's online.",
+      "Send the link to your computer",
+      "Copy link",
+      "Get Harness for your computer"
     ]
   },
   "queuePanelLayout": {

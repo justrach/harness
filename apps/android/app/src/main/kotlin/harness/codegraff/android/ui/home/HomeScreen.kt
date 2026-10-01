@@ -1,6 +1,8 @@
 package harness.codegraff.android.ui.home
 
 import androidx.compose.animation.core.animateFloatAsState
+import harness.codegraff.android.model.OnboardingState
+import androidx.compose.ui.platform.testTag
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfSpan
 import androidx.compose.foundation.background
@@ -155,11 +157,17 @@ fun HomeScreen(
                 val archivedHit = statusFilter == HomeStatusFilter.All && searchText.isNotEmpty() && archived.isNotEmpty()
                 if (!archivedHit) {
                     item(key = "empty") {
-                        Text(
-                            if (scoped.isEmpty()) "No sessions yet — start one with +" else "No matching sessions",
-                            style = sans(12f), color = p.textFaint,
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                        )
+                        val readiness = state.agentReadiness
+                        if (scoped.isEmpty() && readiness.state != OnboardingState.Ready) {
+                            // Nothing started yet: until an agent is ready on a computer, say how to bring one in.
+                            BringYourAgent(readiness, state::deviceName)
+                        } else {
+                            Text(
+                                if (scoped.isEmpty()) "No sessions yet — start one with +" else "No matching sessions",
+                                style = sans(12f), color = p.textFaint,
+                                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp).testTag("home-empty"),
+                            )
+                        }
                     }
                 }
             } else {

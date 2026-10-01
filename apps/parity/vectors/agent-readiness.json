@@ -1,0 +1,544 @@
+{
+  "comment": "Whether someone has brought an agent in. The app looks at every computer that is online and, for Graff, Claude Code and Codex (OpenAI), takes the best status across them: ready (installed and switched on; an absent `installed` or `enabled` reads as true, as in the engine), off (installed but switched off), canInstall (not installed, but it can be installed from that computer's Settings > Agents), missing (not installed, or not reported at all). Other agents (Grok, Cursor and the rest) never count. State is noComputer with no computer online, ready when any of the three is ready, noAgent otherwise. `devices` lists, in order, the online computers at that agent's best status; with no computer online every agent is missing with no devices.",
+  "agents": [
+    "graff",
+    "claude-code",
+    "codex"
+  ],
+  "downloadUrl": "https://harness.codegraff.com/#downloads",
+  "cases": [
+    {
+      "name": "no computers at all",
+      "devices": [],
+      "expect": {
+        "state": "noComputer",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": []
+          },
+          {
+            "id": "claude-code",
+            "status": "missing",
+            "devices": []
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "a computer that is offline does not count, even with every agent ready",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": false,
+          "agents": [
+            {
+              "id": "graff"
+            },
+            {
+              "id": "claude-code"
+            },
+            {
+              "id": "codex"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "noComputer",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": []
+          },
+          {
+            "id": "claude-code",
+            "status": "missing",
+            "devices": []
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "every agent found and on",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": true,
+          "agents": [
+            {
+              "id": "graff"
+            },
+            {
+              "id": "claude-code"
+            },
+            {
+              "id": "codex"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "ready",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "ready",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "ready",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "ready",
+            "devices": [
+              "mac"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "installed and enabled absent read as on (an older engine)",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": true,
+          "agents": [
+            {
+              "id": "claude-code"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "ready",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "ready",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "nothing usable: switched off, installable, and absent",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": true,
+          "agents": [
+            {
+              "id": "graff",
+              "installed": true,
+              "enabled": false
+            },
+            {
+              "id": "claude-code",
+              "installed": false,
+              "canInstall": true
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "noAgent",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "off",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "canInstall",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "an agent that is not installed and cannot be installed here is missing",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": true,
+          "agents": [
+            {
+              "id": "codex",
+              "installed": false,
+              "canInstall": false
+            },
+            {
+              "id": "graff",
+              "installed": false
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "noAgent",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "the best computer wins for each agent",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": true,
+          "agents": [
+            {
+              "id": "claude-code",
+              "enabled": false
+            }
+          ]
+        },
+        {
+          "id": "vps",
+          "name": "Cloud",
+          "online": true,
+          "agents": [
+            {
+              "id": "claude-code"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "ready",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": [
+              "mac",
+              "vps"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "ready",
+            "devices": [
+              "vps"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": [
+              "mac",
+              "vps"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "an offline computer is ignored when another is online",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": false,
+          "agents": [
+            {
+              "id": "graff"
+            },
+            {
+              "id": "claude-code"
+            },
+            {
+              "id": "codex"
+            }
+          ]
+        },
+        {
+          "id": "vps",
+          "name": "Cloud",
+          "online": true,
+          "agents": [
+            {
+              "id": "codex",
+              "installed": false,
+              "canInstall": true
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "noAgent",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": [
+              "vps"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "missing",
+            "devices": [
+              "vps"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "canInstall",
+            "devices": [
+              "vps"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "every computer at the best status is listed, in order",
+      "devices": [
+        {
+          "id": "a",
+          "name": "A",
+          "online": true,
+          "agents": [
+            {
+              "id": "claude-code",
+              "installed": false,
+              "canInstall": true
+            }
+          ]
+        },
+        {
+          "id": "b",
+          "name": "B",
+          "online": true,
+          "agents": [
+            {
+              "id": "claude-code",
+              "installed": false,
+              "canInstall": true
+            }
+          ]
+        },
+        {
+          "id": "c",
+          "name": "C",
+          "online": true,
+          "agents": [
+            {
+              "id": "claude-code",
+              "installed": false
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "noAgent",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": [
+              "a",
+              "b",
+              "c"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "canInstall",
+            "devices": [
+              "a",
+              "b"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": [
+              "a",
+              "b",
+              "c"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "another agent alone does not count",
+      "devices": [
+        {
+          "id": "mac",
+          "name": "MacBook Pro",
+          "online": true,
+          "agents": [
+            {
+              "id": "grok",
+              "enabled": true
+            },
+            {
+              "id": "cursor"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "noAgent",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "missing",
+            "devices": [
+              "mac"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "ready on two computers",
+      "devices": [
+        {
+          "id": "a",
+          "name": "A",
+          "online": true,
+          "agents": [
+            {
+              "id": "graff"
+            }
+          ]
+        },
+        {
+          "id": "b",
+          "name": "B",
+          "online": true,
+          "agents": [
+            {
+              "id": "graff"
+            },
+            {
+              "id": "codex"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "state": "ready",
+        "agents": [
+          {
+            "id": "graff",
+            "status": "ready",
+            "devices": [
+              "a",
+              "b"
+            ]
+          },
+          {
+            "id": "claude-code",
+            "status": "missing",
+            "devices": [
+              "a",
+              "b"
+            ]
+          },
+          {
+            "id": "codex",
+            "status": "ready",
+            "devices": [
+              "b"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

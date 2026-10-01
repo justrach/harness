@@ -32,7 +32,7 @@ object HarnessCatalog {
 
     /** Display names for every harness id the fleet can produce. */
     private val knownLabels = mapOf(
-        "claude-code" to "Claude Code", "codex" to "Codex", "devin" to "Devin", "grok" to "Grok",
+        "graff" to "Graff", "claude-code" to "Claude Code", "codex" to "Codex", "devin" to "Devin", "grok" to "Grok",
         "hermes" to "Hermes", "pi" to "Pi", "cursor" to "Cursor", "opencode" to "OpenCode",
         "antigravity" to "Antigravity", "exo" to "Exo", "mock" to "Mock",
     )

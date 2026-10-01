@@ -15,6 +15,8 @@ final class DemoDataset {
     var chats: [Chat]
     var sessions: [String: SessionRow]
     var changeRequests: [String: ChangeRequestSummary]
+    /// What each computer reports in `ListHarnesses`, by device id (onboarding).
+    var agents: [String: [AgentDescriptor]]
     private var stores: [String: SessionStore] = [:]
     private var streamTask: Task<Void, Never>?
 
@@ -23,12 +25,29 @@ final class DemoDataset {
         userId: "demo", orgId: "demo", deviceId: "ios-demo", deviceName: "iPhone")
 
     init(devices: [DeviceRow], spaces: [Space], chats: [Chat], sessions: [String: SessionRow],
-         changeRequests: [String: ChangeRequestSummary] = [:]) {
+         changeRequests: [String: ChangeRequestSummary] = [:], agents: [String: [AgentDescriptor]] = [:]) {
         self.devices = devices
         self.spaces = spaces
         self.chats = chats
         self.sessions = sessions
         self.changeRequests = changeRequests
+        self.agents = agents
+    }
+
+    /// The three onboarding agents, all found and on.
+    private static let allAgentsReady = [AgentDescriptor(id: "graff"), AgentDescriptor(id: "claude-code"), AgentDescriptor(id: "codex")]
+
+    /// A signed-in account with nothing in it yet, for the "Bring in your agent" screen (launch args
+    /// `-onboarding-nocomputer`, `-onboarding-noagent`).
+    static func onboarding(computerOnline: Bool, agentReady: Bool) -> DemoDataset {
+        let now = nowMs()
+        let mac = DeviceRow(id: "dev-mac", name: "MacBook Pro", platform: "macos",
+                            lastSeenAt: computerOnline ? now : now - 86_400_000, createdAt: now - 86_400_000 * 2)
+        let agents: [AgentDescriptor] = agentReady ? allAgentsReady : [
+            AgentDescriptor(id: "graff", installed: true, enabled: false),
+            AgentDescriptor(id: "claude-code", installed: false, canInstall: true),
+        ]
+        return DemoDataset(devices: [mac], spaces: [], chats: [], sessions: [:], agents: ["dev-mac": agents])
     }
 
     static func standard() -> DemoDataset {
@@ -108,7 +127,8 @@ final class DemoDataset {
             ),
         ]
         return DemoDataset(devices: [mac, vps], spaces: [harness, edge],
-                           chats: chats, sessions: sessions, changeRequests: changeRequests)
+                           chats: chats, sessions: sessions, changeRequests: changeRequests,
+                           agents: ["dev-mac": allAgentsReady, "dev-vps": [AgentDescriptor(id: "graff")]])
     }
 
     // MARK: Fake filesystem (folder browser demo)

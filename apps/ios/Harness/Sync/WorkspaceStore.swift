@@ -592,24 +592,40 @@ final class WorkspaceStore {
     /// Settings → Agents gate; absent `enabled` falls back to the engine's
     /// `default_enabled()` pair, matching `descriptor_enabled`).
     func listHarnesses(deviceId: String) async -> [HarnessInfo]? {
-        struct WireHarness: Decodable {
-            var id: String
-            var name: String
-            var installed: Bool?
-            var enabled: Bool?
-            var supportsSteering: Bool?
-            var steeringMode: String?
-        }
-        let wire: [WireHarness]? = try? await relay(for: deviceId)
-            .call(method: "ListHarnesses", params: [:])
+        let wire = await wireHarnesses(deviceId: deviceId)
         return wire.map { list in
             list.filter { h in
                 h.id != "mock"
                     && (h.installed ?? true)
-                    && (h.enabled ?? ["claude-code", "codex"].contains(h.id))
+                    && (h.enabled ?? Self.defaultOnAgents.contains(h.id))
             }
             .map { HarnessInfo(id: $0.id, label: $0.name,
                                supportsSteering: $0.supportsSteering, steeringMode: $0.steeringMode) }
+        }
+    }
+
+    /// The three agents a fresh device offers out of the box (the engine's `default_on`).
+    private static let defaultOnAgents = ["graff", "claude-code", "codex"]
+
+    private struct WireHarness: Decodable {
+        var id: String
+        var name: String
+        var installed: Bool?
+        var canInstall: Bool?
+        var enabled: Bool?
+        var supportsSteering: Bool?
+        var steeringMode: String?
+    }
+
+    private func wireHarnesses(deviceId: String) async -> [WireHarness]? {
+        try? await relay(for: deviceId).call(method: "ListHarnesses", params: [:])
+    }
+
+    /// Every agent a device reports, found or not, on or off: what onboarding needs to say what is missing. nil when
+    /// the device cannot be reached.
+    func agentDescriptors(deviceId: String) async -> [AgentDescriptor]? {
+        await wireHarnesses(deviceId: deviceId).map { list in
+            list.map { AgentDescriptor(id: $0.id, installed: $0.installed ?? true, canInstall: $0.canInstall ?? false, enabled: $0.enabled) }
         }
     }
 

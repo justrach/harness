@@ -383,7 +383,16 @@ final class AppModel {
     }
 
     func enterDemoMode() {
-        demo = DemoDataset.standard()
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-onboarding-nocomputer") {
+            demo = DemoDataset.onboarding(computerOnline: false, agentReady: false)
+        } else if args.contains("-onboarding-noagent") {
+            demo = DemoDataset.onboarding(computerOnline: true, agentReady: false)
+        } else if args.contains("-onboarding-ready") {
+            demo = DemoDataset.onboarding(computerOnline: true, agentReady: true)
+        } else {
+            demo = DemoDataset.standard()
+        }
         demoPinnedSessionIds = []
         DraftStore.persistsToDisk = false
         phase = .ready
@@ -615,6 +624,25 @@ final class AppModel {
             return cached
         }
         return HarnessCatalog.harnesses
+    }
+
+    /// Whether an agent has been brought in: every computer's `ListHarnesses`, judged by [AgentReadiness]. A computer
+    /// that cannot be reached counts as having nothing.
+    func agentReadiness() async -> AgentReadiness {
+        var devicesAgents: [DeviceAgents] = []
+        for device in devices {
+            let online = deviceOnline(device.id)
+            var agents: [AgentDescriptor] = []
+            if online {
+                if let demo {
+                    agents = demo.agents[device.id] ?? []
+                } else {
+                    agents = await workspace?.agentDescriptors(deviceId: device.id) ?? []
+                }
+            }
+            devicesAgents.append(DeviceAgents(id: device.id, name: device.name, online: online, agents: agents))
+        }
+        return AgentReadiness.evaluate(devicesAgents)
     }
 
     /// Live model catalog from the selected execution device (the desktop's
