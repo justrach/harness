@@ -35,6 +35,8 @@ export interface Env {
   HARNESS_AUTH_SIGNING_KEY?: string;
   /** "codegraff" or "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
+  /** Gateway that vouches for a sandbox's device token (default https://gateway.codegraff.com); tests point it elsewhere. */
+  CODEGRAFF_GATEWAY_URL?: string;
 }
 
 /** Header the Worker stamps on requests it forwards into DOs after verifying
