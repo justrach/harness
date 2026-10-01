@@ -113,6 +113,11 @@ export const codegraffAccess = async (env: Env, userId: string, codegraffRefresh
 };
 
 export const refresh = async (env: Env, refreshToken: string, organizationId?: string) => {
+  // A cloud sandbox's "refresh token" is its lease token: ask the gateway again and keep the same token.
+  if (SANDBOX_TOKEN.test(refreshToken)) {
+    const session = await sandboxExchange(env, refreshToken);
+    return { accessToken: session.accessToken, refreshToken };
+  }
   const credential = await verifyRefreshCredential(env, refreshToken);
   if (!credential) throw new CodegraffAuthFailed("invalid refresh credential");
   if (organizationId && organizationId !== personalOrgId(credential.userId)) {

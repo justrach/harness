@@ -77,6 +77,32 @@ describe("sandbox sign-in", () => {
     expect(get).toBeUndefined();
   });
 
+  it("POST /auth/refresh takes the sandbox token as its refresh token and hands the same one back", async () => {
+    vi.stubGlobal("fetch", gateway(() => Response.json({ user_id: 7, email: "e@f.test" })).impl);
+    const res = await handleAuthRoute(
+      new Request("https://edge.codegraff.com/auth/refresh", {
+        method: "POST",
+        body: JSON.stringify({ refreshToken: TOKEN })
+      }),
+      env,
+      new URL("https://edge.codegraff.com/auth/refresh")
+    );
+    expect(res?.status).toBe(200);
+    const body = (await res!.json()) as { accessToken: string; refreshToken: string };
+    expect(body.refreshToken).toBe(TOKEN);
+    expect(await verifyToken(env, body.accessToken)).toEqual({ userId: "7", orgId: "user-7" });
+    vi.stubGlobal("fetch", gateway(() => new Response("no", { status: 401 })).impl);
+    const gone = await handleAuthRoute(
+      new Request("https://edge.codegraff.com/auth/refresh", {
+        method: "POST",
+        body: JSON.stringify({ refreshToken: TOKEN })
+      }),
+      env,
+      new URL("https://edge.codegraff.com/auth/refresh")
+    );
+    expect(gone?.status).toBe(401);
+  });
+
   it("is not available without the signing secret", async () => {
     const res = await handleAuthRoute(
       new Request("https://edge.codegraff.com/auth/sandbox", { method: "POST", body: JSON.stringify({ token: TOKEN }) }),
