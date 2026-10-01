@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::delegation::{self, ChildRun, Delegation};
 use crate::event::{Event, EventKind, Stamp, SubagentRun, parse_line};
@@ -41,8 +41,14 @@ pub fn jev_eligible(provider: &str, model: &str) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+/// The `RunSummary` JSON layout; bumped on any breaking field change.
+pub const SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunSummary {
+    /// [`SCHEMA_VERSION`] of the layout; 0 when absent.
+    #[serde(default)]
+    pub schema_version: u32,
     pub run_id: String,
     pub pid: Option<u32>,
     /// graff's version, from the turn recipe.
@@ -77,7 +83,7 @@ pub struct RunSummary {
     pub unreadable_lines: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Requests {
     pub root: u64,
     pub helpers: u64,
@@ -85,7 +91,7 @@ pub struct Requests {
     pub errors: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tools {
     pub calls: u64,
     pub errors: u64,
@@ -95,7 +101,7 @@ pub struct Tools {
     pub by_name: Vec<ToolStat>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolStat {
     pub name: String,
     pub calls: u64,
@@ -105,7 +111,7 @@ pub struct ToolStat {
     pub bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
     pub input: u64,
     pub cache_read: u64,
@@ -131,7 +137,7 @@ impl Tokens {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Percentiles {
     pub n: u64,
     pub p50: Option<u64>,
@@ -155,7 +161,7 @@ impl Percentiles {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reliability {
     pub retries: u64,
     pub stream_retries: u64,
@@ -167,7 +173,7 @@ pub struct Reliability {
     pub budget_stops: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jev {
     /// The root route is one graff offers `jev_effort` on (see [`jev_eligible`]).
     pub eligible_model: bool,
@@ -421,6 +427,7 @@ impl Observer {
         let mut by_name: Vec<ToolStat> = self.tools.values().cloned().collect();
         by_name.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.name.cmp(&b.name)));
         RunSummary {
+            schema_version: SCHEMA_VERSION,
             run_id: self.stamp.run_id.clone().unwrap_or_default(),
             pid: self.stamp.pid,
             version: self.version.clone(),
@@ -661,6 +668,21 @@ pub(crate) mod tests {
         assert_eq!(d.children[0].label, "Fix parser");
         assert_eq!((d.children[0].start_ms, d.children[0].end_ms), (7500, 9500));
         assert_eq!(d.children[0].ok, None);
+    }
+
+    #[test]
+    fn the_summary_round_trips_through_json() {
+        let s = observe(RUN).summary();
+        assert_eq!(s.schema_version, SCHEMA_VERSION);
+        let back: RunSummary = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        let old: RunSummary = serde_json::from_str(
+            &serde_json::to_string(&s)
+                .unwrap()
+                .replace("\"schema_version\":1,", ""),
+        )
+        .unwrap();
+        assert_eq!(old.schema_version, 0);
     }
 
     #[test]

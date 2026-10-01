@@ -2,11 +2,11 @@
 //! so a trace answers whether delegating paid off. The columns match the
 //! `subagent_split.py` report in graff's eval harness.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One child, from graff's per-child `subagent` line or, on traces written
 /// before that line existed, from the child's own model requests.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChildRun {
     pub label: String,
     pub start_ms: u64,
@@ -25,7 +25,7 @@ impl ChildRun {
 }
 
 /// All times are milliseconds; `*_at_ms` values are offsets from the run start.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Delegation {
     pub children: Vec<ChildRun>,
     /// `subagent` calls made by the root agent.

@@ -49,6 +49,6 @@ pub use follow::Follower;
 pub use process::{ProcSample, sample_process};
 pub use stats::{Count, DelegationStats, JevStats, ModelStats, Stats, StatsBuilder};
 pub use summary::{
-    Jev, Observer, Percentiles, Reliability, Requests, RunSummary, Tokens, ToolStat, Tools,
-    jev_eligible, summarize,
+    Jev, Observer, Percentiles, Reliability, Requests, RunSummary, SCHEMA_VERSION, Tokens,
+    ToolStat, Tools, jev_eligible, summarize,
 };

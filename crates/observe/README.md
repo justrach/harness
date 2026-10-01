@@ -165,4 +165,6 @@ A line with drifted field types still counts by its event name, and a half-writt
 - Jev: graff offers `jev_effort` only on some routes and only with a Codegraff login. The observer applies graff's route rule, but the login is not in the trace, so "offered" means the route qualifies.
 - Root, helper and child agents are told apart by graff's agent labels: `main`, `repl` and `root` are the root, and graff's own side agents (titles, recaps, judges, side questions, reviews) are helpers.
 - Process sampling uses `ps` and is unavailable on Windows. A sample needs the graff process to still be running.
+- Only local files are read: a run on another machine (a cloud sandbox, a remote host) keeps its traces there.
+- `RunSummary` carries `schema_version` (`SCHEMA_VERSION`, now 1); field names are stable within a version.
 - `watch` prints note details as graff wrote them. Read traces as the user's local data.
