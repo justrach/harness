@@ -11,7 +11,7 @@
  * Exchange/refresh/callback run before the bearer gate. The org route uses
  * the verified Harness JWT's subject; callers cannot choose another identity.
  */
-import { bearerFromRequest, personalOrgId, verifyToken } from "./auth";
+import { bearerFromRequest, personalOrgId, verifyRefreshCredential, verifyToken } from "./auth";
 import type { Env } from "./env";
 import { CodegraffAuthFailed, exchange, refresh } from "./codegraff";
 import { deleteAccount } from "./account-delete";
@@ -26,6 +26,13 @@ const notConfigured = (): Response => json({ error: "CodeGraff OAuth is not conf
 
 const authFailed = (e: unknown): Response =>
   json({ error: e instanceof CodegraffAuthFailed ? e.message : "authentication failed" }, 401);
+
+/** A refresh that failed: only a credential CodeGraff turned down is a 401 (the device must sign in
+ * again). Anything else (CodeGraff down, our own error) is a 503 the device retries, never a sign-out. */
+export const refreshFailed = (e: unknown): Response =>
+  e instanceof CodegraffAuthFailed
+    ? json({ error: e.message }, 401)
+    : json({ error: "refresh is temporarily unavailable", retryable: true }, 503);
 
 const bodyJson = async <T>(request: Request): Promise<T | undefined> => {
   try {
@@ -67,6 +74,20 @@ export const handleAuthRoute = async (
       return json({ error: "missing refreshToken" }, 400);
     }
     try {
+      // CodeGraff's refresh token is single-use, so an answer lost on the way back (a phone suspended
+      // mid-request) would strand the device with a dead credential. The per-user leeway object answers
+      // a repeat of the same request with the same result for a couple of minutes.
+      const credential = env.REFRESH_LEEWAY ? await verifyRefreshCredential(env, body.refreshToken) : undefined;
+      if (credential && env.REFRESH_LEEWAY) {
+        if (body.organizationId && body.organizationId !== personalOrgId(credential.userId)) {
+          return json({ error: "workspace does not belong to this account" }, 401);
+        }
+        const stub = env.REFRESH_LEEWAY.get(env.REFRESH_LEEWAY.idFromName(`refresh1/${credential.userId}`));
+        return await stub.fetch("https://refresh-leeway/refresh", {
+          method: "POST",
+          body: JSON.stringify({ userId: credential.userId, refreshToken: body.refreshToken, organizationId: body.organizationId })
+        });
+      }
       return json(await refresh(env, body.refreshToken, body.organizationId));
     } catch (e) {
       console.warn(
@@ -74,7 +95,7 @@ export const handleAuthRoute = async (
         request.headers.get("cf-connecting-ip") ?? "unknown-ip",
         e instanceof CodegraffAuthFailed ? e.message : String(e)
       );
-      return authFailed(e);
+      return refreshFailed(e);
     }
   }
 

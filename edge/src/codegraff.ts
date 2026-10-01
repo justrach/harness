@@ -19,12 +19,24 @@ type TokenResponse = {
 
 export class CodegraffAuthFailed extends Error {}
 
+/** CodeGraff could not answer (down, overloaded, unreachable). Says nothing about the credential:
+ * callers must not treat it as a rejection, or a blip signs everyone out. */
+export class CodegraffUnavailable extends Error {}
+
 const tokenRequest = async (env: Env, values: Record<string, string>): Promise<TokenResponse> => {
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: env.CODEGRAFF_OAUTH_CLIENT_ID, ...values })
-  });
+  let response: Response;
+  try {
+    response = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: env.CODEGRAFF_OAUTH_CLIENT_ID, ...values })
+    });
+  } catch {
+    throw new CodegraffUnavailable("CodeGraff could not be reached");
+  }
+  if (response.status >= 500 || response.status === 429) {
+    throw new CodegraffUnavailable(`CodeGraff is unavailable (${response.status})`);
+  }
   if (!response.ok) throw new CodegraffAuthFailed(`CodeGraff rejected the grant (${response.status})`);
   return response.json() as Promise<TokenResponse>;
 };

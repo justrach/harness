@@ -149,35 +149,55 @@ struct HomeView: View {
                     // recovery hides instantly) and quiet — a bare
                     // grayscale spinner or dot with a faint caption, no
                     // surface, no border (shell.rs render_connection_pill).
-                    switch model.connectivity.state {
-                    case .offline:
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(Theme.warning)
-                                .frame(width: 5, height: 5)
-                            Text("Offline — sends are saved")
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.textFaint)
+                    if model.sessionExpired {
+                        // The edge rejected the stored sign-in: say so, with the way out, instead of a
+                        // quiet "connecting" that never ends.
+                        Button {
+                            model.signInAgain()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Theme.warning)
+                                    .frame(width: 5, height: 5)
+                                Text(model.signInBusy ? "Signing in…" : "Signed out — tap to sign in")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textMuted)
+                            }
                         }
-                        .transition(.opacity)
-                    case .reconnecting:
-                        HStack(spacing: 5) {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(Theme.textMuted)
-                            Text("Reconnecting…")
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.textFaint)
-                        }
-                        .transition(.opacity)
-                    case .connected:
-                        // Initial catch-up (within the grace): the old
-                        // quiet "connecting" spinner, gone on first sync.
-                        if !model.connected {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(Theme.textMuted)
-                                .accessibilityLabel("Connecting")
+                        .buttonStyle(.plain)
+                        .disabled(model.signInBusy)
+                        .accessibilityIdentifier("session-expired")
+                    } else {
+                        switch model.connectivity.state {
+                        case .offline:
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Theme.warning)
+                                    .frame(width: 5, height: 5)
+                                Text("Offline — sends are saved")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textFaint)
+                            }
+                            .transition(.opacity)
+                        case .reconnecting:
+                            HStack(spacing: 5) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(Theme.textMuted)
+                                Text("Reconnecting…")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textFaint)
+                            }
+                            .transition(.opacity)
+                        case .connected:
+                            // Initial catch-up (within the grace): the old
+                            // quiet "connecting" spinner, gone on first sync.
+                            if !model.connected {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(Theme.textMuted)
+                                    .accessibilityLabel("Connecting")
+                            }
                         }
                     }
                 }

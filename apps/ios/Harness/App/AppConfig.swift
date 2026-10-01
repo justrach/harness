@@ -48,6 +48,15 @@ final class AppConfig: @unchecked Sendable {
     /// and every socket sat in backoff. That was the 5–10s "connecting"
     /// stall on every app open past token expiry (~5 min).
     private var refreshTask: Task<String?, Never>?
+    /// A refresh token the edge turned down. Spending it again can only fail (and CodeGraff treats a
+    /// replayed token as theft), so it is left alone until a sign-in replaces it.
+    private var rejectedRefreshToken: String?
+    /// Called once when the edge rejects the stored sign-in: the person must sign in again. Set by AppModel.
+    var onSessionExpired: (@Sendable () -> Void)? {
+        get { lock.withLock { sessionExpiredHandler } }
+        set { lock.withLock { sessionExpiredHandler = newValue } }
+    }
+    private var sessionExpiredHandler: (@Sendable () -> Void)?
 
     init(edgeURL: URL, mode: Mode, userId: String, orgId: String,
          deviceId: String, deviceName: String,
@@ -65,6 +74,7 @@ final class AppConfig: @unchecked Sendable {
     func updateTokens(_ new: AuthTokens) {
         lock.withLock {
             tokens = new
+            rejectedRefreshToken = nil
         }
     }
 
@@ -94,28 +104,45 @@ final class AppConfig: @unchecked Sendable {
     /// under the lock as its last act, so a caller either joins a live
     /// refresh or starts a fresh one — never a second concurrent POST.
     private func refreshedToken(current: AuthTokens) async -> String? {
+        if lock.withLock({ rejectedRefreshToken }) == current.refreshToken {
+            return current.accessToken
+        }
         let task = lock.withLock {
             if let existing = refreshTask {
                 return existing
             }
 
             let task = Task<String?, Never> { [edgeURL, orgId] in
+                // Let a refresh in flight finish if the app is backgrounded: a reply lost after the edge
+                // rotated the credential is a signed-out phone.
+                let grace = await MainActor.run { BackgroundGrace.begin("harness.refreshToken") }
+                defer { grace.end() }
                 let client = AuthClient(baseURL: edgeURL)
-                let refreshed = try? await client.refresh(refreshToken: current.refreshToken,
-                                                          organizationId: orgId)
-                if let refreshed {
+                let outcome = await TokenRefresh.run {
+                    try await client.refresh(refreshToken: current.refreshToken, organizationId: orgId)
+                }
+                var fresh: String?
+                switch outcome {
+                case .refreshed(let refreshed):
+                    Keychain.saveTokens(refreshed)
                     self.updateTokens(refreshed)
-                    Keychain.save(refreshed.accessToken, key: "codegraffAccessToken")
-                    Keychain.save(refreshed.refreshToken, key: "codegraffRefreshToken")
-                } else {
-                    roomLog.error("auth: token refresh failed; using expired access token (server will reject and rooms will redial)")
+                    fresh = refreshed.accessToken
+                case .rejected:
+                    roomLog.error("auth: the edge rejected the stored sign-in; signing in again is needed")
+                    let notify = self.lock.withLock { () -> (@Sendable () -> Void)? in
+                        self.rejectedRefreshToken = current.refreshToken
+                        return self.sessionExpiredHandler
+                    }
+                    notify?()
+                case .unavailable:
+                    roomLog.error("auth: token refresh failed (will retry); using expired access token (server will reject and rooms will redial)")
                 }
                 self.lock.withLock {
                     self.refreshTask = nil
                 }
-                // Failure falls back to the expired token: let the server
-                // reject; the rooms' backoff redials retry through here.
-                return refreshed?.accessToken ?? current.accessToken
+                // No new token falls back to the expired one: let the server reject; the rooms' backoff
+                // redials retry through here (unless the sign-in itself was rejected).
+                return fresh ?? current.accessToken
             }
             refreshTask = task
             return task

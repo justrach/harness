@@ -102,6 +102,8 @@ struct AuthClient {
 enum Keychain {
     private static let service = "harness.codegraff.ios"
 
+    /// Update in place. Delete-then-add left a gap where a kill (or a failed add) lost the item, and a
+    /// lost refresh token is a signed-out phone.
     static func save(_ value: String, key: String) {
         let data = Data(value.utf8)
         let query: [String: Any] = [
@@ -109,11 +111,19 @@ enum Keychain {
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        guard status == errSecItemNotFound else { return }
         var add = query
         add[kSecValueData as String] = data
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         SecItemAdd(add as CFDictionary, nil)
+    }
+
+    /// The pair a sign-in is made of. The refresh token goes first: it is the one that cannot be
+    /// replaced, while a missing access token is simply refreshed.
+    static func saveTokens(_ tokens: AuthTokens) {
+        save(tokens.refreshToken, key: "codegraffRefreshToken")
+        save(tokens.accessToken, key: "codegraffAccessToken")
     }
 
     static func load(key: String) -> String? {
