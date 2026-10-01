@@ -599,7 +599,8 @@ final class AppModel {
     }
 
     /// Live harness catalog from the selected execution device (Settings → Agents
-    /// gates which agents a device offers); static pair when unreachable.
+    /// gates which agents a device offers); the last-seen list when
+    /// unreachable, the static pair only if the device was never reached.
     func listHarnesses(deviceId: String) async -> [HarnessInfo] {
         if demo != nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -607,7 +608,11 @@ final class AppModel {
         }
         if let live = await workspace?.listHarnesses(deviceId: deviceId),
            !live.isEmpty {
+            _ = DocDisk.saveHarnesses(live, deviceId: deviceId)
             return live
+        }
+        if let cached = DocDisk.loadHarnesses(deviceId: deviceId), !cached.isEmpty {
+            return cached
         }
         return HarnessCatalog.harnesses
     }
