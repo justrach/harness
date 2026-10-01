@@ -16,6 +16,9 @@ export interface Env {
   ROOM_ACTORS: DurableObjectNamespace;
   /** Account deletion jobs (`purge1/{userId}`, account-purge.ts). */
   ACCOUNT_PURGE: DurableObjectNamespace;
+  /** Per-user refresh leeway (`refresh1/{userId}`, refresh-leeway.ts): a refresh whose answer never
+   * reached the device can be asked again. Absent in unit tests; /auth/refresh then refreshes directly. */
+  REFRESH_LEEWAY?: DurableObjectNamespace;
   /** Agent rooms' PostgreSQL. Absent in `wrangler dev` unless a local connection string
    * is supplied; rooms then use an in-memory store (dev auth only). */
   HYPERDRIVE?: Hyperdrive;
@@ -32,6 +35,8 @@ export interface Env {
   HARNESS_AUTH_SIGNING_KEY?: string;
   /** "codegraff" or "dev" (bearer == userId, never prod). */
   AUTH_MODE: string;
+  /** Gateway that vouches for a sandbox's device token (default https://gateway.codegraff.com); tests point it elsewhere. */
+  CODEGRAFF_GATEWAY_URL?: string;
 }
 
 /** Header the Worker stamps on requests it forwards into DOs after verifying

@@ -21,7 +21,8 @@
       { "name": "CHAT_ROOMS", "class_name": "ChatRoom" },
       { "name": "VAULT_ROOMS", "class_name": "VaultRoom" },
       { "name": "ROOM_ACTORS", "class_name": "RoomActor" },
-      { "name": "ACCOUNT_PURGE", "class_name": "AccountPurge" }
+      { "name": "ACCOUNT_PURGE", "class_name": "AccountPurge" },
+      { "name": "REFRESH_LEEWAY", "class_name": "RefreshLeeway" }
     ]
   },
   "migrations": [
@@ -31,7 +32,8 @@
     { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
     { "tag": "v5", "new_sqlite_classes": ["VaultRoom"] },
     { "tag": "v6", "new_sqlite_classes": ["RoomActor"] },
-    { "tag": "v7", "new_sqlite_classes": ["AccountPurge"] }
+    { "tag": "v7", "new_sqlite_classes": ["AccountPurge"] },
+    { "tag": "v8", "new_sqlite_classes": ["RefreshLeeway"] }
   ],
   // PostgreSQL (caching off): agent rooms' store of record, through the edge's
   // own Hyperdrive config (origin connections capped at 8) so room bursts
