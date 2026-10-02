@@ -4,6 +4,10 @@
 //! which links Codex's whole agent runtime. This binary depends on the TUI
 //! crate alone and hands it the bridge address directly.
 
+// The release build computes the layout of Codex's deeply nested app-server futures,
+// which overflows the default query depth on Linux; Codex's own binaries raise it too.
+#![recursion_limit = "256"]
+
 use std::io::Write;
 use std::path::PathBuf;
 
