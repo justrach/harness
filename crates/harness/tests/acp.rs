@@ -164,15 +164,25 @@ async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
     assert!(exec_output.starts_with("   Compiling harness-adapters"));
     assert_eq!(exec_output.lines().count(), 6, "{exec_output:?}");
 
-    // Edit tool: single-shot completed call carries the inline diff.
-    assert!(events.contains(&AgentEvent::ToolCall {
-        id: "t2".into(),
-        call: ToolCall::EditFile {
-            path: "/w/src/resolve.rs".into(),
-            old_string: None,
-            new_string: None,
-        },
-    }));
+    // Edit tool: single-shot completed call carries the inline diff, and the
+    // opening call carries the same old/new text so a terminal UI can draw it.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolCall {
+                id,
+                call: ToolCall::EditFile {
+                    path,
+                    old_string: Some(old),
+                    new_string: Some(new),
+                },
+            } if id == "t2"
+                && path == "/w/src/resolve.rs"
+                && old.contains(".filter(|p| p.exists())")
+                && new.contains("split_paths")
+        )),
+        "{events:?}"
+    );
     let diff = events
         .iter()
         .find_map(|e| match e {
