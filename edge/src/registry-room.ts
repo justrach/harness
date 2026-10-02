@@ -20,6 +20,7 @@
  * auto-response pair; the daily alarm does tombstone GC + the R2 backup.
  */
 import { applyOp, validateOp, type Op, type Row } from "./registry-core";
+import { freshPresence, type PresenceBeat } from "./registry-presence";
 import { AUTH_USER_HEADER, type Env } from "./env";
 import { isPurge, wipeObject } from "./purge";
 
@@ -51,8 +52,9 @@ interface PushOutcome {
 export class RegistryRoom implements DurableObject {
   private readonly ctx: DurableObjectState;
   private readonly env: Env;
-  /** device → last presence beat (epoch ms). Memory-only. */
-  private readonly presence = new Map<string, number>();
+  /** device → last presence beat and when this room heard it. Memory-only;
+   * only beats heard recently are ever handed out (registry-presence.ts). */
+  private readonly presence = new Map<string, PresenceBeat>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -215,7 +217,7 @@ export class RegistryRoom implements DurableObject {
       const device = url.searchParams.get("device") ?? "";
       if (device !== "" && url.searchParams.get("beat") === "1") {
         const at = Date.now();
-        this.presence.set(device, at);
+        this.presence.set(device, { at, seenAt: at });
         for (const socket of this.ctx.getWebSockets()) {
           const socketState = socket.deserializeAttachment() as SocketState | null;
           if (!socketState?.ready) continue;
@@ -230,7 +232,7 @@ export class RegistryRoom implements DurableObject {
         full,
         gcFloor,
         rows: full ? this.rowsSince(0) : this.rowsSince(cursor),
-        presence: Object.fromEntries(this.presence)
+        presence: freshPresence(this.presence, Date.now())
       });
     }
 
@@ -343,7 +345,7 @@ export class RegistryRoom implements DurableObject {
       full,
       gcFloor,
       rows,
-      presence: Object.fromEntries(this.presence)
+      presence: freshPresence(this.presence, Date.now())
     });
   }
 
@@ -431,7 +433,7 @@ export class RegistryRoom implements DurableObject {
   private handlePresence(ws: WebSocket, state: SocketState, frame: Record<string, unknown>): void {
     if (!state.ready || state.device === "") return;
     const at = typeof frame.at === "number" ? frame.at : Date.now();
-    this.presence.set(state.device, at);
+    this.presence.set(state.device, { at, seenAt: Date.now() });
     for (const socket of this.ctx.getWebSockets()) {
       if (socket === ws) continue;
       const socketState = socket.deserializeAttachment() as SocketState | null;
