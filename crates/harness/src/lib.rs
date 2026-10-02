@@ -91,6 +91,16 @@ pub struct ModelContext {
 
 #[async_trait]
 pub trait Harness: Send + Sync {
+    /// Bind a saved account's credential home without mutating the shared
+    /// adapter or process environment. Only the native Codex driver supports it.
+    fn with_account_home(
+        &self,
+        _home: std::path::PathBuf,
+    ) -> Result<std::sync::Arc<dyn Harness>, HarnessError> {
+        Err(HarnessError::Protocol(
+            "account isolation is not supported by this driver".into(),
+        ))
+    }
     fn id(&self) -> HarnessId;
     fn display_name(&self) -> &str;
     fn supports_steering(&self) -> bool;

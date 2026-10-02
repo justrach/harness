@@ -29,6 +29,17 @@ final class HarnessCatalogTests: XCTestCase {
         XCTAssertEqual(HarnessCatalog.selectedChoice(for: option, selectedId: "stale").id, "default")
     }
 
+    func testUnavailableCodexAccountNeverFallsBackToAnotherLogin() {
+        let option = ModelOptionInfo(id: "codexAccount", label: "Codex account",
+                                     choices: [ModelOptionChoiceInfo(id: "account-a", label: "A")],
+                                     defaultChoice: "account-a")
+        XCTAssertEqual(HarnessCatalog.selectedChoice(for: option, selectedId: nil).id, "account-a")
+        XCTAssertEqual(HarnessCatalog.selectedChoice(for: option, selectedId: "account-a").id, "account-a")
+        let missing = HarnessCatalog.selectedChoice(for: option, selectedId: "account-b")
+        XCTAssertEqual(missing.id, "account-b")
+        XCTAssertEqual(missing.label, "Account unavailable")
+    }
+
     func testNormalizeDropsDefaultWhenRealRowsExistButKeepsItAlone() {
         let defaultRow = ModelInfo(id: "default", label: "Default", description: nil, reasoningLevels: [])
         let realRow = ModelInfo(id: "titan", label: "Titan", description: nil, reasoningLevels: [])

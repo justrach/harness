@@ -62,6 +62,8 @@ use crate::graff_logins;
 use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
+mod codex_homes;
+
 // Claude Code's public OAuth client (the one the CLI itself uses for the manual
 // "paste the code" flow — no secret involved, PKCE carries the proof).
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -573,6 +575,12 @@ impl AgentAccounts {
         let file = self.slots_dir(harness)?.join(format!("{account_id}.json"));
         if file.exists() {
             std::fs::remove_file(&file)?;
+        }
+        if harness == HarnessId::Codex {
+            let home = self.codex_slot_home(account_id);
+            if home.exists() {
+                std::fs::remove_dir_all(home)?;
+            }
         }
         self.list_locked(false).await
     }
@@ -1288,6 +1296,9 @@ impl AgentAccounts {
         });
         if let Some(detected) = detected {
             let _ops = self.inner.ops.lock().await;
+            if harness == HarnessId::Codex {
+                self.replace_codex_home_login(&detected)?;
+            }
             self.snapshot_detected(harness, &detected)?;
             // "Connect" semantics: with no (usable) live login, or a re-login
             // of the live account, the fresh login becomes the live one.
@@ -1551,10 +1562,13 @@ impl AgentAccounts {
                 continue;
             }
             // One malformed slot file must skip THAT slot, not brick the page.
-            if let Some(slot) = std::fs::read_to_string(&path)
+            if let Some(mut slot) = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Slot>(&raw).ok())
             {
+                if let Some(credentials) = self.refreshed_codex_credentials(&slot) {
+                    slot.credentials = credentials;
+                }
                 slots.push(slot);
             }
         }

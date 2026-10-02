@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Host-local saved Codex login selected by a conversation. This option is
+/// persisted even when it matches the catalog default: billing must not follow
+/// a later change to the host's active CLI login.
+pub const CODEX_ACCOUNT_OPTION: &str = "codexAccount";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessId {

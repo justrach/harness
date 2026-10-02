@@ -320,6 +320,13 @@ pub fn traits_summary(
     }
     if let Some(model) = model {
         for option in &model.options {
+            if option.id == harness_proto::CODEX_ACCOUNT_OPTION
+                && let Some(selected) = selections.get(&option.id).and_then(|v| v.as_str())
+                && !option.choices.iter().any(|c| c.id == selected)
+            {
+                parts.push("Account unavailable".into());
+                continue;
+            }
             let choice_id = selections
                 .get(&option.id)
                 .and_then(|v| v.as_str())
@@ -348,13 +355,23 @@ pub fn offered_options(
     mut selections: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
     selections.retain(|id, choice| {
+        if id == harness_proto::CODEX_ACCOUNT_OPTION {
+            return true; // Keep unavailable billing identities; the host rejects them.
+        }
         model.options.iter().any(|option| {
             option.id == *id
-                && choice
-                    .as_str()
-                    .is_some_and(|choice| option.choices.iter().any(|c| c.id == choice))
+                && choice.as_str().is_some_and(|choice| {
+                    option.choices.iter().any(|c| c.id == choice)
+                })
         })
     });
+    for option in &model.options {
+        if option.id == harness_proto::CODEX_ACCOUNT_OPTION {
+            selections
+                .entry(option.id.clone())
+                .or_insert_with(|| option.default_choice.clone().into());
+        }
+    }
     selections
 }
 
@@ -1756,7 +1773,7 @@ impl Pickers {
     ) {
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| {
-                if default {
+                if default && option_id != harness_proto::CODEX_ACCOUNT_OPTION {
                     config.model_options.remove(&option_id);
                 } else {
                     config
@@ -1773,7 +1790,7 @@ impl Pickers {
             // New chat: the pick is the sticky memory for the catalog model
             // that offered it — never stored unvalidated.
             let options = self.defaults.model_options_mut(harness, &model);
-            if default {
+            if default && option_id != harness_proto::CODEX_ACCOUNT_OPTION {
                 options.remove(&option_id);
             } else {
                 options.insert(option_id, serde_json::Value::String(choice_id));
@@ -7398,6 +7415,41 @@ mod tests {
             &ladder,
             &serde_json::Map::new()
         ));
+    }
+
+    #[test]
+    fn codex_account_is_explicit_even_when_default_or_unavailable() {
+        let mut model = Model {
+            id: "fixture".into(),
+            label: "Fixture".into(),
+            description: None,
+            reasoning_levels: vec![],
+            maker: None,
+            billing: None,
+            options: vec![ModelOption {
+                id: harness_proto::CODEX_ACCOUNT_OPTION.into(),
+                label: "Codex account".into(),
+                default_choice: "account-a".into(),
+                choices: vec![ModelOptionChoice {
+                    id: "account-a".into(),
+                    label: "A".into(),
+                }],
+            }],
+        };
+        let defaults = offered_options(&model, serde_json::Map::new());
+        assert_eq!(defaults[harness_proto::CODEX_ACCOUNT_OPTION], "account-a");
+        let mut missing = defaults;
+        missing.insert(
+            harness_proto::CODEX_ACCOUNT_OPTION.into(),
+            "account-b".into(),
+        );
+        assert_eq!(offered_options(&model, missing.clone()), missing);
+        assert_eq!(
+            traits_summary(Some(&model), None, &missing).as_deref(),
+            Some("Account unavailable")
+        );
+        model.options.clear();
+        assert_eq!(offered_options(&model, missing.clone()), missing);
     }
 
     #[test]
