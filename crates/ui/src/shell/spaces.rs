@@ -2010,6 +2010,15 @@ pub(super) enum SpacesMenuRow {
     AddSpace,
 }
 
+/// The project menu lists spaces on a connected device first and those on a device that is not
+/// connected after them, each group keeping the order it had (the search ranking, or the name sort).
+/// A project on an away device is not gone, but it is not where the work is either, and the same
+/// name on two devices (a laptop and a studio Mac) reads as one project when they are interleaved.
+pub(super) fn connected_first<T>(items: Vec<T>, connected: impl Fn(&T) -> bool) -> Vec<T> {
+    let (online, offline): (Vec<T>, Vec<T>) = items.into_iter().partition(|item| connected(item));
+    online.into_iter().chain(offline).collect()
+}
+
 /// New project navigates devices, locations, then folders on a command-palette surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectStep {
@@ -2958,10 +2967,16 @@ impl Shell {
         if query.trim().is_empty() {
             rows.push(SpacesMenuRow::All);
         }
+        // Ranked by the search, then split: connected devices first, away ones after.
+        let now = Utc::now();
+        let ranked: Vec<_> = popover::filter_indices(&query, &names)
+            .into_iter()
+            .map(|ix| spaces[ix])
+            .collect();
         rows.extend(
-            popover::filter_indices(&query, &names)
+            connected_first(ranked, |space| state.device_online(&space.device_id, now))
                 .into_iter()
-                .map(|ix| SpacesMenuRow::Space(spaces[ix].id.clone())),
+                .map(|space| SpacesMenuRow::Space(space.id.clone())),
         );
         rows
     }
@@ -3893,6 +3908,12 @@ impl Shell {
         // The pinned footer's keyboard-nav index: one past the last
         // scrollable row, its permanent place at the end of the nav order.
         let add_index = details.len();
+        // Where the away-device group starts, so it can say so once. Not when it starts the list: every
+        // row would then carry the glyph and a caption above all of them says nothing.
+        let first_offline = details
+            .iter()
+            .position(|(_, _, _, offline, _)| *offline)
+            .filter(|&ix| ix > 0);
 
         let list = popover::menu_scroll_host("spaces-menu-list-host")
             .on_hover(cx.listener(Self::on_spaces_menu_list_hover))
@@ -3910,7 +3931,7 @@ impl Shell {
                                 _ => None,
                             };
                             let activate = row;
-                            popover::menu_row_nav(
+                            let row_el = popover::menu_row_nav(
                                 theme,
                                 selected,
                                 ix == active,
@@ -3950,9 +3971,31 @@ impl Shell {
                                         .flex_none()
                                         .text_color(theme.warning.opacity(0.8)),
                                 )
-                            })
+                            });
                             // No check glyph — the selected row's wash (menu_row's
                             // active styling) is the selection signal.
+                            if first_offline == Some(ix) {
+                                // The caption lives INSIDE this row's element, so the list still has one
+                                // child per row: keyboard nav and scroll-to-row both index children by row.
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .id("spaces-menu-offline-caption")
+                                            .px(px(8.0))
+                                            .pt(px(8.0))
+                                            .pb(px(2.0))
+                                            .text_size(crate::typography::ui_rems(10.0))
+                                            .text_color(theme.text_muted)
+                                            .child(SharedString::from("Offline")),
+                                    )
+                                    .child(row_el)
+                                    .into_any_element()
+                            } else {
+                                row_el.into_any_element()
+                            }
                         },
                     )),
             )
@@ -6396,8 +6439,45 @@ impl Shell {
 mod tests {
     use chrono::{TimeZone as _, Utc};
 
-    use super::{compare_sidebar_chats, promote_local_device_group};
+    use super::{compare_sidebar_chats, connected_first, promote_local_device_group};
     use crate::settings::SidebarSort;
+
+    #[test]
+    fn connected_projects_come_first_and_each_group_keeps_its_order() {
+        // (name, device connected): the search ranking / name sort, interleaved.
+        let ranked = vec![
+            ("nanohub", false),
+            ("nanohub2", true),
+            ("rachpradhan", true),
+            ("search", false),
+            ("zigrepper", false),
+            ("zigrepper", true),
+        ];
+        let ordered = connected_first(ranked, |(_, connected)| *connected);
+        assert_eq!(
+            ordered.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            [
+                "nanohub2",
+                "rachpradhan",
+                "zigrepper",
+                "nanohub",
+                "search",
+                "zigrepper"
+            ],
+            "connected first, then away; stable within each"
+        );
+        assert!(ordered[..3].iter().all(|(_, connected)| *connected));
+        assert!(ordered[3..].iter().all(|(_, connected)| !*connected));
+    }
+
+    #[test]
+    fn the_split_changes_nothing_when_every_project_is_on_one_side() {
+        let all_on = vec![("a", true), ("b", true), ("c", true)];
+        assert_eq!(connected_first(all_on.clone(), |(_, c)| *c), all_on);
+        let all_off = vec![("a", false), ("b", false)];
+        assert_eq!(connected_first(all_off.clone(), |(_, c)| *c), all_off);
+        assert!(connected_first(Vec::<(&str, bool)>::new(), |(_, c)| *c).is_empty());
+    }
 
     fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
         (Some((device.into(), device.into())), vec![value])
