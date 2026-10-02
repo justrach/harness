@@ -1,0 +1,33 @@
+[package]
+name = "harness-tui-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Serves Codex's app-server protocol on top of Harness's agent adapters, so the Codex TUI can drive any agent the Harness GUI can."
+
+[[bin]]
+name = "harness-tui-bridge"
+path = "src/main.rs"
+
+[dependencies]
+diffy = "0.4"
+harness-proto = { path = "../../crates/proto" }
+harness-adapters = { path = "../../crates/harness" }
+harness-engine = { path = "../../crates/engine" }
+anyhow = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+tokio-util = "0.7"
+toml_edit = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Own workspace: Harness and Codex pin different toolchains and dependency graphs.
+[workspace]

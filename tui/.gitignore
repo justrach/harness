@@ -1,0 +1,4 @@
+# Upstream clone; fetched by setup.sh at the revision pinned in CODEX_REV.
+/codex/
+target/
+dist/

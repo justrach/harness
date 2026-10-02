@@ -16,7 +16,7 @@ members = [
     "apps/harness",
 ]
 # Vendored forks are their own (trimmed) workspaces.
-exclude = ["vendor/zui", "vendor/gpui-component"]
+exclude = ["vendor/zui", "vendor/gpui-component", "tui"]
 
 [workspace.package]
 version = "0.2.99"
