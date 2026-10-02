@@ -259,13 +259,43 @@ final class Perf: @unchecked Sendable {
             } else if turnStart > 0 {
                 let ms = (now - turnStart) * 1000
                 turnStart = 0
-                turns.add(ms: ms)
-                histograms.add(PerfMetric.mainTurn, ms: ms)
-                if ms >= 50 { record(PerfSpan.mainStall, ms: ms) }
+                turnEnded(ms: ms)
             }
         }
         observer = obs
         CFRunLoopAddObserver(CFRunLoopGetMain(), obs, .commonModes)
+
+        // iOS freezes the process wherever it is, which can be in the middle of a turn: the turn "ends" when
+        // the app next runs, minutes later, and would be counted as one enormous stall. So turns are not
+        // counted from the moment the app goes to the background until it comes back. The background
+        // notification arrives before the freeze and the foreground one after the resumed turn has ended,
+        // so the flag is still set when that turn finishes.
+        inBackground = UIApplication.shared.applicationState == .background
+        let center = NotificationCenter.default
+        lifecycle = [
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [unowned self] _ in
+                setBackgrounded(true)
+            },
+            center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [unowned self] _ in
+                setBackgrounded(false)
+            },
+        ]
+    }
+
+    /// True from entering the background until the foreground notification; main thread only.
+    private var inBackground = false
+    private var lifecycle: [NSObjectProtocol] = []
+
+    func setBackgrounded(_ backgrounded: Bool) {
+        inBackground = backgrounded
+    }
+
+    /// One main run loop turn finished after `ms`. Dropped while backgrounded (see `startWatching`).
+    func turnEnded(ms: Double) {
+        guard !inBackground else { return }
+        turns.add(ms: ms)
+        histograms.add(PerfMetric.mainTurn, ms: ms)
+        if ms >= 50 { record(PerfSpan.mainStall, ms: ms) }
     }
 
     // MARK: Device
