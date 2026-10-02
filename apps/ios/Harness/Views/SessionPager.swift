@@ -78,6 +78,10 @@ struct SessionPagerHost: View {
                     removal: .move(edge: forward ? .leading : .trailing)))
         }
         .clipped()
+        // The clip stops at the safe area, so the session's own background cannot reach under the status bar,
+        // the header or the home indicator, and the system's black showed there: a hard band, worst in dark
+        // mode. The host paints the theme colour to the screen edges, outside the clip.
+        .background(Theme.bg.ignoresSafeArea())
         .environment(\.pageSession, page)
         .environment(\.switchToSession, { go(to: $0) })
     }
