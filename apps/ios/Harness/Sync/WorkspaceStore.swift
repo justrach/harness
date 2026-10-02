@@ -37,15 +37,10 @@ final class WorkspaceStore {
     /// upgrades it's the only flag that ever would.
     private(set) var synced = false
 
-    /// Presence entries older than this are expired (mirrors the Rust
-    /// client's 30s TTL, measured from RECEIPT — beats carry the sender's
-    /// wall clock, which we never trust for freshness).
-    static let presenceTtlMs: Int64 = 30_000
-    /// Dial-gate thresholds (workspace_host.rs PRESENCE_FRESH_MS /
-    /// DIAL_GATE_DARK_MS / DIAL_GATE_WARMUP_MS, PR #168).
-    static let presenceLiveFreshMs: Int64 = 45_000
-    static let dialGateDarkMs: Int64 = 5 * 60_000
-    static let dialGateWarmupMs: Int64 = 60_000
+    /// Bumped when the clock alone changes what a screen should say about a
+    /// device (a beat aged out) — the only thing a view needs to re-read
+    /// `hostStatus`. Beats and reconnects already change observed state.
+    private(set) var statusEpoch = 0
 
     @ObservationIgnored private var doc: RegistryDoc
     @ObservationIgnored private var client: RegistryClient?
@@ -93,21 +88,42 @@ final class WorkspaceStore {
         // down (airplane wifi strips WS upgrades) a 20s poll keeps rows,
         // presence, and pending writes flowing. The GET doubles as our
         // presence beat, so this device stays visible to peers.
-        pollTask?.cancel()
+        Task { [weak self] in await self?.pullDelta() }
+        startOfflinePoll()
+        scheduleStatusRefresh()
+    }
+
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var statusTask: Task<Void, Never>?
+    /// False while the app is in the background: no wake-up is scheduled
+    /// (iOS suspends us anyway), and one is re-armed on return.
+    @ObservationIgnored private var statusActive = true
+    @ObservationIgnored private var lastStatusSnapshot: [String: HostStatus] = [:]
+
+    /// The 20s HTTPS poll exists only for a socket that is down. It runs while
+    /// disconnected and ends when the socket joins, so a healthy connection
+    /// costs no 20s wake-ups at all; a disconnect or foreground restarts it.
+    /// A rejected sign-in parks it too — every request would only be refused.
+    private func startOfflinePoll() {
+        guard pollTask == nil, client != nil, !connected else { return }
         pollTask = Task { [weak self] in
-            await self?.pullDelta()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                try? await Task.sleep(for: .seconds(20), tolerance: .seconds(5))
                 guard let self, !Task.isCancelled else { return }
-                if !self.connected {
-                    await self.pushPendingOverHTTP()
-                    await self.pullDelta()
+                if self.connected || self.config.signInRejected {
+                    self.pollTask = nil
+                    return
                 }
+                await self.pushPendingOverHTTP()
+                await self.pullDelta()
             }
         }
     }
 
-    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    private func stopOfflinePoll() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
 
     /// The WS hello's delta answer over plain HTTPS, applied through the
     /// exact state path the socket uses.
@@ -185,12 +201,14 @@ final class WorkspaceStore {
         if let client {
             Task { await client.kick() }
         }
+        startOfflinePoll()
         restartChangeRequestStreams(resetUnsupported: true)
     }
 
     func stop() {
-        pollTask?.cancel()
-        pollTask = nil
+        stopOfflinePoll()
+        statusTask?.cancel()
+        statusTask = nil
         saver?.flush()
         if let client {
             Task { await client.stop() }
@@ -207,7 +225,8 @@ final class WorkspaceStore {
 
     // MARK: Server events (delivered in frame order — rows before ack)
 
-    private func handle(_ event: RegistryEvent) {
+    /// Internal (not private) so tests can feed a store registry events without a socket.
+    func handle(_ event: RegistryEvent) {
         switch event {
         case .state(let seq, let full, let gcFloor, let rows, let beats):
             // On a state frame with full=true and seq < our cursor (server
@@ -227,11 +246,14 @@ final class WorkspaceStore {
             project()
             pruneDeletedPinsIfNeeded()
             saver?.poke()
+            scheduleStatusRefresh()
         case .connected:
             let reconnected = !connected
             connected = true
             retryAt = nil
             registryJoinedAt = nowMs()
+            stopOfflinePoll()
+            scheduleStatusRefresh()
             if reconnected {
                 restartChangeRequestStreams(resetUnsupported: true)
             }
@@ -254,11 +276,14 @@ final class WorkspaceStore {
         case .presence(let device, let at):
             presence[device] = at
             presenceReceivedAt[device] = nowMs()
+            scheduleStatusRefresh()
         case .disconnected(let retryAfterMs):
             connected = false
             retryAt = Date().addingTimeInterval(TimeInterval(retryAfterMs) / 1_000)
             registryJoinedAt = nil
             doc.markDisconnected()
+            startOfflinePoll()
+            scheduleStatusRefresh()
         }
     }
 
@@ -292,9 +317,18 @@ final class WorkspaceStore {
 
     // MARK: Presence
 
+    /// What the screens may say about a device (see PresenceRule): online on a
+    /// beat in the last 45s, offline only on positive evidence of absence,
+    /// otherwise unknown. Reading it registers the observation a view needs
+    /// to refresh: new beats, reconnects, and the clock-only `statusEpoch`.
+    func hostStatus(_ deviceId: String) -> HostStatus {
+        _ = presence[deviceId]
+        _ = statusEpoch
+        return resolveStatus(deviceId, now: nowMs())
+    }
+
     func deviceOnline(_ deviceId: String) -> Bool {
-        guard let received = presenceReceivedAt[deviceId] else { return false }
-        return nowMs() - received < Self.presenceTtlMs
+        hostStatus(deviceId) == .online
     }
 
     /// Dial-gate verdict (workspace_host.rs peer_liveness): `dark` requires
@@ -303,21 +337,75 @@ final class WorkspaceStore {
     /// ambiguity stay `unknown`, so a rows-down/relay-up incident shape can
     /// never park the relay.
     func peerLiveness(_ deviceId: String) -> PeerLiveness {
-        guard connected, let joinedAt = registryJoinedAt else { return .unknown }
+        PresenceRule.liveness(now: nowMs(), received: presenceReceivedAt[deviceId], connected: connected,
+                              joinedAt: registryJoinedAt, rowLastSeen: rowLastSeen(deviceId))
+    }
+
+    private func rowLastSeen(_ deviceId: String) -> Int64? {
+        devices.first(where: { $0.id == deviceId })?.lastSeenAt
+    }
+
+    private func resolveStatus(_ deviceId: String, now: Int64) -> HostStatus {
+        PresenceRule.status(now: now, received: presenceReceivedAt[deviceId], connected: connected,
+                            joinedAt: registryJoinedAt, rowLastSeen: rowLastSeen(deviceId))
+    }
+
+    /// Milliseconds since the last beat from `deviceId` arrived, for the
+    /// Connection screen. nil = none heard this session.
+    func beatAgeMs(_ deviceId: String) -> Int64? {
+        presenceReceivedAt[deviceId].map { max(0, nowMs() - $0) }
+    }
+
+    // MARK: Status wake-up
+    //
+    // One sleeping task, armed for the next instant the clock alone could
+    // change any device's status — never a repeating tick. While peers beat,
+    // every beat re-arms it further out, so it does not fire at all; once a
+    // peer goes quiet it fires at +45s and +5min, then not again. Nothing is
+    // scheduled in the background or when no device can change.
+
+    private func scheduleStatusRefresh() {
+        statusTask?.cancel()
+        statusTask = nil
+        guard statusActive, client != nil else { return }
         let now = nowMs()
-        if let received = presenceReceivedAt[deviceId] {
-            if now - received < Self.presenceLiveFreshMs { return .live }
-            if now - received >= Self.dialGateDarkMs { return .dark }
-            return .unknown
+        let ids = Set(devices.map(\.id)).union(presenceReceivedAt.keys)
+        let next = ids.compactMap {
+            PresenceRule.nextChange(after: now, received: presenceReceivedAt[$0], connected: connected,
+                                    joinedAt: registryJoinedAt, rowLastSeen: rowLastSeen($0))
+        }.min()
+        guard let next else { return }
+        let delayMs = max(500, next - now + 250)
+        statusTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(delayMs), tolerance: .seconds(2))
+            guard !Task.isCancelled, let self else { return }
+            self.refreshStatuses()
         }
-        // Never heard this session: only a warmed-up room may consult the
-        // durable device row's own stamp.
-        guard now - joinedAt >= Self.dialGateWarmupMs else { return .unknown }
-        if let seen = devices.first(where: { $0.id == deviceId })?.lastSeenAt,
-           now - seen >= Self.dialGateDarkMs {
-            return .dark
+    }
+
+    /// Re-read every device's status; publish only if one actually changed,
+    /// so a wake-up that finds nothing new re-renders nothing.
+    private func refreshStatuses() {
+        let now = nowMs()
+        let ids = Set(devices.map(\.id)).union(presenceReceivedAt.keys)
+        let snapshot = Dictionary(uniqueKeysWithValues: ids.map { ($0, resolveStatus($0, now: now)) })
+        if snapshot != lastStatusSnapshot {
+            lastStatusSnapshot = snapshot
+            statusEpoch &+= 1
         }
-        return .unknown
+        scheduleStatusRefresh()
+    }
+
+    /// Foreground/background: no wake-up while backgrounded; on return,
+    /// catch up on whatever aged out while suspended and re-arm.
+    func setActive(_ active: Bool) {
+        statusActive = active
+        if active {
+            refreshStatuses()
+        } else {
+            statusTask?.cancel()
+            statusTask = nil
+        }
     }
 
     /// Version gates (state.rs device_version_at_least): unknown device or an
