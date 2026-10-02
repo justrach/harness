@@ -81,4 +81,3 @@ final class HomeGroupingUITests: XCTestCase {
         XCTAssertTrue(pinned.label.hasPrefix("Pinned"))
     }
 }
-
