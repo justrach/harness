@@ -540,6 +540,36 @@ final class AppModel {
     }
 
     /// Every active session as its Live Activity would show it.
+    /// Whether the lock-screen state can change without any session row changing: an activity is up (its
+    /// detail and elapsed state follow the transcript) or a session is running or waiting. With neither, the
+    /// only thing that can matter is a session starting, which `untilSessionsChange` waits for.
+    var liveActivitiesNeedSampling: Bool {
+        if liveActivities.isShowing { return true }
+        return overviewChats.contains { chat in
+            let phase = LiveActivityPlan.phase(for: indicator(for: chat))
+            return phase == .working || phase == .waiting
+        }
+    }
+
+    /// Suspends until the session rows change (a run starting or finishing arrives as one), then returns.
+    /// No timer: nothing wakes while every session is quiet.
+    func untilSessionsChange() async {
+        let gate = ResumeOnce()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                gate.install(continuation)
+                withObservationTracking {
+                    _ = workspace?.sessions
+                    _ = demo?.sessions
+                } onChange: {
+                    gate.fire()
+                }
+            }
+        } onCancel: {
+            gate.fire()
+        }
+    }
+
     var liveActivitySnapshots: [LiveActivitySnapshot] {
         overviewChats.map { chat in
             let row = demo?.sessions[chat.id] ?? workspace?.sessions[chat.id]

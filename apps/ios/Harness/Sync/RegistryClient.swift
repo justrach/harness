@@ -45,7 +45,6 @@ actor RegistryClient {
     static let helloDeadlineNs: UInt64 = 15_000_000_000
     static let probeDeadlineNs: UInt64 = 10_000_000_000
     static let probeQuietNs: UInt64 = 900_000_000_000  // 15min quiet-room probe
-    static let livenessTickNs: UInt64 = 1_000_000_000
     static let backoffBaseMs = 250
     static let backoffCapMs = 16_000
     /// Stability-gated backoff reset (registry.rs STABLE_RESET): only a
@@ -78,8 +77,14 @@ actor RegistryClient {
     private var lastInbound = DispatchTime.now()
     /// Protocol clock — only real frames count (pongs prove nothing).
     private var lastProtocolRx = DispatchTime.now()
-    private var helloSentAt: DispatchTime?
-    private var probeSentAt: DispatchTime?
+    /// Setting either deadline wakes a liveness loop that is parked in a long sleep (LivenessSchedule).
+    /// Clearing one needs nothing: the loop's next look sees it gone.
+    private var helloSentAt: DispatchTime? { didSet { if helloSentAt != nil { wakeLivenessIfParked() } } }
+    private var probeSentAt: DispatchTime? { didSet { if probeSentAt != nil { wakeLivenessIfParked() } } }
+    /// True only while the liveness loop is suspended in a long sleep. It is the one state in which
+    /// re-arming is both needed and safe: a loop that is mid-tick (it just sent the quiet probe) picks the
+    /// new deadline up on its own, and cancelling it there would cancel its own probe send.
+    private var livenessParked = false
 
     init(device: String,
          urlProvider: @escaping @Sendable () async -> URL?,
@@ -206,18 +211,12 @@ actor RegistryClient {
             }
         }
 
-        livenessTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: RegistryClient.livenessTickNs)
-                guard let self else { return }
-                await self.livenessTick(gen: gen)
-            }
-        }
-
         // Hello with the persisted cursor (nil asks for full state). The
         // deadline is armed BEFORE the send — an unanswered hello must never
-        // hang the session (room.rs, 2026-07-30).
+        // hang the session (room.rs, 2026-07-30). The liveness loop that
+        // polices it starts with it.
         helloSentAt = .now()
+        armLiveness()
         let cursor = await delegate.helloCursor()
         await send(HelloFrame(cursor: cursor, device: device))
     }
@@ -275,6 +274,45 @@ actor RegistryClient {
     private func presenceTick(gen: Int) async {
         guard gen == generation, joined else { return }
         await send(PresenceFrame(at: nowMs()))
+    }
+
+    /// (Re)start the liveness loop for the current socket. It looks every second while a hello/probe
+    /// deadline is pending and otherwise sleeps until the quiet-probe time — see LivenessSchedule.
+    private func armLiveness() {
+        livenessTask?.cancel()
+        livenessParked = false
+        guard socket != nil, !closed else {
+            livenessTask = nil
+            return
+        }
+        let gen = generation
+        livenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let wait = await self.beginLivenessSleep()
+                try? await Task.sleep(for: .nanoseconds(Int64(wait)), tolerance: .nanoseconds(Int64(wait / 8)))
+                guard !Task.isCancelled else { return }
+                await self.endLivenessSleep()
+                await self.livenessTick(gen: gen)
+            }
+        }
+    }
+
+    private func beginLivenessSleep() -> UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let wait = LivenessSchedule.waitNs(pending: helloSentAt != nil || probeSentAt != nil, joined: joined,
+                                           quietForNs: now &- lastProtocolRx.uptimeNanoseconds,
+                                           probeQuietNs: RegistryClient.probeQuietNs)
+        livenessParked = wait > LivenessSchedule.pendingTickNs
+        return wait
+    }
+
+    private func endLivenessSleep() {
+        livenessParked = false
+    }
+
+    private func wakeLivenessIfParked() {
+        if livenessParked { armLiveness() }
     }
 
     /// Hello answers and probes run against hard deadlines; a long-quiet but
