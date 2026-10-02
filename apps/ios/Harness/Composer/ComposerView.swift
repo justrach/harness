@@ -488,10 +488,11 @@ struct ComposerView: View {
         if changedModel, let newModel,
            let target = models.first(where: { $0.id == newModel }) {
             var compatible: [String: JSONValue] = [:]
+            compatible["codexAccount"] = config.modelOptions["codexAccount"]
             for option in target.options {
                 guard let selected = config.modelOptions[option.id]?.stringValue,
-                      selected != option.defaultChoice,
-                      option.choices.contains(where: { $0.id == selected }) else { continue }
+                      (selected != option.defaultChoice || option.id == "codexAccount"),
+                      (option.id == "codexAccount" || option.choices.contains(where: { $0.id == selected })) else { continue }
                 compatible[option.id] = .string(selected)
             }
             config.modelOptions = compatible
@@ -503,7 +504,7 @@ struct ComposerView: View {
         var config = chat.config ?? ChatConfig(harness: harness, model: currentModel.id,
                                                reasoning: currentReasoning,
                                                sandbox: "workspace-write")
-        if choiceId == option.defaultChoice {
+        if choiceId == option.defaultChoice && option.id != "codexAccount" {
             config.modelOptions.removeValue(forKey: option.id)
         } else {
             config.modelOptions[option.id] = .string(choiceId)

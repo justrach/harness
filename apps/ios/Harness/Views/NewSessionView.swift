@@ -95,12 +95,15 @@ struct NewSessionView: View {
         HarnessCatalog.selectedChoice(for: option, selectedId: optionSelections[option.id])
     }
 
-    /// Only non-default picks ride the run, matching the desktop picker.
+    /// Billing accounts are always explicit, including the current default.
     private var resolvedModelOptions: [String: JSONValue] {
         var result: [String: JSONValue] = [:]
+        if harness == "codex", let account = optionSelections["codexAccount"] {
+            result["codexAccount"] = .string(account)
+        }
         for option in selectedModel.options {
             let choice = selectedChoice(for: option)
-            if choice.id != option.defaultChoice {
+            if choice.id != option.defaultChoice || option.id == "codexAccount" {
                 result[option.id] = .string(choice.id)
             }
         }

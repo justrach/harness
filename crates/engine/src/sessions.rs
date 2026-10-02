@@ -162,6 +162,7 @@ struct Inner {
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
+    agent_accounts: OnceLock<crate::AgentAccounts>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
     /// Fired with `(chat_id, cwd)` when a user prompt starts a turn (fresh
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
@@ -220,10 +221,15 @@ impl SessionsEngine {
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
+                agent_accounts: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
             }),
         }
+    }
+
+    pub fn set_agent_accounts(&self, accounts: crate::AgentAccounts) {
+        let _ = self.inner.agent_accounts.set(accounts);
     }
 
     /// Wire the doc host (called once at engine assembly; the two services are mutually
@@ -394,6 +400,61 @@ impl SessionsEngine {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd);
+        let account_home = if harness_id == HarnessId::Codex {
+            let key = harness_proto::CODEX_ACCOUNT_OPTION;
+            if !request.model_options.contains_key(key)
+                && let Some(config) = self
+                    .inner
+                    .workspace()
+                    .and_then(|ws| ws.chat_config(chat_id))
+                && config.harness == HarnessId::Codex
+                && let Some(account) = config.model_options.get(key)
+            {
+                request.model_options.insert(key.into(), account.clone());
+            }
+            let selected = request
+                .model_options
+                .get(key)
+                .map(|value| {
+                    value.as_str().ok_or_else(|| {
+                        EngineError::Other("Invalid Codex account selection.".into())
+                    })
+                })
+                .transpose()?;
+            match self.inner.agent_accounts.get() {
+                Some(accounts) => {
+                    let resolved = accounts.codex_run_home(selected).await?;
+                    if let Some((id, _)) = &resolved {
+                        request.model_options.insert(key.into(), id.clone().into());
+                        if let Some(workspace) = self.inner.workspace() {
+                            let mut config = workspace.chat_config(chat_id).unwrap_or_else(|| {
+                                harness_proto::ChatConfig {
+                                    harness: harness_id,
+                                    model: request.model.clone(),
+                                    reasoning: request.reasoning,
+                                    model_options: request.model_options.clone(),
+                                    sandbox: request.sandbox,
+                                }
+                            });
+                            if config.harness == HarnessId::Codex {
+                                config.model_options.entry(key)
+                                    .or_insert_with(|| id.clone().into());
+                                workspace.set_chat_config(chat_id, &config)?;
+                            }
+                        }
+                    }
+                    resolved.map(|(_, home)| home)
+                }
+                None if selected.is_some() => {
+                    return Err(EngineError::Other(
+                        "Codex accounts are unavailable on this host.".into(),
+                    ));
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         harness_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -483,7 +544,10 @@ impl SessionsEngine {
             self.interrupt(chat_id).await?;
         }
 
-        let harness = self.inner.registry.resolve(harness_id)?;
+        let mut harness = self.inner.registry.resolve(harness_id)?;
+        if let Some(home) = account_home {
+            harness = harness.with_account_home(home)?;
+        }
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
@@ -3028,6 +3092,22 @@ mod tests {
 
         follow_up.attachments.push("/tmp/image.png".into());
         assert!(!config.can_route(HarnessId::Grok, &follow_up));
+    }
+
+    #[test]
+    fn changing_codex_account_replaces_runtime_instead_of_steering_old_credentials() {
+        let mut initial = request();
+        initial.model_options.insert(
+            harness_proto::CODEX_ACCOUNT_OPTION.into(), "account-a".into(),
+        );
+        let config = RuntimeConfig::from_request(HarnessId::Codex, &initial);
+        let mut follow_up = initial.clone();
+        follow_up.prompt = "continue".into();
+        assert!(config.can_route(HarnessId::Codex, &follow_up));
+        follow_up.model_options.insert(
+            harness_proto::CODEX_ACCOUNT_OPTION.into(), "account-b".into(),
+        );
+        assert!(!config.can_route(HarnessId::Codex, &follow_up));
     }
 
     #[test]

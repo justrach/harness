@@ -132,6 +132,15 @@ trusted remote device can ask an online host to read and write workspace files;
 devices you trust with those files. To return to the local profile on a
 headless device, stop the daemon, run `harness logout`, and restart it.
 
+For concurrent Codex accounts, add each login in **Settings → Agents** on the
+device that runs your work, then choose **Codex account** in the desktop or iOS
+model options. Each conversation saves its account choice, including the
+default; changing the CLI's active login does not change existing conversations.
+Removing a selected account stops future runs until you select or add an account.
+Credentials stay on the execution device, in separate Codex homes; native
+conversation storage and configuration remain shared for resume. Windows hosts
+need permission to create symlinks (for example, Developer Mode).
+
 For the internals, see [architecture](ARCHITECTURE.md). For appearance and
 theme import, see [the theme guide](docs/theme-system.md).
 

@@ -11,7 +11,8 @@ final class ProjectlessSessionTests: XCTestCase {
     }
 
     private let chatConfig = ChatConfig(harness: "codex", model: "gpt-6-astra",
-                                        reasoning: "high", modelOptions: ["serviceTier": .string("fast")],
+                                        reasoning: "high", modelOptions: ["serviceTier": .string("fast"),
+                                                                          "codexAccount": .string("0123456789abcdef")],
                                         sandbox: "workspace-write")
     private let project = Space(id: "repo", deviceId: "host", path: "/repo", name: "Repo",
                                 gitDetected: true, createdAt: 1)
@@ -185,6 +186,7 @@ final class ProjectlessSessionTests: XCTestCase {
         XCTAssertEqual(request["model"]?.stringValue, chatConfig.model)
         XCTAssertEqual(request["reasoning"]?.stringValue, chatConfig.reasoning)
         XCTAssertEqual(request["modelOptions"]?.mapValue?["serviceTier"]?.stringValue, "fast")
+        XCTAssertEqual(request["modelOptions"]?.mapValue?["codexAccount"]?.stringValue, "0123456789abcdef")
         XCTAssertNil(request["worktree"])
     }
 

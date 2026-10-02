@@ -238,7 +238,13 @@ enum HarnessCatalog {
 
     static func selectedChoice(for option: ModelOptionInfo,
                                selectedId: String?) -> ModelOptionChoiceInfo {
-        option.choices.first { $0.id == selectedId }
+        // A removed billing account must remain explicit until the user
+        // chooses another; falling back could charge the wrong account.
+        if option.id == "codexAccount", let selectedId,
+           !option.choices.contains(where: { $0.id == selectedId }) {
+            return ModelOptionChoiceInfo(id: selectedId, label: "Account unavailable")
+        }
+        return option.choices.first { $0.id == selectedId }
             ?? option.choices.first { $0.id == option.defaultChoice }
             ?? option.choices.first
             ?? ModelOptionChoiceInfo(id: option.defaultChoice, label: option.defaultChoice)

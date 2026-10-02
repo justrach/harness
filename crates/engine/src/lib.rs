@@ -322,11 +322,10 @@ impl EngineCore {
             workspace.clone(),
         );
         let agent_accounts = AgentAccounts::new(agent_accounts_config);
-        sessions.set_titles(TitleGenerator::new(
-            workspace.clone(),
-            registry.clone(),
-            repos.clone(),
-        ));
+        sessions.set_agent_accounts(agent_accounts.clone());
+        let titles = TitleGenerator::new(workspace.clone(), registry.clone(), repos.clone());
+        titles.set_agent_accounts(agent_accounts.clone());
+        sessions.set_titles(titles);
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
         // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
         let turn_diff = diff_sync.clone();

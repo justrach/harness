@@ -1694,9 +1694,22 @@ impl RpcService for EngineRpc {
                     .registry
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                let models = crate::model_catalogs::list(self.repos.data_dir(), harness, p.force)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let mut models =
+                    crate::model_catalogs::list(self.repos.data_dir(), harness, p.force)
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if p.harness == HarnessId::Codex {
+                    let account = self
+                        .agent_accounts
+                        .codex_account_option()
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    if let Some(account) = account {
+                        for model in &mut models {
+                            model.options.push(account.clone());
+                        }
+                    }
+                }
                 RpcReply::value(&models)
             }
             methods::LIST_SKILLS => {

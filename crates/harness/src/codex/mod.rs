@@ -106,6 +106,7 @@ pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessErr
 pub struct CodexHarness {
     models_cache: crate::catalog::Catalog,
     executable: Option<PathBuf>,
+    account_home: Option<PathBuf>,
     /// Grace between `turn/interrupt` and SIGTERM.
     interrupt_grace: Duration,
     /// Grace between SIGTERM and SIGKILL.
@@ -117,6 +118,7 @@ impl Default for CodexHarness {
         Self {
             models_cache: crate::catalog::Catalog::default(),
             executable: None,
+            account_home: None,
             interrupt_grace: Duration::from_secs(2),
             kill_grace: Duration::from_secs(3),
         }
@@ -124,6 +126,21 @@ impl Default for CodexHarness {
 }
 
 impl CodexHarness {
+    fn configure_account(&self, cmd: &mut Command) {
+        if let Some(home) = &self.account_home {
+            cmd.env("CODEX_HOME", home)
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("CODEX_API_KEY")
+                .arg("-c")
+                .arg("cli_auth_credentials_store=\"file\"")
+                .arg("-c")
+                .arg("model_provider=\"openai\"");
+            cmd.arg("-c").arg(format!(
+                "sqlite_home={}",
+                serde_json::to_string(&home.join(".shared-state").to_string_lossy()).unwrap()
+            ));
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -171,6 +188,7 @@ impl CodexHarness {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
+        self.configure_account(&mut cmd);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
@@ -230,6 +248,7 @@ impl CodexHarness {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
+        self.configure_account(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -545,6 +564,15 @@ fn parse_skills(result: &Value) -> Vec<harness_proto::invocation::Skill> {
 
 #[async_trait]
 impl Harness for CodexHarness {
+    fn with_account_home(&self, home: PathBuf) -> Result<Arc<dyn Harness>, HarnessError> {
+        Ok(Arc::new(Self {
+            account_home: Some(home),
+            executable: self.executable.clone(),
+            interrupt_grace: self.interrupt_grace,
+            kill_grace: self.kill_grace,
+            ..Self::default()
+        }))
+    }
     fn id(&self) -> HarnessId {
         HarnessId::Codex
     }
@@ -688,6 +716,7 @@ impl CodexHarness {
         };
         let mut cmd = Command::new(&exe);
         cmd.arg("app-server");
+        self.configure_account(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
             cmd.current_dir(&request.cwd);
@@ -1851,6 +1880,22 @@ use crate::{Signal, send_signal, shutdown_child};
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn saved_login_overrides_inherited_api_keys_without_changing_process_environment() {
+        let adapter = CodexHarness {
+            account_home: Some(PathBuf::from("fixture-home")), ..Default::default()
+        };
+        let mut command = Command::new("fixture");
+        adapter.configure_account(&mut command);
+        let env: std::collections::HashMap<_, _> = command.as_std().get_envs().collect();
+        assert_eq!(
+            env[std::ffi::OsStr::new("CODEX_HOME")],
+            Some(std::ffi::OsStr::new("fixture-home"))
+        );
+        assert_eq!(env[std::ffi::OsStr::new("OPENAI_API_KEY")], None);
+        assert_eq!(env[std::ffi::OsStr::new("CODEX_API_KEY")], None);
+    }
 
     #[test]
     fn current_schema_and_legacy_visibility_are_compatible() {

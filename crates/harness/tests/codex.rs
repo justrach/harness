@@ -35,6 +35,41 @@ fn harness() -> CodexHarness {
     CodexHarness::new().with_executable(fixture_path())
 }
 
+#[tokio::test]
+async fn account_bound_processes_use_private_homes_and_shared_sqlite_on_start_and_resume() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("codex-fixture");
+    // Record only fixture paths/flags; no real credentials or Codex calls.
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\" \"$@\" > \"$CODEX_HOME/spawn.txt\"\nexec '{}' \"$@\"\n",
+        fixture_path().display()
+    );
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let adapter = CodexHarness::new().with_executable(executable);
+    let run = |name: &'static str, resume: bool| {
+        let home = root.path().join(name);
+        std::fs::create_dir(&home).unwrap();
+        let bound = adapter.with_account_home(home.clone()).unwrap();
+        async move {
+            let mut req = request("scenario:happy");
+            if resume { req.resume = Some("existing-thread".into()); }
+            let (controls, _steer, _token) = controls("Yes");
+            let events = tokio::time::timeout(Duration::from_secs(10), async {
+                bound.run(req, controls).await.unwrap().collect::<Vec<_>>().await
+            }).await.unwrap();
+            assert!(events.iter().any(|e| matches!(e, Ok(AgentEvent::Done { .. }))));
+            let spawn = std::fs::read_to_string(home.join("spawn.txt")).unwrap();
+            assert_eq!(spawn.lines().next().unwrap(), home.to_str().unwrap());
+            assert!(spawn.contains("cli_auth_credentials_store=\"file\""));
+            assert!(spawn.contains("model_provider=\"openai\""));
+            assert!(spawn.contains(&format!("sqlite_home=\"{}/.shared-state\"", home.display())));
+        }
+    };
+    tokio::join!(run("account-a", false), run("account-b", true));
+}
+
 fn request(prompt: &str) -> RunRequest {
     RunRequest {
         prompt: prompt.into(),
