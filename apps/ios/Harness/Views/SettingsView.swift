@@ -67,7 +67,7 @@ struct SettingsView: View {
                     } header: {
                         Text("Layout")
                     } footer: {
-                        Text("Shows the session list and the open session together when there is room: side by side in landscape, or stacked in portrait. Off keeps the single screen.")
+                        Text("Shows the session list and the open session together when there is room. Auto does it side by side whenever the screen is wide enough, such as in landscape. Side by side and Stacked pick a shape. Off keeps the single screen.")
                     }
                 }
 

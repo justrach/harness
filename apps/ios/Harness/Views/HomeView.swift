@@ -41,6 +41,27 @@ struct HomeView: View {
     /// room for the chosen shape; the single stack otherwise. Off by default.
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
     @State private var containerSize: CGSize = .zero
+    @State private var splitSuggestion = SplitSuggestion.load()
+    @State private var showSplitOffer = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    /// Offer the split once there is room for it and the person is juggling sessions (see SplitSuggestion).
+    private func refreshSplitOffer() {
+        let context = SplitSuggestion.Context(
+            mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off,
+            isPhone: UIDevice.current.userInterfaceIdiom == .phone,
+            compactWidth: horizontalSizeClass == .compact,
+            size: containerSize,
+            largeText: dynamicTypeSize.isAccessibilitySize)
+        showSplitOffer = splitSuggestion.shouldOffer(context, now: Date().timeIntervalSince1970)
+    }
+
+    private func answerSplitOffer(tryIt: Bool) {
+        if tryIt { phoneSplitRaw = PhoneSplit.auto.rawValue }
+        splitSuggestion.markShown(at: Date().timeIntervalSince1970)
+        splitSuggestion.save()
+        showSplitOffer = false
+    }
 
     private var phoneArrangement: PhoneSplit.Arrangement? {
         guard horizontalSizeClass == .compact else { return nil }
@@ -82,6 +103,9 @@ struct HomeView: View {
             }
         }
         .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
+        .onChange(of: containerSize) { refreshSplitOffer() }
+        .onChange(of: phoneSplitRaw) { refreshSplitOffer() }
+        .onAppear { refreshSplitOffer() }
         .environment(\.switchToSession, switchTo)
     }
 
@@ -115,7 +139,12 @@ struct HomeView: View {
     /// what the detail shows instead of stacking behind it.
     private func open(_ route: Route) {
         // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
-        if case .chat = route { Perf.shared.startInteraction(PerfSpan.navigationOpen) }
+        if case .chat = route {
+            Perf.shared.startInteraction(PerfSpan.navigationOpen)
+            splitSuggestion.recordOpen(at: Date().timeIntervalSince1970)
+            splitSuggestion.save()
+            refreshSplitOffer()
+        }
         if splitLayout { path = [route] } else { path.append(route) }
     }
 
@@ -439,6 +468,16 @@ struct HomeView: View {
         let chats = HomeFilter.apply(scoped, query: searchText, status: statusFilter,
                                      indicator: model.indicator(for:), names: model.homeFilterNames)
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        if showSplitOffer {
+            Section {
+                SplitOfferBanner(tryIt: { answerSplitOffer(tryIt: true) },
+                                 notNow: { answerSplitOffer(tryIt: false) })
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+            }
+            .listSectionSeparator(.hidden)
+        }
         if !scoped.isEmpty {
             Section {
                 HStack(spacing: 6) {

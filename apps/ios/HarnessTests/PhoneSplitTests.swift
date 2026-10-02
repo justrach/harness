@@ -46,6 +46,16 @@ final class PhoneSplitTests: XCTestCase {
         XCTAssertEqual(PhoneSplit(rawValue: "stacked"), .stacked)
         XCTAssertNil(PhoneSplit(rawValue: "diagonal"))
         XCTAssertEqual(PhoneSplit(rawValue: "diagonal") ?? .off, .off)
-        XCTAssertEqual(PhoneSplit.allCases.map(\.label), ["Off", "Side by side", "Stacked"])
+        XCTAssertEqual(PhoneSplit.allCases.map(\.label), ["Off", "Auto", "Side by side", "Stacked"])
+    }
+
+    func testAutoSplitsSideBySideOnlyWhereThereIsRoomAndNeverStacks() {
+        XCTAssertNil(PhoneSplit.arrangement(mode: .auto, in: portrait), "no room: Auto leaves the single stack")
+        XCTAssertNil(PhoneSplit.arrangement(mode: .auto, in: CGSize(width: 599, height: 900)))
+        XCTAssertEqual(PhoneSplit.arrangement(mode: .auto, in: landscape),
+                       PhoneSplit.arrangement(mode: .sideBySide, in: landscape))
+        XCTAssertEqual(PhoneSplit.arrangement(mode: .auto, in: landscape)?.axis, .sideBySide)
+        // A tall, wide window (an unfolded fold) is still side by side, never stacked.
+        XCTAssertEqual(PhoneSplit.arrangement(mode: .auto, in: CGSize(width: 700, height: 900))?.axis, .sideBySide)
     }
 }

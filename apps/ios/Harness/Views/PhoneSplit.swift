@@ -9,6 +9,10 @@ import SwiftUI
 
 enum PhoneSplit: String, CaseIterable, Identifiable {
     case off
+    /// Side by side wherever the window has room for it, nothing otherwise: no shape to choose, no cramped
+    /// panes. Stacked is never automatic. A Pro Max in landscape already gets the iPad-style sidebar from its
+    /// regular width, so Auto changes nothing there; it is for the iPhones that stay compact in landscape.
+    case auto
     case sideBySide
     case stacked
 
@@ -18,6 +22,7 @@ enum PhoneSplit: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .off: "Off"
+        case .auto: "Auto"
         case .sideBySide: "Side by side"
         case .stacked: "Stacked"
         }
@@ -41,7 +46,7 @@ enum PhoneSplit: String, CaseIterable, Identifiable {
         switch mode {
         case .off:
             return nil
-        case .sideBySide:
+        case .auto, .sideBySide:
             guard size.width >= minimumWidthSideBySide else { return nil }
             return Arrangement(axis: .sideBySide, listExtent: clamp(size.width * 0.38, to: sideListRange))
         case .stacked:

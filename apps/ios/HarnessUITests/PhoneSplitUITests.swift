@@ -54,4 +54,51 @@ final class PhoneSplitUITests: XCTestCase {
         XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
         XCTAssertFalse(listButton(app).isHittable, "with the split off, an open session replaces the list")
     }
+
+    // MARK: the one-time offer
+
+    /// Home with the split off, and the offer's memory seeded as "three sessions opened in the last minute".
+    private func launchJuggling(orientation: UIDeviceOrientation) -> XCUIApplication {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = orientation
+        Thread.sleep(forTimeInterval: 1)
+        let now = Date().timeIntervalSince1970
+        // Launch arguments carry plain strings only, so the memory is a comma-separated list of times.
+        let opens = "\(now - 30),\(now - 20),\(now - 10)"
+        let app = XCUIApplication()
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-phoneSplit", "off",
+                               "-splitSuggestion.opens", opens, "-splitSuggestion.shown", "0",
+                               // An earlier test's answer is saved in the app's defaults; pin it to "long ago".
+                               "-splitSuggestion.lastShownAt", "0"]
+        app.launch()
+        return app
+    }
+
+    private func offer(_ app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["split-offer"]
+    }
+
+    func testTheOfferAppearsWithRoomAndTryingItSplitsTheScreen() {
+        let app = launchJuggling(orientation: .landscapeLeft)
+        XCTAssertTrue(offer(app).waitForExistence(timeout: 10), "juggling with room should offer the split")
+        attachScreenshot(named: "split-offer")
+        app.buttons["split-offer-try"].tap()
+        XCTAssertTrue(app.staticTexts["Pick a session, or start one with +"].waitForExistence(timeout: 5),
+                      "Try it should turn the split on")
+        XCTAssertFalse(offer(app).exists, "the offer goes away once answered")
+    }
+
+    func testNotNowHidesTheOfferAndLeavesTheSplitOff() {
+        let app = launchJuggling(orientation: .landscapeLeft)
+        XCTAssertTrue(offer(app).waitForExistence(timeout: 10))
+        app.buttons["split-offer-later"].tap()
+        XCTAssertFalse(offer(app).waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Pick a session, or start one with +"].exists, "the split stays off")
+    }
+
+    func testNoOfferWithoutRoomEvenWhileJuggling() {
+        let app = launchJuggling(orientation: .portrait)
+        XCTAssertTrue(app.buttons["new-session"].waitForExistence(timeout: 10), "Home did not load")
+        XCTAssertFalse(offer(app).waitForExistence(timeout: 2), "a portrait phone has no room, so nothing to offer")
+    }
 }
