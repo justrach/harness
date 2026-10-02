@@ -23,6 +23,7 @@ pub mod codegraff_auth;
 mod chat_persistence;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod external_history;
 mod graff_logins;
 mod http_error;
 pub mod instance_lock;
@@ -151,6 +152,8 @@ pub struct EngineCore {
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
+    /// Conversations from other tools on this device, importable as chats.
+    pub external_history: external_history::ExternalHistory,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -308,6 +311,16 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
+        let external_history = external_history::ExternalHistory::new(
+            external_history::Roots {
+                claude_dir: agent_accounts_config.claude_config_dir.clone(),
+                codex_home: agent_accounts_config.codex_home.clone(),
+                projects: Vec::new(),
+            },
+            &device_id,
+            store_for_import.clone(),
+            workspace.clone(),
+        );
         let agent_accounts = AgentAccounts::new(agent_accounts_config);
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),
@@ -338,6 +351,7 @@ impl EngineCore {
             agent_accounts,
             device_id,
             local_import,
+            external_history,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -494,6 +508,7 @@ impl EngineCore {
         if let Some(importer) = self.local_import.clone() {
             rpc = rpc.with_local_import(importer);
         }
+        rpc = rpc.with_external_history(self.external_history.clone());
         Arc::new(rpc)
     }
 

@@ -627,6 +627,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<harness_update::Updater>,
     local_import: Option<crate::local_import::LocalImporter>,
+    external_history: Option<crate::external_history::ExternalHistory>,
     engine_info: EngineInfo,
 }
 
@@ -671,6 +672,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             local_import: None,
+            external_history: None,
             engine_info,
         }
     }
@@ -702,6 +704,21 @@ impl EngineRpc {
     pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
         self.local_import = Some(importer);
         self
+    }
+
+    /// Attach the importer for conversations that live in other tools.
+    pub fn with_external_history(
+        mut self,
+        history: crate::external_history::ExternalHistory,
+    ) -> Self {
+        self.external_history = Some(history);
+        self
+    }
+
+    fn external_history(&self) -> Result<crate::external_history::ExternalHistory, RpcError> {
+        self.external_history
+            .clone()
+            .ok_or_else(|| RpcError::Failed("conversation import unavailable".into()))
     }
 
     fn auth(&self) -> Result<&Auth, RpcError> {
@@ -2119,6 +2136,47 @@ impl RpcService for EngineRpc {
             }
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))
+            }
+            methods::EXTERNAL_HISTORY_LIST => {
+                let history = self.external_history()?;
+                let cwd = params
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+                // Walks other tools' session folders: blocking filesystem work.
+                let sessions =
+                    tokio::task::spawn_blocking(move || history.list(cwd.as_deref(), limit))
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&sessions)
+            }
+            methods::EXTERNAL_HISTORY_IMPORT => {
+                #[derive(Deserialize)]
+                struct Key {
+                    source: crate::external_history::Source,
+                    id: String,
+                }
+                let history = self.external_history()?;
+                let cwd = params
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
+                let keys: Option<Vec<Key>> = match params.get("sessions") {
+                    Some(v) if !v.is_null() => Some(
+                        serde_json::from_value(v.clone())
+                            .map_err(|e| RpcError::Failed(format!("bad sessions: {e}")))?,
+                    ),
+                    _ => None,
+                };
+                let summary = tokio::task::spawn_blocking(move || {
+                    let keys: Option<Vec<_>> =
+                        keys.map(|k| k.into_iter().map(|k| (k.source, k.id)).collect());
+                    history.import(keys.as_deref(), cwd.as_deref())
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&summary)
             }
             methods::LOCAL_IMPORT_STATUS => {
                 let importer = self.local_importer()?.clone();

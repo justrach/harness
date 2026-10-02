@@ -36,6 +36,38 @@ impl EnterPress {
     }
 }
 
+/// A conversation another tool kept on this device, as the engine lists it.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ExternalSession {
+    source: String,
+    id: String,
+    cwd: Option<String>,
+    title: String,
+    updated_at: i64,
+}
+
+impl ExternalSession {
+    fn source_label(&self) -> &str {
+        match self.source.as_str() {
+            "claude" => "Claude Code",
+            "codex" => "Codex",
+            "graff" => "graff",
+            other => other,
+        }
+    }
+
+    fn folder(&self) -> &str {
+        self.cwd
+            .as_deref()
+            .and_then(|cwd| cwd.rsplit('/').find(|part| !part.is_empty()))
+            .unwrap_or("")
+    }
+}
+
+/// How many other-tool conversations show before the person types anything.
+const EXTERNAL_IDLE_LIMIT: usize = 5;
+
 #[derive(Clone, Debug, PartialEq)]
 enum Entry {
     NewChat,
@@ -46,6 +78,10 @@ enum Entry {
     /// focus there instead of pulling its chat into the current pane.
     Pane(usize),
     Chat(String),
+    /// A conversation from another tool: picking it imports it, then opens it.
+    External(String, String),
+    /// Import every conversation from other tools.
+    ImportAll,
 }
 
 impl Entry {
@@ -62,7 +98,7 @@ impl Entry {
                 },
                 mode.icon(),
             )),
-            Self::Pane(_) | Self::Chat(_) => None,
+            Self::Pane(_) | Self::Chat(_) | Self::External(..) | Self::ImportAll => None,
         }
     }
 
@@ -71,6 +107,7 @@ impl Entry {
         match self {
             Self::Pane(_) => 0,
             Self::Chat(_) => 2,
+            Self::External(..) => 3,
             _ => 1,
         }
     }
@@ -126,6 +163,7 @@ impl Shell {
             }
         });
         let previous_focus = window.focused(cx);
+        self.load_external_sessions(cx);
         self.command_palette = Some(CommandPalette {
             search,
             focus: cx.focus_handle(),
@@ -167,6 +205,11 @@ impl Shell {
             }
         }
         entries.extend(actions_for(&query, Theme::of(cx).appearance.is_dark()));
+        if !self.external_sessions.is_empty()
+            && matches_query(&query, "import conversations from other tools")
+        {
+            entries.push(Entry::ImportAll);
+        }
         let state = self.state.read(cx);
         // Global history deliberately ignores the sidebar's project filter and
         // collapsed groups. Archived conversations remain searchable too.
@@ -208,7 +251,122 @@ impl Shell {
                 .take(HISTORY_RESULT_LIMIT)
                 .map(|chat| Entry::Chat(chat.id.clone())),
         );
+        let external_limit = if query.is_empty() {
+            EXTERNAL_IDLE_LIMIT
+        } else {
+            HISTORY_RESULT_LIMIT
+        };
+        entries.extend(
+            self.external_sessions
+                .iter()
+                .filter(|row| {
+                    matches_query(
+                        &query,
+                        &format!("{} {} {}", row.title, row.source_label(), row.folder()),
+                    )
+                })
+                .take(external_limit)
+                .map(|row| Entry::External(row.source.clone(), row.id.clone())),
+        );
         entries
+    }
+
+    /// Ask the engine which conversations other tools kept on this device.
+    fn load_external_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.external_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    harness_rpc::methods::EXTERNAL_HISTORY_LIST,
+                    serde_json::json!({ "limit": 400 }),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                if let Some(rows) = result
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<Vec<ExternalSession>>(v).ok())
+                {
+                    shell.external_sessions = rows;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Import conversations from other tools: the named ones (then open the first), or all.
+    fn import_external(&mut self, picks: Vec<(String, String)>, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let all = picks.is_empty();
+        let params = if all {
+            serde_json::json!({})
+        } else {
+            let sessions: Vec<_> = picks
+                .iter()
+                .map(|(source, id)| serde_json::json!({ "source": source, "id": id }))
+                .collect();
+            serde_json::json!({ "sessions": sessions })
+        };
+        if all {
+            self.sidebar_notice = Some("Importing conversations from other tools…".into());
+            cx.notify();
+        }
+        self.external_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(harness_rpc::methods::EXTERNAL_HISTORY_IMPORT, params)
+                .await;
+            this.update(cx, |shell, cx| {
+                let summary = result.as_ref().ok();
+                let ids: Vec<String> = summary
+                    .and_then(|v| v["chatIds"].as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let errors = summary
+                    .and_then(|v| v["errors"].as_array())
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                // Imported ones are in the sidebar now; stop offering them.
+                shell
+                    .external_sessions
+                    .retain(|row| !ids.contains(&format!("ext-{}-{}", row.source, row.id)));
+                match (&result, all) {
+                    (Err(err), _) => {
+                        shell.sidebar_notice = Some(format!("Import failed: {err}").into())
+                    }
+                    (Ok(_), true) => {
+                        shell.sidebar_notice = Some(
+                            match (ids.len(), errors) {
+                                (0, 0) => "Nothing new to import".to_string(),
+                                (n, 0) => format!("Imported {n} conversations"),
+                                (n, e) => {
+                                    format!("Imported {n} conversations; {e} could not be read")
+                                }
+                            }
+                            .into(),
+                        )
+                    }
+                    (Ok(_), false) => match ids.first() {
+                        Some(id) => shell.open_chat(id.clone(), cx),
+                        None => {
+                            shell.sidebar_notice =
+                                Some("That conversation could not be imported".into())
+                        }
+                    },
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn activate_command(&mut self, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
@@ -227,6 +385,8 @@ impl Shell {
                 self.open_settings(section, cx)
             }
             Entry::Theme(_) => unreachable!(),
+            Entry::External(source, id) => self.import_external(vec![(source, id)], cx),
+            Entry::ImportAll => self.import_external(Vec::new(), cx),
             Entry::Pane(ix) => self.focus_chat_pane(ix, window, cx),
             Entry::Chat(id) => {
                 if !self.reveal_chat_in_tabs(&id, window, cx) {
@@ -386,6 +546,79 @@ impl Shell {
                     .when_some(shortcut, |row, shortcut| {
                         row.child(popover::kbd_hint(&theme, &shortcut))
                     })
+                    .into_any_element()
+            } else if let Entry::ImportAll = entry {
+                let label = format!(
+                    "Import {} conversations from other tools",
+                    self.external_sessions.len()
+                );
+                popover::menu_row(&theme, ix == active, format!("command-import-{ix}"))
+                    .id(("command-import", ix))
+                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                    .role(gpui::Role::Button)
+                    .aria_label(label.clone())
+                    .min_h(px(30.0))
+                    .py(px(4.0))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate_command(Entry::ImportAll, window, cx)
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_none()
+                            .text_center()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from("↓")),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(SharedString::from(label)))
+                    .into_any_element()
+            } else if let Entry::External(source, id) = entry {
+                let row = self
+                    .external_sessions
+                    .iter()
+                    .find(|row| &row.source == source && &row.id == id)?;
+                let title = transcript::single_line(&row.title);
+                let when = chrono::TimeZone::timestamp_millis_opt(&Utc, row.updated_at)
+                    .single()
+                    .map(|at| format_time_ago(at, Utc::now()))
+                    .unwrap_or_default();
+                let trailing = match row.folder() {
+                    "" => format!("{} · {when}", row.source_label()),
+                    folder => format!("{} · {folder} · {when}", row.source_label()),
+                };
+                let entry = entry.clone();
+                popover::menu_row(&theme, ix == active, format!("command-external-{ix}"))
+                    .id(("command-external", ix))
+                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!("Import and open: {title}"))
+                    .min_h(px(30.0))
+                    .py(px(4.0))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate_command(entry.clone(), window, cx)
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_none()
+                            .text_center()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from("↓")),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(popover::search_highlight(
+                        title.into(),
+                        Some(&query),
+                        &theme,
+                    )))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(260.0))
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted.opacity(0.7))
+                            .child(SharedString::from(trailing)),
+                    )
                     .into_any_element()
             } else if let Entry::Chat(id) = entry {
                 let state = self.state.read(cx);
@@ -711,6 +944,27 @@ mod tests {
         ];
         assert!(order.windows(2).all(|w| w[0].section() < w[1].section()));
         assert_eq!(Entry::Pane(0).action(), None);
+    }
+
+    #[test]
+    fn other_tools_conversations_come_after_chat_history() {
+        let order = [
+            Entry::Chat("a".into()),
+            Entry::External("claude".into(), "s1".into()),
+        ];
+        assert!(order[0].section() < order[1].section());
+        assert_eq!(Entry::ImportAll.section(), Entry::NewChat.section());
+    }
+
+    #[test]
+    fn an_external_row_names_its_tool_and_folder() {
+        let row: ExternalSession = serde_json::from_value(serde_json::json!({
+            "source": "codex", "id": "c1", "cwd": "/work/app/", "title": "add a retry",
+            "updatedAt": 1, "startedAt": 0, "size": 10, "path": "/x"
+        }))
+        .unwrap();
+        assert_eq!(row.source_label(), "Codex");
+        assert_eq!(row.folder(), "app");
     }
 
     #[test]
