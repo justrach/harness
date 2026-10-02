@@ -42,16 +42,87 @@ struct HomeView: View {
     /// phone's single stack.
     private var splitLayout: Bool { horizontalSizeClass == .regular }
 
+    // MARK: Split screen (a Max-class iPhone only; see SplitScreen)
+
+    /// The second session shown beside the first. The first is the navigation stack's own.
+    @State private var secondChatId: String?
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+
+    /// The session header on a Max is drawn in the pane, so the system's sidebar button is gone; this brings
+    /// the list in and out.
+    private func toggleList() {
+        columnVisibility = columnVisibility == .all ? .detailOnly : .all
+    }
+
+    private var splitScreenAvailable: Bool {
+        SplitScreen.isAvailable(idiom: UIDevice.current.userInterfaceIdiom, sizeClass: horizontalSizeClass)
+    }
+
+    private var panes: SplitPanes {
+        var primary: String?
+        if case .chat(let id) = path.first { primary = id }
+        return SplitPanes(primary: primary, secondary: secondChatId)
+    }
+
+    private func apply(_ next: SplitPanes) {
+        path = next.primary.map { [.chat($0)] } ?? []
+        secondChatId = next.secondary
+    }
+
+    /// Opens the most recently used session that is not already on screen — no picker.
+    private func openBeside() {
+        var next = panes
+        next.add(SplitScreen.mostRecent(excluding: next.open, in: model.overviewChats))
+        apply(next)
+    }
+
+    private func closePane(_ pane: SplitPanes.Pane) {
+        var next = panes
+        next.close(pane)
+        apply(next)
+    }
+
+    private func controls(for pane: SplitPanes.Pane) -> SplitScreenControls? {
+        guard splitScreenAvailable else { return nil }
+        let two = secondChatId != nil
+        return SplitScreenControls(openBeside: two ? nil : { openBeside() },
+                                   close: two ? { closePane(pane) } : nil,
+                                   toggleList: two ? nil : { toggleList() })
+    }
+
+    private var primaryStack: some View {
+        NavigationStack(path: $path) {
+            SplitDetailPlaceholder()
+                // On each destination, not on the stack: a value set outside the stack did not reach the
+                // pushed session, so its header never saw the split controls.
+                .navigationDestination(for: Route.self) { route in
+                    destination(route).environment(\.splitScreen, controls(for: .primary))
+                }
+        }
+    }
+
+    /// Two sessions side by side. Each is its own navigation stack at the top level — nested inside the split
+    /// view's detail column they would share one navigation bar and the second pane would never appear. The
+    /// list is out of the way here; closing a pane brings the split view (and its list) back.
+    private func twoPanes(second: String) -> some View {
+        HStack(spacing: 0) {
+            primaryStack
+            Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(width: 0.5)
+            NavigationStack {
+                SessionView(chatId: second).environment(\.splitScreen, controls(for: .secondary))
+            }
+        }
+    }
+
     var body: some View {
         Group {
-            if splitLayout {
-                NavigationSplitView {
+            if splitScreenAvailable, let second = secondChatId {
+                twoPanes(second: second)
+            } else if splitLayout {
+                NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
                 } detail: {
-                    NavigationStack(path: $path) {
-                        SplitDetailPlaceholder()
-                            .navigationDestination(for: Route.self, destination: destination)
-                    }
+                    primaryStack
                 }
                 .navigationSplitViewStyle(.balanced)
             } else {
@@ -95,7 +166,16 @@ struct HomeView: View {
     private func open(_ route: Route) {
         // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
         if case .chat = route { Perf.shared.startInteraction(PerfSpan.navigationOpen) }
-        if splitLayout { path = [route] } else { path.append(route) }
+        if splitScreenAvailable, case .chat(let id) = route {
+            // From the list: replaces the first pane; if it is already the second the two swap.
+            var next = panes
+            next.openFromList(id)
+            apply(next)
+        } else if splitLayout {
+            path = [route]
+        } else {
+            path.append(route)
+        }
     }
 
     /// `path` for sidebar children that push by appending (the archived shelf).
