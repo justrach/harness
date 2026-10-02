@@ -1,0 +1,373 @@
+diff --git a/codex-rs/tui/src/empty_state_animation.rs b/codex-rs/tui/src/empty_state_animation.rs
+index 8003d2d..9ac75a6 100644
+--- a/codex-rs/tui/src/empty_state_animation.rs
++++ b/codex-rs/tui/src/empty_state_animation.rs
+@@ -1,10 +1,15 @@
+ //! The blossom welcome animation for onboarding, with a full-color final pose.
+ //! Visible time pauses while hidden. Fresh conversations start settled and can replay on a click.
+ 
++mod codegraff;
++// The blossom renderer is kept for its `MAX_*` limits and `Cell`; `codegraff` draws instead.
++#[allow(dead_code)]
+ mod geometry;
+ mod lighting;
++#[allow(dead_code)]
+ mod paths;
+ mod policy;
++#[allow(dead_code)]
+ mod renderer;
+ mod sequence;
+ 
+@@ -25,9 +30,9 @@ use crate::terminal_palette;
+ use lighting::Lighting;
+ pub(crate) use policy::Presentation;
+ pub(crate) use policy::is_startup_cell;
++use codegraff::Renderer;
+ use renderer::MAX_COLUMNS;
+ use renderer::MAX_ROWS;
+-use renderer::Renderer;
+ 
+ pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(/*millis*/ 50);
+ // The preview's first visible pose (10.8s / 7.2s), also the start of an idle-screen replay.
+diff --git a/codex-rs/tui/src/empty_state_animation/codegraff.rs b/codex-rs/tui/src/empty_state_animation/codegraff.rs
+new file mode 100644
+index 0000000..3cc07cb
+--- /dev/null
++++ b/codex-rs/tui/src/empty_state_animation/codegraff.rs
+@@ -0,0 +1,203 @@
++//! The Codegraff welcome mark: a brush-stroke ensō with `</>` inside and pixels
++//! scattering from its gap. It stands in for the upstream blossom renderer and
++//! keeps the same `Renderer::frame` contract, so the animation driver is unchanged.
++//!
++//! The art is `codegraff_mark.txt`, baked from the logo by `tui/tools/bake_mark.py`:
++//! `#` ring stroke, `c` the `</>` glyph, `o` coral squares, `g` gray squares.
++
++use std::f64::consts::TAU;
++use std::sync::OnceLock;
++
++use super::lighting::Lighting;
++use super::renderer::Cell;
++
++const ART: &str = include_str!("codegraff_mark.txt");
++const CORAL: [f64; 3] = [232.0, 116.0, 62.0];
++/// Codegraff Dark text (`#edeae2`).
++const TEXT: [f64; 3] = [237.0, 234.0, 226.0];
++/// Where the ring stroke starts, in the gap the squares scatter from (radians, counter-clockwise from +x).
++const START_ANGLE: f64 = 0.70;
++/// Braille dot bits by column, then row.
++const DOT_BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
++
++#[derive(Clone, Copy, PartialEq)]
++enum Ink {
++    Ring,
++    Glyph,
++    Coral,
++    Gray,
++}
++
++struct Mark {
++    width: usize,
++    height: usize,
++    ink: Vec<Option<Ink>>,
++    /// When in the draw each dot appears: position along the stroke for the
++    /// ring, left to right for the squares.
++    order: Vec<f32>,
++}
++
++fn smooth(t: f64) -> f64 {
++    let t = t.clamp(0.0, 1.0);
++    t * t * (3.0 - 2.0 * t)
++}
++
++fn mark() -> &'static Mark {
++    static MARK: OnceLock<Mark> = OnceLock::new();
++    MARK.get_or_init(|| {
++        let rows: Vec<&str> = ART.lines().collect();
++        let width = rows.iter().map(|row| row.len()).max().unwrap_or(0);
++        let height = rows.len();
++        let mut ink = vec![None; width * height];
++        for (y, row) in rows.iter().enumerate() {
++            for (x, byte) in row.bytes().enumerate() {
++                ink[y * width + x] = match byte {
++                    b'#' => Some(Ink::Ring),
++                    b'c' => Some(Ink::Glyph),
++                    b'o' => Some(Ink::Coral),
++                    b'g' => Some(Ink::Gray),
++                    _ => None,
++                };
++            }
++        }
++        let span = |wanted: fn(Ink) -> bool| {
++            let xs: Vec<usize> = (0..width * height)
++                .filter(|&i| ink[i].is_some_and(wanted))
++                .map(|i| i % width)
++                .collect();
++            let low = xs.iter().copied().min().unwrap_or(0) as f64;
++            let high = xs.iter().copied().max().unwrap_or(1) as f64;
++            (low, (high - low).max(1.0))
++        };
++        let (ring_left, ring_width) = span(|ink| ink == Ink::Ring);
++        let rows_of_ring: Vec<usize> = (0..width * height)
++            .filter(|&i| ink[i] == Some(Ink::Ring))
++            .map(|i| i / width)
++            .collect();
++        let ring_top = rows_of_ring.iter().copied().min().unwrap_or(0) as f64;
++        let ring_bottom = rows_of_ring.iter().copied().max().unwrap_or(0) as f64;
++        let (center_x, center_y) = (ring_left + ring_width / 2.0, (ring_top + ring_bottom) / 2.0);
++        let (square_left, square_width) = span(|ink| matches!(ink, Ink::Coral | Ink::Gray));
++        let order = (0..width * height)
++            .map(|i| {
++                let (x, y) = ((i % width) as f64, (i / width) as f64);
++                match ink[i] {
++                    Some(Ink::Ring) => {
++                        let angle = (center_y - y).atan2(x - center_x);
++                        ((angle - START_ANGLE).rem_euclid(TAU) / TAU) as f32
++                    }
++                    Some(Ink::Coral | Ink::Gray) => ((x - square_left) / square_width) as f32,
++                    _ => 0.0,
++                }
++            })
++            .collect();
++        Mark {
++            width,
++            height,
++            ink,
++            order,
++        }
++    })
++}
++
++fn mix(from: [f64; 3], to: [f64; 3], amount: f64) -> u32 {
++    let channel = |i: usize| (from[i] + (to[i] - from[i]) * amount).round().clamp(0.0, 255.0) as u8;
++    u32::from_be_bytes([0, channel(0), channel(1), channel(2)])
++}
++
++#[derive(Default)]
++pub(super) struct Renderer {
++    cells: Vec<Cell>,
++}
++
++impl Renderer {
++    /// Draw the mark into `columns` x `rows` braille cells. `phase` 0.5 is the
++    /// settled pose, matching the upstream renderer's contract; earlier phases
++    /// draw the ring stroke, then fade in the glyph and squares.
++    pub(super) fn frame(
++        &mut self,
++        columns: u16,
++        rows: u16,
++        phase: f64,
++        light: &Lighting,
++    ) -> &[Cell] {
++        let (columns, rows) = (usize::from(columns), usize::from(rows));
++        self.cells.clear();
++        self.cells.resize(columns * rows, Cell::default());
++        let mark = mark();
++        if mark.width == 0 || columns == 0 || rows == 0 {
++            return &self.cells;
++        }
++
++        let draw = smooth((phase.rem_euclid(1.0) / 0.5).min(1.0));
++        let ring_progress = smooth(draw / 0.7);
++        let glyph_alpha = smooth((draw - 0.55) / 0.25);
++        let square_progress = smooth((draw - 0.7) / 0.3);
++
++        let background = light.background;
++        // Codegraff's text color on dark terminals; light ones keep their own foreground.
++        let luma = 0.299 * background[0] + 0.587 * background[1] + 0.114 * background[2];
++        let ink = if luma > 128.0 { light.key } else { TEXT };
++        let gray = mix(ink, background, 0.5);
++        let glyph = mix(ink, background, 0.25 + 0.75 * (1.0 - glyph_alpha));
++
++        // Fit the whole mark inside the stage, centered.
++        let (dots_w, dots_h) = ((columns * 2) as f64, (rows * 4) as f64);
++        let scale = (mark.width as f64 / dots_w).max(mark.height as f64 / dots_h);
++        let off_x = (dots_w - mark.width as f64 / scale) / 2.0;
++        let off_y = (dots_h - mark.height as f64 / scale) / 2.0;
++
++        for cy in 0..rows {
++            for cx in 0..columns {
++                let mut dots = 0u8;
++                let mut counts = [0usize; 4];
++                for (dx, column) in DOT_BITS.iter().enumerate() {
++                    for (dy, bit) in column.iter().enumerate() {
++                        let px = ((cx * 2 + dx) as f64 + 0.5 - off_x) * scale;
++                        let py = ((cy * 4 + dy) as f64 + 0.5 - off_y) * scale;
++                        if px < 0.0 || py < 0.0 {
++                            continue;
++                        }
++                        let (ax, ay) = (px as usize, py as usize);
++                        if ax >= mark.width || ay >= mark.height {
++                            continue;
++                        }
++                        let i = ay * mark.width + ax;
++                        let Some(kind) = mark.ink[i] else { continue };
++                        let order = f64::from(mark.order[i]);
++                        let shown = match kind {
++                            Ink::Ring => order <= ring_progress,
++                            Ink::Glyph => glyph_alpha > 0.0,
++                            Ink::Coral | Ink::Gray => order <= square_progress,
++                        };
++                        if shown {
++                            dots |= *bit;
++                            counts[kind as usize] += 1;
++                        }
++                    }
++                }
++                if dots == 0 {
++                    continue;
++                }
++                let rgb = if counts[Ink::Coral as usize] > 0 {
++                    mix(CORAL, background, 0.0)
++                } else {
++                    let (ring, glyph_n, gray_n) = (
++                        counts[Ink::Ring as usize],
++                        counts[Ink::Glyph as usize],
++                        counts[Ink::Gray as usize],
++                    );
++                    if ring >= glyph_n && ring >= gray_n {
++                        mix(ink, background, 0.0)
++                    } else if glyph_n >= gray_n {
++                        glyph
++                    } else {
++                        gray
++                    }
++                };
++                self.cells[cy * columns + cx] = Cell { dots, rgb };
++            }
++        }
++        &self.cells
++    }
++}
+diff --git a/codex-rs/tui/src/empty_state_animation/codegraff_mark.txt b/codex-rs/tui/src/empty_state_animation/codegraff_mark.txt
+new file mode 100644
+index 0000000..b1b0437
+--- /dev/null
++++ b/codex-rs/tui/src/empty_state_animation/codegraff_mark.txt
+@@ -0,0 +1,88 @@
++                                                  #############
++                                              ######################
++                                        ###########               ####
++                                      #######      ##########
++                                   #######   #########################
++                                  #####  #############            #######
++                               ###### ######################        #####
++                              ####  ##########################          ###
++                             #### ##############################          ###
++                           ####  #############################              ###
++                         ####  #######################             gg   g      #
++                        #### #################################         g        ##
++                    g  ### ###########################                  ggg       #
++                   g  ### #######################                         ggg      #
++                     ### ####################                               ggg      g
++                    ########################                                          g
++                   ########################
++             g    ### ##################
++            g    ######################
++           g    ######################
++          gg   ######################   g
++         gg    ####################    g
++         g    ####################   ggg
++        gg   ####################   gg
++        g    ###################  c
++       g    ###################  c
++           ###################  c
++           ################### c
++           #################  c
++          ##################  c
++          ################# cc                                                                        ggggg
++         ################## cc                                                                        ggggg
++         ##################cc                                                              oo         ggggg
++         ################# c                                                                          ggggg
++        ################## c                                                                          ggggg
++        ##################cc                         ccc
++       ################## c                          ccc                                       ooooo
++       ##################cc                  c      cccc    gg                                 ooooo         gg
++       ##################c                  ccc     cccc    ggg                               oooooo         ggg
++       ################# c                ccccc     ccc     ggggg                             oooooo         ggg
++      ################## c              cccccc     cccc     ggggggg                            oooo          ggg
++      ################## c            ccccccc      cccc       ggggggg
++g     ################## c           cccccc        ccc          gggggg                 ooo            gggg
++g     ################## c         ccccccc         ccc           ggggggg              ooooooo         gggg
++  #   ##################cc       ccccccc          cccc            ggggggg             ooooooo         gggg
++  #   ##################cc      cccccc            cccc              gggggg            ooooooo
++  ##  ##################cc       cccccc           ccc             ggggggg             ooooooo
++  ##  ################## c        ccccccc        cccc            gggggg               ooooooo    oooo
++  ##  ################## c          ccccccc      cccc         gggggggg                ooooooo    oooo
++  ##  ################## c            cccccc     ccc        gggggggg                  oooooo     oooo
++  ##  ##################               cccccc   cccc        gggggg                               oooo
++   #   #################                cccccc  cccc       gggggg                ooooo            oo
++   ##  #################                   cc   cccc       ggg                  ooooooo
++   ##  ##################                       cccc                            ooooooo       g
++   ##  ###################                      cccc                            ooooooo   gggggg    oo
++    #  ###################                      ccc                             ooooooo   gggggg     o
++    #   ##################                                                      ooooooo   gggggg
++    ##  ###################                                                     ooooooo   gggggg
++    ##  ###################                                                      oooooo   gggggg   o
++     ##  ###################                                                              gggggg   oo
++     ##  ###################                                    gg          ####
++      ## ####################                                              #####
++      ##  ####################                                              ####
++      ### #####################                                     ##  #   ####        gggg
++      #### #####################                                   ##  ## ######        gggg
++       ### ######################                                 ## ########   ##   #  gggg
++        ###########################                              ################# ###  gggg   o
++         ############################                          #### #################    gg   oo
++         #############################                        ###  ##################
++      g   ##############################                   ##### ####################
++           ### ######################### ##                     ####################    g
++       g   ###############################                    ##################### #
++        g   #####################################          #########################
++         g   ######################################### ###########################
++              ################################################################### gg
++           g   ################################################################ gg    o
++            g   ############################################################## ggg    o
++             g    ##########################################################    g
++              g   #########################################################
++               gg   ######################################################
++                 g    ###################################################  #
++                       ################################################  ##    o
++                    g    ############################################  ##
++                     gg    ######################################### ###
++                       gg     #################################### ##
++                         g      ###############################  ###
++                          gg       ######################### ## #
++                             gg         ################  ####
+diff --git a/codex-rs/tui/src/empty_state_animation/sequence.rs b/codex-rs/tui/src/empty_state_animation/sequence.rs
+index 0955568..4c52516 100644
+--- a/codex-rs/tui/src/empty_state_animation/sequence.rs
++++ b/codex-rs/tui/src/empty_state_animation/sequence.rs
+@@ -3,7 +3,8 @@
+ use std::time::Duration;
+ 
+ pub(super) const STATIC_FADE: Duration = Duration::from_millis(/*millis*/ 400);
+-pub(super) const STATIC_OPACITY: f32 = 0.18;
++// Upstream's blossom idles at 0.18, a ghost; the logo mark needs to stay readable.
++pub(super) const STATIC_OPACITY: f32 = 0.5;
+ // The renderer performs two complete rotations per loop.
+ pub(super) const LOOP_SECONDS: f64 = 7.2;
+ pub(super) const SPIN_DURATION: Duration = Duration::from_millis(/*millis*/ 10_800);
+diff --git a/codex-rs/tui/src/style.rs b/codex-rs/tui/src/style.rs
+index b9f6d45..34e25c8 100644
+--- a/codex-rs/tui/src/style.rs
++++ b/codex-rs/tui/src/style.rs
+@@ -15,13 +15,15 @@ use crate::terminal_palette::stdout_color_level;
+ use ratatui::style::Color;
+ use ratatui::style::Style;
+ 
+-const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (28, 100, 200);
++// Codegraff Light accent (#c77d20); upstream used a blue.
++const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (199, 125, 32);
+ 
+-/// ChatGPT Blue 100 (#A4CDFB), used for selection fills on light backgrounds.
+-pub(crate) const CHATGPT_BLUE_100: (u8, u8, u8) = (164, 205, 251);
++/// Selection fill on light backgrounds: Codegraff Light accent tinted into the paper color.
++/// (Upstream ChatGPT Blue 100; the name is kept so the patch stays small.)
++pub(crate) const CHATGPT_BLUE_100: (u8, u8, u8) = (238, 216, 188);
+ 
+-/// ChatGPT Blue 200 (#63A8F8).
+-pub(crate) const CHATGPT_BLUE_200: (u8, u8, u8) = (99, 168, 248);
++/// Codegraff Dark accent (#e8a33d). (Upstream ChatGPT Blue 200; name kept for the same reason.)
++pub(crate) const CHATGPT_BLUE_200: (u8, u8, u8) = (232, 163, 61);
+ 
+ /// Shared accent for picker selection backgrounds and transcript foreground emphasis.
+ pub(crate) const UI_ACCENT: (u8, u8, u8) = CHATGPT_BLUE_200;

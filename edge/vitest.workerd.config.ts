@@ -38,7 +38,8 @@ export default defineConfig({
           // that records what the account purge asked of it.
           SESSION_ROOMS: { className: "TestSessionRoom", useSQLite: true },
           ROOM_ACTORS: { className: "RoomActor", useSQLite: true },
-          ACCOUNT_PURGE: { className: "AccountPurge", useSQLite: true }
+          ACCOUNT_PURGE: { className: "AccountPurge", useSQLite: true },
+          REFRESH_LEEWAY: { className: "RefreshLeeway", useSQLite: true }
         }
       }
     })

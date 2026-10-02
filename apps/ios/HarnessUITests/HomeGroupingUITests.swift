@@ -8,7 +8,8 @@ final class HomeGroupingUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         XCUIDevice.shared.orientation = .portrait
-        app.launchArguments = ["-demo", "-sethomefilter", ""]
+        // A legacy saved Project preference must not override the Time default.
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-homeGroupBy", "project"]
         app.launch()
     }
 
@@ -27,6 +28,11 @@ final class HomeGroupingUITests: XCTestCase {
     }
 
     func testGroupByProjectAndDeviceWithCollapsibleSections() {
+        let groupBy = app.buttons["home-group-by"]
+        XCTAssertTrue(groupBy.waitForExistence(timeout: 10))
+        XCTAssertEqual(groupBy.value as? String, "Time")
+        XCTAssertFalse(headers("project:").firstMatch.exists)
+
         group(by: "Project")
         XCTAssertTrue(headers("project:").firstMatch.waitForExistence(timeout: 5))
         XCTAssertGreaterThan(headers("project:").count, 1)
@@ -45,8 +51,16 @@ final class HomeGroupingUITests: XCTestCase {
         XCTAssertTrue(headers("device:").firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(headers("project:").firstMatch.exists)
 
-        group(by: "None")
+        group(by: "Time")
         XCTAssertFalse(headers("device:").firstMatch.waitForExistence(timeout: 2))
+        XCTAssertEqual(groupBy.value as? String, "Time")
+
+        group(by: "Project")
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(groupBy.waitForExistence(timeout: 10))
+        XCTAssertEqual(groupBy.value as? String, "Time")
+        XCTAssertFalse(headers("project:").firstMatch.exists)
     }
 
     /// A pinned session leaves its project and sits in a Pinned section above them all.
@@ -67,4 +81,3 @@ final class HomeGroupingUITests: XCTestCase {
         XCTAssertTrue(pinned.label.hasPrefix("Pinned"))
     }
 }
-

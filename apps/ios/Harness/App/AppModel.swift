@@ -55,6 +55,9 @@ final class AppModel {
     }
 
     var phase: Phase = .signedOut
+    /// The edge rejected the stored sign-in (it was revoked or spent). The app keeps everything it has
+    /// and asks for a fresh sign-in, instead of redialing a dead credential behind "connecting".
+    var sessionExpired = false
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
 
@@ -352,6 +355,8 @@ final class AppModel {
                                                        nonce: nonce)
         edgeURLString = edgeURL.absoluteString
         authModeRaw = AppConfig.Mode.codegraff.rawValue
+        // A different account signing in over an expired session must not inherit its data.
+        if sessionExpired, !storedUserId.isEmpty, storedUserId != user.id { signOut() }
         storedUserId = user.id
         let orgs = try await client.orgs(accessToken: tokens.accessToken)
         if let only = orgs.first, orgs.count == 1 {
@@ -369,9 +374,16 @@ final class AppModel {
         let client = AuthClient(baseURL: url)
         let scoped = try await client.refresh(refreshToken: tokens.refreshToken,
                                               organizationId: org.organizationId)
-        Keychain.save(scoped.accessToken, key: "codegraffAccessToken")
-        Keychain.save(scoped.refreshToken, key: "codegraffRefreshToken")
+        Keychain.saveTokens(scoped)
         storedOrgId = org.organizationId
+        if sessionExpired, let config, config.orgId == org.organizationId {
+            // Same account signing back in: hand the live connection its new credential and keep every
+            // open session, draft and cached doc.
+            config.updateTokens(scoped)
+            sessionExpired = false
+            foregrounded()
+            return
+        }
         connect(url: url, mode: .codegraff, userId: storedUserId, orgId: org.organizationId,
                 tokens: scoped, devBearer: nil)
     }
@@ -430,6 +442,7 @@ final class AppModel {
         DocDisk.wipeAll()  // local doc state belongs to the signed-in identity
         storedUserId = ""
         storedOrgId = ""
+        sessionExpired = false
         phase = .signedOut
     }
 
@@ -461,8 +474,7 @@ final class AppModel {
             case .refused(let message, let rotated):
                 if let rotated {
                     config.updateTokens(rotated)
-                    Keychain.save(rotated.accessToken, key: "codegraffAccessToken")
-                    Keychain.save(rotated.refreshToken, key: "codegraffRefreshToken")
+                    Keychain.saveTokens(rotated)
                 }
                 accountDeletionError = message
             }
@@ -481,6 +493,10 @@ final class AppModel {
                                deviceId: deviceId, deviceName: deviceName,
                                tokens: tokens, devBearer: devBearer)
         self.config = config
+        sessionExpired = false
+        config.onSessionExpired = { [weak self] in
+            Task { @MainActor in self?.sessionExpired = true }
+        }
         let store = WorkspaceStore(config: config)
         workspace = store
         store.start()
@@ -620,7 +636,8 @@ final class AppModel {
     }
 
     /// Live harness catalog from the selected execution device (Settings → Agents
-    /// gates which agents a device offers); static pair when unreachable.
+    /// gates which agents a device offers); the last-seen list when
+    /// unreachable, the static pair only if the device was never reached.
     func listHarnesses(deviceId: String) async -> [HarnessInfo] {
         if demo != nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -628,7 +645,11 @@ final class AppModel {
         }
         if let live = await workspace?.listHarnesses(deviceId: deviceId),
            !live.isEmpty {
+            _ = DocDisk.saveHarnesses(live, deviceId: deviceId)
             return live
+        }
+        if let cached = DocDisk.loadHarnesses(deviceId: deviceId), !cached.isEmpty {
+            return cached
         }
         return HarnessCatalog.harnesses
     }
@@ -926,8 +947,22 @@ final class AppModel {
     /// online event on success, so every PARKED backoff (not just the rooms
     /// the kick reaches) lands a redial in ~1 RTT.
     func foregrounded() {
+        refreshSignInIfDue()
         kickAllRooms()
         probeEdgeHealth()
+    }
+
+    /// Spend the refresh while the app is in front (and may finish it), not on whichever socket redials
+    /// first after the access token has run out.
+    private func refreshSignInIfDue() {
+        guard let config, demo == nil, config.mode == .codegraff else { return }
+        Task { _ = await config.currentToken() }
+    }
+
+    /// The "signed out" pill: the browser sign-in again, keeping everything the app has.
+    func signInAgain() {
+        guard !signInBusy else { return }
+        startSignIn()
     }
 
     private func probeEdgeHealth() {

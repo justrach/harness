@@ -58,11 +58,14 @@ struct SessionView: View {
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarLeading) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(chat.displayTitle)
-                            .font(Theme.sans(15, weight: .medium))
-                            .foregroundStyle(Theme.text)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                        HStack(spacing: 8) {
+                            Text(chat.displayTitle)
+                                .font(Theme.sans(15, weight: .medium))
+                                .foregroundStyle(Theme.text)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            pagerHint(for: chat)
+                        }
                         projectLocation(chat: chat, model: model)
                             .font(Theme.sans(12))
                             .foregroundStyle(Theme.textMuted.opacity(0.6))
@@ -76,6 +79,10 @@ struct SessionView: View {
                     // real room and truncates them properly.
                     .frame(width: max(140, viewWidth - Self.headerChromeInset),
                            alignment: .leading)
+                    // Swipe the header to page to the neighbouring session.
+                    .pagerSwipe()
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("session-header")
                 }
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
@@ -91,6 +98,24 @@ struct SessionView: View {
         }
     }
 
+
+    /// "‹ 2/3 ›": where this session sits among the ones the header swipe pages
+    /// through, so the swipe is discoverable. Hidden when there's nowhere to go.
+    @ViewBuilder
+    private func pagerHint(for chat: Chat) -> some View {
+        let _ = model.connectivity.pulse
+        if let place = SessionPaging.position(of: chat.id, in: SessionPaging.entries(model: model)) {
+            HStack(spacing: 3) {
+                Image(systemName: "chevron.left").opacity(place.index > 1 ? 1 : 0.3)
+                Text("\(place.index)/\(place.count)").monospacedDigit()
+                Image(systemName: "chevron.right").opacity(place.index < place.count ? 1 : 0.3)
+            }
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Theme.textFaint)
+            .fixedSize()
+            .accessibilityHidden(true)
+        }
+    }
 
     private func content(chat: Chat, store: SessionStore) -> some View {
         let status = liveStatus(chat: chat)

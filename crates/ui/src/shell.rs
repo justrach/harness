@@ -1784,6 +1784,10 @@ pub struct Shell {
     /// while open.
     add_space: Option<AddSpaceFlow>,
     command_palette: Option<command_palette::CommandPalette>,
+    /// Conversations from other tools on this device (Claude Code, Codex, graff) that
+    /// `/resume` can import; refreshed each time the palette opens.
+    external_sessions: Vec<command_palette::ExternalSession>,
+    external_task: Option<Task<()>>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
@@ -2206,6 +2210,8 @@ impl Shell {
             delete_space_confirm: None,
             add_space: None,
             command_palette: None,
+            external_sessions: Vec::new(),
+            external_task: None,
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),

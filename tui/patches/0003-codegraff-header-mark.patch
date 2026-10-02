@@ -1,0 +1,71 @@
+--- a/codex-rs/tui/src/history_cell/session.rs
++++ b/codex-rs/tui/src/history_cell/session.rs
+@@ -41,12 +41,8 @@
+ }
+ 
+ /// Brand title shared by the session header and the status card; each owns its own indentation.
+-pub(crate) fn codex_title(version: &str) -> Vec<Span<'static>> {
+-    vec![
+-        ">_ ".fg(accent_color()),
+-        "OpenAI Codex".bold(),
+-        format!(" (v{version})").dim(),
+-    ]
++pub(crate) fn codex_title(_version: &str) -> Vec<Span<'static>> {
++    vec!["Codegraff".bold()]
+ }
+ 
+ #[derive(Debug)]
+@@ -219,11 +215,6 @@
+                 "/model".into(),
+                 " - choose what model and reasoning effort to use".dim(),
+             ]),
+-            Line::from(vec![
+-                "  ".into(),
+-                "/review".into(),
+-                " - review any changes and find issues".dim(),
+-            ]),
+         ];
+ 
+         parts.push(Box::new(PlainHistoryCell { lines: help_lines }));
+@@ -269,6 +260,14 @@
+                 }
+         )
+ }
++/// Codegraff mark for the session header, baked by `tui/tools/bake_header_mark.py`.
++const CODEGRAFF_MARK: [&str; 4] = [
++    "⠀⡠⠔⠚⠓⠢⠀⠀",
++    "⣼⠁⡠⠀⡆⢄⠀⠠",
++    "⣿⡘⠷⢸⠃⠞⠁⠁",
++    "⠈⠳⣦⣄⣠⡴⠊⠀",
++];
++
+ /// Session banner with a model label already resolved for presentation by its caller.
+ #[derive(Debug)]
+ pub(crate) struct SessionHeaderHistoryCell {
+@@ -337,16 +336,23 @@
+ impl HistoryCell for SessionHeaderHistoryCell {
+     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+         let width = usize::from(width);
+-        let mut title = vec!["  ".into()];
++        // The Codegraff mark (assets/codegraff-mark.svg baked to braille) sits left of the
++        // title and directory, which share its two middle rows.
++        let mark = |row: usize| Span::from(CODEGRAFF_MARK[row]).fg(accent_color());
++        let mut title = vec!["  ".into(), mark(1), "  ".into()];
+         title.extend(codex_title(self.version));
+         let mut lines = vec![
+             Line::default(),
++            Line::from(vec!["  ".into(), mark(0)]),
+             Line::from(title),
+             Line::from(vec![
+-                "     ".into(),
+-                self.format_directory(Some(width.saturating_sub(/*rhs*/ 5)))
++                "  ".into(),
++                mark(2),
++                "  ".into(),
++                self.format_directory(Some(width.saturating_sub(/*rhs*/ 12)))
+                     .dim(),
+             ]),
++            Line::from(vec!["  ".into(), mark(3)]),
+         ];
+         if self.yolo_mode {
+             lines.push(Line::from(vec![

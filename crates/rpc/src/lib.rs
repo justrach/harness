@@ -139,6 +139,12 @@ pub mod methods {
     pub const CODEGRAFF_AUTH_STATUS: &str = "CodegraffAuthStatus";
     pub const CODEGRAFF_USAGE: &str = "CodegraffUsage";
     pub const CODEGRAFF_SIGN_OUT: &str = "CodegraffSignOut";
+    /// `{cwd?, limit?}` → conversations from Claude Code, Codex and graff found on this
+    /// device that Harness doesn't have yet, newest first.
+    pub const EXTERNAL_HISTORY_LIST: &str = "ExternalHistoryList";
+    /// `{sessions?: [{source, id}], cwd?}` → import those (or, without `sessions`, every
+    /// one the list shows for `cwd`) as chats. Returns `{imported, skipped, errors, chatIds}`.
+    pub const EXTERNAL_HISTORY_IMPORT: &str = "ExternalHistoryImport";
     /// The account's recent CodeGraff PR-agent runs (`GET /v1/jobs`).
     pub const CODEGRAFF_JOBS: &str = "CodegraffJobs";
     /// Cancel one PR-agent run (`POST /v1/jobs/:id/cancel`).

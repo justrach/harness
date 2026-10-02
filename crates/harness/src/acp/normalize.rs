@@ -231,16 +231,19 @@ fn typed_call(update: &Value) -> ToolCall {
             // A diff pins down the file and shape; otherwise fall back to the
             // location/rawInput path with unknown content.
             if let Some(diff) = tool_diff(update) {
+                // Some agents (graff) attach the diff to the opening call and not to the
+                // completion, where it would reach the result. The inputs stay on the call
+                // for live viewers; the doc's render policy strips them before they persist.
                 if diff.old_text.is_none() {
                     ToolCall::WriteFile {
                         path: diff.path,
-                        content: None,
+                        content: Some(diff.new_text),
                     }
                 } else {
                     ToolCall::EditFile {
                         path: diff.path,
-                        old_string: None,
-                        new_string: None,
+                        old_string: diff.old_text,
+                        new_string: Some(diff.new_text),
                     }
                 }
             } else {
@@ -291,13 +294,13 @@ fn typed_call(update: &Value) -> ToolCall {
             if diff.old_text.is_none() {
                 ToolCall::WriteFile {
                     path: diff.path,
-                    content: None,
+                    content: Some(diff.new_text),
                 }
             } else {
                 ToolCall::EditFile {
                     path: diff.path,
-                    old_string: None,
-                    new_string: None,
+                    old_string: diff.old_text,
+                    new_string: Some(diff.new_text),
                 }
             }
         }
@@ -764,8 +767,8 @@ mod tests {
                 id: "t2".into(),
                 call: ToolCall::EditFile {
                     path: "/w/src/main.rs".into(),
-                    old_string: None,
-                    new_string: None,
+                    old_string: Some("fn old() {}".into()),
+                    new_string: Some("fn new() {}".into()),
                 },
             }
         );
@@ -798,7 +801,7 @@ mod tests {
                 id: "t3".into(),
                 call: ToolCall::WriteFile {
                     path: "/w/new.rs".into(),
-                    content: None
+                    content: Some("x".into())
                 },
             }]
         );

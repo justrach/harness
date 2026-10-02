@@ -56,13 +56,14 @@ import { RegistryRoom } from "./registry-room";
 import { ChatRoom } from "./chat-room";
 import { VaultRoom } from "./vault-room";
 import { AccountPurge } from "./account-purge";
+import { RefreshLeeway } from "./refresh-leeway";
 import { AUTH_ORG_HEADER, RoomActor, roomStore } from "./room-actor";
 import { ROOM_ID, RoomError, memberKey, newRoomId } from "./room-core";
 import { sweepExpiredRooms } from "./room-store-pg";
 import { personalOrgId } from "./auth";
 import installSh from "./install.sh";
 
-export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom, RoomActor, AccountPurge };
+export { SessionRoom, DeviceRoom, RegistryRoom, ChatRoom, PreviewRoom, VaultRoom, RoomActor, AccountPurge, RefreshLeeway };
 
 const SOURCE_ARCHIVE = "/releases/harness-edge-source-0.1.0.tar.gz";
 

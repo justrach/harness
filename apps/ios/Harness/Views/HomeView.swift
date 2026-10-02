@@ -26,7 +26,9 @@ struct HomeView: View {
     @State private var chatGPTComputers: [ChatGPTComputer] = []
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
-    @AppStorage(HomeGroupBy.storageKey) private var groupByRaw = HomeGroupBy.none.rawValue
+    // Start with Time each launch; a saved grouping can hide recent sessions
+    // inside collapsed projects. Project/device views are opt-in for this visit.
+    @State private var groupByRaw = HomeGroupBy.none.rawValue
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
@@ -57,12 +59,6 @@ struct HomeView: View {
             } else {
                 NavigationStack(path: $path) {
                     sidebar
-                        // An inset, not an overlay: the last row scrolls
-                        // clear of the pill, and it takes no room when hidden.
-                        .safeAreaInset(edge: .bottom) {
-                            SessionSwitcherPill()
-                                .padding(.bottom, 8)
-                        }
                         .navigationDestination(for: Route.self, destination: destination)
                 }
             }
@@ -85,7 +81,10 @@ struct HomeView: View {
         Group {
             switch route {
             case .space(let id): SpaceView(spaceId: id, path: $path)
-            case .chat(let id): SessionView(chatId: id)
+            // Compact: a pager host, so the open session swipes to its
+            // neighbours. The split layout keeps its own sidebar selection.
+            case .chat(let id):
+                if splitLayout { SessionView(chatId: id) } else { SessionPagerHost(chatId: id) }
             case .newSession(let destination): NewSessionView(destination: destination, path: $path)
             }
         }
@@ -162,35 +161,55 @@ struct HomeView: View {
                     // recovery hides instantly) and quiet — a bare
                     // grayscale spinner or dot with a faint caption, no
                     // surface, no border (shell.rs render_connection_pill).
-                    switch model.connectivity.state {
-                    case .offline:
-                        HStack(spacing: 5) {
-                            Circle()
-                                .fill(Theme.warning)
-                                .frame(width: 5, height: 5)
-                            Text("Offline — sends are saved")
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.textFaint)
+                    if model.sessionExpired {
+                        // The edge rejected the stored sign-in: say so, with the way out, instead of a
+                        // quiet "connecting" that never ends.
+                        Button {
+                            model.signInAgain()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Theme.warning)
+                                    .frame(width: 5, height: 5)
+                                Text(model.signInBusy ? "Signing in…" : "Signed out — tap to sign in")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textMuted)
+                            }
                         }
-                        .transition(.opacity)
-                    case .reconnecting:
-                        HStack(spacing: 5) {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(Theme.textMuted)
-                            Text("Reconnecting…")
-                                .font(Theme.sans(13))
-                                .foregroundStyle(Theme.textFaint)
-                        }
-                        .transition(.opacity)
-                    case .connected:
-                        // Initial catch-up (within the grace): the old
-                        // quiet "connecting" spinner, gone on first sync.
-                        if !model.connected {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .tint(Theme.textMuted)
-                                .accessibilityLabel("Connecting")
+                        .buttonStyle(.plain)
+                        .disabled(model.signInBusy)
+                        .accessibilityIdentifier("session-expired")
+                    } else {
+                        switch model.connectivity.state {
+                        case .offline:
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(Theme.warning)
+                                    .frame(width: 5, height: 5)
+                                Text("Offline — sends are saved")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textFaint)
+                            }
+                            .transition(.opacity)
+                        case .reconnecting:
+                            HStack(spacing: 5) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(Theme.textMuted)
+                                Text("Reconnecting…")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textFaint)
+                            }
+                            .transition(.opacity)
+                        case .connected:
+                            // Initial catch-up (within the grace): the old
+                            // quiet "connecting" spinner, gone on first sync.
+                            if !model.connected {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .tint(Theme.textMuted)
+                                    .accessibilityLabel("Connecting")
+                            }
                         }
                     }
                 }
@@ -320,9 +339,9 @@ struct HomeView: View {
             .pickerStyle(.inline)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: grouped ? grouping.symbol : "square.stack.3d.up")
+                Image(systemName: grouping.symbol)
                     .font(.system(size: 11, weight: .medium))
-                Text(grouped ? grouping.label : "Group")
+                Text(grouping.label)
                     .font(Theme.sans(13, weight: grouped ? .semibold : .medium))
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
@@ -422,6 +441,18 @@ struct HomeView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 6, trailing: 16))
             }
             .listSectionSeparator(.hidden)
+            // What's running or waiting, above the history. Hidden while
+            // searching or filtering so it never competes with a query.
+            let now = NowStrip.active(in: scoped, model: model)
+            if statusFilter == .all, searchText.isEmpty, !now.isEmpty {
+                Section {
+                    NowStrip(chats: now) { open(.chat($0)) }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 10, trailing: 0))
+                }
+                .listSectionSeparator(.hidden)
+            }
         }
         if chats.isEmpty {
             // A search can still hit the archived shelf below.

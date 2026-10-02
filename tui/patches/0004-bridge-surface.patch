@@ -1,0 +1,110 @@
+--- a/codex-rs/tui/src/slash_command.rs
++++ b/codex-rs/tui/src/slash_command.rs
+@@ -299,9 +299,63 @@
+             SlashCommand::Agents | SlashCommand::MultiAgents => true,
+             SlashCommand::Theme | SlashCommand::Pets => false,
+         }
++    }
++
++    /// The Harness bridge serves turns, models and config only, so commands that need other
++    /// app-server methods (threads, review, compaction, MCP, memories, ...) stay out of the
++    /// popup until the bridge implements them.
++    fn needs_unserved_method(self) -> bool {
++        use SlashCommand::*;
++        matches!(
++            self,
++            Ide | ElevateSandbox
++                | Experimental
++                | AutoReview
++                | Memories
++                | Skills
++                | Import
++                | Hooks
++                | Review
++                | Rename
++                | Archive
++                | Delete
++                | Resume
++                | Fork
++                | Worktree
++                | App
++                | Compact
++                | Recap
++                | Plan
++                | Voice
++                | Goal
++                | Agents
++                | Side
++                | Btw
++                | Tui
++                | Daemon
++                | Usage
++                | DebugConfig
++                | Cd
++                | Pets
++                | Mcp
++                | Apps
++                | Plugins
++                | Logout
++                | Feedback
++                | Rollout
++                | Ps
++                | Stop
++                | TestApproval
++                | MultiAgents
++                | MemoryDrop
++                | MemoryUpdate
++        )
+     }
+ 
+     fn is_visible(self) -> bool {
++        if self.needs_unserved_method() {
++            return false;
++        }
+         match self {
+             SlashCommand::Copy => !cfg!(target_os = "android"),
+             SlashCommand::App => cfg!(any(target_os = "macos", target_os = "windows")),
+--- a/codex-rs/tui/src/status/card.rs
++++ b/codex-rs/tui/src/status/card.rs
+@@ -768,7 +768,7 @@
+             .expect("status history agents summary state poisoned")
+             .clone();
+ 
+-        if self.model_provider.is_some() {
++        if self.model_provider.is_some() && false {
+             push_label(&mut labels, &mut seen, "Model provider");
+         }
+         if account_value.is_some() {
+@@ -796,7 +796,8 @@
+         let formatter = FieldFormatter::from_labels(labels.iter().map(String::as_str));
+         let value_width = formatter.value_width(available_width);
+ 
+-        if let Some(remote_connection) = self.remote_connection.as_ref() {
++        // The bridge address is plumbing, not something to show.
++        if let Some(remote_connection) = self.remote_connection.as_ref().filter(|_| false) {
+             let value = if remote_connection.is_local_daemon {
+                 Line::from("Local background server")
+             } else {
+@@ -826,7 +827,7 @@
+         let directory_value = format_directory_display(&self.directory, /*max_width*/ None);
+ 
+         lines.push(formatter.line("Model", model_spans));
+-        if let Some(model_provider) = self.model_provider.as_ref() {
++        if let Some(model_provider) = self.model_provider.as_ref().filter(|_| false) {
+             lines.push(formatter.line("Model provider", vec![Span::from(model_provider.clone())]));
+         }
+         lines.push(formatter.line("Directory", vec![Span::from(directory_value)]));
+@@ -862,7 +863,12 @@
+             lines.push(formatter.line("Context window", spans));
+         }
+ 
+-        lines.extend(self.rate_limit_lines(&rate_limit_state, available_width, &formatter));
++        // Rate limits come from OpenAI accounts; the bridge has none to report.
++        lines.extend(
++            self.rate_limit_lines(&rate_limit_state, available_width, &formatter)
++                .into_iter()
++                .filter(|_| false),
++        );
+         let thread_usage_lines = self.thread_usage.lines(&formatter, value_width);
+         if !thread_usage_lines.is_empty() {
+             lines.push(Line::from(Vec::<Span<'static>>::new()));
