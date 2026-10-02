@@ -37,14 +37,25 @@ struct HomeView: View {
         model.spaces.first { $0.id == spaceFilter }
     }
 
+    /// Opt-in split on iPhone (Settings > Layout): the list and the open session together when the window has
+    /// room for the chosen shape; the single stack otherwise. Off by default.
+    @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
+    @State private var containerSize: CGSize = .zero
+
+    private var phoneArrangement: PhoneSplit.Arrangement? {
+        guard horizontalSizeClass == .compact else { return nil }
+        return PhoneSplit.arrangement(mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off, in: containerSize)
+    }
+
     /// iPad (and other wide windows): the session list becomes a sidebar
     /// next to the open session, like the desktop. Compact width keeps the
-    /// phone's single stack.
-    private var splitLayout: Bool { horizontalSizeClass == .regular }
+    /// phone's single stack, unless the person turned on the phone split and
+    /// the window has room for it.
+    private var splitLayout: Bool { horizontalSizeClass == .regular || phoneArrangement != nil }
 
     var body: some View {
         Group {
-            if splitLayout {
+            if horizontalSizeClass == .regular {
                 NavigationSplitView {
                     sidebar
                 } detail: {
@@ -54,6 +65,15 @@ struct HomeView: View {
                     }
                 }
                 .navigationSplitViewStyle(.balanced)
+            } else if let arrangement = phoneArrangement {
+                PhoneSplitContainer(arrangement: arrangement) {
+                    NavigationStack { sidebar }
+                } detail: {
+                    NavigationStack(path: $path) {
+                        SplitDetailPlaceholder()
+                            .navigationDestination(for: Route.self, destination: destination)
+                    }
+                }
             } else {
                 NavigationStack(path: $path) {
                     sidebar
@@ -61,6 +81,7 @@ struct HomeView: View {
                 }
             }
         }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
         .environment(\.switchToSession, switchTo)
     }
 
@@ -125,7 +146,11 @@ struct HomeView: View {
                 ArchivedSection(spaceId: selectedSpace?.id, query: searchText, path: sidebarPath)
             }
         }
-        .searchable(text: $searchText, prompt: "Search sessions")
+        // In the phone split the field sits in the pane's own bar: the floating one overlaps the rows of a
+        // short pane.
+        .searchable(text: $searchText,
+                    placement: phoneArrangement == nil ? .automatic : .navigationBarDrawer(displayMode: .always),
+                    prompt: "Search sessions")
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 10)
         .contentMargins(.top, 2, for: .scrollContent)
@@ -428,7 +453,9 @@ struct HomeView: View {
             // What's running or waiting, above the history. Hidden while
             // searching or filtering so it never competes with a query.
             let now = NowStrip.active(in: scoped, model: model)
-            if statusFilter == .all, searchText.isEmpty, !now.isEmpty {
+            // Not in the phone split: the list beside the open session already shows what is running or
+            // waiting, and the cards would take most of a narrow pane.
+            if statusFilter == .all, searchText.isEmpty, !now.isEmpty, phoneArrangement == nil {
                 Section {
                     NowStrip(chats: now) { open(.chat($0)) }
                         .listRowBackground(Color.clear)

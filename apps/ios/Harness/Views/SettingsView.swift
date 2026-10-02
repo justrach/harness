@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDeleteAccount = false
+    @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
 
     /// "Codegraff · System", or the two variant names when light and dark
     /// come from different families.
@@ -52,6 +53,22 @@ struct SettingsView: View {
                         LabeledContent("Theme", value: themeSummary)
                     }
                     .accessibilityIdentifier("settings-appearance")
+                }
+
+                // iPad already shows the list beside the open session; a phone can too, when there is room.
+                if UIDevice.current.userInterfaceIdiom == .phone {
+                    Section {
+                        Picker("Split view", selection: $phoneSplitRaw) {
+                            ForEach(PhoneSplit.allCases) { mode in
+                                Text(mode.label).tag(mode.rawValue)
+                            }
+                        }
+                        .accessibilityIdentifier("settings-phone-split")
+                    } header: {
+                        Text("Layout")
+                    } footer: {
+                        Text("Shows the session list and the open session together when there is room: side by side in landscape, or stacked in portrait. Off keeps the single screen.")
+                    }
                 }
 
                 Section("Diagnostics") {
