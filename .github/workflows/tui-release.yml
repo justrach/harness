@@ -7,9 +7,12 @@ name: tui-release
 #
 # Run it after a release is published:
 #   gh workflow run tui-release.yml -f tag=v<version>
-# With no tag it builds and keeps the tarballs as workflow artifacts only.
+# With no tag it builds and keeps the tarballs as workflow artifacts only; a pull
+# request that touches tui/ builds the same way, so the package stays buildable.
 
 on:
+  pull_request:
+    paths: ["tui/**", ".github/workflows/tui-release.yml"]
   workflow_dispatch:
     inputs:
       tag:
