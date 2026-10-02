@@ -237,6 +237,31 @@ case "$promptline" in
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   ;;
 
+*scenario:elicit-interrupted*)
+  emit "{\"id\":\"graff-elicit-1\",\"method\":\"elicitation/create\",\"params\":{\"sessionId\":\"$SID\",\"mode\":\"form\",\"message\":\"Which database should I use?\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\",\"enum\":[\"Postgres\",\"SQLite\"]}},\"required\":[\"answer\"]}}}"
+  read -r ans || exit 1
+  { has "$ans" '"action":"accept"' && has "$ans" '"answer":"SQLite"'; } || exit 1
+  if has "$promptline" 'explicit'; then
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\",\"_meta\":{\"graff/cancelSource\":\"acp_cancel\"}}}"
+    exit 0
+  fi
+  if has "$promptline" 'progress'; then
+    update '{"sessionUpdate":"tool_call","toolCallId":"after-answer","title":"Work after answer","kind":"execute","status":"in_progress"}'
+    emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+    exit 0
+  fi
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"cancelled\"}}"
+  read -r resumed || exit 1
+  has "$resumed" '"method":"session/prompt"' && has "$resumed" '[Harness recovery]' || exit 1
+  if has "$promptline" 'again'; then
+    emit "{\"id\":$(rid "$resumed"),\"result\":{\"stopReason\":\"cancelled\"}}"
+  else
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed after answer"}}'
+    emit "{\"id\":$(rid "$resumed"),\"result\":{\"stopReason\":\"end_turn\"}}"
+  fi
+  exit 0
+  ;;
+
 *scenario:elicit*)
   # graff 0.0.302.6's ask_user: a form elicitation with one required answer.
   # The test's bridge picks "SQLite".

@@ -2068,3 +2068,89 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
         );
     }
 }
+
+async fn interrupted_elicitation_events(suffix: &str) -> Vec<AgentEvent> {
+    let (mut controls, _steer, _token) = controls();
+    controls.request_input = Box::new(|questions| {
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            // Keep the real input bridge parked before accepting the form.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let _ = tx.send(
+                questions
+                    .into_iter()
+                    .map(|q| UserInputAnswer {
+                        question_id: q.id,
+                        labels: vec!["SQLite".into()],
+                    })
+                    .collect(),
+            );
+        });
+        rx
+    });
+    run_to_end(
+        &harness(),
+        request(&format!("scenario:elicit-interrupted{suffix}")),
+        controls,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn accepted_clarification_recovers_an_unsolicited_interruption() {
+    let events = interrupted_elicitation_events("").await;
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "resumed after answer".into()
+        }),
+        "{events:?}"
+    );
+    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+}
+
+#[tokio::test]
+async fn repeated_clarification_interruption_surfaces_an_error_without_looping() {
+    let events = interrupted_elicitation_events("-again").await;
+    let notices = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::TextDelta { text } if text.contains("continuing once")))
+        .count();
+    assert_eq!(notices, 1, "{events:?}");
+    let finished = dones(&events);
+    assert_eq!(finished.len(), 1, "{events:?}");
+    assert_eq!(finished[0].0, DoneStatus::Errored);
+    assert!(
+        finished[0]
+            .1
+            .as_ref()
+            .is_some_and(|error| error.contains("unexpectedly"))
+    );
+}
+
+#[tokio::test]
+async fn explicit_clarification_cancellation_is_not_overridden() {
+    let events = interrupted_elicitation_events("-explicit").await;
+    assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
+    assert!(
+        !events.iter().any(
+            |e| matches!(e, AgentEvent::TextDelta { text } if text.contains("continuing once"))
+        )
+    );
+}
+
+#[tokio::test]
+async fn clarification_recovery_does_not_replay_reported_post_answer_work() {
+    let events = interrupted_elicitation_events("-progress").await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCall { id, .. } if id == "after-answer")),
+        "{events:?}"
+    );
+    assert_eq!(dones(&events)[0].0, DoneStatus::Errored, "{events:?}");
+    assert!(
+        !events.iter().any(
+            |e| matches!(e, AgentEvent::TextDelta { text } if text.contains("continuing once"))
+        )
+    );
+}
