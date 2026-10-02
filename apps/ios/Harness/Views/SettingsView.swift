@@ -56,6 +56,12 @@ struct SettingsView: View {
 
                 Section("Diagnostics") {
                     NavigationLink {
+                        ConnectionView()
+                    } label: {
+                        LabeledContent("Connection", value: model.connectionReport().registry)
+                    }
+                    .accessibilityIdentifier("settings-connection")
+                    NavigationLink {
                         PerformanceView()
                     } label: {
                         LabeledContent("Performance", value: Perf.shared.startupMs.map { "Started in \($0) ms" } ?? "")

@@ -32,6 +32,7 @@ struct HarnessApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background {
+                        model.backgrounded()
                         model.flushDocs()
                         PerfSharing.flush()
                     } else if phase == .active {

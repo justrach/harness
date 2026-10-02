@@ -23,7 +23,7 @@ struct SessionHostPickerSheet: View {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(device.name)
-                                        Text(model.deviceOnline(device.id) ? "Online" : "Offline — sends are saved")
+                                        Text(statusLine(model.hostStatus(device.id)))
                                             .font(Theme.sans(12))
                                             .foregroundStyle(Theme.textMuted)
                                     }
@@ -50,5 +50,14 @@ struct SessionHostPickerSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+
+    /// "Not confirmed" is not "offline": a host the phone has not heard from yet still takes the send.
+    private func statusLine(_ status: HostStatus) -> String {
+        switch status {
+        case .online: "Online"
+        case .unknown: "Not confirmed — sends are saved"
+        case .offline: "Offline — sends are saved"
+        }
     }
 }

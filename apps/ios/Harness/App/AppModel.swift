@@ -599,12 +599,51 @@ final class AppModel {
         (demo?.devices ?? workspace?.devices)?.first { $0.id == deviceId }?.name ?? deviceId
     }
 
-    func deviceOnline(_ deviceId: String) -> Bool {
+    /// What a screen may claim about a device: online on a recent beat, offline only on positive evidence
+    /// of absence (a joined room and five quiet minutes), otherwise unknown — see PresenceRule.
+    func hostStatus(_ deviceId: String) -> HostStatus {
         if let demo {
-            guard let seen = demo.devices.first(where: { $0.id == deviceId })?.lastSeenAt else { return false }
-            return nowMs() - seen < presenceFreshMs
+            guard let seen = demo.devices.first(where: { $0.id == deviceId })?.lastSeenAt else { return .offline }
+            return nowMs() - seen < presenceFreshMs ? .online : .offline
         }
-        return workspace?.deviceOnline(deviceId) ?? false
+        return workspace?.hostStatus(deviceId) ?? .unknown
+    }
+
+    func deviceOnline(_ deviceId: String) -> Bool {
+        hostStatus(deviceId) == .online
+    }
+
+    /// The one line the new-session screen may show above the composer, in order of what is actually
+    /// wrong: the sign-in is dead, the phone is not connected, or the host is positively gone. A host that
+    /// is merely unconfirmed (just launched, a beat not yet in) gets no warning at all.
+    enum HostNotice: Equatable {
+        case signedOut
+        case reconnecting
+        case offline
+    }
+
+    func hostNotice(for deviceId: String) -> HostNotice? {
+        guard demo == nil, let workspace else { return nil }
+        if sessionExpired { return .signedOut }
+        let status = workspace.hostStatus(deviceId)
+        if status == .online { return nil }
+        if !workspace.connected { return .reconnecting }
+        return status == .offline ? .offline : nil
+    }
+
+    /// A snapshot for Settings → Connection. Reading it sends nothing and starts no timer.
+    func connectionReport() -> ConnectionReport {
+        ConnectionReport(
+            auth: config?.authDiagnostics(),
+            registryConnected: workspace?.connected ?? false,
+            registrySynced: workspace?.synced ?? false,
+            retryInSeconds: workspace?.retryAt.map { max(0, Int($0.timeIntervalSinceNow.rounded(.up))) },
+            devices: (workspace?.devices ?? []).map { device in
+                ConnectionReport.Device(name: device.name,
+                                        isThisPhone: device.id == config?.deviceId,
+                                        status: workspace?.hostStatus(device.id) ?? .unknown,
+                                        beatAgeSeconds: workspace?.beatAgeMs(device.id).map { Int($0 / 1_000) })
+            })
     }
 
     /// Live harness catalog from the selected execution device (Settings → Agents
@@ -911,9 +950,16 @@ final class AppModel {
     /// online event on success, so every PARKED backoff (not just the rooms
     /// the kick reaches) lands a redial in ~1 RTT.
     func foregrounded() {
+        workspace?.setActive(true)
         refreshSignInIfDue()
         kickAllRooms()
         probeEdgeHealth()
+    }
+
+    /// Background hook: stop scheduling status wake-ups; iOS suspends the app anyway, and `foregrounded()`
+    /// catches up on whatever aged out.
+    func backgrounded() {
+        workspace?.setActive(false)
     }
 
     /// Spend the refresh while the app is in front (and may finish it), not on whichever socket redials
@@ -1112,7 +1158,7 @@ final class AppModel {
         } else if connectivity.state != .connected {
             return true
         }
-        if !deviceOnline(chat.deviceId) { return true }
+        if hostStatus(chat.deviceId) == .offline { return true }
         return false
     }
 

@@ -347,7 +347,8 @@ struct HomeView: View {
 
     private func deviceTag(_ space: Space) -> String {
         let name = model.deviceName(space.deviceId)
-        return model.deviceOnline(space.deviceId) ? "@ \(name)" : "@ \(name) · offline"
+        // "offline" only on positive evidence; a host that is merely unconfirmed is not called gone.
+        return model.hostStatus(space.deviceId) == .offline ? "@ \(name) · offline" : "@ \(name)"
     }
 
     private func spaceMenuButton(id: String, title: String, subtitle: String?) -> some View {
