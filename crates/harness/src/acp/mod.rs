@@ -31,6 +31,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 mod antigravity_paths;
+mod clarification_resume;
 mod compaction;
 mod devin_models;
 mod elicitation;
@@ -2917,7 +2918,10 @@ fn stop_outcome(
     }
     match res {
         Ok(resp) => match resp.get("stopReason").and_then(Value::as_str) {
-            Some("cancelled") => (DoneStatus::Interrupted, None),
+            Some("cancelled") => match clarification_resume::cancellation_error(resp) {
+                Some(message) => (DoneStatus::Errored, Some(message)),
+                None => (DoneStatus::Interrupted, None),
+            },
             Some("error") => (
                 DoneStatus::Errored,
                 Some("The agent failed to complete the turn.".to_owned()),
@@ -3050,6 +3054,7 @@ fn handle_server_request_live(
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
+    answered: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Vec<AgentEvent> {
     if params
         .get("sessionId")
@@ -3065,7 +3070,7 @@ fn handle_server_request_live(
         return Vec::new();
     }
     if method == "elicitation/create" {
-        return ask_elicitation(client, id, params, request_input);
+        return ask_elicitation(client, id, params, request_input, answered);
     }
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
@@ -3136,6 +3141,7 @@ fn ask_elicitation(
     id: Value,
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
+    answered: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Vec<AgentEvent> {
     let Some(form) = elicitation::form(params, new_message_id) else {
         client.respond(&id, elicitation::cancel());
@@ -3143,9 +3149,14 @@ fn ask_elicitation(
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);
+    let answered = std::sync::Arc::clone(answered);
     tokio::spawn(async move {
         let answers = (request_input)(form.questions()).await.unwrap_or_default();
-        client.respond(&id, form.response(&answers));
+        let response = form.response(&answers);
+        if response.get("action").and_then(Value::as_str) == Some("accept") {
+            answered.store(true, std::sync::atomic::Ordering::Release);
+        }
+        client.respond(&id, response);
     });
     Vec::new()
 }
@@ -3490,6 +3501,7 @@ async fn run_session(session: Session) {
         origin,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
+    let mut clarification = clarification_resume::State::default();
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
@@ -3974,6 +3986,7 @@ async fn run_session(session: Session) {
                 // a full channel never parses the response): past it the call
                 // is abandoned and the steer redelivered.
                 if let Some((text, mut fut)) = steering_call.take() {
+                    clarification.steer();
                     let outcome = match tokio::time::timeout(
                         Duration::from_millis(1000),
                         &mut fut,
@@ -4021,6 +4034,7 @@ async fn run_session(session: Session) {
                             let events =
                                 session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
                             for ev in events {
+                                clarification.observe(&ev);
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
                                     break;
@@ -4035,6 +4049,7 @@ async fn run_session(session: Session) {
                                 &params,
                                 &request_input,
                                 &session_id,
+                                &clarification.answered,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -4050,6 +4065,29 @@ async fn run_session(session: Session) {
                 }
                 if consumer_gone {
                     break 'main;
+                }
+                if interrupt.is_cancelled() {
+                    interrupted = true;
+                }
+                if clarification.take_retry(
+                    &res, interrupted,
+                    !queued_steers.is_empty() || !steer_backlog.is_empty() || !steering.is_empty(),
+                ) {
+                    if !send(&event_tx, AgentEvent::TextDelta {
+                        text: clarification_resume::NOTICE.into(),
+                    }).await {
+                        break 'main;
+                    }
+                    open_tools.clear();
+                    last_update_at = tokio::time::Instant::now();
+                    prompt_seq += 1;
+                    current_prompt_id = prompt_complete_extension.then(|| format!("harness-p{prompt_seq}"));
+                    prompt_stall_deadline = prompt_stall.map(|d| tokio::time::Instant::now() + d);
+                    turn = Some(prompt_turn(
+                        client.clone(), session_id.clone(), clarification_resume::PROMPT.into(),
+                        Vec::new(), allowed_images.clone(), images_supported, current_prompt_id.clone(),
+                    ));
+                    continue 'main;
                 }
                 let (prev, _next) = rotate(&mut assistant_message_id);
                 if !send(
@@ -4203,6 +4241,7 @@ async fn run_session(session: Session) {
                     let events =
                         session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
                     for ev in events {
+                        clarification.observe(&ev);
                         track_open_tools(&ev, &mut open_tools);
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -4218,6 +4257,7 @@ async fn run_session(session: Session) {
                         &params,
                         &request_input,
                         &session_id,
+                        &clarification.answered,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -4315,6 +4355,7 @@ async fn run_session(session: Session) {
                                     let events =
                                         session_update_events(&method, &params, &session_id, &mut subagents, &mut trackers);
                                     for ev in events {
+                                        clarification.observe(&ev);
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
                                             break;
@@ -4329,6 +4370,7 @@ async fn run_session(session: Session) {
                                         &params,
                                         &request_input,
                                 &session_id,
+                                &clarification.answered,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -4552,6 +4594,7 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    clarification.steer();
                     allowed_images.extend(msg.attachments.iter().cloned());
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
