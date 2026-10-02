@@ -206,7 +206,11 @@ struct SessionView: View {
     /// automatically" (degraded path — no fake progress), or the explicit
     /// "Not delivered — tap to retry" (transcript.rs retry_send).
     private func statusStrip(chat: Chat, status: SessionStatus?, store: SessionStore) -> some View {
-        TimelineView(.periodic(from: .now, by: 1)) { _ in
+        // Ticks once a second only while something on the strip is timed: the Working elapsed counter, a
+        // pending send's grace, or the reconnect countdown. An idle open chat repaints nothing.
+        let timed = status == .working || model.sendState(for: chat) != nil
+            || model.connectivity.state != .connected
+        return TimelineView(.animation(minimumInterval: 1, paused: !timed)) { _ in
             HStack(spacing: 6) {
                 switch model.sendState(for: chat) {
                 case .failed?:

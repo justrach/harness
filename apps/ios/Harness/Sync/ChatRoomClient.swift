@@ -43,7 +43,6 @@ actor ChatRoomClient {
     static let checkpointDeadlineNs: UInt64 = 300_000_000_000
     static let probeDeadlineNs: UInt64 = 10_000_000_000
     static let probeQuietNs: UInt64 = 900_000_000_000  // 15min quiet-room probe
-    static let livenessTickNs: UInt64 = 1_000_000_000
     static let backoffBaseMs = 250
     static let backoffCapMs = 16_000
     /// Stability-gated backoff reset (chat_client.rs STABLE_RESET): only a
@@ -136,7 +135,14 @@ actor ChatRoomClient {
     /// Bytes moved on the checkpoint stream recently — download progress IS
     /// liveness while it runs; the silence lease defers to it.
     private var checkpointProgressAt: DispatchTime?
-    private var joined = false
+    /// Leaving `joined` starts the HTTPS fallback poll and entering it ends it, so a healthy room costs
+    /// no 20s wake-ups (see `startPoll`).
+    private var joined = false {
+        didSet {
+            guard joined != oldValue else { return }
+            if joined { stopPoll() } else { startPoll() }
+        }
+    }
     /// When the current session joined — feeds the stability-gated reset.
     private var joinedAt: DispatchTime?
     private var closed = false
@@ -152,10 +158,20 @@ actor ChatRoomClient {
     private var lastInbound = DispatchTime.now()
     /// Protocol clock — only real frames count (pongs prove nothing).
     private var lastProtocolRx = DispatchTime.now()
-    private var helloSentAt: DispatchTime?
-    private var backfillStartedAt: DispatchTime?
-    private var rowPhaseStartedAt: DispatchTime?
-    private var probeSentAt: DispatchTime?
+    /// Setting any of the four deadlines wakes a liveness loop that is parked in a long sleep
+    /// (LivenessSchedule). Clearing one needs nothing: the loop's next look sees it gone.
+    private var helloSentAt: DispatchTime? { didSet { if helloSentAt != nil { wakeLivenessIfParked() } } }
+    private var backfillStartedAt: DispatchTime? {
+        didSet { if backfillStartedAt != nil { wakeLivenessIfParked() } }
+    }
+    private var rowPhaseStartedAt: DispatchTime? {
+        didSet { if rowPhaseStartedAt != nil { wakeLivenessIfParked() } }
+    }
+    private var probeSentAt: DispatchTime? { didSet { if probeSentAt != nil { wakeLivenessIfParked() } } }
+    /// True only while the liveness loop is suspended in a long sleep — the one state in which re-arming is
+    /// both needed and safe. A loop that is mid-tick (it just sent the quiet probe) picks the new deadline
+    /// up on its own, and cancelling it there would cancel its own probe send.
+    private var livenessParked = false
 
     init(chatId: String,
          device: String,
@@ -182,15 +198,34 @@ actor ChatRoomClient {
         // the doc up in ~1 RTT while the socket spends 4+ on TLS + upgrade +
         // hello — and on networks that strip WS upgrades (airplane wifi) the
         // 20s poll is the transport, delivering reads AND queued sends.
-        pullTask?.cancel()
+        Task { [weak self] in await self?.pullSync() }
+        startPoll()
+    }
+
+    /// The 20s poll exists only for a room that is not joined: it runs from start (or from leaving `joined`)
+    /// and ends the moment the room joins, so an open, healthy chat wakes nothing every 20s.
+    private func startPoll() {
+        guard pullTask == nil, !closed, !joined else { return }
         pullTask = Task { [weak self] in
-            await self?.pullSync()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                try? await Task.sleep(for: .seconds(20), tolerance: .seconds(5))
                 guard let self, !Task.isCancelled else { return }
-                if await self.shouldPoll() { await self.pullSync() }
+                guard await self.shouldPoll() else {
+                    await self.pollEnded()
+                    return
+                }
+                await self.pullSync()
             }
         }
+    }
+
+    private func stopPoll() {
+        pullTask?.cancel()
+        pullTask = nil
+    }
+
+    private func pollEnded() {
+        pullTask = nil
     }
 
     /// One HTTPS sync cycle: flush pending batches (POST — batchId dedupe
@@ -445,17 +480,11 @@ actor ChatRoomClient {
             }
         }
 
-        livenessTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: ChatRoomClient.livenessTickNs)
-                guard let self else { return }
-                await self.livenessTick(gen: gen)
-            }
-        }
-
         // Hello with the persisted cursor. The deadline is armed BEFORE the
-        // send — an unanswered hello must never hang the session.
+        // send — an unanswered hello must never hang the session. The
+        // liveness loop that polices it starts with it.
         helloSentAt = .now()
+        armLiveness()
         let cursor = await delegate.cursor()
         await send(ChatWire.encode(ChatFrameType.hello,
                                    header: ["cursor": cursor, "device": device]))
@@ -516,6 +545,47 @@ actor ChatRoomClient {
             return
         }
         await sendSocket(.string("ping"), socket: socket, gen: gen)
+    }
+
+    /// (Re)start the liveness loop for the current socket. It looks every second while a hello, catch-up
+    /// or probe deadline is pending and otherwise sleeps until the quiet-probe time — see LivenessSchedule.
+    private func armLiveness() {
+        livenessTask?.cancel()
+        livenessParked = false
+        guard socket != nil, !closed else {
+            livenessTask = nil
+            return
+        }
+        let gen = generation
+        livenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let wait = await self.beginLivenessSleep()
+                try? await Task.sleep(for: .nanoseconds(Int64(wait)), tolerance: .nanoseconds(Int64(wait / 8)))
+                guard !Task.isCancelled else { return }
+                await self.endLivenessSleep()
+                await self.livenessTick(gen: gen)
+            }
+        }
+    }
+
+    private func beginLivenessSleep() -> UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let pending = helloSentAt != nil || probeSentAt != nil
+            || backfillStartedAt != nil || rowPhaseStartedAt != nil
+        let wait = LivenessSchedule.waitNs(pending: pending, joined: joined,
+                                           quietForNs: now &- lastProtocolRx.uptimeNanoseconds,
+                                           probeQuietNs: ChatRoomClient.probeQuietNs)
+        livenessParked = wait > LivenessSchedule.pendingTickNs
+        return wait
+    }
+
+    private func endLivenessSleep() {
+        livenessParked = false
+    }
+
+    private func wakeLivenessIfParked() {
+        if livenessParked { armLiveness() }
     }
 
     /// Hello answers, the catch-up, and probes run against hard deadlines; a

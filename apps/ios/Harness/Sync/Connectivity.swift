@@ -59,12 +59,20 @@ final class ConnectivityCenter {
     @ObservationIgnored private var degradedSince: [String: Int64] = [:]
     @ObservationIgnored private var tickTask: Task<Void, Never>?
 
+    /// Sampling cadence. While anything is degraded, graced or pending the 4s grace and the elapsed-based
+    /// send states need the original 1s samples. A healthy idle app has nothing to time, so it looks every
+    /// 5s: a drop is noticed up to 5s later, and the pill still only shows after the 4s grace.
+    static let busyTick: Duration = .seconds(1)
+    static let idleTick: Duration = .seconds(5)
+
     func start() {
         guard tickTask == nil else { return }
         tickTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                self?.recompute()
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self else { return }
+                let busy = self.recompute()
+                try? await Task.sleep(for: busy ? Self.busyTick : Self.idleTick,
+                                      tolerance: busy ? .milliseconds(200) : .seconds(1))
             }
         }
     }
@@ -74,9 +82,16 @@ final class ConnectivityCenter {
         tickTask = nil
     }
 
+    /// The OS path flipped: sample now and drop to the busy cadence if that made anything degraded, instead
+    /// of waiting out an idle sleep.
     func setPathOffline(_ offline: Bool) {
         pathOffline = offline
-        recompute()
+        if tickTask != nil {
+            stop()
+            start()
+        } else {
+            recompute()
+        }
     }
 
     /// DegradeGrace: report degraded only once the raw state has persisted
@@ -93,7 +108,9 @@ final class ConnectivityCenter {
         return now - since >= Self.degradeGraceMs
     }
 
-    private func recompute() {
+    /// Returns whether anything still needs the 1s cadence (see `busyTick`).
+    @discardableResult
+    private func recompute() -> Bool {
         let now = nowMs()
         let offline = graced("os", raw: pathOffline, now: now)
         let registryDown = graced("registry", raw: !(registryConnected?() ?? true), now: now)
@@ -123,9 +140,11 @@ final class ConnectivityCenter {
         if newState != state { state = newState }
         if chats != degradedChats { degradedChats = chats }
         if retryAt != nextRetryAt { retryAt = nextRetryAt }
-        if newState != .connected || !chats.isEmpty || !degradedSince.isEmpty
-            || (hasPendingSends?() ?? false) {
+        let busy = newState != .connected || !chats.isEmpty || !degradedSince.isEmpty
+            || (hasPendingSends?() ?? false)
+        if busy {
             pulse &+= 1
         }
+        return busy
     }
 }
