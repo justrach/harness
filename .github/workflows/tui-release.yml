@@ -1,0 +1,63 @@
+name: tui-release
+
+# Build the terminal UI (tui/) and attach it to a release.
+#   - macOS (Apple silicon) and Linux (x86_64 + aarch64) tarballs via tui/package.sh
+# The release workflow does not run this: the TUI pulls and patches an upstream
+# checkout and is a heavy build, so a failure here must not hold up the app.
+#
+# Run it after a release is published:
+#   gh workflow run tui-release.yml -f tag=v<version>
+# With no tag it builds and keeps the tarballs as workflow artifacts only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the tarballs to (empty: artifacts only)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest # Apple silicon
+          - runner: ubuntu-24.04 # x86_64
+          - runner: ubuntu-24.04-arm # aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libssl-dev libcap-dev cmake netcat-openbsd
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tui/bridge
+            tui/launcher
+      - name: package
+        run: tui/package.sh
+      - name: smoke test the tarball
+        run: |
+          mkdir smoke && tar -xzf tui/dist/*.tar.gz -C smoke
+          CODEX_HOME="$RUNNER_TEMP/codex-home" smoke/*/bin/harness-tui --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tui-${{ runner.os }}-${{ runner.arch }}
+          path: tui/dist/*.tar.gz
+          if-no-files-found: error
+      - name: attach to release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" tui/dist/*.tar.gz --clobber
