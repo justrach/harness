@@ -57,12 +57,6 @@ struct HomeView: View {
             } else {
                 NavigationStack(path: $path) {
                     sidebar
-                        // An inset, not an overlay: the last row scrolls
-                        // clear of the pill, and it takes no room when hidden.
-                        .safeAreaInset(edge: .bottom) {
-                            SessionSwitcherPill()
-                                .padding(.bottom, 8)
-                        }
                         .navigationDestination(for: Route.self, destination: destination)
                 }
             }
@@ -85,7 +79,10 @@ struct HomeView: View {
         Group {
             switch route {
             case .space(let id): SpaceView(spaceId: id, path: $path)
-            case .chat(let id): SessionView(chatId: id)
+            // Compact: a pager host, so the open session swipes to its
+            // neighbours. The split layout keeps its own sidebar selection.
+            case .chat(let id):
+                if splitLayout { SessionView(chatId: id) } else { SessionPagerHost(chatId: id) }
             case .newSession(let destination): NewSessionView(destination: destination, path: $path)
             }
         }
@@ -428,6 +425,18 @@ struct HomeView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 6, trailing: 16))
             }
             .listSectionSeparator(.hidden)
+            // What's running or waiting, above the history. Hidden while
+            // searching or filtering so it never competes with a query.
+            let now = NowStrip.active(in: scoped, model: model)
+            if statusFilter == .all, searchText.isEmpty, !now.isEmpty {
+                Section {
+                    NowStrip(chats: now) { open(.chat($0)) }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 10, trailing: 0))
+                }
+                .listSectionSeparator(.hidden)
+            }
         }
         if chats.isEmpty {
             // A search can still hit the archived shelf below.
