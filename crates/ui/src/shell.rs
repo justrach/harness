@@ -3628,6 +3628,34 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::Reauthenticate { chat_id, provider } => {
+                // Resolve the emitting transcript's chat, not the selected
+                // chat/device: split panes may show a different host.
+                let host = self
+                    .state
+                    .read(cx)
+                    .chats
+                    .iter()
+                    .find(|chat| chat.id == *chat_id)
+                    .map(|chat| chat.device_id.clone())
+                    .filter(|host| !host.is_empty());
+                let Some(host) = host else {
+                    self.sidebar_notice = Some(
+                        "Chat host unavailable. Open the chat's host in Accounts to sign in."
+                            .into(),
+                    );
+                    cx.notify();
+                    return;
+                };
+                if self.accounts_page.is_none() {
+                    let state = self.state.clone();
+                    self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
+                }
+                if let Some(page) = &self.accounts_page {
+                    page.update(cx, |page, cx| page.start_reauth(host, *provider, cx));
+                }
+                self.open_settings(SettingsSection::Agents, cx);
+            }
             TranscriptEvent::NewChatWithModel { model } => {
                 self.new_chat_with_model(model.clone(), cx);
             }
@@ -14336,6 +14364,142 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn reauth_action_targets_emitting_chat_host_without_replaying(cx: &mut TestAppContext) {
+        use harness_proto::HarnessId;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    let chat = |id, host| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": host, "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap()
+                    };
+                    state.chats = vec![
+                        chat("viewer-chat", "viewer-host"),
+                        chat("remote-chat", "remote-host"),
+                        chat("other-chat", "other-host"),
+                    ];
+                    state.selected_chat = Some("viewer-chat".into());
+                    state.selected_device = Some("viewer-host".into());
+                    state.local_device_id = Some("viewer-host".into());
+                });
+                shell.composer.update(cx, |composer, cx| {
+                    composer.prefill("unsent draft".into(), cx)
+                });
+                for (chat_id, host, provider) in [
+                    (
+                        "remote-chat",
+                        "remote-host",
+                        harness_proto::ReauthProvider::ChatgptNew,
+                    ),
+                    (
+                        "other-chat",
+                        "other-host",
+                        harness_proto::ReauthProvider::Codex,
+                    ),
+                ] {
+                    shell.on_transcript_event(
+                        shell.transcript.clone(),
+                        &TranscriptEvent::Reauthenticate {
+                            chat_id: chat_id.into(),
+                            provider,
+                        },
+                        cx,
+                    );
+                    assert!(matches!(
+                        shell.route,
+                        Route::Settings(SettingsSection::Agents)
+                    ));
+                    let page = shell.accounts_page.as_ref().unwrap().read(cx);
+                    assert_eq!(page.login_target(), Some(host));
+                    let expected = match provider {
+                        harness_proto::ReauthProvider::ChatgptNew => serde_json::json!({
+                            "harness": "graff", "provider": "chatgpt-new",
+                            "reauthenticate": true, "targetDeviceId": host,
+                        }),
+                        harness_proto::ReauthProvider::Codex => serde_json::json!({
+                            "harness": "codex", "reauthenticate": true, "deviceAuth": true, "targetDeviceId": host,
+                        }),
+                    };
+                    assert_eq!(page.recovery_params(provider), expected);
+                    assert_eq!(
+                        shell.state.read(cx).selected_chat.as_deref(),
+                        Some("viewer-chat")
+                    );
+                    assert_eq!(
+                        shell.state.read(cx).selected_device.as_deref(),
+                        Some("viewer-host")
+                    );
+                    assert_eq!(
+                        shell.composer.read(cx).input.read(cx).text(),
+                        "unsent draft"
+                    );
+                }
+                // A missing owner must not silently route login to the viewer.
+                shell.route = Route::Chat;
+                shell.on_transcript_event(
+                    shell.transcript.clone(),
+                    &TranscriptEvent::Reauthenticate {
+                        chat_id: "missing-chat".into(),
+                        provider: harness_proto::ReauthProvider::ChatgptNew,
+                    },
+                    cx,
+                );
+                assert!(matches!(shell.route, Route::Chat));
+                assert_eq!(
+                    shell
+                        .accounts_page
+                        .as_ref()
+                        .unwrap()
+                        .read(cx)
+                        .login_target(),
+                    Some("other-host")
+                );
+                assert!(
+                    shell
+                        .sidebar_notice
+                        .as_ref()
+                        .unwrap()
+                        .contains("host unavailable")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn model_mismatch_card_actions_carry_the_prompt_without_sending(cx: &mut TestAppContext) {
         use harness_proto::{HarnessId, ReasoningLevel};
         let dir = tempfile::tempdir().unwrap();
@@ -14425,6 +14589,7 @@ mod exit_regressions {
                             message: "harness protocol error: graff restored a different model \
                                       (codex/gpt-6-sol); kimi/k3 requires a new session"
                                 .into(),
+                            reauth: None,
                         },
                     ),
                 ];

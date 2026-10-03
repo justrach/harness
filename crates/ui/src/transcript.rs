@@ -40,7 +40,7 @@ use gpui::{
 };
 
 use harness_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
-use harness_proto::ToolCall;
+use harness_proto::{ReauthProvider, ToolCall};
 
 use crate::markdown::parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full,
@@ -1244,6 +1244,11 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
+    /// Only the typed upstream auth signal offers a login action.
+    ReauthRequired {
+        message: SharedString,
+        provider: ReauthProvider,
+    },
     /// A resumed graff chat restored a model other than the picked one. The
     /// run can't go on, but the chat can: a card offers both ways forward.
     ModelMismatch {
@@ -1816,20 +1821,28 @@ pub fn rows_for_entry(
                     MessagePart::Error {
                         id: part_id,
                         message,
+                        reauth,
                     } => {
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: message.len() as u64,
+                            version: fnv1a(format!("{message}\0{reauth:?}").as_bytes()),
                             turn_start: false,
-                            kind: match harness_adapters::acp::parse_model_mismatch(message) {
-                                Some(mismatch) => RowKind::ModelMismatch {
-                                    requested: mismatch.requested.into(),
-                                    restored: mismatch.restored.map(Into::into),
-                                },
-                                None => RowKind::ErrorChip {
-                                    // Harness-generated; the chip is one line.
+                            kind: if let Some(provider) = reauth {
+                                RowKind::ReauthRequired {
                                     message: single_line(message).into(),
-                                },
+                                    provider: *provider,
+                                }
+                            } else {
+                                match harness_adapters::acp::parse_model_mismatch(message) {
+                                    Some(mismatch) => RowKind::ModelMismatch {
+                                        requested: mismatch.requested.into(),
+                                        restored: mismatch.restored.map(Into::into),
+                                    },
+                                    None => RowKind::ErrorChip {
+                                        // Harness-generated; the chip is one line.
+                                        message: single_line(message).into(),
+                                    },
+                                }
                             },
                             entry_id: entry_id.clone(),
                             timestamp: None,
@@ -3535,6 +3548,12 @@ pub enum TranscriptEvent {
     /// The model-mismatch card: keep this chat on the `model` its session
     /// restored, with the failed prompt back in the composer.
     KeepChatModel { model: String },
+    /// Start the allowlisted login on this chat's execution host. No prompt
+    /// is retried or copied, and the viewer's selected device is irrelevant.
+    Reauthenticate {
+        chat_id: String,
+        provider: ReauthProvider,
+    },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -6069,6 +6088,49 @@ impl Transcript {
             .into_any_element()
     }
 
+    fn render_reauth(
+        &self,
+        row_id: &SharedString,
+        message: &SharedString,
+        provider: ReauthProvider,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chat_id = self.chat_id.clone();
+        div()
+            .py(px(4.0))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                notice_chip(
+                    theme,
+                    false,
+                    "ChatGPT sign-in required",
+                    message.clone(),
+                    Tile,
+                )
+                .w_full(),
+            )
+            .when_some(chat_id, |el, chat_id| {
+                el.child(
+                    crate::popover::btn_primary(theme, "Sign in to ChatGPT")
+                        .id(SharedString::from(format!("{row_id}-reauth")))
+                        .role(gpui::Role::Button)
+                        .aria_label("Sign in to ChatGPT")
+                        .self_start()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(TranscriptEvent::Reauthenticate {
+                                chat_id: chat_id.clone(),
+                                provider,
+                            });
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
     /// The recoverable form of a resumed graff chat's model mismatch: say
     /// plainly what happened and offer both ways forward. Neither action
     /// re-sends anything — the same run would fail the same way.
@@ -7047,6 +7109,9 @@ impl Transcript {
                 mime_type,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            RowKind::ReauthRequired { message, provider } => {
+                self.render_reauth(&row.id, message, *provider, &theme, cx)
+            }
             RowKind::ModelMismatch {
                 requested,
                 restored,
@@ -9209,6 +9274,16 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         }
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
+        }
+        if let MessagePart::Error {
+            message, reauth, ..
+        } = part
+        {
+            acc.extend_from_slice(message.as_bytes());
+            acc.push(0);
+            if let Some(provider) = reauth {
+                acc.extend_from_slice(provider.as_str().as_bytes());
+            }
         }
     }
     fnv1a(&acc)
@@ -12647,10 +12722,12 @@ mod tests {
                     message: "harness protocol error: graff restored a different model \
                               (codex/gpt-6-sol); kimi/k3 requires a new session"
                         .into(),
+                    reauth: None,
                 },
                 MessagePart::Error {
                     id: "e2".into(),
                     message: "boom".into(),
+                    reauth: None,
                 },
             ],
         );
@@ -12676,6 +12753,60 @@ mod tests {
     }
 
     #[test]
+    fn typed_reauth_stays_visible_and_invalidates_cached_error_rows() {
+        let entry = |reauth| {
+            assistant(
+                "a1",
+                MessageStatus::Aborted,
+                vec![
+                    tool_part("t0", "ls"),
+                    MessagePart::Error {
+                        id: "e1".into(),
+                        // Auth-looking prose alone never offers login.
+                        message: "ChatGPT token expired".into(),
+                        reauth,
+                    },
+                ],
+            )
+        };
+        let plain = entry(None);
+        let plain_rows = rows_for_entry(&plain, false, true, &mut parse);
+        let plain_error = compact_visible(&plain_rows)
+            .into_iter()
+            .find(|row| matches!(row.kind, RowKind::ErrorChip { .. }))
+            .expect("untyped errors remain ordinary error chips");
+        let mut versions = HashSet::new();
+        for provider in [ReauthProvider::ChatgptNew, ReauthProvider::Codex] {
+            let typed = entry(Some(provider));
+            assert_ne!(
+                entry_fingerprint(&plain, false),
+                entry_fingerprint(&typed, false)
+            );
+            let rows = rows_for_entry(&typed, false, true, &mut parse);
+            let error = compact_visible(&rows)
+                .into_iter()
+                .find(|row| matches!(row.kind, RowKind::ReauthRequired { .. }))
+                .expect("typed login recovery remains outside the compact work fold");
+            assert!(error.compact_fold.is_none());
+            assert_eq!(error.id, plain_error.id);
+            assert_ne!(error.version, plain_error.version);
+            assert!(
+                matches!(error.kind, RowKind::ReauthRequired { provider: actual, .. } if actual == provider)
+            );
+            versions.insert(error.version);
+        }
+        assert_eq!(
+            versions.len(),
+            2,
+            "changing the route must re-splice the login action"
+        );
+        assert_ne!(
+            entry_fingerprint(&entry(Some(ReauthProvider::ChatgptNew)), false),
+            entry_fingerprint(&entry(Some(ReauthProvider::Codex)), false),
+        );
+    }
+
+    #[test]
     fn compact_mode_keeps_input_and_error_chips_visible() {
         // Interactive/error rows are not work steps — they stay outside the
         // fold so a blocking question or a failure still surfaces.
@@ -12687,6 +12818,7 @@ mod tests {
                 MessagePart::Error {
                     id: "e1".into(),
                     message: "boom".into(),
+                    reauth: None,
                 },
                 tool_part("t1", "pwd"),
                 text_part("r0", "the answer"),

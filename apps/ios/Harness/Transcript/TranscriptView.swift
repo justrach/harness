@@ -13,6 +13,8 @@ struct TranscriptView: View {
     @State private var veils = VeilStore()
     @State var folds = ToolGroupFolds()
     @State private var userExpansionHeights: [String: CGFloat] = [:]
+    @State private var reauthRequest: AgentReauthRequest?
+    @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
@@ -59,6 +61,10 @@ struct TranscriptView: View {
                 }
             }
             .motionAnimation(Motion.fadeQuick, value: scroll.showJump)
+            .sheet(item: $reauthRequest) { request in
+                AgentReauthenticationSheet(provider: request.provider, hostName: request.hostName,
+                                           relay: request.relay)
+            }
     }
 
     @ViewBuilder
@@ -92,8 +98,21 @@ struct TranscriptView: View {
                                 folds: folds, onResize: { scroll.refreshLayout?() })
             case .inputChip(let header, let resolved):
                 InputChipView(header: header, resolved: resolved)
-            case .errorChip(let message):
-                ErrorChipView(message: message)
+            case .errorChip(let message, let reauth):
+                VStack(alignment: .leading, spacing: 8) {
+                    ErrorChipView(message: message)
+                    if let reauth {
+                        Button("Sign in to ChatGPT") {
+                            let host = store.hostDeviceId ?? ""
+                            let name = model.devices.first { $0.id == host }?.name ?? "the execution device"
+                            reauthRequest = AgentReauthRequest(provider: reauth, hostName: name,
+                                                              relay: store.hostRelayClient())
+                        }
+                        .font(Theme.sans(14, weight: .medium))
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("agent-reauth-sign-in")
+                    }
+                }
             }
         }
         .padding(.top, row.topGap)
@@ -101,6 +120,13 @@ struct TranscriptView: View {
         .frame(maxWidth: Self.maxContentWidth)
         .frame(maxWidth: .infinity)
     }
+}
+
+private struct AgentReauthRequest: Identifiable {
+    let id = UUID()
+    let provider: AgentReauthProvider
+    let hostName: String
+    let relay: DeviceRelayClient?
 }
 
 struct TranscriptGeometry: Equatable {

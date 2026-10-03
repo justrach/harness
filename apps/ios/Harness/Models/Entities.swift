@@ -293,16 +293,30 @@ struct GeneratedImageReference: Hashable {
     }
 }
 
+/// Only host-classified auth failures can offer agent sign-in. Never infer a
+/// route from an error's prose or execute commands supplied by the transcript.
+enum AgentReauthProvider: String, Hashable, Sendable {
+    case chatGPTNew = "chatgpt-new"
+    case codex
+
+    var startParameters: [String: Any] {
+        switch self {
+        case .chatGPTNew: return ["harness": "graff", "provider": "chatgpt-new", "reauthenticate": true]
+        case .codex: return ["harness": "codex", "reauthenticate": true, "deviceAuth": true]
+        }
+    }
+}
+
 enum MessagePart: Hashable, Identifiable {
     case image(id: String, reference: GeneratedImageReference)
     case text(id: String, text: String)
     case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool)
     case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool)
-    case error(id: String, message: String)
+    case error(id: String, message: String, reauth: AgentReauthProvider? = nil)
 
     var id: String {
         switch self {
-        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
+        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _, _):
             return id
         }
     }

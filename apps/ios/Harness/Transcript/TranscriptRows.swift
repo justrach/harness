@@ -15,7 +15,7 @@ enum RowKind {
     case markdown(block: MDBlock, streaming: Bool)
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
     case inputChip(header: String, resolved: Bool)
-    case errorChip(message: String)
+    case errorChip(message: String, reauth: AgentReauthProvider?)
 }
 
 struct ToolItem: Hashable {
@@ -200,11 +200,12 @@ enum TranscriptRowBuilder {
                                           entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
 
-            case .error(let partId, let message):
+            case .error(let partId, let message, let reauth):
                 flushTools(lastIx: ix - 1)
-                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: fnv1a(message),
+                let version = fnv1a(message + "\0" + (reauth?.rawValue ?? ""))
+                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
                                           turnStart: first,
-                                          kind: .errorChip(message: message),
+                                          kind: .errorChip(message: message, reauth: reauth),
                                           entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
             }

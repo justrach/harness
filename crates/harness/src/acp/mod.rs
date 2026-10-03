@@ -3160,6 +3160,7 @@ async fn new_session(
     signs_in_from_settings: bool,
 ) -> Result<Value, HarnessError> {
     match request_draining(client, incoming, "session/new", params).await {
+        Err(error @ HarnessError::ReauthRequired { .. }) => Err(error),
         Err(error) if signs_in_from_settings && is_auth_required(&error) => {
             Err(HarnessError::Protocol(format!(
                 "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
@@ -3747,6 +3748,17 @@ async fn run_session(session: Session) {
             match res {
                 Ok(v) => v,
                 Err(e) => {
+                    if let HarnessError::ReauthRequired { provider } = &e {
+                        let _ = send(&event_tx, AgentEvent::ReauthRequired { provider: *provider }).await;
+                        let _ = send(&event_tx, AgentEvent::Done {
+                            status: DoneStatus::Errored,
+                            result: None,
+                            error: None,
+                            session_id: None,
+                        }).await;
+                        child.shutdown(kill_grace).await;
+                        return;
+                    }
                     // A child that dies before the handshake used to surface only
                     // the RPC-side symptom ("transport closed") — its exit status
                     // and stderr, both already in hand, were dropped, leaving
@@ -4068,8 +4080,15 @@ async fn run_session(session: Session) {
                     break 'main;
                 }
                 let (status, mut error) = stop_outcome(&res, interrupted);
-                if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
-                    error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
+                if !interrupted {
+                    if let Err(HarnessError::ReauthRequired { provider }) = &res {
+                        if !send(&event_tx, AgentEvent::ReauthRequired { provider: *provider }).await {
+                            break 'main;
+                        }
+                        error = None;
+                    } else if auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
+                        error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
+                    }
                 }
                 trackers.effort.finish_turn();
                 done_current = true;
@@ -4234,8 +4253,9 @@ async fn run_session(session: Session) {
                     // failed by the reader's EOF cleanup falls through to the
                     // crash-message bookkeeping below (stderr tail intact).
                     if let Some(mut fut) = turn.take()
-                        && let Ok(res @ Ok(_)) =
+                        && let Ok(res) =
                             tokio::time::timeout(Duration::from_millis(50), &mut fut).await
+                        && (res.is_ok() || matches!(&res, Err(HarnessError::ReauthRequired { .. })))
                     {
                         let (prev, _next) = rotate(&mut assistant_message_id);
                         let _ = send(
@@ -4246,7 +4266,11 @@ async fn run_session(session: Session) {
                         if let Some(usage) = usage_from_response(&res) {
                             let _ = send(&event_tx, usage).await;
                         }
-                        let (status, error) = stop_outcome(&res, interrupted);
+                        let (status, mut error) = stop_outcome(&res, interrupted);
+                        if !interrupted && let Err(HarnessError::ReauthRequired { provider }) = &res {
+                            let _ = send(&event_tx, AgentEvent::ReauthRequired { provider: *provider }).await;
+                            error = None;
+                        }
                         trackers.effort.finish_turn();
                         done_current = true;
                         if interrupted {
