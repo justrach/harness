@@ -112,6 +112,24 @@ pid=$(rid "$promptline")
 
 case "$promptline" in
 
+*scenario:reauth-*)
+  if has "$promptline" 'reauth-legacy-token-expired'; then
+    emit "{\"id\":$pid,\"error\":{\"code\":-32603,\"message\":\"chatgpt-new api error [token_expired]: Provided authentication token is expired.\"}}"
+    exit 0
+  fi
+  provider='chatgpt-new'
+  command='graff'
+  args='["login","chatgpt-new"]'
+  if has "$promptline" 'reauth-codex'; then
+    provider='codex'
+    command='codex'
+    args='["login"]'
+  fi
+  emit "{\"id\":$pid,\"error\":{\"code\":-32000,\"message\":\"Authentication required\",\"data\":{\"kind\":\"reauth_required\",\"provider\":\"$provider\",\"login\":{\"command\":\"$command\",\"args\":$args}}}}"
+  # Race the final error response with EOF as a real agent can.
+  exit 0
+  ;;
+
 *scenario:model-api*)
   if has "$MODEL_SETS" '"modelId":"grok-4.5"'; then
     update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"model switched"}}'

@@ -70,6 +70,7 @@ mod codegraff_account;
 mod command_palette;
 mod files_panel;
 mod project_icon;
+mod reauth;
 mod sidebar_pins;
 mod sidebar_sections;
 mod spaces;
@@ -1764,6 +1765,8 @@ pub struct Shell {
     /// "Sign in with Codegraff" state (`shell/codegraff_account.rs`).
     codegraff: Option<codegraff_account::CodegraffStatus>,
     codegraff_flow: Option<Task<()>>,
+    /// In-chat ChatGPT reconnects in flight, one per host and route (`shell/reauth.rs`).
+    reauth_tasks: std::collections::HashMap<crate::reauth_recovery::ReauthKey, Task<()>>,
     codegraff_status_task: Option<Task<()>>,
     chat_split_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
@@ -2206,6 +2209,7 @@ impl Shell {
             boot_restored: false,
             codegraff: None,
             codegraff_flow: None,
+            reauth_tasks: std::collections::HashMap::new(),
             codegraff_status_task: None,
             chat_split_bounds: Default::default(),
             browsers: std::collections::HashMap::new(),
@@ -3664,6 +3668,16 @@ impl Shell {
                     *frozen,
                     cx,
                 );
+            }
+            TranscriptEvent::Reauthenticate {
+                chat_id,
+                row_id,
+                provider,
+                action,
+            } => {
+                // The emitting transcript's chat, never the selected chat or device: split panes
+                // may show another host.
+                self.on_reauth_action(chat_id, row_id, *provider, *action, cx);
             }
             TranscriptEvent::NewChatWithModel { model } => {
                 self.new_chat_with_model(model.clone(), cx);
@@ -14388,6 +14402,167 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn reauth_action_targets_emitting_chat_host_without_replaying(cx: &mut TestAppContext) {
+        use harness_proto::HarnessId;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    let chat = |id, host| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": host, "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap()
+                    };
+                    state.chats = vec![
+                        chat("viewer-chat", "viewer-host"),
+                        chat("remote-chat", "remote-host"),
+                        chat("other-chat", "other-host"),
+                    ];
+                    state.selected_chat = Some("viewer-chat".into());
+                    state.selected_device = Some("viewer-host".into());
+                    state.local_device_id = Some("viewer-host".into());
+                });
+                shell.composer.update(cx, |composer, cx| {
+                    composer.prefill("unsent draft".into(), cx)
+                });
+                use crate::reauth_recovery::{ReauthAction, ReauthKey, RecoveryPhase};
+                let act = |shell: &mut Shell,
+                           chat_id: &str,
+                           provider,
+                           action,
+                           cx: &mut Context<Shell>| {
+                    shell.on_transcript_event(
+                        shell.transcript.clone(),
+                        &TranscriptEvent::Reauthenticate {
+                            chat_id: chat_id.into(),
+                            row_id: format!("{chat_id}-error"),
+                            provider,
+                            action,
+                        },
+                        cx,
+                    );
+                };
+                for (chat_id, host, provider) in [
+                    (
+                        "remote-chat",
+                        "remote-host",
+                        harness_proto::ReauthProvider::ChatgptNew,
+                    ),
+                    (
+                        "other-chat",
+                        "other-host",
+                        harness_proto::ReauthProvider::Codex,
+                    ),
+                ] {
+                    act(shell, chat_id, provider, ReauthAction::Reconnect, cx);
+                    // The recovery belongs to the emitting chat's host, and the chat stays put.
+                    let key = ReauthKey {
+                        host: host.into(),
+                        provider,
+                    };
+                    let state = shell.state.read(cx);
+                    assert!(state.reauth.phase(&key).is_some(), "recovery for {host}");
+                    assert!(
+                        state.reauth.requesters[&key]
+                            .iter()
+                            .any(|row| row.chat_id == chat_id)
+                    );
+                    assert!(matches!(shell.route, Route::Chat), "no trip to Settings");
+                    assert_eq!(state.selected_chat.as_deref(), Some("viewer-chat"));
+                    assert_eq!(state.selected_device.as_deref(), Some("viewer-host"));
+                    assert_eq!(
+                        shell.composer.read(cx).input.read(cx).text(),
+                        "unsent draft"
+                    );
+                }
+                // No engine in this rig: the start fails visibly instead of hanging.
+                let key = ReauthKey {
+                    host: "remote-host".into(),
+                    provider: harness_proto::ReauthProvider::ChatgptNew,
+                };
+                assert!(matches!(
+                    shell.state.read(cx).reauth.phase(&key),
+                    Some(RecoveryPhase::Failed(_))
+                ));
+                // Cancel returns the cards to their first step.
+                act(
+                    shell,
+                    "remote-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Cancel,
+                    cx,
+                );
+                assert!(shell.state.read(cx).reauth.phase(&key).is_none());
+                // Resume before a verified sign-in sends nothing.
+                act(
+                    shell,
+                    "remote-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Resume,
+                    cx,
+                );
+                assert!(shell.state.read(cx).reauth.resumed.is_empty());
+                // A missing owner must not silently route login to the viewer.
+                act(
+                    shell,
+                    "missing-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Reconnect,
+                    cx,
+                );
+                assert!(
+                    !shell
+                        .state
+                        .read(cx)
+                        .reauth
+                        .phases
+                        .keys()
+                        .any(|key| key.host == "viewer-host")
+                );
+                assert!(
+                    shell
+                        .sidebar_notice
+                        .as_ref()
+                        .unwrap()
+                        .contains("host unavailable")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn model_mismatch_card_actions_carry_the_prompt_without_sending(cx: &mut TestAppContext) {
         use harness_proto::{HarnessId, ReasoningLevel};
         let dir = tempfile::tempdir().unwrap();
@@ -14477,6 +14652,7 @@ mod exit_regressions {
                             message: "harness protocol error: graff restored a different model \
                                       (codex/gpt-6-sol); kimi/k3 requires a new session"
                                 .into(),
+                            reauth: None,
                         },
                     ),
                 ];

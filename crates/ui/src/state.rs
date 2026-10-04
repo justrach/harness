@@ -665,6 +665,8 @@ pub fn canvas_panel_key(space_id: Option<&str>) -> String {
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
 pub struct AppState {
     pub connection: ConnectionStatus,
+    /// In-chat ChatGPT reconnects (`reauth_recovery.rs`): one per execution host and route.
+    pub reauth: crate::reauth_recovery::ReauthRecoveries,
     /// Fixed data boundary of the attached engine. Authentication may change
     /// in place, but changing this scope requires assembling a new runtime.
     pub workspace_scope: Option<WorkspaceScope>,
@@ -817,6 +819,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             connection: ConnectionStatus::Connecting,
+            reauth: Default::default(),
             workspace_scope: None,
             auth: None,
             devices: Vec::new(),

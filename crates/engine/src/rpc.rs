@@ -444,6 +444,12 @@ struct AgentAccountParams {
 #[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
+    /// Explicit recovery may replace the expired live login after approval.
+    #[serde(default)]
+    reauthenticate: bool,
+    /// Host-owned device authorization can be approved from a phone.
+    #[serde(default)]
+    device_auth: bool,
     /// Which sign-in, for harnesses that have several (graff: `xai`, `kimi`, `zai`).
     #[serde(default)]
     provider: Option<String>,
@@ -3198,12 +3204,28 @@ impl RpcService for EngineRpc {
             }
             methods::START_AGENT_LOGIN => {
                 let p: StartAgentLoginParams = parse_params(params)?;
+                if p.device_auth && (!p.reauthenticate || p.harness != HarnessId::Codex) {
+                    return Err(RpcError::Failed(
+                        "Device authorization is supported only for explicit Codex recovery."
+                            .into(),
+                    ));
+                }
                 let start = match (p.harness, p.provider.as_deref()) {
+                    // Recovery attaches to a sign-in already waiting on this host.
+                    (HarnessId::Graff, Some(provider)) if p.reauthenticate => {
+                        self.agent_accounts.start_graff_reauth(provider).await
+                    }
                     (HarnessId::Graff, Some(provider)) => {
                         self.agent_accounts.start_graff_login(provider).await
                     }
                     (HarnessId::Graff, None) => Err(crate::EngineError::Other(
                         "Say which graff provider to sign in to.".into(),
+                    )),
+                    (HarnessId::Codex, _) if p.reauthenticate => {
+                        self.agent_accounts.start_codex_reauth(p.device_auth).await
+                    }
+                    (_, _) if p.device_auth => Err(crate::EngineError::Other(
+                        "Device sign-in is not supported for this provider.".into(),
                     )),
                     (harness, _) => self.agent_accounts.start_login(harness).await,
                 }

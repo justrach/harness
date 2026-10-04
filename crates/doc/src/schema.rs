@@ -92,6 +92,8 @@ struct DocPartJson {
     resolved: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reauth: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,10 +210,15 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             resolved: Some(*resolved),
             ..Default::default()
         },
-        MessagePart::Error { id, message } => DocPartJson {
+        MessagePart::Error {
+            id,
+            message,
+            reauth,
+        } => DocPartJson {
             id: id.clone(),
             kind: "error".into(),
             message: Some(message.clone()),
+            reauth: reauth.map(|provider| provider.as_str().to_owned()),
             ..Default::default()
         },
     })
@@ -266,6 +273,9 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "error" => MessagePart::Error {
             id: p.id,
             message: p.message.unwrap_or_default(),
+            reauth: p
+                .reauth
+                .and_then(|provider| serde_json::from_value(serde_json::json!(provider)).ok()),
         },
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
@@ -303,6 +313,7 @@ fn image_part(
         _ => MessagePart::Error {
             id,
             message: "Generated image unavailable".into(),
+            reauth: None,
         },
     }
 }
@@ -684,6 +695,7 @@ impl SessionDoc {
                 &MessagePart::Error {
                     id: part_id.to_string(),
                     message: message.to_string(),
+                    reauth: None,
                 },
             )?;
             self.doc.commit();
@@ -885,6 +897,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
+    }
+    if let Some(reauth) = &doc_part.reauth {
+        map.insert("reauth", reauth.as_str())?;
     }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
@@ -1103,6 +1118,9 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         return Some(MessagePart::Error {
             id,
             message: message.to_owned(),
+            reauth: obj
+                .get("reauth")
+                .and_then(|value| serde_json::from_value(value.clone()).ok()),
         });
     }
     None
@@ -1356,6 +1374,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
+    if let Some(reauth) = &doc_part.reauth {
+        map.insert("reauth", reauth.as_str())?;
+    }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
     }
@@ -1447,6 +1468,56 @@ mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
     use harness_proto::{AgentEvent, ToolCall};
+
+    #[test]
+    fn reauth_survives_event_fold_document_sync_and_plain_errors() {
+        for provider in [
+            harness_proto::ReauthProvider::ChatgptNew,
+            harness_proto::ReauthProvider::Codex,
+        ] {
+            let mut parts = Vec::new();
+            fold_event_into_parts(&mut parts, &AgentEvent::ReauthRequired { provider });
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::Done {
+                    status: harness_proto::DoneStatus::Errored,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            );
+            assert_eq!(parts.len(), 1);
+            let doc = SessionDoc::init("host").unwrap();
+            doc.push_message(&SessionMessageEntry {
+                id: "auth-error".into(),
+                role: MessageRole::Assistant,
+                parts: parts.clone(),
+                created_at: 1,
+                device_id: "host".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+            let peer = SessionDoc::init("viewer").unwrap();
+            peer.doc().import(&doc.export_snapshot().unwrap()).unwrap();
+            assert_eq!(peer.read_entries().unwrap()[0].parts, parts);
+        }
+        let plain = from_doc_part(
+            serde_json::from_value(serde_json::json!({
+                "kind":"error","id":"old","message":"HTTP 429"
+            }))
+            .unwrap(),
+        );
+        assert!(matches!(plain, MessagePart::Error { reauth: None, .. }));
+        let unknown = from_doc_part(
+            serde_json::from_value(serde_json::json!({
+                "kind":"error","id":"unknown","message":"rejected","reauth":"arbitrary-command"
+            }))
+            .unwrap(),
+        );
+        assert!(matches!(unknown, MessagePart::Error { reauth: None, .. }));
+    }
 
     #[test]
     fn opening_tail_bounds_parts_and_preserves_continuation_ids() {

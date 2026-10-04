@@ -237,6 +237,8 @@ pub enum MessagePart {
     Error {
         id: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reauth: Option<harness_proto::ReauthProvider>,
     },
 }
 
@@ -501,6 +503,16 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             out.push(MessagePart::Error {
                 id,
                 message: message.clone(),
+                reauth: None,
+            });
+        }
+        AgentEvent::ReauthRequired { provider } => {
+            let id = format!("e{}", out.len());
+            out.push(MessagePart::Error {
+                id,
+                message: "ChatGPT sign-in expired or was rejected. Sign in again to continue."
+                    .into(),
+                reauth: Some(*provider),
             });
         }
         AgentEvent::Done { error, .. } => {
@@ -509,6 +521,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(MessagePart::Error {
                     id,
                     message: message.clone(),
+                    reauth: None,
                 });
             }
         }

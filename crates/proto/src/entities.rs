@@ -956,6 +956,24 @@ pub enum AgentLoginMode {
     PasteCode,
     /// Codex: the CLI's loopback callback completes in the browser; poll until done.
     Browser,
+    /// The CLI opens its callback-bound browser on the execution host.
+    /// No authorization URL or callback is sent to a remote viewer.
+    HostBrowser,
+    /// Approve a one-time code on any device; tokens are stored on the host.
+    DeviceCode,
+}
+
+impl AgentLoginStart {
+    /// Device authorization never carries an OAuth redirect, token or arbitrary URL.
+    pub fn is_safe_device_code(&self) -> bool {
+        self.mode == AgentLoginMode::DeviceCode
+            && !self.login_id.is_empty()
+            && self.url == "https://auth.openai.com/codex/device"
+            && self.code.as_deref().is_some_and(|code| {
+                (4..=32).contains(&code.len())
+                    && code.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -979,9 +997,13 @@ pub enum AgentLoginStatus {
 }
 
 /// The providers `graff login <id>` signs into itself, as `(id, display name)`.
-/// CodeGraff's own account and the Codex (ChatGPT) login are managed elsewhere.
-pub const GRAFF_LOGIN_PROVIDERS: &[(&str, &str)] =
-    &[("xai", "xAI"), ("kimi", "Kimi"), ("zai", "Z.AI")];
+/// CodeGraff's own account and the legacy Codex login are managed elsewhere.
+pub const GRAFF_LOGIN_PROVIDERS: &[(&str, &str)] = &[
+    ("xai", "xAI"),
+    ("kimi", "Kimi"),
+    ("zai", "Z.AI"),
+    ("chatgpt-new", "ChatGPT"),
+];
 
 /// One graff sign-in provider on a device (`ListGraffLogins` row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

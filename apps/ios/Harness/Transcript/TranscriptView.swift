@@ -10,6 +10,13 @@ struct TranscriptView: View {
     var cwd: String? = nil
     /// A tapped link that only opens on the host computer.
     var onHostLink: (HostLink) -> Void = { _ in }
+    /// The chat this transcript shows, and whether a turn is running in it: the reconnect row's
+    /// Resume needs the chat's own agent and model, and waits for a running turn.
+    var chat: Chat? = nil
+    var runLive = false
+    /// The name of the computer the chat runs on, for the reconnect row and sheet. Passed in, so
+    /// the transcript needs no app model in its environment.
+    var hostName = "the execution device"
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -17,6 +24,7 @@ struct TranscriptView: View {
     @State private var veils = VeilStore()
     @State var folds = ToolGroupFolds()
     @State private var userExpansionHeights: [String: CGFloat] = [:]
+    @State private var reauthRequest: AgentReauthRequest?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
@@ -27,13 +35,14 @@ struct TranscriptView: View {
                                               entries: store.entries,
                                               pendingSends: store.pendingSends)
         let runway = store.lastSubmittedMessageId
+        let earlierErrors = Self.earlierReauthRows(rows)
         NativeTranscriptTable(rows: rows, scroll: scroll, runwayID: runway,
             expansionHeight: runway.flatMap { userExpansionHeights[$0] } ?? 0,
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,
             reduceMotion: reduceMotion,
             configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
                 ^ colorScheme.hashValue) { row in
-                AnyView(rowView(row)
+                AnyView(rowView(row, earlier: earlierErrors.contains(row.id))
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
@@ -68,10 +77,70 @@ struct TranscriptView: View {
                 }
             }
             .motionAnimation(Motion.fadeQuick, value: scroll.showJump)
+            .sheet(item: $reauthRequest) { request in
+                AgentReauthenticationSheet(
+                    provider: request.provider, hostName: request.hostName, relay: request.relay,
+                    onSignedIn: { ReauthOutcomes.shared.resolve(request.key) },
+                    resume: canResume ? { resume(request.key) } : nil)
+            }
+    }
+
+    /// Reconnect rows from earlier in the conversation: a user message came after them, so the
+    /// chat has moved on (that is also how a sent Resume stops being offered).
+    static func earlierReauthRows(_ rows: [TranscriptRow]) -> Set<String> {
+        var earlier: Set<String> = []
+        var userSince = false
+        for row in rows.reversed() {
+            switch row.kind {
+            case .user: userSince = true
+            case .errorChip(_, let reauth) where reauth != nil && userSince: earlier.insert(row.id)
+            default: break
+            }
+        }
+        return earlier
+    }
+
+    /// The chat's own agent and model are stored, and no turn is running: resuming never falls
+    /// back to a default model.
+    private var canResume: Bool { chat?.config?.model != nil && !runLive }
+
+    /// Resume conversation: a new turn in this chat with its own agent and model, from its
+    /// existing session. The failed prompt and finished tools are not replayed, and the composer's
+    /// draft and attachments are untouched.
+    private func resume(_ key: String) -> Bool {
+        guard let chat, chat.config?.model != nil, !runLive,
+              ReauthOutcomes.shared.claimResume(key) else { return false }
+        store.sendRun(prompt: ReauthCopy.resumePrompt, chat: chat)
+        return true
     }
 
     @ViewBuilder
-    private func rowView(_ row: TranscriptRow) -> some View {
+    private func reauthControls(_ reauth: AgentReauthProvider, row: TranscriptRow, earlier: Bool) -> some View {
+        let key = ReauthOutcomes.key(chatId: chatId, rowId: row.id)
+        let outcomes = ReauthOutcomes.shared
+        if outcomes.resolved.contains(key) {
+            Label("ChatGPT reconnected on \(hostName)", systemImage: "checkmark.circle")
+                .font(Theme.sans(14, weight: .medium))
+                .foregroundStyle(Theme.textMuted)
+            if !earlier, !outcomes.resumed.contains(key), canResume {
+                Button("Resume conversation") { _ = resume(key) }
+                    .font(Theme.sans(14, weight: .medium))
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("agent-reauth-resume")
+            }
+        } else if !earlier {
+            Button("Reconnect ChatGPT") {
+                reauthRequest = AgentReauthRequest(provider: reauth, hostName: hostName,
+                                                  relay: store.hostRelayClient(), key: key)
+            }
+            .font(Theme.sans(14, weight: .medium))
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("agent-reauth-sign-in")
+        }
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: TranscriptRow, earlier: Bool) -> some View {
         Group {
             switch row.kind {
             case .user(let text):
@@ -101,8 +170,13 @@ struct TranscriptView: View {
                                 folds: folds, onResize: { scroll.refreshLayout?() })
             case .inputChip(let header, let resolved):
                 InputChipView(header: header, resolved: resolved)
-            case .errorChip(let message):
-                ErrorChipView(message: message)
+            case .errorChip(let message, let reauth):
+                VStack(alignment: .leading, spacing: 8) {
+                    ErrorChipView(message: message)
+                    if let reauth {
+                        reauthControls(reauth, row: row, earlier: earlier)
+                    }
+                }
             }
         }
         .padding(.top, row.topGap)
@@ -110,6 +184,15 @@ struct TranscriptView: View {
         .frame(maxWidth: Self.maxContentWidth)
         .frame(maxWidth: .infinity)
     }
+}
+
+private struct AgentReauthRequest: Identifiable {
+    let id = UUID()
+    let provider: AgentReauthProvider
+    let hostName: String
+    let relay: DeviceRelayClient?
+    /// The row that opened the sheet (`ReauthOutcomes.key`).
+    let key: String
 }
 
 struct TranscriptGeometry: Equatable {

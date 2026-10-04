@@ -23,6 +23,12 @@ pub fn credential_path(home: &Path, provider: &str) -> Option<PathBuf> {
         .iter()
         .any(|(id, _)| *id == provider)
         .then(|| {
+            if provider == "chatgpt-new" {
+                return home
+                    .join(".graff")
+                    .join("credentials")
+                    .join("chatgpt-new.json");
+            }
             home.join(format!(".{provider}"))
                 .join("credentials")
                 .join("graff-oauth.json")
@@ -144,6 +150,16 @@ pub fn saw_success(output: &str) -> bool {
         .any(|line| strip_ansi(line).trim_start().starts_with('✓'))
 }
 
+/// ChatGPT's zero exit and generic signed-in prefix also cover denied plan
+/// access. Only its explicit plan-granted report qualifies for recovery.
+pub fn chatgpt_plan_granted(output: &str) -> bool {
+    output.lines().any(|line| {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        line.starts_with("✓ signed in to ChatGPT as ") && line.ends_with("; plan usage is on.")
+    })
+}
+
 /// What to tell the user when a sign-in ended without one: graff's `✗` line,
 /// else its last line of output, else a plain sentence.
 pub fn failure_message(output: &str) -> String {
@@ -168,6 +184,21 @@ mod tests {
     const ZAI: &str = "\nTo log in to Z.AI Coding Plan, open this URL (browser should open automatically):\n\n  https://chat.z.ai/cli/authorize?flow=f1\n\nwaiting for authorization…\n";
 
     #[test]
+    fn reauth_chatgpt_requires_explicit_plan_grant() {
+        assert!(chatgpt_plan_granted(
+            "✓ signed in to ChatGPT as fixture; plan usage is on.\n"
+        ));
+        for output in [
+            "✓ signed in to ChatGPT as fixture, but plan usage was not allowed.\n",
+            "✗ ChatGPT sign-in was cancelled. Nothing changed.\n",
+            "✗ ChatGPT sign-in failed: rejected\n",
+            "✓ signed in to ChatGPT as fixture\n",
+        ] {
+            assert!(!chatgpt_plan_granted(output));
+        }
+    }
+
+    #[test]
     fn credential_paths_follow_graffs_credential_store() {
         let home = Path::new("/h");
         assert_eq!(
@@ -181,6 +212,10 @@ mod tests {
         assert_eq!(
             credential_path(home, "zai"),
             Some(PathBuf::from("/h/.zai/credentials/graff-oauth.json"))
+        );
+        assert_eq!(
+            credential_path(home, "chatgpt-new"),
+            Some(PathBuf::from("/h/.graff/credentials/chatgpt-new.json"))
         );
     }
 
@@ -207,7 +242,12 @@ mod tests {
             rows.iter()
                 .map(|r| (r.id.as_str(), r.signed_in))
                 .collect::<Vec<_>>(),
-            [("xai", false), ("kimi", false), ("zai", false)]
+            [
+                ("xai", false),
+                ("kimi", false),
+                ("zai", false),
+                ("chatgpt-new", false)
+            ]
         );
         let path = credential_path(dir.path(), "kimi").unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -217,7 +257,12 @@ mod tests {
             rows.iter()
                 .map(|r| (r.name.as_str(), r.signed_in))
                 .collect::<Vec<_>>(),
-            [("xAI", false), ("Kimi", true), ("Z.AI", false)]
+            [
+                ("xAI", false),
+                ("Kimi", true),
+                ("Z.AI", false),
+                ("ChatGPT", false)
+            ]
         );
     }
 

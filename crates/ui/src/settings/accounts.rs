@@ -198,6 +198,9 @@ pub fn openai_login(snapshot: &AgentAccountsSnapshot) -> (bool, Option<String>) 
 
 /// A graff provider's display name for the sign-in dialog title.
 fn graff_provider_name(id: Option<&str>) -> &'static str {
+    if id == Some("chatgpt-new") {
+        return "ChatGPT (new)";
+    }
     GRAFF_LOGIN_PROVIDERS
         .iter()
         .find(|(provider, _)| Some(*provider) == id)
@@ -215,6 +218,7 @@ enum LoginFlow {
         harness: HarnessId,
         /// graff's sign-ins say which provider (`xai`, `kimi`, `zai`).
         provider: Option<String>,
+        reauthenticate: bool,
     },
     /// Claude-style: open the URL, paste the code back.
     PasteCode {
@@ -227,6 +231,7 @@ enum LoginFlow {
     Browser {
         harness: HarnessId,
         provider: Option<String>,
+        reauthenticate: bool,
         start: AgentLoginStart,
         message: Option<SharedString>,
         error: Option<SharedString>,
@@ -236,14 +241,22 @@ enum LoginFlow {
 impl LoginFlow {
     /// Dialog title (harness: "Add Claude account" / "Add Codex account").
     fn title(&self) -> String {
-        let (harness, provider) = match self {
-            LoginFlow::Starting { harness, provider }
+        let (harness, provider, reauthenticate) = match self {
+            LoginFlow::Starting {
+                harness,
+                provider,
+                reauthenticate,
+            }
             | LoginFlow::Browser {
-                harness, provider, ..
-            } => (*harness, provider.as_deref()),
-            LoginFlow::PasteCode { harness, .. } => (*harness, None),
+                harness,
+                provider,
+                reauthenticate,
+                ..
+            } => (*harness, provider.as_deref(), *reauthenticate),
+            LoginFlow::PasteCode { harness, .. } => (*harness, None, false),
         };
         match harness {
+            HarnessId::Codex if reauthenticate => "Sign in to ChatGPT (Codex)".into(),
             HarnessId::Codex => "Add Codex account".into(),
             HarnessId::Cursor => "Connect Cursor".into(),
             HarnessId::Graff => format!("Sign in to {}", graff_provider_name(provider)),
@@ -367,6 +380,9 @@ impl AccountsPage {
             cx.notify();
             return;
         }
+        // Cancel against the OLD host before retargeting, and drop any start
+        // request/poll so its completion cannot replace the new host's flow.
+        self.cancel_login(cx);
         self.target_device = target;
         // A different device = a different accounts world: drop in-flight
         // login/action state and reload with a forced usage probe (the new
@@ -1104,13 +1120,32 @@ impl AccountsPage {
 
     // ---- add-account flows ----
 
+    fn login_params(
+        &self,
+        harness: HarnessId,
+        provider: Option<&str>,
+        reauthenticate: bool,
+    ) -> serde_json::Value {
+        let mut params = serde_json::json!({ "harness": harness });
+        if reauthenticate {
+            params["reauthenticate"] = serde_json::json!(true);
+            if harness == HarnessId::Codex {
+                params["deviceAuth"] = serde_json::json!(true);
+            }
+        }
+        if let Some(provider) = provider {
+            params["provider"] = serde_json::json!(provider);
+        }
+        self.params(params)
+    }
+
     fn start_login(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        self.begin_login(harness, None, cx);
+        self.begin_login(harness, None, false, cx);
     }
 
     /// graff's own sign-in for one provider (`xai`, `kimi`, `zai`).
     fn start_graff_login(&mut self, provider: &str, cx: &mut Context<Self>) {
-        self.begin_login(HarnessId::Graff, Some(provider.to_string()), cx);
+        self.begin_login(HarnessId::Graff, Some(provider.to_string()), false, cx);
     }
 
     /// Sign out of one graff provider (removes graff's credential on the shown
@@ -1147,33 +1182,58 @@ impl AccountsPage {
         &mut self,
         harness: HarnessId,
         provider: Option<String>,
+        reauthenticate: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            self.error = Some("Engine not connected".into());
+            cx.notify();
             return;
         };
         self.login = Some(LoginFlow::Starting {
             harness,
             provider: provider.clone(),
+            reauthenticate,
         });
         self.error = None;
-        let mut params = serde_json::json!({ "harness": harness });
-        if let (Some(provider), Some(object)) = (&provider, params.as_object_mut()) {
-            object.insert("provider".into(), serde_json::json!(provider));
-        }
-        let params = self.params(params);
+        let params = self.login_params(harness, provider.as_deref(), reauthenticate);
+        let mut cancel_params = self.params(serde_json::json!({}));
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(methods::START_AGENT_LOGIN, params)
-                .await;
-            this.update(cx, |page, cx| {
-                match result.and_then(|value| {
+                .await
+                .and_then(|value| {
                     serde_json::from_value::<AgentLoginStart>(value)
                         .map_err(|e| harness_rpc::RpcError::Failed(e.to_string()))
-                }) {
+                });
+            let result = match result {
+                Ok(start)
+                    if reauthenticate
+                        && !(harness == HarnessId::Codex && start.is_safe_device_code())
+                        && (start.mode != AgentLoginMode::HostBrowser
+                            || !start.url.is_empty()
+                            || start.code.is_some()
+                            || start.login_id.is_empty()) =>
+                {
+                    cancel_params["loginId"] = serde_json::json!(start.login_id);
+                    let _ = engine
+                        .client()
+                        .call(methods::CANCEL_AGENT_LOGIN, cancel_params)
+                        .await;
+                    Err(harness_rpc::RpcError::Failed(
+                        "Update Harness on the execution device to use desktop sign-in recovery."
+                            .into(),
+                    ))
+                }
+                result => result,
+            };
+            this.update(cx, |page, cx| {
+                match result {
                     Ok(start) => {
-                        cx.open_url(&start.url);
+                        if start.mode != AgentLoginMode::HostBrowser && !start.url.is_empty() {
+                            cx.open_url(&start.url);
+                        }
                         match start.mode {
                             AgentLoginMode::PasteCode => {
                                 page.code_input
@@ -1185,10 +1245,13 @@ impl AccountsPage {
                                     error: None,
                                 });
                             }
-                            AgentLoginMode::Browser => {
+                            AgentLoginMode::Browser
+                            | AgentLoginMode::HostBrowser
+                            | AgentLoginMode::DeviceCode => {
                                 page.login = Some(LoginFlow::Browser {
                                     harness,
                                     provider,
+                                    reauthenticate,
                                     start,
                                     message: None,
                                     error: None,
@@ -1335,9 +1398,10 @@ impl AccountsPage {
         };
         self.login = None;
         self.poll_task = None;
+        self.action_task = None;
         if let (Some(login_id), Some(engine)) = (login_id, self.state.read(cx).engine().cloned()) {
             let params = self.params(serde_json::json!({ "loginId": login_id }));
-            self.action_task = Some(cx.spawn(async move |_, _| {
+            cx.spawn(async move |_, _| {
                 if let Err(err) = engine
                     .client()
                     .call(methods::CANCEL_AGENT_LOGIN, params)
@@ -1345,7 +1409,8 @@ impl AccountsPage {
                 {
                     tracing::debug!(error = %err, "CancelAgentLogin failed (best-effort)");
                 }
-            }));
+            })
+            .detach();
         }
         cx.notify();
     }
@@ -1591,10 +1656,44 @@ impl AccountsPage {
             .into_any_element()
     }
 
-    /// graff's own provider sign-ins: a row per provider with its state and
-    /// Sign in / Sign out. graff's OpenAI (ChatGPT) login IS the Codex login,
-    /// so that row follows the Codex account below and has no buttons of its
-    /// own — signing out there would sign the Codex agent out too.
+    /// The new ChatGPT route is separate from legacy Codex and remains
+    /// available even if an account-list probe fails. Stored credentials are
+    /// not evidence that a token is valid; sign-in can always be requested.
+    fn render_chatgpt_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .mt(px(24.0))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        crate::icons::icon(crate::icons::OPENAI_MARK)
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(widgets::row_title(theme, "ChatGPT (new)")),
+            )
+            .child(
+                widgets::section_card(theme)
+                    .mt(px(8.0))
+                    .child(self.render_graff_row(
+                        1000,
+                        Some("chatgpt-new"),
+                        "ChatGPT (graff)",
+                        "Separate from Codex · graff login chatgpt-new · token validity checked when used".into(),
+                        false,
+                        theme,
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// graff's other provider sign-ins plus the LEGACY shared Codex login.
+    /// Credential detection here does not validate the stored token.
     fn render_graff_logins_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let header = div()
             .flex()
@@ -1637,9 +1736,9 @@ impl AccountsPage {
                     None => "Checking…".to_string(),
                     Some(snapshot) => match openai_login(snapshot) {
                         (true, Some(who)) => {
-                            format!("Signed in as {who} · shared with the Codex agent")
+                            format!("Credentials stored for {who} · legacy Codex login")
                         }
-                        (true, None) => "Signed in · shared with the Codex agent".to_string(),
+                        (true, None) => "Credentials stored · legacy Codex login".to_string(),
                         (false, _) => "Not signed in — add a Codex account below".to_string(),
                     },
                 };
@@ -1651,6 +1750,7 @@ impl AccountsPage {
                 // status line, signed in)
                 let mut entries: Vec<(Option<&str>, &str, String, bool)> = providers
                     .iter()
+                    .filter(|p| p.id != "chatgpt-new")
                     .map(|p| {
                         let status = if p.signed_in {
                             "Signed in on this device"
@@ -1667,7 +1767,7 @@ impl AccountsPage {
                     .collect();
                 entries.insert(
                     entries.len().min(1),
-                    (None, "OpenAI (ChatGPT)", openai, openai_signed_in),
+                    (None, "ChatGPT (legacy Codex)", openai, openai_signed_in),
                 );
                 div()
                     .children(entries.into_iter().enumerate().map(
@@ -2174,28 +2274,47 @@ impl AccountsPage {
             LoginFlow::Browser {
                 harness,
                 provider,
+                reauthenticate,
                 start,
                 message,
                 error,
             } => {
                 let has_error = error.is_some();
-                let body: SharedString = match harness {
-                    HarnessId::Cursor => {
-                        "Finish signing in to Cursor in your browser. This mints a \
+                let body: SharedString = if start.mode == AgentLoginMode::DeviceCode {
+                    "Open the ChatGPT sign-in page and enter the one-time code below. \
+                     You can approve on this device or your iPhone. Credentials are saved \
+                     only on the execution device shown above, and your failed turn is not replayed."
+                        .into()
+                } else if start.mode == AgentLoginMode::HostBrowser {
+                    "Complete sign-in in the browser on the execution device shown above. \
+                     ChatGPT's local callback must finish on that desktop. Your failed turn \
+                     will not be sent again automatically."
+                        .into()
+                } else {
+                    match harness {
+                        HarnessId::Cursor => {
+                            "Finish signing in to Cursor in your browser. This mints a \
                          harness-named API key you can revoke any time from Cursor's \
                          dashboard — it is separate from `cursor-agent login`."
-                            .into()
-                    }
-                    HarnessId::Graff => format!(
-                        "Finish signing in to {} in your browser. graff saves the login \
+                                .into()
+                        }
+                        HarnessId::Graff => format!(
+                            "Finish signing in to {} in your browser. graff saves the login \
                          itself, so nothing is copied into Harness.",
-                        graff_provider_name(provider.as_deref())
-                    )
-                    .into(),
-                    _ => "Finish signing in to OpenAI in your browser. The new login is \
+                            graff_provider_name(provider.as_deref())
+                        )
+                        .into(),
+                        HarnessId::Codex if *reauthenticate => {
+                            "Finish signing in to ChatGPT in your browser. The renewed login \
+                         replaces the expired Codex login on this device. Your failed turn \
+                         will not be sent again automatically."
+                                .into()
+                        }
+                        _ => "Finish signing in to OpenAI in your browser. The new login is \
                          captured in an isolated profile — your current session is untouched \
                          until you switch."
-                        .into(),
+                            .into(),
+                    }
                 };
                 div()
                     .flex()
@@ -2232,13 +2351,15 @@ impl AccountsPage {
                                 ),
                         )
                     })
-                    .child(url_link(
-                        "login-open-url-browser",
-                        "Reopen the sign-in page",
-                        &start.url,
-                        cx,
-                    ))
-                    .child(url_field(&start.url, cx))
+                    .when(!start.url.is_empty(), |el| {
+                        el.child(url_link(
+                            "login-open-url-browser",
+                            "Reopen the sign-in page",
+                            &start.url,
+                            cx,
+                        ))
+                        .child(url_field(&start.url, cx))
+                    })
                     .when(!has_error, |el| {
                         el.child(
                             div()
@@ -2287,8 +2408,21 @@ impl AccountsPage {
                     .into_any_element()
             }
         };
+        let host = self.target_device.as_deref().map(|id| {
+            self.state
+                .read(cx)
+                .device_name(id)
+                .unwrap_or(id)
+                .to_string()
+        });
         let card = popover::dialog_card(&theme)
             .child(popover::dialog_title(&theme, &title))
+            .when_some(host, |el, host| {
+                el.child(popover::dialog_body(
+                    &theme,
+                    format!("Signing in on {host}"),
+                ))
+            })
             .child(body)
             .into_any_element();
         Some(popover::modal("add-account-dialog", viewport, card))
@@ -2666,6 +2800,7 @@ impl Render for AccountsPage {
                                 )
                             })
                             .child(self.render_codegraff_section(&theme, now, cx))
+                            .child(self.render_chatgpt_section(&theme, cx))
                             .child(self.render_graff_logins_section(&theme, cx))
                             .children(sections)
                             // Footer note (harness: `mt-6 text-[12px] leading-relaxed
@@ -2883,18 +3018,33 @@ mod tests {
         let graff = |provider: Option<&str>| LoginFlow::Starting {
             harness: HarnessId::Graff,
             provider: provider.map(str::to_string),
+            reauthenticate: false,
         };
         assert_eq!(graff(Some("xai")).title(), "Sign in to xAI");
         assert_eq!(graff(Some("kimi")).title(), "Sign in to Kimi");
         assert_eq!(graff(Some("zai")).title(), "Sign in to Z.AI");
+        assert_eq!(
+            graff(Some("chatgpt-new")).title(),
+            "Sign in to ChatGPT (new)"
+        );
         assert_eq!(graff(None).title(), "Sign in to graff");
         assert_eq!(graff(Some("nope")).title(), "Sign in to graff");
         // The other harnesses keep their titles.
         let starting = |harness| LoginFlow::Starting {
             harness,
             provider: None,
+            reauthenticate: false,
         };
         assert_eq!(starting(HarnessId::Codex).title(), "Add Codex account");
+        assert_eq!(
+            LoginFlow::Starting {
+                harness: HarnessId::Codex,
+                provider: None,
+                reauthenticate: true,
+            }
+            .title(),
+            "Sign in to ChatGPT (Codex)"
+        );
         assert_eq!(starting(HarnessId::Cursor).title(), "Connect Cursor");
         assert_eq!(
             starting(HarnessId::ClaudeCode).title(),

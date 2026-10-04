@@ -38,6 +38,10 @@ name = "help-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "reauth-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "question-wrap-fixture"
 required-features = ["appshots-fixture"]
 
