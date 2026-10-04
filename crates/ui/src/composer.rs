@@ -4995,6 +4995,7 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    Help,
 }
 
 impl WorkspaceCommand {
@@ -5024,6 +5025,12 @@ impl WorkspaceCommand {
                 true,
             ),
             (Self::Stop, "stop", "Harness: stop the active run", true),
+            (
+                Self::Help,
+                "help",
+                "Harness: show keyboard shortcuts",
+                false,
+            ),
         ]
     }
 }
@@ -11082,7 +11089,7 @@ mod tests {
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 12);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
@@ -11091,9 +11098,9 @@ mod tests {
             workspace_command_for_text("/harness:harness:model", &rows),
             Some(WorkspaceCommand::Model)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 12);
         let draft_rows = with_workspace_commands(vec![], false);
-        assert_eq!(draft_rows.len(), 4);
+        assert_eq!(draft_rows.len(), 5);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
         assert_eq!(
             workspace_command_for_text("/model  ", &draft_rows),
@@ -13293,6 +13300,18 @@ mod tests {
             assert!(candidate.invocation.prompt_text().contains("SKILL.md"));
         }
         assert_ne!(slash[1].invocation, slash[2].invocation);
+    }
+
+    #[test]
+    fn help_is_offered_with_or_without_a_chat() {
+        for in_chat in [false, true] {
+            let rows = with_workspace_commands(Vec::new(), in_chat);
+            let help = rows
+                .iter()
+                .find(|row| row.workspace_command == Some(WorkspaceCommand::Help))
+                .expect("/help is a Harness command");
+            assert_eq!(help.name, "help");
+        }
     }
 
     #[test]

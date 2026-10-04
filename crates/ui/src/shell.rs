@@ -120,6 +120,43 @@ actions!(
     ]
 );
 
+/// The shortcuts `/help` lists beside the rebindable ones (Settings →
+/// Shortcuts), in reading order. Keys come from the live keymap, so each
+/// platform shows its own (Ghostty's macOS keys, its GTK keys elsewhere).
+fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
+    use crate::settings::shortcuts::FixedShortcut;
+    let row = |label: &'static str, action: Box<dyn gpui::Action>| FixedShortcut { label, action };
+    vec![
+        row("Split the chat to the right", Box::new(SplitChatRight)),
+        row("Split the chat down", Box::new(SplitChatDown)),
+        row(
+            "Close the pane (back to one column)",
+            Box::new(crate::app_menus::CloseTab),
+        ),
+        row("Next pane", Box::new(FocusNextChatPane)),
+        row("Previous pane", Box::new(FocusPrevChatPane)),
+        row("Move to the pane on the left", Box::new(FocusChatPaneLeft)),
+        row(
+            "Move to the pane on the right",
+            Box::new(FocusChatPaneRight),
+        ),
+        row("Move to the pane above", Box::new(FocusChatPaneUp)),
+        row("Move to the pane below", Box::new(FocusChatPaneDown)),
+        row("Grow the pane to the left", Box::new(ResizeChatPaneLeft)),
+        row("Grow the pane to the right", Box::new(ResizeChatPaneRight)),
+        row("Grow the pane up", Box::new(ResizeChatPaneUp)),
+        row("Grow the pane down", Box::new(ResizeChatPaneDown)),
+        row("Make all panes the same size", Box::new(EqualizeChatPanes)),
+        row("Zoom the pane (and back)", Box::new(ToggleChatPaneZoom)),
+        row("New chat tab", Box::new(NewChatTab)),
+        row("Next chat tab", Box::new(NextChatTab)),
+        row("Previous chat tab", Box::new(PrevChatTab)),
+        row("Jump to the message box", Box::new(FocusComposer)),
+        row("Command palette", Box::new(ToggleCommandPalette)),
+        row("Settings", Box::new(OpenSettings)),
+    ]
+}
+
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
 /// focus from controls that are mounting in response to the same input event.
@@ -4606,7 +4643,7 @@ impl Shell {
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
                     let appshot_destination = self.settings.appshot_destination;
                     let page = cx.new(|cx| {
-                        ShortcutsPage::new(
+                        let mut page = ShortcutsPage::new(
                             state,
                             keymap,
                             escape_stops_active_agent,
@@ -4615,7 +4652,9 @@ impl Shell {
                             appshot_sound_enabled,
                             appshot_destination,
                             cx,
-                        )
+                        );
+                        page.set_fixed_shortcuts(fixed_shortcuts());
+                        page
                     });
                     // Persist + re-apply shortcut preferences whenever the page changes them.
                     self.shortcuts_sub = Some(cx.subscribe(
@@ -11206,6 +11245,7 @@ impl Render for Shell {
                     let section = self.remembered_settings_section();
                     self.open_settings(section, cx)
                 }
+                WorkspaceCommand::Help => self.open_settings(SettingsSection::Shortcuts, cx),
                 WorkspaceCommand::Diff if !self.active_chat.is_empty() => self.add_diff_surface(cx),
                 WorkspaceCommand::Files if !self.active_chat.is_empty() => {
                     self.add_files_surface(window, cx)
@@ -13481,6 +13521,12 @@ mod exit_regressions {
                 shell.pending_workspace_command = Some(WorkspaceCommand::Settings);
                 let _ = shell.render(window, cx);
                 assert!(matches!(shell.route, Route::Settings(_)));
+                shell.pending_workspace_command = Some(WorkspaceCommand::Help);
+                let _ = shell.render(window, cx);
+                assert!(matches!(
+                    shell.route,
+                    Route::Settings(SettingsSection::Shortcuts)
+                ));
                 shell.pending_workspace_command = Some(WorkspaceCommand::New);
                 let _ = shell.render(window, cx);
                 assert!(matches!(shell.route, Route::Chat));
@@ -15451,6 +15497,12 @@ impl Shell {
         } else {
             self.close_settings(cx);
         }
+    }
+    /// `/help` QA (`examples/help-fixture.rs`): issue the workspace command
+    /// the way the composer does.
+    pub fn fixture_help(&mut self, cx: &mut Context<Self>) {
+        self.pending_workspace_command = Some(crate::composer::WorkspaceCommand::Help);
+        cx.notify();
     }
     /// Onboarding QA (`examples/onboarding-fixture.rs`): click a starter.
     pub fn fixture_onboarding_starter(&mut self, id: &str, cx: &mut Context<Self>) {
