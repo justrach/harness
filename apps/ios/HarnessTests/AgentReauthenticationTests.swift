@@ -186,7 +186,9 @@ final class AgentReauthenticationTests: XCTestCase {
         XCTAssertEqual(recovery.phase, .done)
         XCTAssertNil(recovery.approval)
         XCTAssertEqual(transport.providers, [.codex, .chatGPTNew])
-        XCTAssertTrue(transport.cancelled.contains("login-1"))
+        // A new attempt detaches from the earlier one instead of cancelling it: the host may share
+        // that approval with another viewer, and a same-route retry attaches to it.
+        XCTAssertFalse(transport.cancelled.contains("login-1"))
         XCTAssertFalse(transport.cancelled.contains("login-2"))
     }
 
@@ -329,7 +331,7 @@ final class AgentReauthenticationTests: XCTestCase {
         XCTAssertEqual(transport.cancelled, ["login-1"])
     }
 
-    func testTaskCancellationDuringApprovalDelayClearsPendingCode() async {
+    func testTaskCancellationDuringApprovalDelayClearsPendingCodeAndDetaches() async {
         let transport = LoginTransportStub()
         transport.mode = .deviceCode
         transport.url = "https://auth.openai.com/codex/device"
@@ -347,7 +349,48 @@ final class AgentReauthenticationTests: XCTestCase {
         XCTAssertEqual(recovery.phase, .idle)
         XCTAssertNil(recovery.approval)
         await Task.yield()
-        XCTAssertEqual(transport.cancelled, ["login-1"])
+        // Dismissing the sheet only detaches: the approval keeps waiting on the host.
+        XCTAssertEqual(transport.cancelled, [])
+    }
+
+    func testDismissDuringStartDetachesAndLeavesTheHostSignInWaiting() async throws {
+        let transport = LoginTransportStub()
+        transport.deferStart = true
+        let starting = expectation(description: "start dispatched")
+        transport.onStart = { starting.fulfill() }
+        let recovery = AgentReauthentication(transport: transport, pollDelay: {})
+        let run = Task { await recovery.run(provider: .codex) }
+        await fulfillment(of: [starting], timeout: 1)
+        recovery.detach()
+        try XCTUnwrap(transport.startContinuation).resume(returning: AgentLoginStart(
+            loginId: "late", url: "", mode: .hostBrowser, code: nil))
+        await run.value
+        XCTAssertEqual(transport.cancelled, [], "a dismissed sheet never cancels the host's sign-in")
+        XCTAssertEqual(recovery.phase, .idle)
+    }
+
+    func testReconnectOutcomesResolveRowsAndAllowOneResume() {
+        let outcomes = ReauthOutcomes()
+        let key = ReauthOutcomes.key(chatId: "chat", rowId: "row")
+        XCTAssertFalse(outcomes.claimResume(key), "no Resume before the host verifies the sign-in")
+        outcomes.resolve(key)
+        XCTAssertTrue(outcomes.claimResume(key))
+        XCTAssertFalse(outcomes.claimResume(key), "a second tap sends nothing")
+        outcomes.releaseResume(key)
+        XCTAssertTrue(outcomes.claimResume(key), "a Resume that failed to send can be retried")
+    }
+
+    func testEarlierReconnectRowsAreTheOnesAUserMessageFollows() {
+        func row(_ id: String, _ kind: RowKind) -> TranscriptRow {
+            TranscriptRow(id: id, version: 0, turnStart: true, kind: kind, entryId: id)
+        }
+        let rows = [
+            row("e1", .errorChip(message: "expired", reauth: .chatGPTNew)),
+            row("u1", .user(text: "resume")),
+            row("e2", .errorChip(message: "expired", reauth: .chatGPTNew)),
+            row("e3", .errorChip(message: "plain", reauth: nil)),
+        ]
+        XCTAssertEqual(TranscriptView.earlierReauthRows(rows), ["e1"])
     }
 
     func testHostFailureClearsApprovalWithoutRetainingPollOutput() async throws {

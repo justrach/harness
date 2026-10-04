@@ -70,6 +70,7 @@ mod codegraff_account;
 mod command_palette;
 mod files_panel;
 mod project_icon;
+mod reauth;
 mod sidebar_pins;
 mod sidebar_sections;
 mod spaces;
@@ -1764,6 +1765,8 @@ pub struct Shell {
     /// "Sign in with Codegraff" state (`shell/codegraff_account.rs`).
     codegraff: Option<codegraff_account::CodegraffStatus>,
     codegraff_flow: Option<Task<()>>,
+    /// In-chat ChatGPT reconnects in flight, one per host and route (`shell/reauth.rs`).
+    reauth_tasks: std::collections::HashMap<crate::reauth_recovery::ReauthKey, Task<()>>,
     codegraff_status_task: Option<Task<()>>,
     chat_split_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
@@ -2206,6 +2209,7 @@ impl Shell {
             boot_restored: false,
             codegraff: None,
             codegraff_flow: None,
+            reauth_tasks: std::collections::HashMap::new(),
             codegraff_status_task: None,
             chat_split_bounds: Default::default(),
             browsers: std::collections::HashMap::new(),
@@ -3665,33 +3669,15 @@ impl Shell {
                     cx,
                 );
             }
-            TranscriptEvent::Reauthenticate { chat_id, provider } => {
-                // Resolve the emitting transcript's chat, not the selected
-                // chat/device: split panes may show a different host.
-                let host = self
-                    .state
-                    .read(cx)
-                    .chats
-                    .iter()
-                    .find(|chat| chat.id == *chat_id)
-                    .map(|chat| chat.device_id.clone())
-                    .filter(|host| !host.is_empty());
-                let Some(host) = host else {
-                    self.sidebar_notice = Some(
-                        "Chat host unavailable. Open the chat's host in Accounts to sign in."
-                            .into(),
-                    );
-                    cx.notify();
-                    return;
-                };
-                if self.accounts_page.is_none() {
-                    let state = self.state.clone();
-                    self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
-                }
-                if let Some(page) = &self.accounts_page {
-                    page.update(cx, |page, cx| page.start_reauth(host, *provider, cx));
-                }
-                self.open_settings(SettingsSection::Agents, cx);
+            TranscriptEvent::Reauthenticate {
+                chat_id,
+                row_id,
+                provider,
+                action,
+            } => {
+                // The emitting transcript's chat, never the selected chat or device: split panes
+                // may show another host.
+                self.on_reauth_action(chat_id, row_id, *provider, *action, cx);
             }
             TranscriptEvent::NewChatWithModel { model } => {
                 self.new_chat_with_model(model.clone(), cx);
@@ -14471,6 +14457,23 @@ mod exit_regressions {
                 shell.composer.update(cx, |composer, cx| {
                     composer.prefill("unsent draft".into(), cx)
                 });
+                use crate::reauth_recovery::{ReauthAction, ReauthKey, RecoveryPhase};
+                let act = |shell: &mut Shell,
+                           chat_id: &str,
+                           provider,
+                           action,
+                           cx: &mut Context<Shell>| {
+                    shell.on_transcript_event(
+                        shell.transcript.clone(),
+                        &TranscriptEvent::Reauthenticate {
+                            chat_id: chat_id.into(),
+                            row_id: format!("{chat_id}-error"),
+                            provider,
+                            action,
+                        },
+                        cx,
+                    );
+                };
                 for (chat_id, host, provider) in [
                     (
                         "remote-chat",
@@ -14483,62 +14486,70 @@ mod exit_regressions {
                         harness_proto::ReauthProvider::Codex,
                     ),
                 ] {
-                    shell.on_transcript_event(
-                        shell.transcript.clone(),
-                        &TranscriptEvent::Reauthenticate {
-                            chat_id: chat_id.into(),
-                            provider,
-                        },
-                        cx,
-                    );
-                    assert!(matches!(
-                        shell.route,
-                        Route::Settings(SettingsSection::Agents)
-                    ));
-                    let page = shell.accounts_page.as_ref().unwrap().read(cx);
-                    assert_eq!(page.login_target(), Some(host));
-                    let expected = match provider {
-                        harness_proto::ReauthProvider::ChatgptNew => serde_json::json!({
-                            "harness": "graff", "provider": "chatgpt-new",
-                            "reauthenticate": true, "targetDeviceId": host,
-                        }),
-                        harness_proto::ReauthProvider::Codex => serde_json::json!({
-                            "harness": "codex", "reauthenticate": true, "deviceAuth": true, "targetDeviceId": host,
-                        }),
+                    act(shell, chat_id, provider, ReauthAction::Reconnect, cx);
+                    // The recovery belongs to the emitting chat's host, and the chat stays put.
+                    let key = ReauthKey {
+                        host: host.into(),
+                        provider,
                     };
-                    assert_eq!(page.recovery_params(provider), expected);
-                    assert_eq!(
-                        shell.state.read(cx).selected_chat.as_deref(),
-                        Some("viewer-chat")
+                    let state = shell.state.read(cx);
+                    assert!(state.reauth.phase(&key).is_some(), "recovery for {host}");
+                    assert!(
+                        state.reauth.requesters[&key]
+                            .iter()
+                            .any(|row| row.chat_id == chat_id)
                     );
-                    assert_eq!(
-                        shell.state.read(cx).selected_device.as_deref(),
-                        Some("viewer-host")
-                    );
+                    assert!(matches!(shell.route, Route::Chat), "no trip to Settings");
+                    assert_eq!(state.selected_chat.as_deref(), Some("viewer-chat"));
+                    assert_eq!(state.selected_device.as_deref(), Some("viewer-host"));
                     assert_eq!(
                         shell.composer.read(cx).input.read(cx).text(),
                         "unsent draft"
                     );
                 }
-                // A missing owner must not silently route login to the viewer.
-                shell.route = Route::Chat;
-                shell.on_transcript_event(
-                    shell.transcript.clone(),
-                    &TranscriptEvent::Reauthenticate {
-                        chat_id: "missing-chat".into(),
-                        provider: harness_proto::ReauthProvider::ChatgptNew,
-                    },
+                // No engine in this rig: the start fails visibly instead of hanging.
+                let key = ReauthKey {
+                    host: "remote-host".into(),
+                    provider: harness_proto::ReauthProvider::ChatgptNew,
+                };
+                assert!(matches!(
+                    shell.state.read(cx).reauth.phase(&key),
+                    Some(RecoveryPhase::Failed(_))
+                ));
+                // Cancel returns the cards to their first step.
+                act(
+                    shell,
+                    "remote-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Cancel,
                     cx,
                 );
-                assert!(matches!(shell.route, Route::Chat));
-                assert_eq!(
-                    shell
-                        .accounts_page
-                        .as_ref()
-                        .unwrap()
+                assert!(shell.state.read(cx).reauth.phase(&key).is_none());
+                // Resume before a verified sign-in sends nothing.
+                act(
+                    shell,
+                    "remote-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Resume,
+                    cx,
+                );
+                assert!(shell.state.read(cx).reauth.resumed.is_empty());
+                // A missing owner must not silently route login to the viewer.
+                act(
+                    shell,
+                    "missing-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Reconnect,
+                    cx,
+                );
+                assert!(
+                    !shell
+                        .state
                         .read(cx)
-                        .login_target(),
-                    Some("other-host")
+                        .reauth
+                        .phases
+                        .keys()
+                        .any(|key| key.host == "viewer-host")
                 );
                 assert!(
                     shell

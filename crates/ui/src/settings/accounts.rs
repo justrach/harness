@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use harness_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, GRAFF_LOGIN_PROVIDERS, GraffLoginProvider, HarnessId, ReauthProvider,
+    AgentLoginStatus, GRAFF_LOGIN_PROVIDERS, GraffLoginProvider, HarnessId,
 };
 use harness_rpc::methods;
 
@@ -206,14 +206,6 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
         .find(|(provider, _)| Some(*provider) == id)
         .map(|(_, name)| *name)
         .unwrap_or("graff")
-}
-
-/// Only these typed routes can be selected by a transcript recovery action.
-fn reauth_login_route(provider: ReauthProvider) -> (HarnessId, Option<&'static str>) {
-    match provider {
-        ReauthProvider::ChatgptNew => (HarnessId::Graff, Some("chatgpt-new")),
-        ReauthProvider::Codex => (HarnessId::Codex, None),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,31 +1119,6 @@ impl AccountsPage {
     }
 
     // ---- add-account flows ----
-
-    /// Transcript recovery always supplies the chat's execution host,
-    /// including for a local chat. Never use the viewer's current selection.
-    pub(crate) fn start_reauth(
-        &mut self,
-        host: String,
-        provider: ReauthProvider,
-        cx: &mut Context<Self>,
-    ) {
-        self.cancel_login(cx);
-        self.set_target_device(Some(host), cx);
-        let (harness, provider) = reauth_login_route(provider);
-        self.begin_login(harness, provider.map(str::to_string), true, cx);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn login_target(&self) -> Option<&str> {
-        self.target_device.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn recovery_params(&self, provider: ReauthProvider) -> serde_json::Value {
-        let (harness, provider) = reauth_login_route(provider);
-        self.login_params(harness, provider, true)
-    }
 
     fn login_params(
         &self,

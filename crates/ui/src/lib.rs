@@ -57,6 +57,7 @@ pub mod pickers;
 pub mod popover;
 pub mod project_actions;
 pub mod queue;
+pub mod reauth_recovery;
 pub mod rail;
 pub(crate) mod screen_access;
 pub mod settings;

@@ -78,6 +78,8 @@ final class AgentReauthentication {
     private(set) var approval: Approval?
     private var loginId: String?
     @ObservationIgnored private var generation: UInt64 = 0
+    /// Attempts ended by an explicit Cancel: a sign-in that starts late for one of them is ended too.
+    @ObservationIgnored private var cancelledAttempts: Set<UInt64> = []
     @ObservationIgnored private let transport: (any AgentLoginTransport)?
     @ObservationIgnored private let pollDelay: @MainActor () async throws -> Void
 
@@ -89,21 +91,30 @@ final class AgentReauthentication {
         self.pollDelay = pollDelay
     }
 
+    /// Explicit Cancel: ends the sign-in on the host for everyone waiting on it.
     func cancel() {
-        generation &+= 1
         let oldId = loginId
-        loginId = nil
-        approval = nil
-        phase = .idle
+        cancelledAttempts.insert(generation)
+        detach()
         if let oldId, let transport {
             Task { await transport.cancel(loginId: oldId) }
         }
     }
 
+    /// Stop watching without ending the host's sign-in (the sheet was dismissed, or the task that
+    /// ran it was cancelled). Reopening attaches to the same approval: the host coalesces
+    /// recoveries per route and account.
+    func detach() {
+        generation &+= 1
+        loginId = nil
+        approval = nil
+        phase = .idle
+    }
+
     /// User-triggered only. Late start/poll responses cannot restore a
     /// dismissed sheet or overwrite a replacement attempt's state.
     func run(provider: AgentReauthProvider) async {
-        cancel()
+        detach()
         let attempt = generation
         phase = .starting
         guard let transport else {
@@ -112,9 +123,13 @@ final class AgentReauthentication {
         }
         do {
             let started = try await transport.start(provider: provider)
+            // Dismissed while starting: leave the host's sign-in running; reopening attaches.
+            // Cancelled explicitly: end the sign-in that just started.
             guard generation == attempt, !Task.isCancelled else {
-                if generation == attempt { cancel() }
-                await transport.cancel(loginId: started.loginId)
+                if generation == attempt { detach() }
+                if cancelledAttempts.remove(attempt) != nil {
+                    await transport.cancel(loginId: started.loginId)
+                }
                 return
             }
             guard !started.loginId.isEmpty else {
@@ -156,11 +171,11 @@ final class AgentReauthentication {
                     throw RelayError.rpc("Sign-in failed. Try again on the execution device.")
                 }
             }
-            if generation == attempt, Task.isCancelled { cancel() }
+            if generation == attempt, Task.isCancelled { detach() }
         } catch {
             guard generation == attempt else { return }
             if Task.isCancelled || error is CancellationError {
-                cancel()
+                detach()
                 return
             }
             let message: String
@@ -177,4 +192,36 @@ final class AgentReauthentication {
             phase = .failed(message)
         }
     }
+}
+
+/// Recoveries that succeeded in this app session, and the rows whose one Resume was sent. Memory
+/// only: a relaunch shows the row's first step again, and the host attaches to any approval still
+/// waiting.
+@MainActor
+@Observable
+final class ReauthOutcomes {
+    static let shared = ReauthOutcomes()
+
+    private(set) var resolved: Set<String> = []
+    private(set) var resumed: Set<String> = []
+
+    static func key(chatId: String, rowId: String) -> String { "\(chatId)|\(rowId)" }
+
+    func resolve(_ key: String) { resolved.insert(key) }
+
+    /// Claim a row's one Resume. `false` when the row isn't reconnected or was already resumed.
+    func claimResume(_ key: String) -> Bool {
+        resolved.contains(key) && resumed.insert(key).inserted
+    }
+
+    /// A Resume that couldn't be sent: the row offers it again.
+    func releaseResume(_ key: String) { resumed.remove(key) }
+}
+
+enum ReauthCopy {
+    /// The turn Resume sends: a continuation, never the failed prompt.
+    static let resumePrompt = "Continue where you left off. The previous turn stopped because ChatGPT needed reconnecting; it is connected again now."
+    /// Harness has no signal for either case, so this never says one applies, and never suggests
+    /// turning account security off.
+    static let accountSecurityNote = "If you recently reset your password or enrolled in Advanced Account Security (including Daybreak), ChatGPT may ask you to sign in again."
 }

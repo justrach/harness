@@ -63,9 +63,24 @@ async fn device_reauth_child() {
         serde_json::from_slice::<serde_json::Value>(&std::fs::read(&live).unwrap()).unwrap(),
         expired
     );
+    // A second viewer (another chat, the phone) attaches to the approval already waiting: same
+    // login and code, and the first one keeps going.
+    let again = accounts.start_codex_reauth(true).await.unwrap();
+    assert_eq!(
+        again, start,
+        "a second recovery attaches instead of restarting"
+    );
+    assert_eq!(
+        accounts.poll_login(&start.login_id).await.unwrap().status,
+        AgentLoginStatus::Pending
+    );
     if scenario == "cancel" {
         accounts.cancel_login(&start.login_id);
         assert!(accounts.poll_login(&start.login_id).await.is_err());
+        // Only an explicit Cancel ends it; the next demand starts a fresh approval.
+        let fresh = accounts.start_codex_reauth(true).await.unwrap();
+        assert_ne!(fresh.login_id, start.login_id);
+        accounts.cancel_login(&fresh.login_id);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&std::fs::read(&live).unwrap()).unwrap(),
             expired

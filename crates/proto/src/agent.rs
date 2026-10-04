@@ -399,7 +399,7 @@ pub enum DoneStatus {
 
 /// Fixed login routes offered by a provider-typed reauthentication failure.
 /// Wire-provided commands are never executed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReauthProvider {
     #[serde(rename = "chatgpt-new")]
     ChatgptNew,

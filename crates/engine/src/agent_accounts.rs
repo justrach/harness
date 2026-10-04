@@ -263,6 +263,15 @@ impl LoginFlow {
             | LoginFlow::Graff { started_at, .. } => *started_at,
         }
     }
+
+    /// Still waiting on the user: the child has not exited, or the task has no outcome yet.
+    fn pending(&self) -> bool {
+        match self {
+            LoginFlow::Claude { .. } => true,
+            LoginFlow::Spawned { exit, .. } | LoginFlow::Graff { exit, .. } => lock(exit).is_none(),
+            LoginFlow::Task { state, .. } => lock(state).outcome.is_none(),
+        }
+    }
 }
 
 // ── service ─────────────────────────────────────────────────────────────────
@@ -289,6 +298,10 @@ struct Inner {
     /// removal and sign the wrong live account out.
     ops: tokio::sync::Mutex<()>,
     flows: Mutex<HashMap<String, LoginFlow>>,
+    /// Explicit recoveries in progress, one per route and account on this execution host
+    /// ([`reauth_route`]): a second viewer (another chat, the phone) attaches to the approval
+    /// already waiting instead of starting another and cancelling the first.
+    reauth_starts: Mutex<HashMap<String, AgentLoginStart>>,
     /// `"{harness}:{accountKey}"` → cached usage windows.
     usage_cache: Mutex<HashMap<String, CachedUsage>>,
     /// Slots with a token refresh in flight — a second refresh of the same
@@ -329,6 +342,7 @@ impl AgentAccounts {
                 http,
                 ops: tokio::sync::Mutex::new(()),
                 flows: Mutex::new(HashMap::new()),
+                reauth_starts: Mutex::new(HashMap::new()),
                 usage_cache: Mutex::new(HashMap::new()),
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
             }),
@@ -743,9 +757,49 @@ impl AgentAccounts {
         &self,
         device_auth: bool,
     ) -> Result<AgentLoginStart, EngineError> {
+        let account = self
+            .detect_codex()
+            .map(|d| d.account_key)
+            .unwrap_or_default();
+        let route = reauth_route("codex", device_auth, &account);
+        if let Some(start) = self.pending_reauth(&route) {
+            return Ok(start);
+        }
         // Preserve the existing live account before an approved recovery replaces it.
         self.list(false).await?;
-        self.start_codex_login(true, device_auth).await
+        let start = self.start_codex_login(true, device_auth).await?;
+        lock(&self.inner.reauth_starts).insert(route, start.clone());
+        Ok(start)
+    }
+
+    /// Explicit recovery of a graff provider's sign-in (the ChatGPT route): attaches to a recovery
+    /// already waiting on this host, else starts one. An ordinary sign-in from Accounts still
+    /// supersedes ([`Self::start_graff_login`]).
+    pub async fn start_graff_reauth(&self, provider: &str) -> Result<AgentLoginStart, EngineError> {
+        // graff keeps one registration per provider per home, so the provider names the account.
+        let route = reauth_route("graff", false, provider);
+        if let Some(start) = self.pending_reauth(&route) {
+            return Ok(start);
+        }
+        let start = self.start_graff_login(provider).await?;
+        lock(&self.inner.reauth_starts).insert(route, start.clone());
+        Ok(start)
+    }
+
+    /// The recovery already waiting for `route`, if its flow is still pending. A finished,
+    /// cancelled or expired flow drops out, so the next demand starts a fresh one.
+    fn pending_reauth(&self, route: &str) -> Option<AgentLoginStart> {
+        self.sweep_flows();
+        let start = lock(&self.inner.reauth_starts).get(route).cloned()?;
+        let pending = lock(&self.inner.flows)
+            .get(&start.login_id)
+            .is_some_and(LoginFlow::pending);
+        if pending {
+            Some(start)
+        } else {
+            lock(&self.inner.reauth_starts).remove(route);
+            None
+        }
     }
 
     async fn start_codex_login(
@@ -2422,6 +2476,15 @@ type LoginChildHandles = (
 /// (the URL can land on either stream), and a monitor polls `try_wait` so the
 /// child is reaped without owning it — the cancel path needs concurrent kill
 /// access.
+/// The coalescing key for an explicit recovery on this host: the route (harness, and whether it is
+/// device authorization) and the account it renews.
+fn reauth_route(harness: &str, device_auth: bool, account: &str) -> String {
+    format!(
+        "{harness}:{}:{account}",
+        if device_auth { "device" } else { "browser" }
+    )
+}
+
 fn wire_login_child(mut child: harness_adapters::process::Child) -> LoginChildHandles {
     let output = Arc::new(Mutex::new(String::new()));
     for pipe in [
@@ -2556,6 +2619,27 @@ fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), Engi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recoveries_only_join_on_the_same_route_and_account() {
+        let codex = reauth_route("codex", true, "account-a");
+        assert_eq!(codex, reauth_route("codex", true, "account-a"));
+        assert_ne!(
+            codex,
+            reauth_route("codex", true, "account-b"),
+            "another account never joins"
+        );
+        assert_ne!(
+            codex,
+            reauth_route("codex", false, "account-a"),
+            "nor another route"
+        );
+        assert_ne!(
+            reauth_route("graff", false, "chatgpt-new"),
+            reauth_route("graff", false, "xai"),
+            "each graff provider is its own registration"
+        );
+    }
 
     #[tokio::test]
     async fn reauth_poll_activates_renewed_credentials_without_overwriting_them() {

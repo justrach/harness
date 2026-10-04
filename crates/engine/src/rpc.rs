@@ -3206,10 +3206,15 @@ impl RpcService for EngineRpc {
                 let p: StartAgentLoginParams = parse_params(params)?;
                 if p.device_auth && (!p.reauthenticate || p.harness != HarnessId::Codex) {
                     return Err(RpcError::Failed(
-                        "Device authorization is supported only for explicit Codex recovery.".into(),
+                        "Device authorization is supported only for explicit Codex recovery."
+                            .into(),
                     ));
                 }
                 let start = match (p.harness, p.provider.as_deref()) {
+                    // Recovery attaches to a sign-in already waiting on this host.
+                    (HarnessId::Graff, Some(provider)) if p.reauthenticate => {
+                        self.agent_accounts.start_graff_reauth(provider).await
+                    }
                     (HarnessId::Graff, Some(provider)) => {
                         self.agent_accounts.start_graff_login(provider).await
                     }

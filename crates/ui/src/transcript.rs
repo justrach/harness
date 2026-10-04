@@ -3289,6 +3289,8 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
+    /// The reconnect generation the cards were last measured at (`reauth_recovery.rs`).
+    reauth_generation: u64,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
@@ -3548,11 +3550,14 @@ pub enum TranscriptEvent {
     /// The model-mismatch card: keep this chat on the `model` its session
     /// restored, with the failed prompt back in the composer.
     KeepChatModel { model: String },
-    /// Start the allowlisted login on this chat's execution host. No prompt
-    /// is retried or copied, and the viewer's selected device is irrelevant.
+    /// A step on the in-chat ChatGPT reconnect card, for the recovery on this chat's execution
+    /// host (never the viewer's selected device). No prompt or tool is replayed; Resume sends a
+    /// new turn in this chat only when clicked.
     Reauthenticate {
         chat_id: String,
+        row_id: String,
         provider: ReauthProvider,
+        action: crate::reauth_recovery::ReauthAction,
     },
 }
 
@@ -3663,6 +3668,7 @@ impl Transcript {
         let pinned = follow;
         let mut this = Self {
             state,
+            reauth_generation: 0,
             list,
             rows: Vec::new(),
             last_source: None,
@@ -4759,6 +4765,16 @@ impl Transcript {
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
+        // A reconnect card changed step (waiting, reconnected, …): re-measure the cards.
+        let reauth_generation = self.state.read(cx).reauth.generation;
+        if reauth_generation != self.reauth_generation {
+            self.reauth_generation = reauth_generation;
+            for ix in 0..self.rows.len() {
+                if matches!(self.rows[ix].kind, RowKind::ReauthRequired { .. }) {
+                    self.list.remeasure_items(ix..ix + 1);
+                }
+            }
+        }
         // The trailer grows with the live steps: re-measure the row it rides.
         if self.doc_override.is_none() {
             let steps = live_step_lines(&self.state.read(cx).tool_progress);
@@ -6088,46 +6104,296 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// A reconnect card's click: the step goes to the shell with this row's chat and id.
+    fn reauth_click(
+        chat_id: &str,
+        row_id: &SharedString,
+        provider: ReauthProvider,
+        action: crate::reauth_recovery::ReauthAction,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static {
+        let chat_id = chat_id.to_string();
+        let row_id = row_id.to_string();
+        cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+            cx.stop_propagation();
+            cx.emit(TranscriptEvent::Reauthenticate {
+                chat_id: chat_id.clone(),
+                row_id: row_id.clone(),
+                provider,
+                action,
+            });
+        })
+    }
+
+    /// The in-chat ChatGPT reconnect card (`reauth_recovery.rs`). Styled like the Accounts ChatGPT
+    /// sign-in: its mark, primary and ghost buttons, Active badge, spinner and error colour.
     fn render_reauth(
         &self,
+        ix: usize,
         row_id: &SharedString,
         message: &SharedString,
         provider: ReauthProvider,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chat_id = self.chat_id.clone();
+        use crate::reauth_recovery::{
+            ACCOUNT_SECURITY_NOTE, CardStep, ReauthAction, ReauthKey, ReauthRow, ResumeState,
+            card_step,
+        };
+        let chip = notice_chip(
+            theme,
+            false,
+            "ChatGPT sign-in required",
+            message.clone(),
+            Tile,
+        )
+        .w_full();
+        let Some(chat_id) = self.chat_id.clone() else {
+            return div().py(px(4.0)).w_full().child(chip).into_any_element();
+        };
+        let entry = self.rows[ix].entry_id.clone();
+        let later_activity = self.rows[ix + 1..]
+            .iter()
+            .any(|row| row.entry_id != entry && matches!(row.kind, RowKind::User { .. }));
+        let (host_name, step) = {
+            let state = self.state.read(cx);
+            let chat = state.chats.iter().find(|chat| chat.id == chat_id);
+            let host = chat.map(|chat| chat.device_id.clone()).unwrap_or_default();
+            let host_name: SharedString = if state.local_device_id.as_deref() == Some(host.as_str())
+            {
+                "this computer".into()
+            } else {
+                state
+                    .devices
+                    .iter()
+                    .find(|device| device.id == host)
+                    .map(|device| device.name.clone())
+                    .unwrap_or_else(|| "the chat's computer".into())
+                    .into()
+            };
+            // Resume runs on the chat's own agent and model; without both it is not offered.
+            let has_config = chat
+                .and_then(|chat| chat.config.as_ref())
+                .is_some_and(|config| config.model.is_some());
+            let running = matches!(
+                state.indicator_for(&chat_id, chrono::Utc::now()),
+                crate::state::Indicator::Working | crate::state::Indicator::AwaitingInput
+            );
+            let step = card_step(
+                &state.reauth,
+                &ReauthKey { host, provider },
+                &ReauthRow {
+                    chat_id: chat_id.clone(),
+                    row_id: row_id.to_string(),
+                },
+                later_activity,
+                running,
+                has_config,
+            );
+            (host_name, step)
+        };
+        let line = |text: SharedString| {
+            div()
+                .text_size(crate::typography::ui_rems(12.5))
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let note = div()
+            .text_size(crate::typography::ui_rems(11.5))
+            .text_color(theme.text_muted.opacity(0.8))
+            .child(SharedString::from(ACCOUNT_SECURITY_NOTE));
+        let header = |title: SharedString| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    crate::icons::icon(crate::icons::OPENAI_MARK)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(crate::settings::widgets::row_title(theme, title))
+        };
+        let button_id = |what: &str| SharedString::from(format!("{row_id}-reauth-{what}"));
+        let primary = |label: &str, what: &str, action: ReauthAction, cx: &mut Context<Self>| {
+            crate::popover::btn_primary(theme, label)
+                .id(button_id(what))
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(label.to_string()))
+                .on_click(Self::reauth_click(&chat_id, row_id, provider, action, cx))
+        };
+        let waiting_line = |text: SharedString, cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(crate::loaders::gradient_spinner(
+                    "reauth-wait",
+                    theme,
+                    3.0,
+                    cx.entity_id(),
+                    cx,
+                ))
+                .child(line(text))
+        };
+        let reconnected = matches!(step, CardStep::Reconnected { .. });
+        let card = div().flex().flex_col().gap(px(10.0));
+        let card = match step {
+            CardStep::Earlier => return div().py(px(4.0)).w_full().child(chip).into_any_element(),
+            CardStep::Offer => card
+                .child(header("Reconnect ChatGPT".into()))
+                .child(line(
+                    format!(
+                        "Sign in again on {host_name} to keep going in this chat. Your draft and \
+                         history stay as they are, and nothing is sent until you choose to."
+                    )
+                    .into(),
+                ))
+                .child(div().flex().child(primary(
+                    "Reconnect ChatGPT",
+                    "start",
+                    ReauthAction::Reconnect,
+                    cx,
+                )))
+                .child(note),
+            CardStep::Starting => card
+                .child(header("Reconnect ChatGPT".into()))
+                .child(waiting_line(
+                    format!("Starting sign-in on {host_name}…").into(),
+                    cx,
+                ))
+                .child(
+                    div().flex().child(
+                        crate::popover::btn_ghost(theme, "Cancel", button_id("cancel-start-fade"))
+                            .id(button_id("cancel-start"))
+                            .role(gpui::Role::Button)
+                            .aria_label("Cancel the ChatGPT sign-in")
+                            .on_click(Self::reauth_click(&chat_id, row_id, provider, ReauthAction::Cancel, cx)),
+                    ),
+                ),
+            CardStep::Waiting { code, url, message } => {
+                let body: SharedString = if code.is_some() {
+                    format!(
+                        "Open the ChatGPT sign-in page and enter this code. You can approve on any \
+                         device; the renewed sign-in is saved on {host_name}."
+                    )
+                    .into()
+                } else {
+                    format!(
+                        "Finish signing in in the browser on {host_name}. ChatGPT's sign-in has to \
+                         complete on that computer."
+                    )
+                    .into()
+                };
+                card.child(header("Waiting for approval".into()))
+                    .child(line(body))
+                    .when_some(code, |el, code| {
+                        el.child(
+                            div()
+                                .self_start()
+                                .px(px(12.0))
+                                .py(px(8.0))
+                                .rounded(px(8.0))
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(crate::theme::ink(0.03))
+                                .font_family(theme.font_mono.clone())
+                                .text_size(crate::typography::ui_rems(18.0))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(SharedString::from(code)),
+                        )
+                    })
+                    .child(waiting_line(
+                        message.map(SharedString::from).unwrap_or_else(|| {
+                            format!("Waiting for approval on {host_name}…").into()
+                        }),
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .when(!url.is_empty(), |el| {
+                                let url = url.clone();
+                                el.child(
+                                    crate::popover::btn_primary(theme, "Open the sign-in page")
+                                        .id(button_id("open"))
+                                        .role(gpui::Role::Button)
+                                        .aria_label("Open the sign-in page")
+                                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                                )
+                            })
+                            .child(
+                                crate::popover::btn_ghost(theme, "Cancel", button_id("cancel-fade"))
+                                    .id(button_id("cancel"))
+                                    .role(gpui::Role::Button)
+                                    .aria_label("Cancel the ChatGPT sign-in")
+                                    .on_click(Self::reauth_click(&chat_id, row_id, provider, ReauthAction::Cancel, cx)),
+                            ),
+                    )
+                    .child(note)
+            }
+            CardStep::Failed(error) => card
+                .child(header("Couldn't reconnect ChatGPT".into()))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_color(theme.danger_muted.opacity(0.9))
+                        .child(SharedString::from(error)),
+                )
+                .child(div().flex().child(primary("Retry", "retry", ReauthAction::Retry, cx)))
+                .child(note),
+            CardStep::Reconnected { resume } => card
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            crate::icons::icon(crate::icons::OPENAI_MARK)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(crate::settings::widgets::row_title(theme, "ChatGPT reconnected"))
+                        .child(crate::settings::widgets::badge_active(theme, "Active")),
+                )
+                .child(line(match resume {
+                    ResumeState::Ready => format!(
+                        "Signed in again on {host_name}. Nothing was resent: resume when you're ready."
+                    )
+                    .into(),
+                    ResumeState::Busy => "A turn is running in this chat. Resume once it finishes.".into(),
+                    ResumeState::Unavailable => {
+                        "Send a message to continue: this chat has no saved agent and model to resume with."
+                            .into()
+                    }
+                    ResumeState::Sent => format!("Signed in again on {host_name}.").into(),
+                }))
+                .when(resume == ResumeState::Ready, |el| {
+                    el.child(div().flex().child(primary(
+                        "Resume conversation",
+                        "resume",
+                        ReauthAction::Resume,
+                        cx,
+                    )))
+                }),
+        };
         div()
             .py(px(4.0))
             .w_full()
             .flex()
             .flex_col()
             .gap(px(8.0))
+            // Resolved: the error stays in history, but the card leads.
+            .when(!reconnected, |el| el.child(chip))
             .child(
-                notice_chip(
-                    theme,
-                    false,
-                    "ChatGPT sign-in required",
-                    message.clone(),
-                    Tile,
-                )
-                .w_full(),
+                crate::settings::widgets::section_card(theme)
+                    .px(px(16.0))
+                    .py(px(14.0))
+                    .id(SharedString::from(format!("{row_id}-reauth-card")))
+                    .child(card),
             )
-            .when_some(chat_id, |el, chat_id| {
-                el.child(
-                    crate::popover::btn_primary(theme, "Sign in to ChatGPT")
-                        .id(SharedString::from(format!("{row_id}-reauth")))
-                        .role(gpui::Role::Button)
-                        .aria_label("Sign in to ChatGPT")
-                        .self_start()
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(TranscriptEvent::Reauthenticate {
-                                chat_id: chat_id.clone(),
-                                provider,
-                            });
-                        })),
-                )
-            })
             .into_any_element()
     }
 
@@ -7110,7 +7376,7 @@ impl Transcript {
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, cx),
             RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
             RowKind::ReauthRequired { message, provider } => {
-                self.render_reauth(&row.id, message, *provider, &theme, cx)
+                self.render_reauth(ix, &row.id, message, *provider, &theme, cx)
             }
             RowKind::ModelMismatch {
                 requested,

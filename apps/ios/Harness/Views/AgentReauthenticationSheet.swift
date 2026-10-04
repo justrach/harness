@@ -3,14 +3,22 @@ import SwiftUI
 struct AgentReauthenticationSheet: View {
     let provider: AgentReauthProvider
     let hostName: String
+    /// The host verified the renewed sign-in: the row that opened the sheet is resolved.
+    var onSignedIn: () -> Void = {}
+    /// Resume the conversation (a new turn in the same chat), or nil when it can't be offered.
+    /// Returns false when nothing was sent.
+    var resume: (() -> Bool)? = nil
     @State private var recovery: AgentReauthentication
     @State private var attempt = 0
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
-    init(provider: AgentReauthProvider, hostName: String, relay: DeviceRelayClient?) {
+    init(provider: AgentReauthProvider, hostName: String, relay: DeviceRelayClient?,
+         onSignedIn: @escaping () -> Void = {}, resume: (() -> Bool)? = nil) {
         self.provider = provider
         self.hostName = hostName
+        self.onSignedIn = onSignedIn
+        self.resume = resume
         _recovery = State(initialValue: AgentReauthentication(
             transport: relay.map { RelayAgentLoginTransport(relay: $0) }))
     }
@@ -19,7 +27,7 @@ struct AgentReauthenticationSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text("Sign in to ChatGPT")
+                    Text("Reconnect ChatGPT")
                         .font(Theme.sans(22, weight: .semibold))
                     Text("Credentials will be saved on \(hostName), where this session runs. This does not sign you out of Harness.")
                         .font(Theme.sans(14))
@@ -65,15 +73,30 @@ struct AgentReauthenticationSheet: View {
                         Text("Credentials are saved on \(hostName), not your iPhone. Sign-in will not resend or replay the failed message.")
                             .foregroundStyle(Theme.textMuted)
                     case .done:
-                        Label("Signed in on \(hostName)", systemImage: "checkmark.circle")
-                        Text("Return to the session and send or retry your message when you are ready. The failed turn has not been replayed.")
+                        Label("ChatGPT reconnected on \(hostName)", systemImage: "checkmark.circle")
+                        Text("Nothing was resent. Resume the conversation when you're ready, or go back and send something new.")
                             .foregroundStyle(Theme.textMuted)
-                        Button("Return to session") { dismiss() }
+                        if let resume {
+                            Button("Resume conversation") {
+                                if resume() { dismiss() }
+                            }
                             .buttonStyle(.borderedProminent)
+                            .accessibilityIdentifier("agent-reauth-resume")
+                            Button("Return to session") { dismiss() }
+                                .buttonStyle(.bordered)
+                        } else {
+                            Button("Return to session") { dismiss() }
+                                .buttonStyle(.borderedProminent)
+                        }
                     case .failed(let message):
                         Text(message).foregroundStyle(Theme.danger)
                         Button("Try again") { attempt += 1 }
                             .buttonStyle(.borderedProminent)
+                    }
+                    if recovery.phase != .done {
+                        Text(ReauthCopy.accountSecurityNote)
+                            .font(Theme.sans(12))
+                            .foregroundStyle(Theme.textMuted)
                     }
                 }
                 .font(Theme.sans(14))
@@ -92,6 +115,11 @@ struct AgentReauthenticationSheet: View {
         }
         .presentationDetents([.medium, .large])
         .task(id: attempt) { await recovery.run(provider: provider) }
-        .onDisappear { recovery.cancel() }
+        .onChange(of: recovery.phase) { _, phase in
+            if phase == .done { onSignedIn() }
+        }
+        // Dismissal only stops watching: the sign-in keeps waiting on the host, and reopening
+        // attaches to it. The Cancel button is the explicit way to end it.
+        .onDisappear { recovery.detach() }
     }
 }

@@ -206,7 +206,8 @@ struct SessionView: View {
         // above it, so keyboard and glass morphs cannot cover the last row.
         return VStack(spacing: 0) {
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
-                           onHostLink: { hostLink = $0 })
+                           onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
+                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId))
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
