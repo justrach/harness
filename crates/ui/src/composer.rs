@@ -4995,6 +4995,7 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    Help,
 }
 
 impl WorkspaceCommand {
@@ -5024,6 +5025,12 @@ impl WorkspaceCommand {
                 true,
             ),
             (Self::Stop, "stop", "Harness: stop the active run", true),
+            (
+                Self::Help,
+                "help",
+                "Harness: show keyboard shortcuts",
+                false,
+            ),
         ]
     }
 }
@@ -13293,6 +13300,18 @@ mod tests {
             assert!(candidate.invocation.prompt_text().contains("SKILL.md"));
         }
         assert_ne!(slash[1].invocation, slash[2].invocation);
+    }
+
+    #[test]
+    fn help_is_offered_with_or_without_a_chat() {
+        for in_chat in [false, true] {
+            let rows = with_workspace_commands(Vec::new(), in_chat);
+            let help = rows
+                .iter()
+                .find(|row| row.workspace_command == Some(WorkspaceCommand::Help))
+                .expect("/help is a Harness command");
+            assert_eq!(help.name, "help");
+        }
     }
 
     #[test]
