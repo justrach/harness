@@ -675,11 +675,13 @@ final class WorkspaceStore {
     }
 
     /// ListAgentAccounts on the target device — its agent CLI logins with
-    /// rate-limit windows. `forceUsage` bypasses the engine's usage cache.
+    /// rate-limit windows. `forceUsage` reads the limits from each provider
+    /// (one network probe per login, hence the longer deadline); without it
+    /// the engine only returns limits cached in the last few minutes.
     func agentAccounts(deviceId: String, forceUsage: Bool) async throws -> AgentAccountsSnapshot {
         try await relay(for: deviceId).call(method: "ListAgentAccounts",
                                             params: ["forceUsage": forceUsage],
-                                            timeoutSeconds: 20)
+                                            timeoutSeconds: 45)
     }
 
     /// ListRefs on the target device — branches with current/worktree markers

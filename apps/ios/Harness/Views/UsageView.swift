@@ -2,7 +2,9 @@
 // agents, so this asks one of them over its relay: the CodeGraff account its
 // engine is signed in with (credits, 30-day spend, the monthly key budget)
 // and each agent CLI's plan windows (Claude Code, Codex, …). The desktop's
-// Settings → Accounts shows the same numbers.
+// Settings → Accounts shows the same numbers, and like it every load asks the
+// engine to read the limits afresh: an unforced list only returns limits some
+// other client read in the last few minutes, and otherwise none.
 
 import SwiftUI
 
@@ -10,6 +12,8 @@ struct UsageView: View {
     @Environment(AppModel.self) private var model
     @State private var selectedDeviceId: String?
     @State private var state: LoadState = .idle
+    /// The computer `state` describes; another one shows a spinner, not stale numbers.
+    @State private var loadedDeviceId: String?
     @State private var now = Date()
 
     enum LoadState {
@@ -56,8 +60,8 @@ struct UsageView: View {
                 content
             }
         }
-        .refreshable { await reload(force: true) }
-        .task(id: deviceId) { await reload(force: false) }
+        .refreshable { await reload() }
+        .task(id: deviceId) { await reload() }
         .navigationTitle("Usage")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -76,7 +80,7 @@ struct UsageView: View {
         case .failed(let message):
             Section {
                 Text(message).foregroundStyle(.secondary)
-                Button("Try again") { Task { await reload(force: true) } }
+                Button("Try again") { Task { await reload() } }
             }
         case .loaded(let codegraff, let accounts):
             codegraffSection(codegraff)
@@ -133,16 +137,18 @@ struct UsageView: View {
         }
     }
 
-    private func reload(force: Bool) async {
+    private func reload() async {
         guard let deviceId else { return }
-        if case .loaded = state, !force {} else { state = .loading }
+        // A refresh keeps the numbers on screen until the new ones arrive.
+        if case .loaded = state, loadedDeviceId == deviceId {} else { state = .loading }
         // The two answers are independent; one failing (a CLI that can't
         // report, a signed-out gateway) shouldn't blank the other.
         async let codegraff = capture { try await model.codegraffUsage(deviceId: deviceId) }
-        async let accounts = capture { try await model.agentAccounts(deviceId: deviceId, forceUsage: force) }
+        async let accounts = capture { try await model.agentAccounts(deviceId: deviceId, forceUsage: true) }
         let (usage, snapshot) = await (codegraff, accounts)
         guard self.deviceId == deviceId else { return }
         now = Date()
+        loadedDeviceId = deviceId
         switch (usage, snapshot) {
         case (.failure(let error), .failure):
             state = .failed("Couldn't reach \(model.deviceName(deviceId)): \(describeTransportError(error))")

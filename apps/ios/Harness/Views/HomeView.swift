@@ -174,7 +174,10 @@ struct HomeView: View {
                 }
             }
         }
-        .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
+        // The keyboard must not reshape the split under the person typing (see PhoneSplit.layoutSize).
+        .onGeometryChange(for: CGSize.self) { $0.size } action: {
+            containerSize = PhoneSplit.layoutSize(previous: containerSize, measured: $0)
+        }
         .onChange(of: containerSize) { refreshSplitOffer() }
         .onChange(of: phoneSplitRaw) { refreshSplitOffer() }
         .onAppear { refreshSplitOffer() }
