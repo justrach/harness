@@ -206,6 +206,17 @@ final class DemoDataset {
             seedAppshots(store)
         } else if ProcessInfo.processInfo.arguments.contains("-longhistory") {
             store.setEntries(BenchRunner.syntheticEntries(turns: 200))
+        } else if ProcessInfo.processInfo.arguments.contains("-links") {
+            // Link-tap UI checks: a settled reply with a bare URL and a
+            // markdown link, both loopback so a tap opens the host-link sheet.
+            store.setEntries([
+                MessageEntry(id: "links-ask", role: .user,
+                    parts: [.text(id: "t0", text: "Where is the preview?")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "links-reply", role: .assistant,
+                    parts: [.text(id: "t0", text: "Bare: http://127.0.0.1:3777/bare and markdown: [the preview](http://127.0.0.1:3777/md).")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
+            ])
         } else if ProcessInfo.processInfo.arguments.contains("-longprompt") {
             store.setEntries([
                 MessageEntry(id: "long-prompt", role: .user,

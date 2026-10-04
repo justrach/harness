@@ -136,7 +136,7 @@ enum MarkdownParser {
     private static func collectInline(_ markup: Markup, style: InlineStyle, into runs: inout [InlineRun]) {
         switch markup {
         case let text as Markdown.Text:
-            runs.append(InlineRun(text: text.string, style: style))
+            appendText(text.string, style: style, into: &runs)
         case let code as InlineCode:
             var s = style; s.code = true
             runs.append(InlineRun(text: code.code, style: s))
@@ -168,6 +168,33 @@ enum MarkdownParser {
             }
         }
     }
+
+    /// Plain text, with bare web URLs turned into links. swift-markdown attaches
+    /// no GFM autolink extension, so `https://…` in prose arrives as text and
+    /// could not be tapped. Text already inside a link keeps that link; inline
+    /// code never reaches here.
+    private static func appendText(_ string: String, style: InlineStyle, into runs: inout [InlineRun]) {
+        guard style.link == nil, string.contains("://") || string.contains("www."), let detector = linkDetector else {
+            runs.append(InlineRun(text: string, style: style))
+            return
+        }
+        let ns = string as NSString
+        var cursor = 0
+        for match in detector.matches(in: string, range: NSRange(location: 0, length: ns.length)) {
+            guard let url = match.url, let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https", match.range.location >= cursor else { continue }
+            if match.range.location > cursor {
+                runs.append(InlineRun(text: ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor)), style: style))
+            }
+            var linked = style
+            linked.link = url.absoluteString
+            runs.append(InlineRun(text: ns.substring(with: match.range), style: linked))
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length { runs.append(InlineRun(text: ns.substring(from: cursor), style: style)) }
+    }
+
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
     /// Merge adjacent runs with identical style so rendering sees minimal spans.
     static func mergeRuns(_ runs: [InlineRun]) -> [InlineRun] {
