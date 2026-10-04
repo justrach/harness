@@ -57,6 +57,29 @@ final class PhoneSplitUITests: XCTestCase {
         XCTAssertLessThan(listButton(app).frame.maxY, header(app).frame.minY, "the list sits above the session")
     }
 
+    func testDraggingTheStackedHandleUpGivesTheSessionTheScreenAndItsIconBringsTheListBack() {
+        let app = launch("stacked", orientation: .portrait)
+        XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
+        let handle = app.buttons["stacked-split-handle"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 5), "no split handle")
+        XCTAssertTrue(listButton(app).isHittable, "the list starts open")
+
+        // Drag the handle to the top of the screen.
+        let start = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let top = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08))
+        start.press(forDuration: 0.1, thenDragTo: top)
+        Thread.sleep(forTimeInterval: 0.8)
+        attachScreenshot(named: "stacked-folded")
+        XCTAssertFalse(listButton(app).isHittable, "the list folds away")
+        XCTAssertTrue(header(app).isHittable, "the session fills the screen")
+        XCTAssertEqual(handle.label, "Show the session list", "folded, the handle offers the list back")
+
+        handle.tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        XCTAssertTrue(listButton(app).isHittable, "tapping the icon brings the list back")
+        XCTAssertEqual(handle.label, "Hide the session list")
+    }
+
     func testOffKeepsTheSingleStackAndTheSessionReplacesTheList() {
         let app = launch("off", orientation: .portrait)
         XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")

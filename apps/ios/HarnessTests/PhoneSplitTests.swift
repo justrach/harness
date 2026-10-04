@@ -80,4 +80,22 @@ final class PhoneSplitTests: XCTestCase {
         let landscape = CGSize(width: 874, height: 402)
         XCTAssertEqual(PhoneSplit.layoutSize(previous: portrait, measured: landscape), landscape)
     }
+
+    func testDraggingTheStackedHandleMovesTheListWithinItsExtent() {
+        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 350, drag: -100, extent: 350), 250)
+        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 350, drag: -900, extent: 350), 0)
+        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 350, drag: 200, extent: 350), 350,
+                       "the list never grows past its open height")
+        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 0, drag: 120, extent: 350), 120,
+                       "a folded list comes back down with the finger")
+    }
+
+    func testAReleasedDragFoldsAboveHalfwayAndOpensBelowIt() {
+        XCTAssertTrue(PhoneSplit.foldsAfterDrag(resting: 350, predicted: -250, extent: 350))
+        XCTAssertFalse(PhoneSplit.foldsAfterDrag(resting: 350, predicted: -100, extent: 350),
+                       "a short drag snaps back open")
+        XCTAssertFalse(PhoneSplit.foldsAfterDrag(resting: 0, predicted: 220, extent: 350),
+                       "dragging a folded list past halfway opens it")
+        XCTAssertTrue(PhoneSplit.foldsAfterDrag(resting: 0, predicted: 60, extent: 350))
+    }
 }
