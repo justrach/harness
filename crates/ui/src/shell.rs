@@ -6005,17 +6005,19 @@ impl Shell {
     /// Native Windows caption controls integrated into Harness's unified
     /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
     /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
-    /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
+    /// Snap Layouts). The glyphs are Harness's own caption icons, not the
+    /// Segoe Fluent Icons font: that font ships only with Windows 11, and
+    /// without it every button drew as an empty box.
     fn render_windows_caption_controls(&self, window: &Window, cx: &App) -> Option<AnyElement> {
         if !cfg!(target_os = "windows") {
             return None;
         }
 
         let theme = Theme::of(cx);
-        let (maximize_id, maximize_glyph) = if window.is_maximized() {
-            ("window-restore", "\u{e923}")
+        let (maximize_id, maximize_icon) = if window.is_maximized() {
+            ("window-restore", crate::icons::WINDOW_RESTORE)
         } else {
-            ("window-maximize", "\u{e922}")
+            ("window-maximize", crate::icons::WINDOW_MAXIMIZE)
         };
         Some(
             div()
@@ -6026,24 +6028,23 @@ impl Shell {
                 .h(px(Theme::TITLEBAR_HEIGHT))
                 .flex()
                 .flex_row()
-                .font_family("Segoe Fluent Icons")
                 .child(windows_caption_button(
                     "window-minimize",
-                    "\u{e921}",
+                    crate::icons::WINDOW_MINIMIZE,
                     WindowControlArea::Min,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     maximize_id,
-                    maximize_glyph,
+                    maximize_icon,
                     WindowControlArea::Max,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     "window-close",
-                    "\u{e8bb}",
+                    crate::icons::CLOSE,
                     WindowControlArea::Close,
                     theme,
                     true,
@@ -11013,6 +11014,8 @@ fn window_control_button(
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
+/// Close to the 10px Segoe caption glyphs these icons stand in for.
+const WINDOWS_CAPTION_ICON_SIZE: f32 = 12.0;
 const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
 
 /// Right padding for titlebar content: past the native Windows caption
@@ -11028,46 +11031,49 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
     }
 }
 
-/// A Windows-owned caption target using the same system glyphs and native
-/// non-client hit-test areas as GPUI/Zed's platform titlebar.
+/// A Windows-owned caption target with the native non-client hit-test areas
+/// of GPUI/Zed's platform titlebar, drawn with Harness's caption icons.
 fn windows_caption_button(
     id: &'static str,
-    glyph: &'static str,
+    icon_path: &'static str,
     area: WindowControlArea,
     theme: &Theme,
     close: bool,
 ) -> impl IntoElement {
-    let (hover_bg, hover_fg, active_bg, active_fg) = if close {
+    // A pressed button is also hovered, so the hover colour covers the icon
+    // while pressed too.
+    let (hover_bg, hover_fg, active_bg) = if close {
         let red: gpui::Hsla = gpui::rgb(0xe81123).into();
-        (
-            red,
-            gpui::white(),
-            red.opacity(0.8),
-            gpui::white().opacity(0.8),
-        )
+        (red, gpui::white(), red.opacity(0.8))
     } else {
         (
             theme.glass_hover(),
             theme.text,
             theme.glass_hover().opacity(0.7),
-            theme.text,
         )
     };
+    let group: SharedString = format!("windows-caption-{id}").into();
     div()
         .id(id)
+        // gpui svgs don't inherit the div's text color: recolor the icon on
+        // hover through the group, as the Linux buttons do.
+        .group(group.clone())
         .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
         .h_full()
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text)
-        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
-        .active(move |style| style.bg(active_bg).text_color(active_fg))
+        .hover(move |style| style.bg(hover_bg))
+        .active(move |style| style.bg(active_bg))
         .occlude()
         .window_control_area(area)
-        .child(glyph)
+        .child(
+            icon(icon_path)
+                .size(px(WINDOWS_CAPTION_ICON_SIZE))
+                .text_color(theme.text)
+                .group_hover(group, move |style| style.text_color(hover_fg)),
+        )
 }
 
 /// A Linux caption button in harness's own cluster style (24px, rounded-6,
