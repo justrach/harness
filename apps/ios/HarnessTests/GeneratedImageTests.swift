@@ -27,12 +27,13 @@ final class GeneratedImageTests: XCTestCase {
                                    ("name", ""), ("mimeType", "image/svg+xml"), ("mimeType", "")] {
             var value = fields
             value[key] = replacement
-            guard case .error(let id, let message)? = SessionStore.partFrom(.fromJSON(value)) else {
+            guard case .error(let id, let message, let reauth)? = SessionStore.partFrom(.fromJSON(value)) else {
                 XCTFail("malformed \(key) must not silently disappear")
                 continue
             }
             XCTAssertEqual(id, "image-1")
             XCTAssertEqual(message, "Generated image unavailable")
+            XCTAssertNil(reauth)
         }
     }
 

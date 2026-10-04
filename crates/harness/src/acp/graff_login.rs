@@ -33,10 +33,13 @@ pub async fn login_command(
         Some(dir) => crate::compose_child_path_with_prefix(&mut cmd, &program, dir),
         None => crate::compose_child_path(&mut cmd, &program),
     }
-    cmd.arg("login")
-        .arg(provider)
-        .env("NO_COLOR", "1")
-        .env("GRAFF_NO_BROWSER", "1");
+    cmd.arg("login").arg(provider).env("NO_COLOR", "1");
+    if provider == "chatgpt-new" {
+        // This PKCE flow can complete only on the host's loopback callback.
+        cmd.env_remove("GRAFF_NO_BROWSER");
+    } else {
+        cmd.env("GRAFF_NO_BROWSER", "1");
+    }
     Ok(cmd)
 }
 

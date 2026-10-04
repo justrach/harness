@@ -42,7 +42,7 @@ pub(crate) enum Incoming {
 
 type StdoutObserver = Box<dyn Fn(&str) + Send>;
 
-type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
+type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, HarnessError>>>>>;
 
 #[derive(Clone)]
 pub(crate) struct RpcClient {
@@ -115,7 +115,10 @@ impl RpcClient {
         }
         match rx.await {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(message)) => Err(HarnessError::Protocol(format!("{method}: {message}"))),
+            Ok(Err(HarnessError::Protocol(message))) => {
+                Err(HarnessError::Protocol(format!("{method}: {message}")))
+            }
+            Ok(Err(error)) => Err(error),
             // Sender dropped: the reader hit EOF and failed all pending.
             Err(_) => Err(HarnessError::Protocol(format!(
                 "{method}: app-server exited before responding"
@@ -201,6 +204,31 @@ fn response_error(error: &Value) -> String {
     rendered
 }
 
+fn response_failure(error: &Value) -> HarnessError {
+    if error.get("code").and_then(Value::as_i64) == Some(-32000)
+        && let Some(provider) = error
+            .get("data")
+            .and_then(harness_proto::ReauthProvider::from_acp)
+    {
+        return HarnessError::ReauthRequired { provider };
+    }
+    // Compatibility with installed Graff releases predating the typed contract.
+    // Match only the observed, route-specific terminal provider error; never
+    // infer reauthentication from arbitrary prose or a generic -32603.
+    if error.get("code").and_then(Value::as_i64) == Some(-32603)
+        && error.get("data").is_none_or(Value::is_null)
+        && error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.starts_with("chatgpt-new api error [token_expired]:"))
+    {
+        return HarnessError::ReauthRequired {
+            provider: harness_proto::ReauthProvider::ChatgptNew,
+        };
+    }
+    HarnessError::Protocol(response_error(error))
+}
+
 /// Parse stdout lines: responses resolve the pending map, everything else is
 /// forwarded in order. Non-JSON noise is skipped; on EOF all pending requests
 /// fail (their senders drop) and one final [`Incoming::Eof`] is delivered.
@@ -247,7 +275,7 @@ async fn read_loop(
                     continue;
                 };
                 let outcome = match msg.get("error") {
-                    Some(err) => Err(response_error(err)),
+                    Some(err) => Err(response_failure(err)),
                     None => Ok(msg
                         .get_mut("result")
                         .map(Value::take)
@@ -294,6 +322,53 @@ async fn read_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reauth_requires_typed_code_and_allowlisted_route() {
+        let data = json!({"kind":"reauth_required", "provider":"chatgpt-new", "login":{"command":"graff", "args":["login","chatgpt-new"]}});
+        assert!(matches!(
+            response_failure(
+                &json!({"code":-32000,"message":"Authentication required","data":data})
+            ),
+            HarnessError::ReauthRequired {
+                provider: harness_proto::ReauthProvider::ChatgptNew
+            }
+        ));
+        for error in [
+            json!({"code":-32603,"message":"Authentication required","data":data}),
+            json!({"code":-32000,"message":"expired"}),
+            json!({"code":-32000,"data":{"kind":"reauth_required","provider":"other","login":{"command":"sh","args":["-c","anything"]}}}),
+            json!({"code":-32000,"data":{"kind":"reauth_required","provider":"codex","login":{"command":"graff","args":["login","codex"]}}}),
+        ] {
+            assert!(
+                matches!(response_failure(&error), HarnessError::Protocol(_)),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn reauth_compatibility_is_narrow_to_the_observed_token_expired_error() {
+        assert!(matches!(
+            response_failure(
+                &json!({"code":-32603,"message":"chatgpt-new api error [token_expired]: Provided authentication token is expired."})
+            ),
+            HarnessError::ReauthRequired {
+                provider: harness_proto::ReauthProvider::ChatgptNew
+            }
+        ));
+        for error in [
+            json!({"code":-32603,"message":"Please sign in again"}),
+            json!({"code":-32603,"message":"quoted: chatgpt-new api error [token_expired]: expired"}),
+            json!({"code":-32603,"message":"chatgpt-new api error [quota_exceeded]: expired"}),
+            json!({"code":-32603,"message":"chatgpt-new api error [token_expired]: expired", "data":{"kind":"rate_limit"}}),
+        ] {
+            assert!(
+                matches!(response_failure(&error), HarnessError::Protocol(_)),
+                "{error}"
+            );
+        }
+    }
 
     #[test]
     fn cancel_notification_wire_has_no_id() {

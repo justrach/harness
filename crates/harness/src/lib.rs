@@ -30,6 +30,10 @@ pub enum HarnessError {
     NotInstalled(String),
     #[error("harness protocol error: {0}")]
     Protocol(String),
+    #[error("ChatGPT sign-in expired or was rejected. Sign in again to continue.")]
+    ReauthRequired {
+        provider: harness_proto::ReauthProvider,
+    },
     /// A managed adapter install (npm) failed; carries npm's own output so
     /// the cause is diagnosable from the chat error alone.
     #[error("adapter install failed: {0}")]

@@ -730,7 +730,8 @@ final class SessionStore {
             return .input(id: id, requestId: id, questions: questions,
                           resolved: m["resolved"]?.boolValue ?? false)
         case "error":
-            return .error(id: id, message: m["message"]?.stringValue ?? "")
+            return .error(id: id, message: m["message"]?.stringValue ?? "",
+                          reauth: m["reauth"]?.stringValue.flatMap(AgentReauthProvider.init(rawValue:)))
         default:
             return nil
         }

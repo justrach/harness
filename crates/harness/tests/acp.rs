@@ -99,6 +99,50 @@ fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
 }
 
 #[tokio::test]
+async fn reauth_required_preserves_route_through_prompt_dispatch_and_eof() {
+    for (scenario, provider) in [
+        (
+            "scenario:reauth-chatgpt-new",
+            harness_proto::ReauthProvider::ChatgptNew,
+        ),
+        (
+            "scenario:reauth-codex",
+            harness_proto::ReauthProvider::Codex,
+        ),
+        (
+            "scenario:reauth-legacy-token-expired",
+            harness_proto::ReauthProvider::ChatgptNew,
+        ),
+    ] {
+        let (controls, _steer, _token) = controls();
+        let events = run_to_end(&harness(), request(scenario), controls).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ReauthRequired { .. }))
+                .count(),
+            1,
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&AgentEvent::ReauthRequired { provider }),
+            "{events:?}"
+        );
+        assert_eq!(
+            dones(&events),
+            vec![(DoneStatus::Errored, None)],
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. })),
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn happy_path_maps_chunks_tools_diffs_plans_and_commands() {
     let (controls, _steer, _token) = controls();
     let events = run_to_end(&harness(), request("scenario:happy"), controls).await;
