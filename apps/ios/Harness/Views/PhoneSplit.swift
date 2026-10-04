@@ -51,6 +51,19 @@ enum PhoneSplit: String, CaseIterable, Identifiable {
         return previous
     }
 
+    /// The stacked list's height while its handle is dragged: the resting height moved by the drag, never
+    /// below nothing or above the arrangement's extent.
+    static func draggedListHeight(resting: CGFloat, drag: CGFloat, extent: CGFloat) -> CGFloat {
+        min(max(resting + drag, 0), extent)
+    }
+
+    /// Where a released drag settles: folded away (the session gets the whole screen) when it would end
+    /// above half the list's extent, open otherwise. `predicted` is where the finger's momentum carries it,
+    /// so a short flick up folds and a short flick down opens.
+    static func foldsAfterDrag(resting: CGFloat, predicted: CGFloat, extent: CGFloat) -> Bool {
+        draggedListHeight(resting: resting, drag: predicted, extent: extent) < extent / 2
+    }
+
     /// Height the session keeps below a stacked list: its header, a few rows and the composer.
     static let stackedSessionMinimum: CGFloat = 320
 
@@ -86,6 +99,11 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
     @ViewBuilder var list: List
     @ViewBuilder var detail: Detail
     @State private var availableHeight: CGFloat = .infinity
+    /// Stacked: the list folded away under its handle, so the session has the whole screen.
+    @State private var listFolded = false
+    /// Stacked: how far the handle has been dragged, negative upward.
+    @State private var drag: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         switch arrangement.axis {
@@ -96,15 +114,69 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
                 detail.frame(maxWidth: .infinity)
             }
         case .stacked:
+            // The list's height when open (the keyboard can shrink it), and where it rests now.
+            let open = PhoneSplit.stackedListHeight(extent: arrangement.listExtent, available: availableHeight)
+            let resting = listFolded ? 0 : open
+            let height = PhoneSplit.draggedListHeight(resting: resting, drag: drag, extent: open)
             VStack(spacing: 0) {
-                list.frame(height: PhoneSplit.stackedListHeight(extent: arrangement.listExtent,
-                                                                available: availableHeight))
+                list.frame(height: height)
                     .clipped()
-                Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
+                    .accessibilityHidden(height == 0)
+                StackedSplitHandle(folded: listFolded && drag == 0) { setFolded(!listFolded) }
+                    .gesture(
+                        DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                            .onChanged { drag = $0.translation.height }
+                            .onEnded { value in
+                                setFolded(PhoneSplit.foldsAfterDrag(
+                                    resting: resting, predicted: value.predictedEndTranslation.height,
+                                    extent: open))
+                            }
+                    )
                 detail.frame(maxHeight: .infinity)
             }
             // Above the keyboard: this is the height the two panes share right now.
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { availableHeight = $0 }
         }
+    }
+
+    private func setFolded(_ folded: Bool) {
+        withAnimation(reduceMotion ? nil : Motion.collapse) {
+            listFolded = folded
+            drag = 0
+        }
+    }
+}
+
+/// The stacked split's divider: a grabber to drag the list up out of the way (the session then fills the
+/// screen) or back down. Folded, it stays at the top with a visible split icon that brings the list back.
+private struct StackedSplitHandle: View {
+    let folded: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 8) {
+                if folded {
+                    // Folded, this is the only way back to the list: make it plainly visible.
+                    Image(systemName: "rectangle.split.1x2")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                }
+                Capsule()
+                    .fill(Theme.textFaint.opacity(0.55))
+                    .frame(width: 36, height: 5)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: folded ? 36 : 18)
+            .contentShape(Rectangle())
+            .background(Theme.bg)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(folded ? "Show the session list" : "Hide the session list")
+        .accessibilityHint("Drag up to give the session the whole screen, down to bring the list back.")
+        .accessibilityIdentifier("stacked-split-handle")
     }
 }
