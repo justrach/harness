@@ -23,6 +23,7 @@ struct HarnessApp: App {
                 // stays paint for status/markdown, never chrome.
                 .tint(Theme.text)
                 .background(Theme.bg)
+                .hingeRecede()
                 .onAppear {
                     Perf.shared.markFirstFrame()
                     if let scene = UIApplication.shared.connectedScenes

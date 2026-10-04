@@ -456,6 +456,7 @@ struct ComposerView: View {
             }
         }
         // A queued row being retyped is not the draft: the draft stays as it was until the edit ends.
+        // DraftStore also carries the text across a foldable opening or closing, which rebuilds the session.
         .onChange(of: text) { _, new in
             if editingQueuedId == nil { DraftStore.save(new, for: DraftStore.chatKey(chat.id)) }
         }
