@@ -574,6 +574,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn closing_the_other_pane_goes_back_to_one_column(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["here", "there"].map(archive_test_chat).into();
+                    state.selected_chat = Some("here".into());
+                });
+                shell.route = Route::Chat;
+                shell.chat_split = chat_split::ChatSplit::split(
+                    None,
+                    SplitAxis::Horizontal,
+                    Some("there".into()),
+                    None,
+                );
+                let split = shell.chat_split.as_ref().expect("two panes");
+                assert_eq!(split.panes.len(), 2);
+                let other = 1 - split.focus;
+                assert!(!shell.close_chat_pane(7, window, cx), "no such pane");
+                // The other pane's close button.
+                assert!(shell.close_chat_pane(other, window, cx));
+                assert!(shell.chat_split.is_none(), "back to one column");
+                assert_eq!(
+                    shell.state.read(cx).selected_chat.as_deref(),
+                    Some("here"),
+                    "the chat that was in focus stays open"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn close_pane_archive_dispatches_without_cancelling_prior_closes(cx: &mut gpui::TestAppContext) {
         assert_close_archive_dispatch(cx, true);
     }
