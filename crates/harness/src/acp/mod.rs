@@ -3695,6 +3695,14 @@ async fn run_session(session: Session) {
             &efforts,
             &request.model_options,
         ) {
+            if devin_configured
+                && config_id == "speed"
+                && devin_selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.speed.is_some())
+            {
+                continue;
+            }
             let mut params = serde_json::Map::new();
             params.insert("sessionId".into(), session_id.clone().into());
             params.insert("configId".into(), config_id.clone().into());

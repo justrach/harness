@@ -18,6 +18,7 @@ use crate::process::{Command, Stdio};
 pub(super) struct ModelSelection {
     pub model: String,
     pub thought_level: Option<&'static str>,
+    pub speed: Option<&'static str>,
 }
 
 const EFFORT_SUFFIXES: [&str; 6] = ["-xhigh", "-medium", "-none", "-low", "-high", "-max"];
@@ -36,24 +37,70 @@ fn split_effort(id: &str) -> (&str, Option<&'static str>) {
     (id, None)
 }
 
+struct ParsedVariant<'a> {
+    family: &'a str,
+    sidekick: Option<&'a str>,
+    thought_level: Option<&'static str>,
+    speed: Option<&'static str>,
+}
+
+fn parse_variant(id: &str) -> ParsedVariant<'_> {
+    if id.starts_with("fusion-") {
+        if let Some((lead, sidekick)) = id.split_once("-sidekick-")
+            && !sidekick.is_empty()
+        {
+            let (lead, speed) = match lead.strip_suffix("-fast") {
+                Some(stripped) if !stripped.is_empty() => (stripped, "fast"),
+                _ => (lead, "standard"),
+            };
+            if let (stem, Some(effort)) = split_effort(lead) {
+                return ParsedVariant {
+                    family: stem,
+                    sidekick: Some(sidekick),
+                    thought_level: Some(effort),
+                    speed: Some(speed),
+                };
+            }
+        }
+        return ParsedVariant {
+            family: id,
+            sidekick: None,
+            thought_level: None,
+            speed: None,
+        };
+    }
+    let (stem, effort) = split_effort(id);
+    ParsedVariant {
+        family: stem,
+        sidekick: None,
+        thought_level: effort,
+        speed: None,
+    }
+}
+
 fn resolve(requested: &str, candidates: &[&str], grouped: bool) -> Option<ModelSelection> {
+    let parsed = parse_variant(requested);
     if candidates.contains(&requested) {
         return Some(ModelSelection {
             model: requested.to_owned(),
-            thought_level: grouped.then(|| split_effort(requested).1).flatten(),
+            thought_level: grouped.then_some(parsed.thought_level).flatten(),
+            speed: grouped.then_some(parsed.speed).flatten(),
         });
     }
     if !grouped {
         return None;
     }
-    let (stem, effort) = split_effort(requested);
-    effort?;
+    parsed.thought_level?;
     candidates
         .iter()
-        .find(|candidate| split_effort(candidate).0 == stem)
+        .find(|candidate| {
+            let advertised = parse_variant(candidate);
+            advertised.family == parsed.family && advertised.sidekick == parsed.sidekick
+        })
         .map(|candidate| ModelSelection {
             model: (*candidate).to_owned(),
-            thought_level: effort,
+            thought_level: parsed.thought_level,
+            speed: parsed.speed,
         })
 }
 
@@ -151,6 +198,21 @@ fn config_option<'a>(
         .and_then(serde_json::Value::as_array)?
         .iter()
         .find(|option| option.get("category").and_then(serde_json::Value::as_str) == Some(category))
+}
+
+fn config_option_by_id<'a>(
+    response: &'a serde_json::Value,
+    id: &str,
+    category: &str,
+) -> Option<&'a serde_json::Value> {
+    response
+        .get("configOptions")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|option| {
+            option.get("id").and_then(serde_json::Value::as_str) == Some(id)
+                && option.get("category").and_then(serde_json::Value::as_str) == Some(category)
+        })
 }
 
 fn absorb_config_options(
@@ -275,6 +337,49 @@ pub(super) async fn configure_model(
             })?;
         absorb_config_options(response, &result, true)?;
     }
+    if let Some(speed) = selection.speed {
+        let speed_option = config_option_by_id(response, "speed", "model_config")
+            .cloned()
+            .ok_or_else(|| {
+                HarnessError::Protocol(format!(
+                    "Devin did not advertise a speed option for model {}",
+                    selection.model
+                ))
+            })?;
+        let speed_choices: Vec<&str> = speed_option
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+            .map(|choices| choices.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|choice| choice.get("value").and_then(serde_json::Value::as_str))
+            .collect();
+        if !speed_choices.contains(&speed) {
+            return Err(HarnessError::Protocol(format!(
+                "Devin does not offer requested speed {speed} for model {}",
+                selection.model
+            )));
+        }
+        let speed_config_id = speed_option
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| HarnessError::Protocol("Devin's speed config option has no id".into()))?
+            .to_owned();
+        if speed_option
+            .get("currentValue")
+            .and_then(serde_json::Value::as_str)
+            != Some(speed)
+        {
+            let result = set_config_option(client, incoming, session_id, &speed_config_id, speed)
+                .await
+                .map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "Devin rejected requested speed {speed}: {error}"
+                    ))
+                })?;
+            absorb_config_options(response, &result, true)?;
+        }
+    }
     let model_ok = config_option(response, "model")
         .and_then(|option| option.get("currentValue"))
         .and_then(serde_json::Value::as_str)
@@ -283,11 +388,27 @@ pub(super) async fn configure_model(
         .and_then(|option| option.get("currentValue"))
         .and_then(serde_json::Value::as_str)
         == Some(level);
-    if !(model_ok && thought_ok) {
-        return Err(HarnessError::Protocol(format!(
-            "Devin did not confirm model {} at thinking level {level}",
-            selection.model
-        )));
+    let speed_ok = match selection.speed {
+        Some(speed) => {
+            config_option_by_id(response, "speed", "model_config")
+                .and_then(|option| option.get("currentValue"))
+                .and_then(serde_json::Value::as_str)
+                == Some(speed)
+        }
+        None => true,
+    };
+    if !(model_ok && thought_ok && speed_ok) {
+        let detail = match selection.speed {
+            Some(speed) => format!(
+                "Devin did not confirm model {} at thinking level {level} and speed {speed}",
+                selection.model
+            ),
+            None => format!(
+                "Devin did not confirm model {} at thinking level {level}",
+                selection.model
+            ),
+        };
+        return Err(HarnessError::Protocol(detail));
     }
     Ok(true)
 }
@@ -435,6 +556,102 @@ mod tests {
         assert!(resolve("swe-2-turbo", &candidates, true).is_none());
         assert!(resolve("gpt-5-max", &candidates, true).is_none());
         assert!(resolve("swe-9-high", &candidates, true).is_none());
+    }
+
+    #[test]
+    fn resolves_paired_fusion_variants_by_family_and_sidekick() {
+        let candidates = [
+            "fusion-lead-model-1-high-sidekick-worker-model-2-high",
+            "fusion-lead-model-1-high-sidekick-worker-model-2-medium",
+            "swe-2-high",
+        ];
+        let rep_medium = "fusion-lead-model-1-high-sidekick-worker-model-2-medium";
+        let selected = resolve(
+            "fusion-lead-model-1-medium-sidekick-worker-model-2-medium",
+            &candidates,
+            true,
+        )
+        .unwrap();
+        assert_eq!(selected.model, rep_medium);
+        assert_eq!(selected.thought_level, Some("medium"));
+        assert_eq!(selected.speed, Some("standard"));
+        let selected = resolve(
+            "fusion-lead-model-1-medium-fast-sidekick-worker-model-2-medium",
+            &candidates,
+            true,
+        )
+        .unwrap();
+        assert_eq!(selected.model, rep_medium);
+        assert_eq!(selected.thought_level, Some("medium"));
+        assert_eq!(selected.speed, Some("fast"));
+        let selected = resolve(rep_medium, &candidates, true).unwrap();
+        assert_eq!(selected.model, rep_medium);
+        assert_eq!(selected.thought_level, Some("high"));
+        assert_eq!(selected.speed, Some("standard"));
+        let selected = resolve(
+            "fusion-lead-model-1-medium-sidekick-worker-model-2-high",
+            &candidates,
+            true,
+        )
+        .unwrap();
+        assert_eq!(selected.model, candidates[0]);
+        assert_eq!(selected.thought_level, Some("medium"));
+        for (requested, effort) in [
+            (
+                "fusion-lead-model-1-xhigh-sidekick-worker-model-2-medium",
+                "xhigh",
+            ),
+            (
+                "fusion-lead-model-1-max-sidekick-worker-model-2-medium",
+                "max",
+            ),
+        ] {
+            let selected = resolve(requested, &candidates, true).unwrap();
+            assert_eq!(selected.model, rep_medium);
+            assert_eq!(selected.thought_level, Some(effort));
+            assert_eq!(selected.speed, Some("standard"));
+        }
+        for id in [
+            "fusion-lead-model-2-medium-sidekick-worker-model-2-medium",
+            "fusion-lead-model-1-medium-sidekick-worker-model-3-medium",
+            "fusion-lead-model-1-medium-sidekick-worker-model-2-low",
+            "fusion-lead-model-1-medium-sidekick-swe-2-medium",
+        ] {
+            assert!(resolve(id, &candidates, true).is_none(), "{id}");
+        }
+        assert!(
+            resolve(
+                "fusion-lead-model-1-medium-sidekick-worker-model-2-medium",
+                &candidates,
+                false
+            )
+            .is_none()
+        );
+        let exact = resolve(rep_medium, &candidates, false).unwrap();
+        assert_eq!(exact.model, rep_medium);
+        assert!(exact.thought_level.is_none() && exact.speed.is_none());
+        let standalone = resolve("swe-2-max", &candidates, true).unwrap();
+        assert_eq!(standalone.model, "swe-2-high");
+        assert!(standalone.speed.is_none());
+    }
+
+    #[test]
+    fn paired_fusion_requires_recognized_lead_effort() {
+        let candidates = [
+            "fusion-lead-model-1-high-sidekick-worker-model-2-medium",
+            "fusion-lead-model-1-high",
+        ];
+        for id in [
+            "fusion-lead-model-1-turbo-sidekick-worker-model-2-medium",
+            "fusion-lead-model-1-sidekick-worker-model-2-medium",
+            "fusion-lead-model-1-medium-sidekick-",
+            "fusion-lead-model-1-medium",
+        ] {
+            assert!(resolve(id, &candidates, true).is_none(), "{id}");
+        }
+        let exact = resolve("fusion-lead-model-1-high", &candidates, true).unwrap();
+        assert_eq!(exact.model, "fusion-lead-model-1-high");
+        assert!(exact.thought_level.is_none() && exact.speed.is_none());
     }
 
     #[test]
