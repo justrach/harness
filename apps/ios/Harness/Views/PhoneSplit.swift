@@ -103,6 +103,10 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
     @State private var listFolded = false
     /// Stacked: how far the handle has been dragged, negative upward.
     @State private var drag: CGFloat = 0
+    /// Stacked: this install is in the drag handle's "on" half (FeatureRollout). Read once per container.
+    @State private var dragEnabled = FeatureRollout.isOn(.stackedSplitDrag)
+    /// Stacked, "on" half: the one-time callout under the handle is showing.
+    @State private var showDragOnboarding = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -116,33 +120,115 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
         case .stacked:
             // The list's height when open (the keyboard can shrink it), and where it rests now.
             let open = PhoneSplit.stackedListHeight(extent: arrangement.listExtent, available: availableHeight)
-            let resting = listFolded ? 0 : open
-            let height = PhoneSplit.draggedListHeight(resting: resting, drag: drag, extent: open)
+            let resting = dragEnabled && listFolded ? 0 : open
+            let height = dragEnabled ? PhoneSplit.draggedListHeight(resting: resting, drag: drag, extent: open) : open
             VStack(spacing: 0) {
                 list.frame(height: height)
                     .clipped()
                     .accessibilityHidden(height == 0)
-                StackedSplitHandle(folded: listFolded && drag == 0) { setFolded(!listFolded) }
-                    .gesture(
-                        DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                            .onChanged { drag = $0.translation.height }
-                            .onEnded { value in
-                                setFolded(PhoneSplit.foldsAfterDrag(
-                                    resting: resting, predicted: value.predictedEndTranslation.height,
-                                    extent: open))
-                            }
-                    )
+                if dragEnabled {
+                    StackedSplitHandle(folded: listFolded && drag == 0) { setFolded(!listFolded) }
+                        .gesture(
+                            DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                                .onChanged { value in
+                                    drag = value.translation.height
+                                    if showDragOnboarding { finishOnboarding() }
+                                }
+                                .onEnded { value in
+                                    setFolded(PhoneSplit.foldsAfterDrag(
+                                        resting: resting, predicted: value.predictedEndTranslation.height,
+                                        extent: open))
+                                }
+                        )
+                } else {
+                    Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
+                }
                 detail.frame(maxHeight: .infinity)
+                    .overlay(alignment: .top) {
+                        if showDragOnboarding {
+                            StackedDragOnboarding { finishOnboarding() }
+                                .padding(.horizontal, 16)
+                                .padding(.top, 6)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                    }
             }
             // Above the keyboard: this is the height the two panes share right now.
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { availableHeight = $0 }
+            .onAppear {
+                FeatureUsage.record(.splitShown, for: .stackedSplitDrag)
+                if dragEnabled, !FeatureOnboarding.hasSeen(.stackedSplitDrag) {
+                    showDragOnboarding = true
+                    FeatureUsage.record(.onboardingShown, for: .stackedSplitDrag)
+                }
+            }
         }
     }
 
     private func setFolded(_ folded: Bool) {
+        if folded != listFolded {
+            FeatureUsage.record(folded ? .folded : .unfolded, for: .stackedSplitDrag)
+        }
         withAnimation(reduceMotion ? nil : Motion.collapse) {
             listFolded = folded
             drag = 0
+        }
+    }
+
+    /// The callout goes for good on "Got it" or on the first drag: either way the person has met the handle.
+    private func finishOnboarding() {
+        FeatureOnboarding.markSeen(.stackedSplitDrag)
+        FeatureUsage.record(.onboardingDismissed, for: .stackedSplitDrag)
+        withAnimation(reduceMotion ? nil : Motion.fadeQuick) { showDragOnboarding = false }
+    }
+}
+
+/// The one-time introduction to the stacked split's handle, pointing up at it.
+private struct StackedDragOnboarding: View {
+    let dismiss: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var nudge = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Points at the handle just above.
+            Image(systemName: "arrowtriangle.up.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.surfaceRaised)
+                .offset(y: 3)
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 28, height: 28)
+                    .offset(y: nudge ? -3 : 0)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("New: full-screen sessions")
+                        .font(Theme.sans(15, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Text("Drag the handle up to give this session the whole screen. Tap the split icon at the top to bring the list back.")
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Got it", action: dismiss)
+                        .font(Theme.sans(13, weight: .semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.accent)
+                        .padding(.top, 4)
+                        .accessibilityIdentifier("stacked-drag-onboarding-dismiss")
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.border, lineWidth: 1))
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("stacked-drag-onboarding")
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { nudge = true }
         }
     }
 }
