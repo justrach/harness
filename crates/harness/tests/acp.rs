@@ -1286,16 +1286,24 @@ root = pathlib.Path(__file__).parent
 def emit(frame):
     print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
 
-def options(model, thought, thoughts):
-    return [
+def options(model, thought, thoughts, speed, speeds):
+    result = [
         {'id':'model', 'category':'model', 'type':'select', 'currentValue':model,
-         'options':[{'value':'swe-1-7', 'name':'SWE-1.7'},
-                    {'value':'swe-2-high', 'name':'SWE-2 High'},
-                    {'value':'adaptive', 'name':'Adaptive'}]},
+         'options':[{'value':v, 'name':v} for v in [
+             'fusion-lead-model-1-high-sidekick-worker-model-2-high',
+             'fusion-lead-model-1-high-sidekick-worker-model-2-medium',
+             'swe-1-7', 'swe-2-high', 'adaptive']]},
         {'id':'thinking', 'category':'thought_level', 'type':'select',
          'currentValue':thought,
          'options':[{'value':t, 'name':t} for t in thoughts]},
     ]
+    state = (root / 'state').read_text().strip()
+    if model.startswith('fusion-') and state != 'speed-unavailable':
+        shown = {'speed-few-choices':['fast'], 'speed-standard-only':['standard']}.get(state, speeds)
+        result.append({'id':'speed', 'category':'model_config', 'type':'select',
+                       'currentValue':speed,
+                       'options':[{'value':s, 'name':s} for s in shown]})
+    return result
 
 if sys.argv[1:] == ['models', 'list', '--format', 'json']:
     print(json.dumps({'families':[{'variants':[
@@ -1306,6 +1314,8 @@ assert sys.argv[1:] == ['acp'], sys.argv
 model = 'swe-1-7'
 thought = 'high'
 thoughts = ['low','medium','high','xhigh','max']
+speed = 'standard'
+speeds = ['standard','fast']
 
 for line in sys.stdin:
     req = json.loads(line)
@@ -1316,12 +1326,13 @@ for line in sys.stdin:
     elif method == 'session/new':
         thought = (root / 'thought').read_text().strip()
         model = (root / 'start-model').read_text().strip()
+        speed = (root / 'start-speed').read_text().strip()
         emit({'method':'session/update', 'params':{'sessionId':'other', 'update':{
             'sessionUpdate':'config_option_update', 'configOptions':[
                 {'id':'model', 'category':'model', 'type':'select',
                  'currentValue':'swe-9-high',
                  'options':[{'value':'swe-9-high', 'name':'SWE-9 High'}]}]}}})
-        result = {'sessionId':'s-1', 'configOptions':options(model, thought, thoughts)}
+        result = {'sessionId':'s-1', 'configOptions':options(model, thought, thoughts, speed, speeds)}
     elif method == 'session/set_config_option':
         state = (root / 'state').read_text().strip()
         config_id = req['params']['configId']
@@ -1331,31 +1342,52 @@ for line in sys.stdin:
             if state == 'reject-model':
                 emit({'id':req['id'], 'error':{'code':-32602, 'message':'model unavailable'}})
                 continue
-            assert value in ('swe-2-high', 'adaptive'), value
+            assert value in ('swe-2-high', 'adaptive',
+                             'fusion-lead-model-1-high-sidekick-worker-model-2-high',
+                             'fusion-lead-model-1-high-sidekick-worker-model-2-medium'), value
             thought = 'high'
             thoughts = ['medium','high'] if state == 'nomax' else ['medium','high','max']
             if state == 'model-noconfig':
                 model = value
                 result = {}
             elif state == 'wrong-model':
-                result = {'configOptions':options('swe-1-7', thought, thoughts)}
+                result = {'configOptions':options('swe-1-7', thought, thoughts, speed, speeds)}
             else:
                 model = value
-                result = {'configOptions':options(model, thought, thoughts)}
-        else:
+                result = {'configOptions':options(model, thought, thoughts, speed, speeds)}
+        elif config_id == 'thinking':
             if state == 'reject-thought':
                 emit({'id':req['id'], 'error':{'code':-32602, 'message':'thinking unavailable'}})
                 continue
-            assert config_id == 'thinking', config_id
             if state == 'thought-noconfig':
                 result = {}
             elif state == 'wrong-thought':
-                result = {'configOptions':options(model, 'high', ['medium','high','max'])}
+                result = {'configOptions':options(model, 'high', ['medium','high','max'], speed, speeds)}
             else:
                 thought = value
-                result = {'configOptions':options(model, thought, ['medium','high','max'])}
+                result = {'configOptions':options(model, thought, ['medium','high','max'], speed, speeds)}
+        elif config_id == 'speed':
+            if state == 'reject-speed':
+                emit({'id':req['id'], 'error':{'code':-32602, 'message':'speed unavailable'}})
+                continue
+            assert model.startswith('fusion-'), model
+            if state == 'speed-noconfig':
+                result = {}
+            elif state == 'wrong-speed':
+                result = {'configOptions':options(
+                    model, thought, thoughts,
+                    'fast' if value == 'standard' else 'standard', speeds)}
+            elif state == 'wrong-model-after-speed':
+                speed = value
+                result = {'configOptions':options('swe-1-7', thought, thoughts, speed, speeds)}
+            else:
+                speed = value
+                result = {'configOptions':options(model, thought, thoughts, speed, speeds)}
+        else:
+            raise AssertionError(config_id)
     elif method == 'session/prompt':
-        (root / 'prompted').write_text(model + ':' + thought)
+        suffix = ':' + speed if model.startswith('fusion-') else ''
+        (root / 'prompted').write_text(model + ':' + thought + suffix)
         result = {'stopReason':'end_turn'}
     emit({'id':req['id'], 'result':result})
     if method == 'session/prompt': break
@@ -1366,6 +1398,7 @@ for line in sys.stdin:
     std::fs::write(dir.path().join("state"), "ok").unwrap();
     std::fs::write(dir.path().join("thought"), "high").unwrap();
     std::fs::write(dir.path().join("start-model"), "swe-1-7").unwrap();
+    std::fs::write(dir.path().join("start-speed"), "standard").unwrap();
     let harness = AcpHarness::devin().with_executable(script);
     (dir, harness)
 }
@@ -1608,6 +1641,281 @@ async fn devin_grouped_other_session_updates_do_not_satisfy_readiness() {
         dones(&events)
             .iter()
             .any(|(status, _)| *status == DoneStatus::Errored),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+const FUSION_REP_MEDIUM: &str = "fusion-lead-model-1-high-sidekick-worker-model-2-medium";
+const FUSION_REQ_MEDIUM: &str = "fusion-lead-model-1-medium-sidekick-worker-model-2-medium";
+const FUSION_REQ_FAST_MEDIUM: &str =
+    "fusion-lead-model-1-medium-fast-sidekick-worker-model-2-medium";
+
+async fn devin_paired_run(
+    dir: &tempfile::TempDir,
+    harness: &AcpHarness,
+    model: &str,
+    reasoning: Option<ReasoningLevel>,
+    model_options: &[(&str, &str)],
+) -> Vec<AgentEvent> {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("Say hello");
+    req.model = Some(model.into());
+    req.reasoning = reasoning;
+    req.cwd = dir.path().display().to_string();
+    for (opt_id, choice) in model_options {
+        req.model_options
+            .insert((*opt_id).to_owned(), (*choice).into());
+    }
+    run_to_end(harness, req, controls).await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_medium_selects_same_worker_representative() {
+    let (dir, harness) = devin_grouped_fixture();
+    let events = devin_paired_run(
+        &dir,
+        &harness,
+        FUSION_REQ_MEDIUM,
+        Some(ReasoningLevel::XHigh),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompted")).unwrap(),
+        format!("{FUSION_REP_MEDIUM}:medium:standard")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sets")).unwrap(),
+        format!("model={FUSION_REP_MEDIUM}\nthinking=medium\n")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_exact_representative_resets_effort_and_speed() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("thought"), "medium").unwrap();
+    std::fs::write(dir.path().join("start-speed"), "fast").unwrap();
+    std::fs::write(dir.path().join("start-model"), FUSION_REP_MEDIUM).unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REP_MEDIUM, None, &[]).await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompted")).unwrap(),
+        format!("{FUSION_REP_MEDIUM}:high:standard")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sets")).unwrap(),
+        "thinking=high\nspeed=standard\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_fast_variant_overrides_model_options_speed() {
+    let (dir, harness) = devin_grouped_fixture();
+    let events = devin_paired_run(
+        &dir,
+        &harness,
+        FUSION_REQ_FAST_MEDIUM,
+        None,
+        &[("speed", "standard")],
+    )
+    .await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompted")).unwrap(),
+        format!("{FUSION_REP_MEDIUM}:medium:fast")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sets")).unwrap(),
+        format!("model={FUSION_REP_MEDIUM}\nthinking=medium\nspeed=fast\n")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_standard_variant_ignores_model_options_speed() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("start-speed"), "fast").unwrap();
+    let events = devin_paired_run(
+        &dir,
+        &harness,
+        FUSION_REQ_MEDIUM,
+        None,
+        &[("speed", "fast")],
+    )
+    .await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompted")).unwrap(),
+        format!("{FUSION_REP_MEDIUM}:medium:standard")
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sets")).unwrap(),
+        format!("model={FUSION_REP_MEDIUM}\nthinking=medium\nspeed=standard\n")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_disjoint_worker_or_lead_is_bounded() {
+    let (dir, harness) = devin_grouped_fixture();
+    let harness = harness.with_handshake_timeout(Duration::from_millis(300));
+    for model in [
+        "fusion-lead-model-1-medium-sidekick-worker-model-2-low",
+        "fusion-lead-model-1-medium-sidekick-worker-model-3-medium",
+        "fusion-lead-model-2-medium-sidekick-worker-model-2-medium",
+    ] {
+        let events = devin_paired_run(&dir, &harness, model, None, &[]).await;
+        assert!(
+            dones(&events)
+                .iter()
+                .any(|(status, _)| *status == DoneStatus::Errored),
+            "{model}: {events:?}"
+        );
+    }
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_rejected_speed_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "reject-speed").unwrap();
+    std::fs::write(dir.path().join("start-speed"), "fast").unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REQ_MEDIUM, None, &[]).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("speed unavailable"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_speed_setter_without_config_options_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "speed-noconfig").unwrap();
+    std::fs::write(dir.path().join("start-speed"), "fast").unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REQ_MEDIUM, None, &[]).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("refreshed config options"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_unconfirmed_speed_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "wrong-speed").unwrap();
+    std::fs::write(dir.path().join("start-speed"), "fast").unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REQ_MEDIUM, None, &[]).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("did not confirm"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_missing_speed_option_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "speed-unavailable").unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REQ_MEDIUM, None, &[]).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error.as_deref().is_some_and(|e| e.contains("speed"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_missing_speed_choice_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "speed-few-choices").unwrap();
+    std::fs::write(dir.path().join("start-speed"), "fast").unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REQ_MEDIUM, None, &[]).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error.as_deref().is_some_and(|e| e.contains("speed"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_missing_fast_speed_choice_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "speed-standard-only").unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REQ_FAST_MEDIUM, None, &[]).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error.as_deref().is_some_and(|e| e.contains("speed"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_paired_speed_setter_changing_model_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "wrong-model-after-speed").unwrap();
+    std::fs::write(dir.path().join("start-speed"), "fast").unwrap();
+    let events = devin_paired_run(&dir, &harness, FUSION_REQ_MEDIUM, None, &[]).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("did not confirm"))),
         "{events:?}"
     );
     assert!(!dir.path().join("prompted").exists());
