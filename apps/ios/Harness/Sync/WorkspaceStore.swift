@@ -667,6 +667,21 @@ final class WorkspaceStore {
         return try await relay(for: deviceId).call(method: "ListFolders", params: params)
     }
 
+    /// CodegraffUsage on the target device: the CodeGraff account its engine
+    /// is signed in with (nil when that computer is signed out).
+    func codegraffUsage(deviceId: String) async throws -> CodegraffUsage? {
+        try await relay(for: deviceId).call(method: "CodegraffUsage", params: [:],
+                                            timeoutSeconds: 20)
+    }
+
+    /// ListAgentAccounts on the target device — its agent CLI logins with
+    /// rate-limit windows. `forceUsage` bypasses the engine's usage cache.
+    func agentAccounts(deviceId: String, forceUsage: Bool) async throws -> AgentAccountsSnapshot {
+        try await relay(for: deviceId).call(method: "ListAgentAccounts",
+                                            params: ["forceUsage": forceUsage],
+                                            timeoutSeconds: 20)
+    }
+
     /// ListRefs on the target device — branches with current/worktree markers
     /// (default branch first, per the engine's ordering).
     func listRefs(deviceId: String, repoPath: String) async -> [RepoRef]? {
