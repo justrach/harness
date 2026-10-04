@@ -472,6 +472,26 @@ impl Shell {
         }
     }
 
+    /// Close pane `ix`, focused or not (a pane's own close button). Closing an
+    /// unfocused pane focuses it first, so it closes the way ⌘W would.
+    pub(super) fn close_chat_pane(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(split) = self.chat_split.as_ref() else {
+            return false;
+        };
+        if ix >= split.panes.len() {
+            return false;
+        }
+        if split.focus != ix {
+            self.focus_chat_pane(ix, window, cx);
+        }
+        self.close_focused_chat_pane(window, cx)
+    }
+
     /// ⌘W with a split open closes the focused pane (not the window); with
     /// one pane left it closes the tab. Either can archive the closed session
     /// ([`Shell::archive_closed_session`]).
@@ -833,10 +853,47 @@ impl Shell {
                     .flex_none()
                     .px(px(14.0))
                     .pb(px(6.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(title),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(title),
+                    )
+                    // Closing the other panes is how you get back to one
+                    // column; ⌘W / Ctrl+Shift+W closes the focused pane.
+                    .child(
+                        div()
+                            .id(("chat-peer-pane-close", ix))
+                            .flex_none()
+                            .size(px(20.0))
+                            .rounded(px(5.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.ink(0.08)))
+                            .role(gpui::Role::Button)
+                            .aria_label("Close this pane")
+                            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                window.prevent_default()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_chat_pane(ix, window, cx);
+                            }))
+                            .child(
+                                crate::icons::icon(crate::icons::CLOSE)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    ),
             )
             // Ghostty dims unfocused splits.
             .child(div().flex_1().min_h_0().flex().flex_col().opacity(0.8).child(body))
