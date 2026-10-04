@@ -71,6 +71,8 @@ enum FeatureUsageEvent: String, CaseIterable {
     case unfolded = "unfolded"
     case onboardingShown = "onboarding_shown"
     case onboardingDismissed = "onboarding_dismissed"
+    /// The handle dragged down so the list has the whole screen.
+    case listExpanded = "list_expanded"
 }
 
 enum FeatureUsage {

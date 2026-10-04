@@ -59,9 +59,12 @@ private struct HingeRecede<Content: View>: View {
     var body: some View {
         content
             .scaleEffect(1 - 0.06 * closing)
-            .clipShape(RoundedRectangle(cornerRadius: 40 * closing, style: .continuous))
+            // A mask that reaches under the status bar and home indicator, not `clipShape`: clipping to the
+            // safe-area frame cut off every background drawn into those strips, even with the hinge open,
+            // and left them the bare window's white on every screen.
+            .mask { RoundedRectangle(cornerRadius: 40 * closing, style: .continuous).ignoresSafeArea() }
             .overlay {
-                if closing > 0 { Color.black.opacity(0.4 * closing).allowsHitTesting(false) }
+                if closing > 0 { Color.black.opacity(0.4 * closing).ignoresSafeArea().allowsHitTesting(false) }
             }
             .onHingeChange { _, new in hingeChanged(new.hinge) }
     }
