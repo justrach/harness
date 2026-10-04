@@ -6,6 +6,10 @@ struct TranscriptView: View {
     let store: SessionStore
     let chatId: String
     let scroll: ScrollState
+    /// The chat's folder on its host, for workspace-relative links.
+    var cwd: String? = nil
+    /// A tapped link that only opens on the host computer.
+    var onHostLink: (HostLink) -> Void = { _ in }
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -34,7 +38,12 @@ struct TranscriptView: View {
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
-                    .environment(\.colorScheme, ThemeStore.shared.colorScheme))
+                    .environment(\.colorScheme, ThemeStore.shared.colorScheme)
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let link = HostLink.classify(url, cwd: cwd) else { return .systemAction }
+                        onHostLink(link)
+                        return .handled
+                    }))
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.bg)

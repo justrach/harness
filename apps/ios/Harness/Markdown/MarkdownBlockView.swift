@@ -53,7 +53,11 @@ extension [InlineRun] {
             if let link = run.style.link {
                 // Monochrome links: primary text + muted hairline underline,
                 // never accent (desktop render.rs:536).
+                // Agents link raw host paths (`D:/My Projects/x.html`); keep
+                // them tappable so the transcript's link handler sees them.
                 piece.link = URL(string: link)
+                    ?? link.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+                        .flatMap { URL(string: $0) }
                 piece.foregroundColor = baseColor
                 piece.underlineStyle = Text.LineStyle(pattern: .solid, color: Theme.textMuted)
             }
