@@ -553,6 +553,36 @@ fn field_mutators_round_trip() {
 }
 
 #[test]
+fn forget_device_tombstones_the_row_and_a_later_boot_brings_it_back() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.upsert_device(&device("dev-a", "studio")).unwrap();
+    ws.upsert_device(&device("dev-b", "cloud sandbox")).unwrap();
+
+    assert!(ws.forget_device("dev-b").unwrap());
+    let ids: Vec<String> = ws
+        .read_devices()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["dev-a".to_string()],
+        "the removed device leaves the list"
+    );
+    assert!(!ws.forget_device("dev-b").unwrap(), "already gone");
+    assert!(!ws.forget_device("nope").unwrap());
+
+    // The device starts Harness again: its boot upsert is newer than the tombstone.
+    ws.upsert_device(&device("dev-b", "cloud sandbox")).unwrap();
+    assert_eq!(
+        ws.read_devices().unwrap().len(),
+        2,
+        "it comes back by itself"
+    );
+}
+
+#[test]
 fn delete_chat_tombstones_row_and_session() {
     let mut ws = RegistryDoc::new("dev-a");
     ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();

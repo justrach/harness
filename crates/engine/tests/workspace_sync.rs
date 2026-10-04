@@ -340,6 +340,24 @@ async fn two_engines_share_a_workspace() {
     )
     .await;
 
+    // A device can't remove itself from the list (Settings → Devices only offers Remove on
+    // other, offline devices).
+    let refused = client_b
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "forgetDevice", "deviceId": "dev-b" }),
+        )
+        .await;
+    assert!(refused.is_err(), "B removed itself: {refused:?}");
+    assert!(
+        b.workspace
+            .read_devices()
+            .unwrap_or_default()
+            .iter()
+            .any(|d| d.id == "dev-b"),
+        "B is still listed"
+    );
+
     drop(link);
     a.shutdown().await;
     b.shutdown().await;

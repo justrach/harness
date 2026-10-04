@@ -603,6 +603,139 @@ enum GraffWorktreeOutcome {
     Failed,
 }
 
+// ---- cloud sandbox row in the device picker ----------------------------------------------------
+//
+// The engine's `CodegraffSandboxes` / `CodegraffCreateSandbox` / `CodegraffSandboxAction` calls (names
+// repeated here as strings so this file does not depend on where they are declared). The picker only
+// reads the list as JSON: `{enabled, sandboxes:[{id, provider, name?, deviceName?, state}]}`.
+
+const CLOUD_LIST: &str = "CodegraffSandboxes";
+const CLOUD_CREATE: &str = "CodegraffCreateSandbox";
+const CLOUD_ACTION: &str = "CodegraffSandboxAction";
+/// The device name a cloud sandbox registers under when the engine does not say otherwise.
+const CLOUD_DEVICE_NAME: &str = "Harness cloud";
+/// How long a fresh or woken sandbox gets to show up online before the picker gives up waiting.
+const CLOUD_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone, PartialEq)]
+struct CloudSandbox {
+    id: String,
+    /// Gateway state: `started`/`running`, `starting`, `paused`, `destroyed`/`terminated`, `error`, …
+    state: String,
+    /// The name its Harness device registers under.
+    device_name: String,
+}
+
+impl CloudSandbox {
+    fn live(&self) -> bool {
+        !matches!(
+            self.state.as_str(),
+            "destroyed" | "terminated" | "error" | "stopping"
+        )
+    }
+
+    fn paused(&self) -> bool {
+        self.state == "paused"
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CloudBusy {
+    Creating,
+    Waking,
+}
+
+#[derive(Debug, Default)]
+struct CloudState {
+    /// `false` until the engine says this build offers cloud sandboxes (stable builds show nothing).
+    enabled: bool,
+    sandboxes: Vec<CloudSandbox>,
+    busy: Option<CloudBusy>,
+    error: Option<String>,
+}
+
+/// What the device popover's cloud row offers right now.
+#[derive(Debug, Clone, PartialEq)]
+enum CloudRow {
+    Hidden,
+    Create,
+    Wake(String),
+    /// Working on it: `Creating` / `Waking`, or a started sandbox whose device has not registered yet.
+    Busy(&'static str),
+}
+
+/// Read the engine's list. Only our own (`fleet`) sandboxes can be Harness devices.
+fn parse_cloud(value: &serde_json::Value) -> (bool, Vec<CloudSandbox>) {
+    let enabled = value
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let sandboxes = value
+        .get("sandboxes")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|row| row.get("provider").and_then(|v| v.as_str()) == Some("fleet"))
+        .filter_map(|row| {
+            let id = row.get("id")?.as_str()?.to_string();
+            let text = |key: &str| {
+                row.get(key)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+            };
+            Some(CloudSandbox {
+                id,
+                state: text("state").unwrap_or_default(),
+                device_name: text("deviceName")
+                    .or_else(|| text("name"))
+                    .unwrap_or_else(|| CLOUD_DEVICE_NAME.to_string()),
+            })
+        })
+        .collect();
+    (enabled, sandboxes)
+}
+
+/// The id of the device a cloud sandbox registered, when it is online: matched by name, platform linux.
+fn online_cloud_device(
+    devices: &[harness_proto::Device],
+    sandbox: &CloudSandbox,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    devices
+        .iter()
+        .find(|d| {
+            d.name == sandbox.device_name
+                && d.platform == "linux"
+                && crate::settings::devices::device_online(d.last_seen_at, now)
+        })
+        .map(|d| d.id.clone())
+}
+
+/// Pure: which row the popover shows. A running sandbox whose device is already online needs no row
+/// (it is in the list); a paused one offers Wake; none offers Create.
+fn cloud_row(
+    cloud: &CloudState,
+    devices: &[harness_proto::Device],
+    now: chrono::DateTime<chrono::Utc>,
+) -> CloudRow {
+    if !cloud.enabled {
+        return CloudRow::Hidden;
+    }
+    match cloud.busy {
+        Some(CloudBusy::Creating) => return CloudRow::Busy("Creating cloud sandbox…"),
+        Some(CloudBusy::Waking) => return CloudRow::Busy("Waking cloud sandbox…"),
+        None => {}
+    }
+    match cloud.sandboxes.iter().find(|s| s.live()) {
+        None => CloudRow::Create,
+        Some(sandbox) if sandbox.paused() => CloudRow::Wake(sandbox.id.clone()),
+        Some(sandbox) if online_cloud_device(devices, sandbox, now).is_some() => CloudRow::Hidden,
+        Some(_) => CloudRow::Busy("Connecting cloud sandbox…"),
+    }
+}
+
 pub struct Pickers {
     state: Entity<AppState>,
     config: DraftConfig,
@@ -689,6 +822,11 @@ pub struct Pickers {
     graff_worktree_busy: Option<String>,
     graff_worktree_status: Option<GraffWorktreeStatus>,
     graff_worktree_task: Option<Task<()>>,
+    /// The device popover's cloud sandbox row (see [`cloud_row`]).
+    cloud: CloudState,
+    /// Create / wake, then wait for the device to come online. Own slot: a list refresh must not cancel it.
+    cloud_task: Option<Task<()>>,
+    cloud_list_task: Option<Task<()>>,
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
@@ -856,6 +994,9 @@ impl Pickers {
             graff_worktree_busy: None,
             graff_worktree_status: None,
             graff_worktree_task: None,
+            cloud: CloudState::default(),
+            cloud_task: None,
+            cloud_list_task: None,
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
@@ -1301,7 +1442,9 @@ impl Pickers {
                 self.prefetch_models(true, cx);
             }
             // Projects and devices are already synced state — nothing to load.
-            PickerKind::Space | PickerKind::Device => {}
+            PickerKind::Space => {}
+            // Devices are synced state too; only the cloud sandbox row asks the engine.
+            PickerKind::Device => self.refresh_cloud(cx),
         }
         cx.notify();
     }
@@ -2242,10 +2385,172 @@ impl Pickers {
     }
 
     fn pick_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        // An offline cloud device is a paused sandbox: wake it, then select it once it is online.
+        if let Some(id) = self.paused_cloud_for_device(&device_id, cx) {
+            self.start_cloud(Some(id), cx);
+            return;
+        }
         self.state
             .update(cx, |s, cx| s.select_device(device_id, cx));
         self.remember_target(cx);
         self.close(cx);
+    }
+
+    /// The paused cloud sandbox behind `device_id`, when that device is offline.
+    fn paused_cloud_for_device(&self, device_id: &str, cx: &App) -> Option<String> {
+        if !self.cloud.enabled {
+            return None;
+        }
+        let state = self.state.read(cx);
+        let device = state.devices.iter().find(|d| d.id == device_id)?;
+        if device.platform != "linux"
+            || crate::settings::devices::device_online(device.last_seen_at, chrono::Utc::now())
+        {
+            return None;
+        }
+        self.cloud
+            .sandboxes
+            .iter()
+            .find(|s| s.live() && s.paused() && s.device_name == device.name)
+            .map(|s| s.id.clone())
+    }
+
+    /// Ask the engine what cloud sandboxes the account has. An engine that does not know the call (an
+    /// older build) or a stable build both read as "not offered": the row stays hidden.
+    fn refresh_cloud(&mut self, cx: &mut Context<Self>) {
+        if self.cloud.busy.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        self.cloud_list_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(CLOUD_LIST, serde_json::json!({}))
+                .await;
+            this.update(cx, |pickers, cx| {
+                if pickers.cloud.busy.is_some() {
+                    return;
+                }
+                match result {
+                    Ok(value) => {
+                        let (enabled, sandboxes) = parse_cloud(&value);
+                        pickers.cloud.enabled = enabled;
+                        pickers.cloud.sandboxes = sandboxes;
+                    }
+                    Err(_) => pickers.cloud.enabled = false,
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Create the account's cloud sandbox (`wake == None`) or wake a paused one, then select its device
+    /// the moment it is online. The row shows progress meanwhile; a failure is shown under it.
+    fn start_cloud(&mut self, wake: Option<String>, cx: &mut Context<Self>) {
+        if self.cloud.busy.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        self.cloud.busy = Some(if wake.is_some() {
+            CloudBusy::Waking
+        } else {
+            CloudBusy::Creating
+        });
+        self.cloud.error = None;
+        cx.notify();
+        self.cloud_task = Some(cx.spawn(async move |this, cx| {
+            let started = match &wake {
+                Some(id) => {
+                    engine
+                        .client()
+                        .call(
+                            CLOUD_ACTION,
+                            serde_json::json!({ "id": id, "action": "start" }),
+                        )
+                        .await
+                }
+                None => engine.client().call(CLOUD_CREATE, serde_json::json!({})).await,
+            };
+            if let Err(err) = started {
+                this.update(cx, |pickers, cx| {
+                    pickers.cloud.busy = None;
+                    pickers.cloud.error = Some(err.to_string());
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            // Learn the sandbox's device name, then wait for that device to come online.
+            let list = engine
+                .client()
+                .call(CLOUD_LIST, serde_json::json!({}))
+                .await
+                .ok();
+            this.update(cx, |pickers, cx| {
+                if let Some(value) = &list {
+                    let (enabled, sandboxes) = parse_cloud(value);
+                    pickers.cloud.enabled = enabled;
+                    pickers.cloud.sandboxes = sandboxes;
+                }
+                cx.notify();
+            })
+            .ok();
+            let deadline = std::time::Instant::now() + CLOUD_CONNECT_TIMEOUT;
+            loop {
+                let found = this
+                    .update(cx, |pickers, cx| {
+                        let now = chrono::Utc::now();
+                        let sandbox = pickers.cloud.sandboxes.iter().find(|s| s.live())?;
+                        online_cloud_device(&pickers.state.read(cx).devices, sandbox, now)
+                    })
+                    .ok()
+                    .flatten();
+                if let Some(device_id) = found {
+                    this.update(cx, |pickers, cx| {
+                        pickers.cloud.busy = None;
+                        pickers.pick_device(device_id, cx);
+                    })
+                    .ok();
+                    return;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+            }
+            this.update(cx, |pickers, cx| {
+                pickers.cloud.busy = None;
+                pickers.cloud.error = Some(
+                    "The sandbox started but has not shown up as a device yet. Try again in a moment."
+                        .into(),
+                );
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The popover's cloud row for the current devices and clock.
+    fn current_cloud_row(&self, cx: &App) -> CloudRow {
+        cloud_row(
+            &self.cloud,
+            &self.state.read(cx).devices,
+            chrono::Utc::now(),
+        )
+    }
+
+    /// Run the cloud row's action (click or Enter); `Busy` / `Hidden` do nothing.
+    fn activate_cloud_row(&mut self, cx: &mut Context<Self>) {
+        match self.current_cloud_row(cx) {
+            CloudRow::Create => self.start_cloud(None, cx),
+            CloudRow::Wake(id) => self.start_cloud(Some(id), cx),
+            CloudRow::Busy(_) | CloudRow::Hidden => {}
+        }
     }
 
     /// Persist the device/project picks — the "last selected" defaults the
@@ -2319,6 +2624,16 @@ impl Pickers {
             )
         };
         let active = self.active;
+        let cloud_names: Vec<String> = self
+            .cloud
+            .sandboxes
+            .iter()
+            .filter(|s| s.live())
+            .map(|s| s.device_name.clone())
+            .collect();
+        let cloud_row = self.current_cloud_row(cx);
+        let cloud_error = self.cloud.error.clone();
+        let device_count = rows.len();
         let scrollbar = popover::rail(self, "device-scrollbar", &theme, cx);
         let body: AnyElement = if rows.is_empty() {
             div()
@@ -2340,6 +2655,8 @@ impl Pickers {
                         .children(rows.into_iter().zip(online).enumerate().map(
                             |(ix, (device, online))| {
                                 let is_local = local.as_deref() == Some(device.id.as_str());
+                                let is_cloud = device.platform == "linux"
+                                    && cloud_names.iter().any(|name| *name == device.name);
                                 let label: SharedString = device.name.clone().into();
                                 let is_selected = effective.as_deref() == Some(device.id.as_str());
                                 let pick_id = device.id.clone();
@@ -2354,6 +2671,15 @@ impl Pickers {
                                     this.pick_device(pick_id.clone(), cx);
                                 }))
                                 .child(div().flex_1().min_w_0().truncate().child(label))
+                                // A cloud sandbox wears a muted cloud glyph.
+                                .when(is_cloud, |el| {
+                                    el.child(
+                                        crate::icons::icon(crate::icons::CLOUD)
+                                            .size(px(12.0))
+                                            .flex_none()
+                                            .text_color(theme.text_muted),
+                                    )
+                                })
                                 // The local device wears a muted right-aligned "You"
                                 // instead of a "(this device)" suffix in the name.
                                 .when(is_local, |el| {
@@ -2380,11 +2706,84 @@ impl Pickers {
                 .children(scrollbar)
                 .into_any_element()
         };
+        let cloud_footer: Option<AnyElement> = match cloud_row {
+            CloudRow::Hidden => None,
+            CloudRow::Busy(text) => Some(
+                popover::menu_row_nav(&theme, false, false, "device-cloud-busy".to_string())
+                    .id("device-cloud-busy")
+                    .child(
+                        crate::icons::icon(crate::icons::CLOUD)
+                            .size(px(12.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(text)),
+                    )
+                    .into_any_element(),
+            ),
+            action @ (CloudRow::Create | CloudRow::Wake(_)) => {
+                let (icon, text) = match action {
+                    CloudRow::Wake(_) => (crate::icons::CLOUD, "Wake cloud sandbox"),
+                    _ => (crate::icons::PLUS, "New cloud sandbox"),
+                };
+                Some(
+                    popover::menu_row_nav(
+                        &theme,
+                        false,
+                        active == device_count,
+                        "device-cloud".to_string(),
+                    )
+                    .id("device-cloud")
+                    .on_click(cx.listener(|this, _, _, cx| this.activate_cloud_row(cx)))
+                    .child(
+                        crate::icons::icon(icon)
+                            .size(px(12.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(text)),
+                    )
+                    .into_any_element(),
+                )
+            }
+        };
+        let cloud_problem: Option<AnyElement> = cloud_error.map(|message| {
+            div()
+                .px(px(Theme::SPACE_SM))
+                .py(px(4.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.warning)
+                .child(SharedString::from(message))
+                .into_any_element()
+        });
         div()
             .flex()
             .flex_col()
             .child(self.search_box(&theme))
             .child(body)
+            .when(cloud_footer.is_some() || cloud_problem.is_some(), |el| {
+                el.child(
+                    div()
+                        .my(px(4.0))
+                        .mx(px(-popover::CARD_INSET))
+                        .h(px(1.0))
+                        .flex_none()
+                        .bg(theme.border.opacity(0.6)),
+                )
+            })
+            .children(cloud_footer)
+            .children(cloud_problem)
             .into_any_element()
     }
 
@@ -2525,10 +2924,13 @@ impl Pickers {
                 self.pick_no_project(cx);
             }
         }
-        if self.open_kind() == Some(PickerKind::Device)
-            && let Some(device) = self.filtered_device_rows(cx).into_iter().nth(self.active)
-        {
-            self.pick_device(device.id, cx);
+        if self.open_kind() == Some(PickerKind::Device) {
+            let rows = self.filtered_device_rows(cx);
+            if let Some(device) = rows.get(self.active) {
+                self.pick_device(device.id.clone(), cx);
+            } else if self.active == rows.len() {
+                self.activate_cloud_row(cx);
+            }
         }
         // Palette-search Enter submits the highlighted model or setting.
         if self.open_kind() == Some(PickerKind::HarnessModel) {
@@ -2612,7 +3014,13 @@ impl Pickers {
                         self.model_rows_len(cx) + self.setting_groups(cx).len()
                     }
                     Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 1,
-                    Some(PickerKind::Device) => self.filtered_device_rows(cx).len(),
+                    Some(PickerKind::Device) => {
+                        self.filtered_device_rows(cx).len()
+                            + usize::from(matches!(
+                                self.current_cloud_row(cx),
+                                CloudRow::Create | CloudRow::Wake(_)
+                            ))
+                    }
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
@@ -7684,6 +8092,152 @@ mod tests {
         ];
         let offered = offered_harnesses_impl(&catalog, false);
         assert!(offered.is_empty());
+    }
+
+    // ---- device picker: cloud sandbox row ----
+
+    fn device(id: &str, name: &str, platform: &str, seen_secs_ago: i64) -> harness_proto::Device {
+        harness_proto::Device {
+            id: id.into(),
+            name: name.into(),
+            platform: platform.into(),
+            last_seen_at: Some(chrono::Utc::now() - chrono::Duration::seconds(seen_secs_ago)),
+            created_at: None,
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: Vec::new(),
+        }
+    }
+
+    fn cloud_with(state: &str) -> CloudState {
+        CloudState {
+            enabled: true,
+            sandboxes: vec![CloudSandbox {
+                id: "cnd_1".into(),
+                state: state.into(),
+                device_name: "Harness cloud".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cloud_list_keeps_only_fleet_sandboxes_and_names_their_device() {
+        let value = serde_json::json!({
+            "enabled": true,
+            "sandboxes": [
+                { "id": "sb_daytona", "provider": "daytona", "state": "started" },
+                { "id": "cnd_1", "provider": "fleet", "state": "paused" },
+                { "id": "cnd_2", "provider": "fleet", "state": "started", "name": " Mine ", "deviceName": "My cloud" },
+                { "id": "cnd_3", "provider": "fleet", "state": "started", "name": "Only name" },
+                { "provider": "fleet", "state": "started" },
+            ]
+        });
+        let (enabled, rows) = parse_cloud(&value);
+        assert!(enabled);
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.state.as_str(), r.device_name.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("cnd_1", "paused", "Harness cloud"),
+                ("cnd_2", "started", "My cloud"),
+                ("cnd_3", "started", "Only name"),
+            ]
+        );
+        assert_eq!(parse_cloud(&serde_json::json!({})), (false, vec![]));
+        assert_eq!(
+            parse_cloud(&serde_json::json!({ "enabled": "yes" })).0,
+            false
+        );
+    }
+
+    #[test]
+    fn the_cloud_row_follows_the_sandbox_and_its_device() {
+        let now = chrono::Utc::now();
+        let online = [device("d1", "Harness cloud", "linux", 5)];
+        let stale = [device("d1", "Harness cloud", "linux", 600)];
+        let none: [harness_proto::Device; 0] = [];
+
+        // Not offered (stable build, old engine): nothing at all.
+        assert_eq!(
+            cloud_row(&CloudState::default(), &none, now),
+            CloudRow::Hidden
+        );
+        // Offered but no sandbox yet: create one. A destroyed one does not count.
+        let offered = CloudState {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(cloud_row(&offered, &none, now), CloudRow::Create);
+        assert_eq!(
+            cloud_row(&cloud_with("destroyed"), &none, now),
+            CloudRow::Create
+        );
+        assert_eq!(
+            cloud_row(&cloud_with("error"), &none, now),
+            CloudRow::Create
+        );
+        // Paused: wake it.
+        assert_eq!(
+            cloud_row(&cloud_with("paused"), &stale, now),
+            CloudRow::Wake("cnd_1".into())
+        );
+        // Running and its device is online: it is already in the list, no row.
+        assert_eq!(
+            cloud_row(&cloud_with("started"), &online, now),
+            CloudRow::Hidden
+        );
+        // Running but the device has not registered (or has gone quiet): say it is connecting.
+        assert_eq!(
+            cloud_row(&cloud_with("started"), &none, now),
+            CloudRow::Busy("Connecting cloud sandbox…")
+        );
+        assert_eq!(
+            cloud_row(&cloud_with("started"), &stale, now),
+            CloudRow::Busy("Connecting cloud sandbox…")
+        );
+        // A same-named laptop is not the sandbox.
+        let mac = [device("d2", "Harness cloud", "macos", 5)];
+        assert_eq!(
+            cloud_row(&cloud_with("started"), &mac, now),
+            CloudRow::Busy("Connecting cloud sandbox…")
+        );
+        // Working on it wins over everything.
+        let mut busy = cloud_with("paused");
+        busy.busy = Some(CloudBusy::Waking);
+        assert_eq!(
+            cloud_row(&busy, &none, now),
+            CloudRow::Busy("Waking cloud sandbox…")
+        );
+        busy.busy = Some(CloudBusy::Creating);
+        assert_eq!(
+            cloud_row(&busy, &none, now),
+            CloudRow::Busy("Creating cloud sandbox…")
+        );
+    }
+
+    #[test]
+    fn the_online_cloud_device_is_matched_by_name_and_platform() {
+        let now = chrono::Utc::now();
+        let sandbox = CloudSandbox {
+            id: "cnd_1".into(),
+            state: "started".into(),
+            device_name: "My cloud".into(),
+        };
+        let devices = [
+            device("a", "My cloud", "macos", 1),
+            device("b", "Other", "linux", 1),
+            device("c", "My cloud", "linux", 999),
+            device("d", "My cloud", "linux", 2),
+        ];
+        assert_eq!(
+            online_cloud_device(&devices, &sandbox, now).as_deref(),
+            Some("d")
+        );
+        assert_eq!(online_cloud_device(&devices[..3], &sandbox, now), None);
     }
 }
 

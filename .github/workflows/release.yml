@@ -29,8 +29,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04 # x86_64
-          - runner: ubuntu-24.04-arm # aarch64
+          # Built on the oldest runner we can: the binary links the runner's glibc, so a newer
+          # runner (24.04 = glibc 2.39) produces a tarball that will not start on Debian 12
+          # (glibc 2.36), which Codegraff cloud sandboxes run. 22.04 is glibc 2.35.
+          - runner: ubuntu-22.04 # x86_64
+          - runner: ubuntu-22.04-arm # aarch64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4

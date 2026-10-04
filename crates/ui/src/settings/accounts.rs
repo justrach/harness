@@ -23,6 +23,9 @@ use harness_proto::{
 use harness_rpc::methods;
 
 use crate::codegraff_jobs::{CodegraffJob, job_active, job_summary};
+use crate::codegraff_sandboxes::{
+    CodegraffSandboxes, can_start, can_stop, sandbox_detail, sandbox_title, start_labels,
+};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -266,6 +269,16 @@ pub struct AccountsPage {
     jobs_poll_task: Option<Task<()>>,
     /// Job id with an in-flight Cancel.
     cancelling_job: Option<String>,
+    /// Cloud sandboxes (`None` when signed out; `enabled: false` hides the card).
+    codegraff_sandboxes: Loadable<Option<CodegraffSandboxes>>,
+    sandboxes_task: Option<Task<()>>,
+    /// The sandbox with an in-flight Start / Stop / Delete, and which.
+    sandbox_busy: Option<(String, &'static str)>,
+    /// Delete asks for a second click.
+    sandbox_confirm_delete: Option<String>,
+    creating_sandbox: bool,
+    /// Sign out of Codegraff is in flight.
+    codegraff_signing_out: bool,
     /// Account id with an in-flight Switch/Forget.
     busy_account: Option<String>,
     /// graff's own provider sign-ins (xAI, Kimi, Z.AI) on the shown device.
@@ -307,6 +320,12 @@ impl AccountsPage {
             jobs_task: None,
             jobs_poll_task: None,
             cancelling_job: None,
+            codegraff_sandboxes: Loadable::Idle,
+            sandboxes_task: None,
+            sandbox_busy: None,
+            sandbox_confirm_delete: None,
+            creating_sandbox: false,
+            codegraff_signing_out: false,
             busy_account: None,
             graff_logins: Loadable::Idle,
             graff_task: None,
@@ -547,6 +566,7 @@ impl AccountsPage {
         self.snapshot = Loadable::Loading;
         self.load_codegraff_usage(cx);
         self.load_codegraff_jobs(cx);
+        self.load_codegraff_sandboxes(cx);
         self.load_graff_logins(cx);
         let params = self.params(serde_json::json!({ "forceUsage": force_usage }));
         self.load_task = Some(cx.spawn(async move |this, cx| {
@@ -683,6 +703,286 @@ impl AccountsPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// The account's cloud sandboxes. They belong to this device's Codegraff sign-in, so the
+    /// call is never retargeted at another device.
+    fn load_codegraff_sandboxes(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if matches!(self.codegraff_sandboxes, Loadable::Idle) {
+            self.codegraff_sandboxes = Loadable::Loading;
+        }
+        self.sandboxes_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CODEGRAFF_SANDBOXES, serde_json::json!({}))
+                .await;
+            this.update(cx, |page, cx| {
+                page.codegraff_sandboxes = match result {
+                    Ok(value) => {
+                        match serde_json::from_value::<Option<CodegraffSandboxes>>(value) {
+                            Ok(list) => Loadable::Ready(list),
+                            Err(err) => Loadable::Error(err.to_string()),
+                        }
+                    }
+                    Err(err) => Loadable::Error(err.to_string()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn create_codegraff_sandbox(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.creating_sandbox = true;
+        self.error = None;
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CODEGRAFF_CREATE_SANDBOX, serde_json::json!({}))
+                .await;
+            this.update(cx, |page, cx| {
+                page.creating_sandbox = false;
+                if let Err(err) = result {
+                    page.error = Some(format!("{err}").into());
+                }
+                page.load_codegraff_sandboxes(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Sign this device out of Codegraff (the key `graff login` shares), then show the signed-out
+    /// card. The Harness account stays signed in.
+    fn sign_out_codegraff(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.codegraff_signing_out = true;
+        self.error = None;
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CODEGRAFF_SIGN_OUT, serde_json::json!({}))
+                .await;
+            this.update(cx, |page, cx| {
+                page.codegraff_signing_out = false;
+                if let Err(err) = result {
+                    page.error = Some(format!("Sign out of Codegraff failed: {err}").into());
+                }
+                page.load_codegraff_usage(cx);
+                page.load_codegraff_jobs(cx);
+                page.load_codegraff_sandboxes(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// `action`: `start` (wakes a paused sandbox and attaches Harness again), `stop`, `delete`.
+    fn codegraff_sandbox_action(
+        &mut self,
+        id: String,
+        action: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.sandbox_busy = Some((id.clone(), action));
+        self.sandbox_confirm_delete = None;
+        self.error = None;
+        let params = serde_json::json!({ "id": id, "action": action });
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::CODEGRAFF_SANDBOX_ACTION, params)
+                .await;
+            this.update(cx, |page, cx| {
+                page.sandbox_busy = None;
+                if let Err(err) = result {
+                    page.error = Some(format!("{err}").into());
+                }
+                page.load_codegraff_sandboxes(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The cloud sandboxes card: nothing while signed out or in builds without the feature.
+    fn render_codegraff_sandboxes(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let Loadable::Ready(Some(list)) = &self.codegraff_sandboxes else {
+            return None;
+        };
+        if !list.enabled {
+            return None;
+        }
+        let now = Utc::now();
+        let rows = list.sandboxes.iter().enumerate().map(|(ix, sandbox)| {
+            let busy = self
+                .sandbox_busy
+                .as_ref()
+                .filter(|(id, _)| *id == sandbox.id)
+                .map(|(_, action)| *action);
+            let start = can_start(sandbox).then(|| {
+                let id = sandbox.id.clone();
+                widgets::ghost_action(theme)
+                    .id(("codegraff-sandbox-start", ix))
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .when(busy.is_some(), |el| el.opacity(0.5))
+                    .when(busy.is_none(), |el| {
+                        el.on_click(cx.listener(move |page, _, _, cx| {
+                            page.codegraff_sandbox_action(id.clone(), "start", cx)
+                        }))
+                    })
+                    .child(if busy == Some("start") {
+                        start_labels(sandbox).1
+                    } else {
+                        start_labels(sandbox).0
+                    })
+            });
+            let stop = can_stop(sandbox).then(|| {
+                let id = sandbox.id.clone();
+                widgets::ghost_action(theme)
+                    .id(("codegraff-sandbox-stop", ix))
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .when(busy.is_some(), |el| el.opacity(0.5))
+                    .when(busy.is_none(), |el| {
+                        el.on_click(cx.listener(move |page, _, _, cx| {
+                            page.codegraff_sandbox_action(id.clone(), "stop", cx)
+                        }))
+                    })
+                    .child(if busy == Some("stop") {
+                        "Stopping…"
+                    } else {
+                        "Stop"
+                    })
+            });
+            let confirming = self.sandbox_confirm_delete.as_deref() == Some(sandbox.id.as_str());
+            let delete = {
+                let id = sandbox.id.clone();
+                widgets::ghost_action(theme)
+                    .id(("codegraff-sandbox-delete", ix))
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .when(busy.is_some(), |el| el.opacity(0.5))
+                    .when(busy.is_none(), |el| {
+                        el.on_click(cx.listener(move |page, _, _, cx| {
+                            if page.sandbox_confirm_delete.as_deref() == Some(id.as_str()) {
+                                page.codegraff_sandbox_action(id.clone(), "delete", cx);
+                            } else {
+                                page.sandbox_confirm_delete = Some(id.clone());
+                                cx.notify();
+                            }
+                        }))
+                    })
+                    .child(match (busy, confirming) {
+                        (Some("delete"), _) => "Deleting…",
+                        (_, true) => "Delete for good?",
+                        _ => "Delete",
+                    })
+            };
+            div()
+                .id(("codegraff-sandbox", ix))
+                .px(px(20.0))
+                .py(px(10.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(theme, sandbox_title(sandbox)))
+                        .child(
+                            div()
+                                .mt(px(2.0))
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(11.5))
+                                .text_color(theme.text_muted)
+                                .child(sandbox_detail(sandbox, now)),
+                        ),
+                )
+                .children(start)
+                .children(stop)
+                .child(delete)
+        });
+        let creating = self.creating_sandbox;
+        let create = div()
+            .id("codegraff-sandbox-create-row")
+            .px(px(20.0))
+            .py(px(10.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .when(!list.sandboxes.is_empty(), |row| {
+                row.border_t_1().border_color(theme.border)
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(widgets::row_title(theme, "Harness cloud"))
+                    .child(
+                        div()
+                            .mt(px(2.0))
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .text_color(theme.text_muted)
+                            .child(
+                                "A machine that keeps running Harness for you. It shows up in your devices, billed per second from your Codegraff credit.",
+                            ),
+                    ),
+            )
+            .child(
+                widgets::ghost_action(theme)
+                    .id("codegraff-sandbox-create")
+                    .hover(|s| widgets::ghost_hover(theme, s))
+                    .when(creating, |el| el.opacity(0.5))
+                    .when(!creating, |el| {
+                        el.on_click(cx.listener(|page, _, _, cx| page.create_codegraff_sandbox(cx)))
+                    })
+                    .child(if creating { "Creating…" } else { "Create" }),
+            );
+        Some(
+            div()
+                .mt(px(16.0))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child("Cloud sandboxes"),
+                )
+                .child(
+                    widgets::section_card(theme)
+                        .mt(px(8.0))
+                        .children(rows)
+                        .child(create),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The PR-agent jobs card; nothing while signed out or with no jobs.
@@ -1542,6 +1842,29 @@ impl AccountsPage {
                     .child("CodeGraff"),
             )
             .child(div().flex_1())
+            // The account menu shows who is signed in; signing out of Codegraff lives here, beside
+            // what the sign-in pays for.
+            .when(
+                matches!(self.codegraff_usage, Loadable::Ready(Some(_))),
+                |el| {
+                    el.child(
+                        widgets::ghost_action(theme)
+                            .id("codegraff-sign-out")
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .when(self.codegraff_signing_out, |el| el.opacity(0.5))
+                            .when(!self.codegraff_signing_out, |el| {
+                                el.on_click(
+                                    cx.listener(|page, _, _, cx| page.sign_out_codegraff(cx)),
+                                )
+                            })
+                            .child(if self.codegraff_signing_out {
+                                "Signing out…"
+                            } else {
+                                "Sign out"
+                            }),
+                    )
+                },
+            )
             .child(
                 widgets::ghost_action(theme)
                     .id("codegraff-view-usage")
@@ -1668,6 +1991,7 @@ impl AccountsPage {
             .child(header)
             .child(widgets::section_card(theme).mt(px(8.0)).child(body))
             .children(self.render_codegraff_jobs(theme, cx))
+            .children(self.render_codegraff_sandboxes(theme, cx))
             .into_any_element()
     }
 
