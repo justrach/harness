@@ -15,6 +15,86 @@ use crate::HarnessError;
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Command, Stdio};
 
+pub(super) struct ModelSelection {
+    pub model: String,
+    pub thought_level: Option<&'static str>,
+}
+
+const EFFORT_SUFFIXES: [&str; 6] = ["-xhigh", "-medium", "-none", "-low", "-high", "-max"];
+
+fn split_effort(id: &str) -> (&str, Option<&'static str>) {
+    if id.contains("-sidekick-") {
+        return (id, None);
+    }
+    for suffix in EFFORT_SUFFIXES {
+        if let Some(stem) = id.strip_suffix(suffix)
+            && !stem.is_empty()
+        {
+            return (stem, Some(&suffix[1..]));
+        }
+    }
+    (id, None)
+}
+
+fn resolve(requested: &str, candidates: &[&str], grouped: bool) -> Option<ModelSelection> {
+    if candidates.contains(&requested) {
+        return Some(ModelSelection {
+            model: requested.to_owned(),
+            thought_level: grouped.then(|| split_effort(requested).1).flatten(),
+        });
+    }
+    if !grouped {
+        return None;
+    }
+    let (stem, effort) = split_effort(requested);
+    effort?;
+    candidates
+        .iter()
+        .find(|candidate| split_effort(candidate).0 == stem)
+        .map(|candidate| ModelSelection {
+            model: (*candidate).to_owned(),
+            thought_level: effort,
+        })
+}
+
+fn selection_from_session(response: &serde_json::Value, requested: &str) -> Option<ModelSelection> {
+    let config_options = response
+        .get("configOptions")
+        .and_then(serde_json::Value::as_array);
+    let grouped = config_options.is_some_and(|options| {
+        options.iter().any(|option| {
+            option.get("category").and_then(serde_json::Value::as_str) == Some("thought_level")
+        })
+    });
+    let choices: Vec<&str> = config_options
+        .and_then(|options| {
+            options.iter().find(|option| {
+                option.get("category").and_then(serde_json::Value::as_str) == Some("model")
+            })
+        })
+        .and_then(|option| option.get("options").and_then(serde_json::Value::as_array))
+        .map(|choices| {
+            choices
+                .iter()
+                .filter_map(|choice| choice.get("value").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !choices.is_empty() {
+        return resolve(requested, &choices, grouped);
+    }
+    let legacy: Vec<&str> = response
+        .get("models")
+        .and_then(|models| models.get("availableModels"))
+        .and_then(serde_json::Value::as_array)
+        .map(|models| models.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|model| model.get("modelId").and_then(serde_json::Value::as_str))
+        .collect();
+    resolve(requested, &legacy, grouped)
+}
+
 /// A freshly discovered variant may also arrive after `session/new` in the
 /// process that runs the prompt. Wait for that exact id; the generic ACP
 /// family fallback could otherwise silently select a different GPT model.
@@ -24,14 +104,11 @@ pub(super) async fn wait_for_model(
     session_id: &str,
     response: &mut serde_json::Value,
     model: &str,
-) -> Result<(), HarnessError> {
+) -> Result<ModelSelection, HarnessError> {
     let wait = async {
         loop {
-            if super::models_from_session(response, &[])
-                .iter()
-                .any(|m| m.id == model)
-            {
-                return Ok(());
+            if let Some(selection) = selection_from_session(response, model) {
+                return Ok(selection);
             }
             match incoming.recv().await {
                 Some(Incoming::Notification { method, params })
@@ -63,6 +140,156 @@ pub(super) async fn wait_for_model(
                 "Devin did not advertise requested model {model} after refreshing"
             ))
         })?
+}
+
+fn config_option<'a>(
+    response: &'a serde_json::Value,
+    category: &str,
+) -> Option<&'a serde_json::Value> {
+    response
+        .get("configOptions")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|option| option.get("category").and_then(serde_json::Value::as_str) == Some(category))
+}
+
+fn absorb_config_options(
+    response: &mut serde_json::Value,
+    result: &serde_json::Value,
+    required: bool,
+) -> Result<(), HarnessError> {
+    if result
+        .get("configOptions")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        response["configOptions"] = result["configOptions"].clone();
+        return Ok(());
+    }
+    if required {
+        return Err(HarnessError::Protocol(
+            "Devin did not return refreshed config options".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn set_config_option(
+    client: &RpcClient,
+    incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+    session_id: &str,
+    config_id: &str,
+    value: &str,
+) -> Result<serde_json::Value, HarnessError> {
+    super::request_draining(
+        client,
+        incoming,
+        "session/set_config_option",
+        serde_json::json!({
+            "sessionId": session_id,
+            "configId": config_id,
+            "value": value,
+        }),
+    )
+    .await
+}
+
+pub(super) async fn configure_model(
+    client: &RpcClient,
+    incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
+    session_id: &str,
+    response: &mut serde_json::Value,
+    requested: &str,
+    selection: &ModelSelection,
+) -> Result<bool, HarnessError> {
+    let Some(model_option) = config_option(response, "model").cloned() else {
+        return Ok(false);
+    };
+    let model_config_id = model_option
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| HarnessError::Protocol("Devin's model config option has no id".into()))?
+        .to_owned();
+    if model_option
+        .get("currentValue")
+        .and_then(serde_json::Value::as_str)
+        != Some(selection.model.as_str())
+    {
+        let result = set_config_option(
+            client,
+            incoming,
+            session_id,
+            &model_config_id,
+            &selection.model,
+        )
+        .await
+        .map_err(|error| {
+            HarnessError::Protocol(format!(
+                "agent rejected requested model {requested}: {error}"
+            ))
+        })?;
+        absorb_config_options(response, &result, selection.thought_level.is_some())?;
+    }
+    let Some(level) = selection.thought_level else {
+        return Ok(true);
+    };
+    let thought = config_option(response, "thought_level")
+        .cloned()
+        .ok_or_else(|| {
+            HarnessError::Protocol(format!(
+                "Devin did not advertise a thought_level option for model {}",
+                selection.model
+            ))
+        })?;
+    let choices: Vec<&str> = thought
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .map(|choices| choices.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|choice| choice.get("value").and_then(serde_json::Value::as_str))
+        .collect();
+    if !choices.contains(&level) {
+        return Err(HarnessError::Protocol(format!(
+            "Devin does not offer requested thinking level {level} for model {}",
+            selection.model
+        )));
+    }
+    let thought_config_id = thought
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            HarnessError::Protocol("Devin's thought_level config option has no id".into())
+        })?
+        .to_owned();
+    if thought
+        .get("currentValue")
+        .and_then(serde_json::Value::as_str)
+        != Some(level)
+    {
+        let result = set_config_option(client, incoming, session_id, &thought_config_id, level)
+            .await
+            .map_err(|error| {
+                HarnessError::Protocol(format!(
+                    "Devin rejected requested thinking level {level}: {error}"
+                ))
+            })?;
+        absorb_config_options(response, &result, true)?;
+    }
+    let model_ok = config_option(response, "model")
+        .and_then(|option| option.get("currentValue"))
+        .and_then(serde_json::Value::as_str)
+        == Some(selection.model.as_str());
+    let thought_ok = config_option(response, "thought_level")
+        .and_then(|option| option.get("currentValue"))
+        .and_then(serde_json::Value::as_str)
+        == Some(level);
+    if !(model_ok && thought_ok) {
+        return Err(HarnessError::Protocol(format!(
+            "Devin did not confirm model {} at thinking level {level}",
+            selection.model
+        )));
+    }
+    Ok(true)
 }
 
 #[derive(Default)]
@@ -180,6 +407,44 @@ mod tests {
                 .iter()
                 .all(|m| m.reasoning_levels.is_empty() && m.options.is_empty())
         );
+    }
+
+    #[test]
+    fn resolves_grouped_family_stems_strictly() {
+        let candidates = ["swe-1-7", "swe-2-high", "adaptive"];
+        let selected = resolve("swe-2-max", &candidates, true).unwrap();
+        assert_eq!(selected.model, "swe-2-high");
+        assert_eq!(selected.thought_level, Some("max"));
+        let selected = resolve("swe-2-high", &candidates, true).unwrap();
+        assert_eq!(selected.model, "swe-2-high");
+        assert_eq!(selected.thought_level, Some("high"));
+        let selected = resolve("swe-1-7-max", &candidates, true).unwrap();
+        assert_eq!(selected.model, "swe-1-7");
+        assert_eq!(selected.thought_level, Some("max"));
+        let selected = resolve("adaptive", &candidates, true).unwrap();
+        assert_eq!(selected.model, "adaptive");
+        assert_eq!(selected.thought_level, None);
+        assert!(resolve("swe-2", &candidates, true).is_none());
+        assert!(resolve("swe-2-max", &candidates, false).is_none());
+        assert_eq!(
+            resolve("swe-2-high", &candidates, false)
+                .unwrap()
+                .thought_level,
+            None
+        );
+        assert!(resolve("swe-2-turbo", &candidates, true).is_none());
+        assert!(resolve("gpt-5-max", &candidates, true).is_none());
+        assert!(resolve("swe-9-high", &candidates, true).is_none());
+    }
+
+    #[test]
+    fn sidekick_ids_stay_exact_only() {
+        let candidates = ["swe-2-sidekick-high", "swe-2-high"];
+        assert!(resolve("swe-2-sidekick-max", &candidates, true).is_none());
+        assert!(resolve("swe-2-sidekick", &candidates, true).is_none());
+        let selected = resolve("swe-2-sidekick-high", &candidates, true).unwrap();
+        assert_eq!(selected.model, "swe-2-sidekick-high");
+        assert_eq!(selected.thought_level, None);
     }
 
     #[test]

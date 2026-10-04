@@ -3592,17 +3592,20 @@ async fn run_session(session: Session) {
                 request_draining(&client, &mut incoming, "graff/models", json!({})).await?;
             graff_models::verify_resumed_model(&catalog, model)?;
         }
+        let mut devin_selection = None;
         if harness == HarnessId::Devin
             && let Some(model) = request.model.as_deref()
         {
-            devin_models::wait_for_model(
-                &client,
-                &mut incoming,
-                &session_id,
-                &mut session_response,
-                model,
-            )
-            .await?;
+            devin_selection = Some(
+                devin_models::wait_for_model(
+                    &client,
+                    &mut incoming,
+                    &session_id,
+                    &mut session_response,
+                    model,
+                )
+                .await?,
+            );
         }
         // ACP has had two model-selection surfaces. Newer config-option agents
         // use category=model below; Grok Build currently advertises only the
@@ -3610,13 +3613,32 @@ async fn run_session(session: Session) {
         // ACP clients follow the same split. Unlike the best-effort auxiliary options,
         // an explicit model switch is strict: prompting with a different
         // model than the picker shows is worse than surfacing the RPC error.
-        let requested_model: Option<String> = match request.model.as_deref() {
-            Some(model) if effort_in_model_id => Some(effort_variant_id(
-                &session_response,
-                model,
-                request.reasoning,
-            )),
-            model => model.map(str::to_owned),
+        let devin_configured = if harness == HarnessId::Devin
+            && let (Some(selection), Some(requested)) = (&devin_selection, request.model.as_deref())
+        {
+            devin_models::configure_model(
+                &client,
+                &mut incoming,
+                &session_id,
+                &mut session_response,
+                requested,
+                selection,
+            )
+            .await?
+        } else {
+            false
+        };
+        let requested_model: Option<String> = if devin_configured {
+            None
+        } else {
+            match request.model.as_deref() {
+                Some(model) if effort_in_model_id => Some(effort_variant_id(
+                    &session_response,
+                    model,
+                    request.reasoning,
+                )),
+                model => model.map(str::to_owned),
+            }
         };
         if harness == HarnessId::Antigravity {
             validate_config_model_selection(
@@ -3649,7 +3671,15 @@ async fn run_session(session: Session) {
         if harness == HarnessId::Graff {
             graff_models::validate_effort(&session_response, request.reasoning)?;
         }
-        let efforts = effort_values(request.reasoning, request.model.as_deref());
+        let efforts = if devin_configured
+            && devin_selection
+                .as_ref()
+                .is_some_and(|selection| selection.thought_level.is_some())
+        {
+            Vec::new()
+        } else {
+            effort_values(request.reasoning, request.model.as_deref())
+        };
         let session_commands = scan_available_commands(&session_response);
         let init_commands = if session_commands.is_empty() {
             init_commands
