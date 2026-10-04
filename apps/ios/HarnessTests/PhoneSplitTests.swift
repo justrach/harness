@@ -90,12 +90,36 @@ final class PhoneSplitTests: XCTestCase {
                        "a folded list comes back down with the finger")
     }
 
-    func testAReleasedDragFoldsAboveHalfwayAndOpensBelowIt() {
-        XCTAssertTrue(PhoneSplit.foldsAfterDrag(resting: 350, predicted: -250, extent: 350))
-        XCTAssertFalse(PhoneSplit.foldsAfterDrag(resting: 350, predicted: -100, extent: 350),
-                       "a short drag snaps back open")
-        XCTAssertFalse(PhoneSplit.foldsAfterDrag(resting: 0, predicted: 220, extent: 350),
-                       "dragging a folded list past halfway opens it")
-        XCTAssertTrue(PhoneSplit.foldsAfterDrag(resting: 0, predicted: 60, extent: 350))
+    func testEachRestHasItsListHeight() {
+        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .session, open: 350, full: 740), 0)
+        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .split, open: 350, full: 740), 350)
+        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .list, open: 350, full: 740), 740)
+        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .list, open: 350, full: 200), 350,
+                       "the list's whole screen is never smaller than its split height")
+    }
+
+    func testAReleasedDragSettlesAtTheNearestRest() {
+        // From the split (350 of 740).
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: -250, open: 350, full: 740), .session)
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: -100, open: 350, full: 740), .split,
+                       "a short drag up snaps back")
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: 120, open: 350, full: 740), .split,
+                       "a short drag down snaps back")
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: 300, open: 350, full: 740), .list,
+                       "dragging down past halfway gives the list the screen")
+        // From the session's screen: down to the split, or a long flick all the way to the list.
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 0, predicted: 220, open: 350, full: 740), .split)
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 0, predicted: 60, open: 350, full: 740), .session)
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 0, predicted: 900, open: 350, full: 740), .list)
+        // From the list's screen: back up to the split.
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 740, predicted: -300, open: 350, full: 740), .split)
+        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 740, predicted: -80, open: 350, full: 740), .list)
+    }
+
+    func testTypingGivesTheSessionTheScreenUntilTheKeyboardGoes() {
+        for rest in [PhoneSplit.StackedPane.session, .split, .list] {
+            XCTAssertEqual(PhoneSplit.shownPane(resting: rest, composerFocused: true), .session)
+            XCTAssertEqual(PhoneSplit.shownPane(resting: rest, composerFocused: false), rest)
+        }
     }
 }

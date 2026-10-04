@@ -112,6 +112,63 @@ final class PhoneSplitUITests: XCTestCase {
         XCTAssertEqual(handle.label, "Hide the session list")
     }
 
+    func testDraggingTheStackedHandleDownGivesTheListTheScreenAndItsIconBringsTheSessionBack() {
+        let app = launchRollout("on", onboardingSeen: true)
+        XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
+        let handle = app.buttons["stacked-split-handle"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 5), "no split handle")
+
+        let start = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let bottom = app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.95))
+        start.press(forDuration: 0.1, thenDragTo: bottom)
+        Thread.sleep(forTimeInterval: 0.8)
+        attachScreenshot(named: "stacked-list-full")
+        XCTAssertTrue(listButton(app).isHittable, "the list has the screen")
+        XCTAssertFalse(header(app).isHittable, "the session folds away below it")
+        XCTAssertEqual(handle.label, "Show the session", "folded down, the handle offers the session back")
+        XCTAssertGreaterThan(handle.frame.minY, app.windows.firstMatch.frame.height * 0.8,
+                             "the handle waits at the bottom")
+
+        handle.tap()
+        Thread.sleep(forTimeInterval: 0.8)
+        XCTAssertTrue(header(app).isHittable, "tapping the icon brings the session back")
+        XCTAssertTrue(listButton(app).isHittable, "in the split, under the list")
+        XCTAssertEqual(handle.label, "Hide the session list")
+    }
+
+    /// Typing in a stacked split gives the session the screen above the keyboard; sending puts the keyboard
+    /// away and the list comes back. Both halves of the rollout get this.
+    private func typeAndSend(_ half: String) {
+        let app = launchRollout(half, onboardingSeen: true)
+        XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
+        XCTAssertTrue(listButton(app).isHittable, "the list starts open")
+
+        let input = app.textViews["composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 5), "no composer")
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), "the keyboard came up")
+        input.typeText("does the list get out of the way")
+        Thread.sleep(forTimeInterval: 0.8)
+        attachScreenshot(named: "stacked-typing-\(half)")
+        XCTAssertFalse(listButton(app).isHittable, "typing gives the session the screen")
+        XCTAssertTrue(header(app).isHittable, "the session's header is still on screen")
+        XCTAssertGreaterThan(app.keyboards.count, 0, "and the keyboard stays up while typing")
+
+        app.buttons["composer-send"].tap()
+        Thread.sleep(forTimeInterval: 1)
+        attachScreenshot(named: "stacked-sent-\(half)")
+        XCTAssertEqual(app.keyboards.count, 0, "sending puts the keyboard away")
+        XCTAssertTrue(listButton(app).isHittable, "and the list comes back")
+    }
+
+    func testTypingInTheStackedSplitGivesTheSessionTheScreenAndSendingBringsTheListBack() {
+        typeAndSend("on")
+    }
+
+    func testTheOffHalfAlsoGivesTheSessionTheScreenWhileTyping() {
+        typeAndSend("off")
+    }
+
     func testOffKeepsTheSingleStackAndTheSessionReplacesTheList() {
         let app = launch("off", orientation: .portrait)
         XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")

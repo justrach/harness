@@ -51,17 +51,38 @@ enum PhoneSplit: String, CaseIterable, Identifiable {
         return previous
     }
 
+    /// Where the stacked split's handle rests: the session given the screen (the list folded up), both
+    /// panes, or the list given the screen (the session folded down).
+    enum StackedPane: Equatable { case session, split, list }
+
     /// The stacked list's height while its handle is dragged: the resting height moved by the drag, never
-    /// below nothing or above the arrangement's extent.
+    /// below nothing or above `extent`, the list's height with the whole screen.
     static func draggedListHeight(resting: CGFloat, drag: CGFloat, extent: CGFloat) -> CGFloat {
         min(max(resting + drag, 0), extent)
     }
 
-    /// Where a released drag settles: folded away (the session gets the whole screen) when it would end
-    /// above half the list's extent, open otherwise. `predicted` is where the finger's momentum carries it,
-    /// so a short flick up folds and a short flick down opens.
-    static func foldsAfterDrag(resting: CGFloat, predicted: CGFloat, extent: CGFloat) -> Bool {
-        draggedListHeight(resting: resting, drag: predicted, extent: extent) < extent / 2
+    /// The list's height resting at `pane`: nothing, its height in the split (`open`), or all of it (`full`).
+    static func stackedListHeight(for pane: StackedPane, open: CGFloat, full: CGFloat) -> CGFloat {
+        switch pane {
+        case .session: 0
+        case .split: open
+        case .list: max(full, open)
+        }
+    }
+
+    /// Where a released drag settles: whichever of the three rests is nearest where the finger's momentum
+    /// (`predicted`) carries the handle, so a short flick moves one step and a long one can go end to end.
+    static func paneAfterDrag(resting: CGFloat, predicted: CGFloat, open: CGFloat, full: CGFloat) -> StackedPane {
+        let end = draggedListHeight(resting: resting, drag: predicted, extent: max(full, open))
+        let rests: [(StackedPane, CGFloat)] = [(.session, 0), (.split, open), (.list, max(full, open))]
+        return rests.min { abs($0.1 - end) < abs($1.1 - end) }?.0 ?? .split
+    }
+
+    /// The pane actually shown. Typing in the session's composer gives the session the screen above the
+    /// keyboard, whatever the handle's rest; the rest comes back when the composer lets the keyboard go
+    /// (sending puts it away).
+    static func shownPane(resting: StackedPane, composerFocused: Bool) -> StackedPane {
+        composerFocused ? .session : resting
     }
 
     /// Height the session keeps below a stacked list: its header, a few rows and the composer.
@@ -93,14 +114,24 @@ enum PhoneSplit: String, CaseIterable, Identifiable {
     }
 }
 
+extension EnvironmentValues {
+    /// Set inside a stacked split's session: its composer reports gaining and losing keyboard focus, so the
+    /// split can give the session the screen while it types, and puts the keyboard away on send.
+    @Entry var stackedComposerFocus: ((Bool) -> Void)? = nil
+}
+
 /// The list and the open session together, in the shape the arrangement asks for.
 struct PhoneSplitContainer<List: View, Detail: View>: View {
     let arrangement: PhoneSplit.Arrangement
+    /// The session the detail shows: opening one from a list that has the screen brings the split back.
+    var selection: String? = nil
     @ViewBuilder var list: List
     @ViewBuilder var detail: Detail
     @State private var availableHeight: CGFloat = .infinity
-    /// Stacked: the list folded away under its handle, so the session has the whole screen.
-    @State private var listFolded = false
+    /// Stacked: where the handle rests (the session's screen, both, or the list's screen).
+    @State private var pane: PhoneSplit.StackedPane = .split
+    /// Stacked: the session's composer has the keyboard, so the session has the screen for now.
+    @State private var composerFocused = false
     /// Stacked: how far the handle has been dragged, negative upward.
     @State private var drag: CGFloat = 0
     /// Stacked: this install is in the drag handle's "on" half (FeatureRollout). Read once per container.
@@ -108,6 +139,10 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
     /// Stacked, "on" half: the one-time callout under the handle is showing.
     @State private var showDragOnboarding = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// The handle's height while it is the only way back to a folded pane, and with the list open.
+    private static var handleFolded: CGFloat { 36 }
+    private static var handleOpen: CGFloat { 18 }
 
     var body: some View {
         switch arrangement.axis {
@@ -118,61 +153,110 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
                 detail.frame(maxWidth: .infinity)
             }
         case .stacked:
-            // The list's height when open (the keyboard can shrink it), and where it rests now.
-            let open = PhoneSplit.stackedListHeight(extent: arrangement.listExtent, available: availableHeight)
-            let resting = dragEnabled && listFolded ? 0 : open
-            let height = dragEnabled ? PhoneSplit.draggedListHeight(resting: resting, drag: drag, extent: open) : open
-            VStack(spacing: 0) {
-                list.frame(height: height)
-                    .clipped()
-                    .accessibilityHidden(height == 0)
-                if dragEnabled {
-                    StackedSplitHandle(folded: listFolded && drag == 0) { setFolded(!listFolded) }
-                        .gesture(
-                            DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                                .onChanged { value in
-                                    drag = value.translation.height
-                                    if showDragOnboarding { finishOnboarding() }
-                                }
-                                .onEnded { value in
-                                    setFolded(PhoneSplit.foldsAfterDrag(
-                                        resting: resting, predicted: value.predictedEndTranslation.height,
-                                        extent: open))
-                                }
-                        )
-                } else {
-                    Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
-                }
-                detail.frame(maxHeight: .infinity)
-                    .overlay(alignment: .top) {
-                        if showDragOnboarding {
-                            StackedDragOnboarding { finishOnboarding() }
-                                .padding(.horizontal, 16)
-                                .padding(.top, 6)
-                                .transition(.opacity.combined(with: .move(edge: .top)))
-                        }
-                    }
+            stacked
+        }
+    }
+
+    private var stacked: some View {
+        // The list's height in the split (the keyboard can shrink it) and with the whole screen.
+        let open = PhoneSplit.stackedListHeight(extent: arrangement.listExtent, available: availableHeight)
+        let full = availableHeight.isFinite ? max(availableHeight - Self.handleFolded, open) : open
+        let shown = PhoneSplit.shownPane(resting: dragEnabled ? pane : .split, composerFocused: composerFocused)
+        let resting = PhoneSplit.stackedListHeight(for: shown, open: open, full: full)
+        let height = dragEnabled ? PhoneSplit.draggedListHeight(resting: resting, drag: drag, extent: full) : resting
+        // Mid-drag the handle is a plain grabber; at rest it shows the way back to a folded pane.
+        let handleState: StackedSplitHandle.Mode
+        switch shown {
+        case _ where drag != 0: handleState = .split
+        case .session: handleState = .sessionFull
+        case .split: handleState = .split
+        case .list: handleState = .listFull
+        }
+        return VStack(spacing: 0) {
+            list.frame(height: height)
+                .clipped()
+                // The clip stops the list's own background at the split's top edge, so the status bar above
+                // it showed the session's lighter color. While the list is on screen it colors the status bar.
+                .background(height > 0 ? Theme.surface : Theme.bg, ignoresSafeAreaEdges: .top)
+                .accessibilityHidden(height == 0)
+            if dragEnabled {
+                StackedSplitHandle(state: handleState, action: tapHandle)
+                    .gesture(
+                        DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                            .onChanged { value in
+                                drag = value.translation.height
+                                if showDragOnboarding { finishOnboarding() }
+                            }
+                            .onEnded { value in
+                                let next = PhoneSplit.paneAfterDrag(
+                                    resting: resting, predicted: value.predictedEndTranslation.height,
+                                    open: open, full: full)
+                                if composerFocused, next != .session { dismissKeyboard() }
+                                setPane(next)
+                            }
+                    )
+            } else {
+                Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
             }
-            // Above the keyboard: this is the height the two panes share right now.
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { availableHeight = $0 }
-            .onAppear {
-                FeatureUsage.record(.splitShown, for: .stackedSplitDrag)
-                if dragEnabled, !FeatureOnboarding.hasSeen(.stackedSplitDrag) {
-                    showDragOnboarding = true
-                    FeatureUsage.record(.onboardingShown, for: .stackedSplitDrag)
+            detail.frame(minHeight: 0, maxHeight: .infinity)
+                .clipped()
+                .accessibilityHidden(shown == .list && drag == 0)
+                .environment(\.stackedComposerFocus) { focused in
+                    guard focused != composerFocused else { return }
+                    withAnimation(reduceMotion ? nil : Motion.collapse) { composerFocused = focused }
                 }
+                .overlay(alignment: .top) {
+                    if showDragOnboarding {
+                        StackedDragOnboarding { finishOnboarding() }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 6)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
+        }
+        // Above the keyboard: this is the height the two panes share right now.
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { availableHeight = $0 }
+        .onChange(of: selection) { _, chat in
+            // Picking a session from a list that has the screen opens it in the split.
+            if chat != nil, pane == .list { setPane(.split) }
+        }
+        .onAppear {
+            FeatureUsage.record(.splitShown, for: .stackedSplitDrag)
+            if dragEnabled, !FeatureOnboarding.hasSeen(.stackedSplitDrag) {
+                showDragOnboarding = true
+                FeatureUsage.record(.onboardingShown, for: .stackedSplitDrag)
             }
         }
     }
 
-    private func setFolded(_ folded: Bool) {
-        if folded != listFolded {
-            FeatureUsage.record(folded ? .folded : .unfolded, for: .stackedSplitDrag)
+    /// A tap on the handle: from the split it gives the session the screen; from either full screen it
+    /// brings the split back. While the composer has the keyboard, the tap puts the keyboard away instead,
+    /// which brings back whatever the handle rested at.
+    private func tapHandle() {
+        if composerFocused {
+            dismissKeyboard()
+        } else {
+            setPane(pane == .split ? .session : .split)
+        }
+    }
+
+    private func setPane(_ next: PhoneSplit.StackedPane) {
+        if next != pane {
+            let event: FeatureUsageEvent = switch next {
+            case .session: .folded
+            case .split: .unfolded
+            case .list: .listExpanded
+            }
+            FeatureUsage.record(event, for: .stackedSplitDrag)
         }
         withAnimation(reduceMotion ? nil : Motion.collapse) {
-            listFolded = folded
+            pane = next
             drag = 0
         }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
     /// The callout goes for good on "Got it" or on the first drag: either way the person has met the handle.
@@ -234,16 +318,28 @@ private struct StackedDragOnboarding: View {
 }
 
 /// The stacked split's divider: a grabber to drag the list up out of the way (the session then fills the
-/// screen) or back down. Folded, it stays at the top with a visible split icon that brings the list back.
+/// screen), back down, or on down so the list fills the screen. With either pane folded it shows a split
+/// icon that brings the split back.
 private struct StackedSplitHandle: View {
-    let folded: Bool
-    let toggle: () -> Void
+    enum Mode { case split, sessionFull, listFull }
+    let state: Mode
+    let action: () -> Void
+
+    private var folded: Bool { state != .split }
+
+    private var label: String {
+        switch state {
+        case .split: "Hide the session list"
+        case .sessionFull: "Show the session list"
+        case .listFull: "Show the session"
+        }
+    }
 
     var body: some View {
-        Button(action: toggle) {
+        Button(action: action) {
             HStack(spacing: 8) {
                 if folded {
-                    // Folded, this is the only way back to the list: make it plainly visible.
+                    // Folded, this is the only way back to the other pane: make it plainly visible.
                     Image(systemName: "rectangle.split.1x2")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(Theme.text)
@@ -255,14 +351,14 @@ private struct StackedSplitHandle: View {
             .frame(maxWidth: .infinity)
             .frame(height: folded ? 36 : 18)
             .contentShape(Rectangle())
-            .background(Theme.bg)
-            .overlay(alignment: .bottom) {
+            .background(state == .listFull ? Theme.surface : Theme.bg)
+            .overlay(alignment: state == .listFull ? .top : .bottom) {
                 Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(folded ? "Show the session list" : "Hide the session list")
-        .accessibilityHint("Drag up to give the session the whole screen, down to bring the list back.")
+        .accessibilityLabel(label)
+        .accessibilityHint("Drag up to give the session the whole screen, down to give the list the whole screen.")
         .accessibilityIdentifier("stacked-split-handle")
     }
 }
