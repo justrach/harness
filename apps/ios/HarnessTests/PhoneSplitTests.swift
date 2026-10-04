@@ -58,4 +58,26 @@ final class PhoneSplitTests: XCTestCase {
         // A tall, wide window (an unfolded fold) is still side by side, never stacked.
         XCTAssertEqual(PhoneSplit.arrangement(mode: .auto, in: CGSize(width: 700, height: 900))?.axis, .sideBySide)
     }
+
+    func testTheStackedListYieldsToTheKeyboard() {
+        // No keyboard: the session already has more than its minimum, so the list keeps its extent.
+        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: 800), 393)
+        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: .infinity), 393)
+        // A ~336pt keyboard leaves ~478pt: the list shrinks so the session keeps 320pt for its composer.
+        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: 478), 158)
+        // Never negative, however little room is left.
+        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: 200), 0)
+    }
+
+    func testTheKeyboardDoesNotReshapeTheSplit() {
+        let portrait = CGSize(width: 402, height: 778)
+        // The keyboard: same width, shorter. The split keeps choosing from the full height.
+        XCTAssertEqual(PhoneSplit.layoutSize(previous: portrait, measured: CGSize(width: 402, height: 484)), portrait)
+        // The keyboard going away, or the first measurement: taken as measured.
+        XCTAssertEqual(PhoneSplit.layoutSize(previous: CGSize(width: 402, height: 484), measured: portrait), portrait)
+        XCTAssertEqual(PhoneSplit.layoutSize(previous: .zero, measured: portrait), portrait)
+        // Rotating or unfolding changes the width: a new window, measured afresh.
+        let landscape = CGSize(width: 874, height: 402)
+        XCTAssertEqual(PhoneSplit.layoutSize(previous: portrait, measured: landscape), landscape)
+    }
 }

@@ -41,6 +41,26 @@ enum PhoneSplit: String, CaseIterable, Identifiable {
     /// A pane never gets so small it cannot be read, nor so large the session loses its room.
     static let sideListRange: ClosedRange<CGFloat> = 280...380
     static let stackedListRange: ClosedRange<CGFloat> = 240...420
+    /// The window size a shape is chosen from. A phone's window only gets shorter at the same width when the
+    /// keyboard comes up (rotating or unfolding changes the width), so a shorter measurement at an unchanged
+    /// width keeps the previous height. Otherwise the keyboard dropped a stacked split below its minimum the
+    /// moment someone tapped the composer: the single stack replaced the split, the session was rebuilt, its
+    /// composer left the window and the keyboard went with it.
+    static func layoutSize(previous: CGSize, measured: CGSize) -> CGSize {
+        guard measured.width == previous.width, measured.height < previous.height else { return measured }
+        return previous
+    }
+
+    /// Height the session keeps below a stacked list: its header, a few rows and the composer.
+    static let stackedSessionMinimum: CGFloat = 320
+
+    /// The stacked list's height in a pane that is `available` tall right now. The arrangement's extent is
+    /// fixed from the window measured without the keyboard; when the keyboard takes room, the list gives it up
+    /// so the session keeps `stackedSessionMinimum`. Squeezed below that, the composer lost focus as soon as
+    /// it gained it and typing never worked.
+    static func stackedListHeight(extent: CGFloat, available: CGFloat) -> CGFloat {
+        max(min(extent, available - stackedSessionMinimum), 0)
+    }
 
     static func arrangement(mode: PhoneSplit, in size: CGSize) -> Arrangement? {
         switch mode {
@@ -65,6 +85,7 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
     let arrangement: PhoneSplit.Arrangement
     @ViewBuilder var list: List
     @ViewBuilder var detail: Detail
+    @State private var availableHeight: CGFloat = .infinity
 
     var body: some View {
         switch arrangement.axis {
@@ -76,10 +97,14 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
             }
         case .stacked:
             VStack(spacing: 0) {
-                list.frame(height: arrangement.listExtent)
+                list.frame(height: PhoneSplit.stackedListHeight(extent: arrangement.listExtent,
+                                                                available: availableHeight))
+                    .clipped()
                 Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
                 detail.frame(maxHeight: .infinity)
             }
+            // Above the keyboard: this is the height the two panes share right now.
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { availableHeight = $0 }
         }
     }
 }
