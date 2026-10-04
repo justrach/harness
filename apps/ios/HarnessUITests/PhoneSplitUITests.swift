@@ -57,8 +57,40 @@ final class PhoneSplitUITests: XCTestCase {
         XCTAssertLessThan(listButton(app).frame.maxY, header(app).frame.minY, "the list sits above the session")
     }
 
+    private func launchRollout(_ half: String, onboardingSeen: Bool) -> XCUIApplication {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        Thread.sleep(forTimeInterval: 1)
+        let app = XCUIApplication()
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-route", "chat:chat-tabs", "-phoneSplit", "stacked",
+                               "-rollout.stackedSplitDrag", half,
+                               "-onboarding.stackedSplitDrag.seen", onboardingSeen ? "YES" : "NO"]
+        app.launch()
+        return app
+    }
+
+    func testTheOnHalfMeetsTheHandleOnceAndGotItPutsTheCalloutAway() {
+        let app = launchRollout("on", onboardingSeen: false)
+        XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
+        let callout = app.descendants(matching: .any)["stacked-drag-onboarding"]
+        XCTAssertTrue(callout.waitForExistence(timeout: 5), "the on half is introduced to the handle")
+        attachScreenshot(named: "stacked-drag-onboarding")
+        app.buttons["stacked-drag-onboarding-dismiss"].tap()
+        XCTAssertFalse(callout.waitForExistence(timeout: 2), "Got it puts the callout away")
+        XCTAssertTrue(app.buttons["stacked-split-handle"].exists, "the handle stays")
+    }
+
+    func testTheOffHalfKeepsThePlainDivider() {
+        let app = launchRollout("off", onboardingSeen: false)
+        XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
+        XCTAssertTrue(listButton(app).isHittable, "the stacked split is there")
+        XCTAssertFalse(app.buttons["stacked-split-handle"].exists, "no handle in the off half")
+        XCTAssertFalse(app.descendants(matching: .any)["stacked-drag-onboarding"].exists, "and no introduction")
+        attachScreenshot(named: "stacked-off-half")
+    }
+
     func testDraggingTheStackedHandleUpGivesTheSessionTheScreenAndItsIconBringsTheListBack() {
-        let app = launch("stacked", orientation: .portrait)
+        let app = launchRollout("on", onboardingSeen: true)
         XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
         let handle = app.buttons["stacked-split-handle"]
         XCTAssertTrue(handle.waitForExistence(timeout: 5), "no split handle")
