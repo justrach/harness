@@ -25,6 +25,14 @@ use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
 /// Default and ceiling for the blocking waits.
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 const MAX_WAIT: Duration = Duration::from_secs(3600);
+/// Ceiling when the caller is itself a chat. A wait parks the caller's turn
+/// behind a silent tool call, and the recipient replies into the caller's chat
+/// anyway (see `attribute`), so a chat never needs to block for long.
+const CHAT_MAX_WAIT: Duration = Duration::from_secs(120);
+/// Attached to a chat caller's timed-out wait so it ends its turn rather than
+/// waiting again.
+const CHAT_WAIT_NOTE: &str = "The chat is still working. Its reply arrives in your chat as a \
+    [Message from Harness chat …] message, so end your turn now instead of waiting again.";
 /// A session row older than this is not trusted to still be working
 /// (the UI's staleness window): a crashed host must not read as busy forever.
 const SESSION_STALE: chrono::Duration = chrono::Duration::seconds(45);
@@ -125,7 +133,7 @@ fn catalog() -> Vec<ToolDef> {
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
-                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply." },
+                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply. From a chat, waits stop after 120 seconds." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
                 }
             }),
@@ -142,7 +150,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat. Messages are attributed to your chat. mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes and returns the assistant's reply.",
+            description: "Send a message to a chat. Messages are attributed to your chat. mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes and returns the assistant's reply. From a chat, waits stop after 120 seconds: the recipient replies into your chat on its own, so prefer wait=false and end your turn.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -152,7 +160,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message.",
+            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. From a chat, waits stop after 120 seconds.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
@@ -281,10 +289,11 @@ fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))
 }
 
-fn wait_duration(secs: Option<u64>) -> Duration {
+fn wait_duration(secs: Option<u64>, from_chat: bool) -> Duration {
+    let ceiling = if from_chat { CHAT_MAX_WAIT } else { MAX_WAIT };
     secs.map(Duration::from_secs)
         .unwrap_or(DEFAULT_WAIT)
-        .min(MAX_WAIT)
+        .min(ceiling)
 }
 
 fn now_millis() -> i64 {
@@ -682,7 +691,7 @@ impl Tools {
                         &chat,
                         None,
                         true,
-                        wait_duration(args.timeout_secs),
+                        self.wait_limit(args.timeout_secs),
                         now_millis(),
                     )
                     .await?;
@@ -756,7 +765,7 @@ impl Tools {
                     &chat,
                     baseline.as_ref(),
                     true,
-                    wait_duration(args.timeout_secs),
+                    self.wait_limit(args.timeout_secs),
                     sent_at,
                 )
                 .await?;
@@ -767,7 +776,7 @@ impl Tools {
     async fn wait_for_turn(&self, args: WaitArgs) -> anyhow::Result<Value> {
         let chat = self.harness.resolve_chat(&args.chat).await?;
         let turn = self
-            .await_turn(&chat, None, false, wait_duration(args.timeout_secs), 0)
+            .await_turn(&chat, None, false, self.wait_limit(args.timeout_secs), 0)
             .await?;
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
@@ -994,13 +1003,27 @@ impl Tools {
             replies
         };
         let (status, _) = status_of(session.as_ref());
-        Ok(json!({
+        let timed_out = outcome == TurnOutcome::TimedOut;
+        let mut turn = json!({
             "outcome": outcome,
             "status": status,
-            "timedOut": outcome == TurnOutcome::TimedOut,
+            "timedOut": timed_out,
             "pendingInput": last_pending_input(&rendered),
             "replies": replies,
-        }))
+        });
+        if timed_out && self.from_chat() {
+            turn["note"] = json!(CHAT_WAIT_NOTE);
+        }
+        Ok(turn)
+    }
+
+    /// Whether this server speaks for a chat (an agent-to-agent caller).
+    fn from_chat(&self) -> bool {
+        self.harness.origin().chat_id.is_some()
+    }
+
+    fn wait_limit(&self, secs: Option<u64>) -> Duration {
+        wait_duration(secs, self.from_chat())
     }
 }
 
@@ -1354,6 +1377,37 @@ mod tests {
             .unwrap();
         assert_eq!(sent["turn"]["outcome"], "timedOut");
         assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(sent["turn"].get("note").is_none());
+    }
+
+    #[test]
+    fn a_chat_caller_waits_at_most_two_minutes() {
+        assert_eq!(wait_duration(Some(3600), true), CHAT_MAX_WAIT);
+        assert_eq!(wait_duration(None, true), CHAT_MAX_WAIT);
+        assert_eq!(wait_duration(Some(30), true), Duration::from_secs(30));
+        assert_eq!(wait_duration(Some(3600), false), MAX_WAIT);
+        assert_eq!(wait_duration(None, false), DEFAULT_WAIT);
+    }
+
+    #[tokio::test]
+    async fn a_chat_callers_timed_out_wait_says_to_end_the_turn() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world,
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        let sent = tools
+            .call(
+                "send_message",
+                json!({ "chat": "alpha", "text": "hi", "wait": true, "timeout_secs": 1 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["turn"]["outcome"], "timedOut");
+        assert_eq!(sent["turn"]["note"], CHAT_WAIT_NOTE);
     }
 
     #[tokio::test]
