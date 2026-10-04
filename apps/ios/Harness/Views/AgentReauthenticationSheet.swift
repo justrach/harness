@@ -90,7 +90,7 @@ struct AgentReauthenticationSheet: View {
                         }
                     case .failed(let message):
                         Text(message).foregroundStyle(Theme.danger)
-                        Button("Try again") { attempt += 1 }
+                        Button(provider == .chatGPTNew ? "Continue with ChatGPT" : "Try again") { attempt += 1 }
                             .buttonStyle(.borderedProminent)
                     }
                     if recovery.phase != .done {

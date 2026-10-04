@@ -4000,7 +4000,13 @@ async fn run_session(session: Session) {
 
             res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
                 turn = None;
-                if res.is_err() && client.is_closed() {
+                // A request failed by the reader's EOF cleanup is a crash. A
+                // reauth error is the agent's own answer, and the agent may
+                // exit right after sending it, so it still ends the turn below.
+                if res.is_err()
+                    && !matches!(&res, Err(HarnessError::ReauthRequired { .. }))
+                    && client.is_closed()
+                {
                     break 'main;
                 }
                 starve_deadline = None;
