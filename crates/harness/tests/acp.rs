@@ -1272,6 +1272,347 @@ async fn devin_missing_variant_is_bounded_and_never_prompts() {
     assert!(!dir.path().join("prompted").exists());
 }
 
+#[cfg(unix)]
+fn devin_grouped_fixture() -> (tempfile::TempDir, AcpHarness) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("devin.py");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+
+def options(model, thought, thoughts):
+    return [
+        {'id':'model', 'category':'model', 'type':'select', 'currentValue':model,
+         'options':[{'value':'swe-1-7', 'name':'SWE-1.7'},
+                    {'value':'swe-2-high', 'name':'SWE-2 High'},
+                    {'value':'adaptive', 'name':'Adaptive'}]},
+        {'id':'thinking', 'category':'thought_level', 'type':'select',
+         'currentValue':thought,
+         'options':[{'value':t, 'name':t} for t in thoughts]},
+    ]
+
+if sys.argv[1:] == ['models', 'list', '--format', 'json']:
+    print(json.dumps({'families':[{'variants':[
+        {'model_uid':'swe-2-high','label':'SWE-2 High'},
+        {'model_uid':'swe-2-max','label':'SWE-2 Max'}]}]}))
+    sys.exit(0)
+assert sys.argv[1:] == ['acp'], sys.argv
+model = 'swe-1-7'
+thought = 'high'
+thoughts = ['low','medium','high','xhigh','max']
+
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    result = {}
+    if method == 'initialize':
+        result = {'protocolVersion':1, 'agentCapabilities':{}}
+    elif method == 'session/new':
+        thought = (root / 'thought').read_text().strip()
+        model = (root / 'start-model').read_text().strip()
+        emit({'method':'session/update', 'params':{'sessionId':'other', 'update':{
+            'sessionUpdate':'config_option_update', 'configOptions':[
+                {'id':'model', 'category':'model', 'type':'select',
+                 'currentValue':'swe-9-high',
+                 'options':[{'value':'swe-9-high', 'name':'SWE-9 High'}]}]}}})
+        result = {'sessionId':'s-1', 'configOptions':options(model, thought, thoughts)}
+    elif method == 'session/set_config_option':
+        state = (root / 'state').read_text().strip()
+        config_id = req['params']['configId']
+        value = req['params']['value']
+        with (root / 'sets').open('a') as f: f.write(config_id + '=' + value + '\n')
+        if config_id == 'model':
+            if state == 'reject-model':
+                emit({'id':req['id'], 'error':{'code':-32602, 'message':'model unavailable'}})
+                continue
+            assert value in ('swe-2-high', 'adaptive'), value
+            thought = 'high'
+            thoughts = ['medium','high'] if state == 'nomax' else ['medium','high','max']
+            if state == 'model-noconfig':
+                model = value
+                result = {}
+            elif state == 'wrong-model':
+                result = {'configOptions':options('swe-1-7', thought, thoughts)}
+            else:
+                model = value
+                result = {'configOptions':options(model, thought, thoughts)}
+        else:
+            if state == 'reject-thought':
+                emit({'id':req['id'], 'error':{'code':-32602, 'message':'thinking unavailable'}})
+                continue
+            assert config_id == 'thinking', config_id
+            if state == 'thought-noconfig':
+                result = {}
+            elif state == 'wrong-thought':
+                result = {'configOptions':options(model, 'high', ['medium','high','max'])}
+            else:
+                thought = value
+                result = {'configOptions':options(model, thought, ['medium','high','max'])}
+    elif method == 'session/prompt':
+        (root / 'prompted').write_text(model + ':' + thought)
+        result = {'stopReason':'end_turn'}
+    emit({'id':req['id'], 'result':result})
+    if method == 'session/prompt': break
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.path().join("state"), "ok").unwrap();
+    std::fs::write(dir.path().join("thought"), "high").unwrap();
+    std::fs::write(dir.path().join("start-model"), "swe-1-7").unwrap();
+    let harness = AcpHarness::devin().with_executable(script);
+    (dir, harness)
+}
+
+async fn devin_grouped_run(
+    dir: &tempfile::TempDir,
+    harness: &AcpHarness,
+    model: &str,
+    reasoning: Option<ReasoningLevel>,
+) -> Vec<AgentEvent> {
+    let (controls, _steer, _token) = controls();
+    let mut req = request("Say hello");
+    req.model = Some(model.into());
+    req.reasoning = reasoning;
+    req.cwd = dir.path().display().to_string();
+    run_to_end(harness, req, controls).await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_selects_representative_and_encoded_effort() {
+    let (dir, harness) = devin_grouped_fixture();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", Some(ReasoningLevel::XHigh)).await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompted")).unwrap(),
+        "swe-2-high:max"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_inherited_effort_returns_to_the_encoded_level() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("thought"), "medium").unwrap();
+    std::fs::write(dir.path().join("start-model"), "swe-2-high").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-high", None).await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompted")).unwrap(),
+        "swe-2-high:high"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sets")).unwrap(),
+        "thinking=high\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_suffix_less_model_keeps_generic_effort() {
+    let (dir, harness) = devin_grouped_fixture();
+    let events = devin_grouped_run(&dir, &harness, "adaptive", Some(ReasoningLevel::Medium)).await;
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prompted")).unwrap(),
+        "adaptive:medium"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sets")).unwrap(),
+        "model=adaptive\nthinking=medium\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_missing_effort_after_the_model_switch_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "nomax").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("thinking level max"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_rejected_model_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "reject-model").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("model unavailable"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_rejected_thought_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "reject-thought").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("thinking unavailable"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_unconfirmed_thought_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "wrong-thought").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("did not confirm"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_model_setter_without_config_options_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "model-noconfig").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("refreshed config options"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_thought_setter_without_config_options_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "thought-noconfig").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("refreshed config options"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_unconfirmed_model_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    std::fs::write(dir.path().join("state"), "wrong-model").unwrap();
+    let events = devin_grouped_run(&dir, &harness, "swe-2-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, error)| *status == DoneStatus::Errored
+                && error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("did not confirm"))),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_missing_family_is_bounded_and_never_prompts() {
+    let (dir, harness) = devin_grouped_fixture();
+    let harness = harness.with_handshake_timeout(Duration::from_millis(300));
+    let events = devin_grouped_run(&dir, &harness, "swe-3-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, _)| *status == DoneStatus::Errored),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_disjoint_family_is_never_selected() {
+    let (dir, harness) = devin_grouped_fixture();
+    let harness = harness.with_handshake_timeout(Duration::from_millis(300));
+    let events = devin_grouped_run(&dir, &harness, "gpt-5-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, _)| *status == DoneStatus::Errored),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_grouped_other_session_updates_do_not_satisfy_readiness() {
+    let (dir, harness) = devin_grouped_fixture();
+    let harness = harness.with_handshake_timeout(Duration::from_millis(300));
+    let events = devin_grouped_run(&dir, &harness, "swe-9-max", None).await;
+    assert!(
+        dones(&events)
+            .iter()
+            .any(|(status, _)| *status == DoneStatus::Errored),
+        "{events:?}"
+    );
+    assert!(!dir.path().join("prompted").exists());
+}
+
 #[test]
 fn antigravity_sign_in_preserves_relative_home_auth_in_a_separate_process() {
     let parent_cwd = tempfile::tempdir().unwrap();
