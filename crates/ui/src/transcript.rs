@@ -6250,7 +6250,11 @@ impl Transcript {
                     .into(),
                 ))
                 .child(div().flex().child(primary(
-                    "Reconnect ChatGPT",
+                    if provider == ReauthProvider::ChatgptNew {
+                        "Continue with ChatGPT"
+                    } else {
+                        "Reconnect ChatGPT"
+                    },
                     "start",
                     ReauthAction::Reconnect,
                     cx,
@@ -6342,7 +6346,16 @@ impl Transcript {
                         .text_color(theme.danger_muted.opacity(0.9))
                         .child(SharedString::from(error)),
                 )
-                .child(div().flex().child(primary("Retry", "retry", ReauthAction::Retry, cx)))
+                .child(div().flex().child(primary(
+                    if provider == ReauthProvider::ChatgptNew {
+                        "Continue with ChatGPT"
+                    } else {
+                        "Retry"
+                    },
+                    "retry",
+                    ReauthAction::Retry,
+                    cx,
+                )))
                 .child(note),
             CardStep::Reconnected { resume } => card
                 .child(

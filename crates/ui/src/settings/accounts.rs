@@ -1836,7 +1836,9 @@ impl AccountsPage {
                 .child(
                     crate::popover::btn_primary(
                         theme,
-                        if signed_in {
+                        if id == "chatgpt-new" {
+                            "Continue with ChatGPT"
+                        } else if signed_in {
                             "Sign in again"
                         } else {
                             "Sign in"
