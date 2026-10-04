@@ -129,7 +129,7 @@ struct TranscriptView: View {
                     .accessibilityIdentifier("agent-reauth-resume")
             }
         } else if !earlier {
-            Button("Reconnect ChatGPT") {
+            Button(reauth == .chatGPTNew ? "Continue with ChatGPT" : "Reconnect ChatGPT") {
                 reauthRequest = AgentReauthRequest(provider: reauth, hostName: hostName,
                                                   relay: store.hostRelayClient(), key: key)
             }
