@@ -840,6 +840,20 @@ final class AppModel {
     /// Browse folders on a remote device (the desktop add-space palette's data
     /// path). Demo mode serves a canned tree; live mode asks the device over
     /// the relay.
+    /// Usage as one computer's engine reports it (Settings → Usage). Demo
+    /// mode has no CodeGraff account or agent logins behind it.
+    func codegraffUsage(deviceId: String) async throws -> CodegraffUsage? {
+        if demo != nil { return nil }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.codegraffUsage(deviceId: deviceId)
+    }
+
+    func agentAccounts(deviceId: String, forceUsage: Bool) async throws -> AgentAccountsSnapshot {
+        if demo != nil { return AgentAccountsSnapshot(accounts: []) }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.agentAccounts(deviceId: deviceId, forceUsage: forceUsage)
+    }
+
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {
         if let demo {
             try? await Task.sleep(nanoseconds: 120_000_000)  // feel like a network hop

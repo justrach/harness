@@ -23,6 +23,7 @@ struct SessionView: View {
 
     /// Follow intent belongs to the session, independent of composer focus.
     @State private var scroll = ScrollState()
+    @State private var hostLink: HostLink?
 
 
     private var chat: Chat? { model.chat(id: chatId) }
@@ -122,7 +123,12 @@ struct SessionView: View {
         // The composer owns real layout space. The transcript's viewport ends
         // above it, so keyboard and glass morphs cannot cover the last row.
         return VStack(spacing: 0) {
-            TranscriptView(store: store, chatId: chat.id, scroll: scroll)
+            TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
+                           onHostLink: { hostLink = $0 })
+                .sheet(item: $hostLink) { link in
+                    let host = store.hostDeviceId ?? chat.deviceId
+                    HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
+                }
                 .overlay {
                     if store.entries.isEmpty, store.pendingSends.isEmpty,
                        chat.lastMessageAt != nil {

@@ -39,6 +39,12 @@ struct SettingsView: View {
                     } else if model.canDeleteAccount {
                         LabeledContent("Signed in with", value: "CodeGraff")
                     }
+                    NavigationLink {
+                        UsageView()
+                    } label: {
+                        Text("Usage")
+                    }
+                    .accessibilityIdentifier("settings-usage")
                     Button("Sign out", role: .destructive) {
                         dismiss()
                         model.signOut()
