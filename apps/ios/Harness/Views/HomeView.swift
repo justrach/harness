@@ -37,10 +37,42 @@ struct HomeView: View {
         model.spaces.first { $0.id == spaceFilter }
     }
 
+    /// Opt-in split on iPhone (Settings > Layout): the list and the open session together when the window has
+    /// room for the chosen shape; the single stack otherwise. Off by default.
+    @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
+    @State private var containerSize: CGSize = .zero
+    @State private var splitSuggestion = SplitSuggestion.load()
+    @State private var showSplitOffer = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    /// Offer the split once there is room for it and the person is juggling sessions (see SplitSuggestion).
+    private func refreshSplitOffer() {
+        let context = SplitSuggestion.Context(
+            mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off,
+            isPhone: UIDevice.current.userInterfaceIdiom == .phone,
+            compactWidth: horizontalSizeClass == .compact,
+            size: containerSize,
+            largeText: dynamicTypeSize.isAccessibilitySize)
+        showSplitOffer = splitSuggestion.shouldOffer(context, now: Date().timeIntervalSince1970)
+    }
+
+    private func answerSplitOffer(tryIt: Bool) {
+        if tryIt { phoneSplitRaw = PhoneSplit.auto.rawValue }
+        splitSuggestion.markShown(at: Date().timeIntervalSince1970)
+        splitSuggestion.save()
+        showSplitOffer = false
+    }
+
+    private var phoneArrangement: PhoneSplit.Arrangement? {
+        guard horizontalSizeClass == .compact else { return nil }
+        return PhoneSplit.arrangement(mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off, in: containerSize)
+    }
+
     /// iPad (and other wide windows): the session list becomes a sidebar
     /// next to the open session, like the desktop. Compact width keeps the
-    /// phone's single stack.
-    private var splitLayout: Bool { horizontalSizeClass == .regular }
+    /// phone's single stack, unless the person turned on the phone split and
+    /// the window has room for it.
+    private var splitLayout: Bool { horizontalSizeClass == .regular || phoneArrangement != nil }
 
     // MARK: Split screen (a Max-class iPhone only; see SplitScreen)
 
@@ -116,15 +148,23 @@ struct HomeView: View {
 
     var body: some View {
         Group {
+            // Regular width (iPad, a Max in landscape) and the compact phone split never overlap: the Max's
+            // two panes need regular width, the phone split compact.
             if splitScreenAvailable, let second = secondChatId {
                 twoPanes(second: second)
-            } else if splitLayout {
+            } else if horizontalSizeClass == .regular {
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
                 } detail: {
                     primaryStack
                 }
                 .navigationSplitViewStyle(.balanced)
+            } else if let arrangement = phoneArrangement {
+                PhoneSplitContainer(arrangement: arrangement) {
+                    NavigationStack { sidebar }
+                } detail: {
+                    primaryStack
+                }
             } else {
                 NavigationStack(path: $path) {
                     sidebar
@@ -132,6 +172,10 @@ struct HomeView: View {
                 }
             }
         }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { containerSize = $0 }
+        .onChange(of: containerSize) { refreshSplitOffer() }
+        .onChange(of: phoneSplitRaw) { refreshSplitOffer() }
+        .onAppear { refreshSplitOffer() }
         .environment(\.switchToSession, switchTo)
     }
 
@@ -165,7 +209,12 @@ struct HomeView: View {
     /// what the detail shows instead of stacking behind it.
     private func open(_ route: Route) {
         // Only opening a chat is timed, the same journey the desktop reports as conversation_load_ms.
-        if case .chat = route { Perf.shared.startInteraction(PerfSpan.navigationOpen) }
+        if case .chat = route {
+            Perf.shared.startInteraction(PerfSpan.navigationOpen)
+            splitSuggestion.recordOpen(at: Date().timeIntervalSince1970)
+            splitSuggestion.save()
+            refreshSplitOffer()
+        }
         if splitScreenAvailable, case .chat(let id) = route {
             // From the list: replaces the first pane; if it is already the second the two swap.
             var next = panes
@@ -205,7 +254,11 @@ struct HomeView: View {
                 ArchivedSection(spaceId: selectedSpace?.id, query: searchText, path: sidebarPath)
             }
         }
-        .searchable(text: $searchText, prompt: "Search sessions")
+        // In the phone split the field sits in the pane's own bar: the floating one overlaps the rows of a
+        // short pane.
+        .searchable(text: $searchText,
+                    placement: phoneArrangement == nil ? .automatic : .navigationBarDrawer(displayMode: .always),
+                    prompt: "Search sessions")
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 10)
         .contentMargins(.top, 2, for: .scrollContent)
@@ -495,6 +548,16 @@ struct HomeView: View {
         let chats = HomeFilter.apply(scoped, query: searchText, status: statusFilter,
                                      indicator: model.indicator(for:), names: model.homeFilterNames)
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        if showSplitOffer {
+            Section {
+                SplitOfferBanner(tryIt: { answerSplitOffer(tryIt: true) },
+                                 notNow: { answerSplitOffer(tryIt: false) })
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+            }
+            .listSectionSeparator(.hidden)
+        }
         if !scoped.isEmpty {
             Section {
                 HStack(spacing: 6) {
@@ -509,7 +572,9 @@ struct HomeView: View {
             // What's running or waiting, above the history. Hidden while
             // searching or filtering so it never competes with a query.
             let now = NowStrip.active(in: scoped, model: model)
-            if statusFilter == .all, searchText.isEmpty, !now.isEmpty {
+            // Not in the phone split: the list beside the open session already shows what is running or
+            // waiting, and the cards would take most of a narrow pane.
+            if statusFilter == .all, searchText.isEmpty, !now.isEmpty, phoneArrangement == nil {
                 Section {
                     NowStrip(chats: now) { open(.chat($0)) }
                         .listRowBackground(Color.clear)
