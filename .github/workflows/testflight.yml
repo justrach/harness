@@ -12,6 +12,16 @@ on:
           - internal
           - external
         default: internal
+      ci_certificates:
+        description: >-
+          Development certificates earlier runs created ("Created via API"):
+          keep them, list them and stop, or revoke them and then build
+        type: choice
+        options:
+          - keep
+          - list
+          - revoke
+        default: keep
 
 permissions:
   contents: read
@@ -98,10 +108,51 @@ jobs:
           echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
           echo "Preparing $AUDIENCE TestFlight build $build_number from $GITHUB_SHA."
 
+      # Automatic signing on a fresh runner creates an Apple Development
+      # certificate every run, and the team's certificate limit eventually
+      # blocks archiving. Only certificates created through the API key are
+      # touched; ones made in Xcode on a person's Mac carry their name.
+      - name: Development certificates from earlier runs
+        if: inputs.ci_certificates == 'list' || inputs.ci_certificates == 'revoke'
+        shell: bash
+        env:
+          MODE: ${{ inputs.ci_certificates }}
+        run: |
+          set -euo pipefail
+          token="$(cat "$AC_TOKEN_PATH")"
+          api() {
+            curl --globoff --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' "$@"
+          }
+          certs="$RUNNER_TEMP/dev-certificates.json"
+          api 'https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=DEVELOPMENT,IOS_DEVELOPMENT&fields[certificates]=name,displayName,certificateType,serialNumber,expirationDate&limit=200' > "$certs"
+          echo "Development certificates on the team (* = created via the API):"
+          jq -r '.data[] | "\(if .attributes.displayName == "Created via API" then "*" else " " end) \(.attributes.name) | \(.attributes.certificateType) | serial \(.attributes.serialNumber) | expires \(.attributes.expirationDate)"' "$certs"
+          ids="$(jq -r '.data[] | select(.attributes.displayName == "Created via API") | .id' "$certs")"
+          echo "$(printf '%s' "$ids" | grep -c . || true) created via the API."
+          if [ "$MODE" = "list" ]; then
+            echo "List only: nothing revoked, and this run stops before building." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          for id in $ids; do
+            api -X DELETE "https://api.appstoreconnect.apple.com/v1/certificates/$id"
+            echo "Revoked $id"
+          done
+
+      - name: Signing identities before archiving
+        if: inputs.ci_certificates != 'list'
+        shell: bash
+        run: |
+          # Serials already on the runner; whatever signing adds is this run's.
+          security find-certificate -a -c "Apple Development" -p > "$RUNNER_TEMP/certs-before.pem" || true
+
       - name: Xcode version
+        if: inputs.ci_certificates != 'list'
         run: xcodebuild -version
 
       - name: Compile iOS app and tests
+        if: inputs.ci_certificates != 'list'
         working-directory: apps/ios
         run: |
           xcodebuild -project Harness.xcodeproj -scheme Harness \
@@ -109,6 +160,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO build-for-testing
 
       - name: Archive build
+        if: inputs.ci_certificates != 'list'
         working-directory: apps/ios
         run: |
           xcodebuild -project Harness.xcodeproj -scheme Harness \
@@ -121,6 +173,7 @@ jobs:
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
 
       - name: Upload to TestFlight
+        if: inputs.ci_certificates != 'list'
         run: |
           options="$RUNNER_TEMP/ExportOptions.plist"
           plutil -create xml1 "$options"
@@ -142,6 +195,7 @@ jobs:
             -authenticationKeyIssuerID "$AC_API_ISSUER_ID"
 
       - name: Verify App Store Connect processing
+        if: inputs.ci_certificates != 'list'
         shell: bash
         run: |
           set -euo pipefail
@@ -190,7 +244,7 @@ jobs:
           exit 5
 
       - name: Distribute to external testers
-        if: inputs.audience == 'external'
+        if: inputs.audience == 'external' && inputs.ci_certificates != 'list'
         shell: bash
         run: |
           set -euo pipefail
@@ -246,6 +300,69 @@ jobs:
             --data "$(jq -n --arg build "$ASC_BUILD_ID" '{data: {type: "betaAppReviewSubmissions", relationships: {build: {data: {type: "builds", id: $build}}}}}')" \
             > "$review"
           echo "Submitted build $BUILD_NUMBER for beta review: $(jq -r '.data.attributes.betaReviewState // "SUBMITTED"' "$review")"
+
+      # Even when archiving failed: a certificate is created before the archive
+      # can fail, and leaving it is how the team reaches its limit.
+      - name: Revoke this run's development certificate
+        if: always() && inputs.ci_certificates != 'list'
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -s "${AC_KEY_PATH:-}" ] || { echo "No App Store Connect key; nothing to revoke."; exit 0; }
+          security find-certificate -a -c "Apple Development" -p > "$RUNNER_TEMP/certs-after.pem" || true
+          new_serials="$(python - "$RUNNER_TEMP/certs-before.pem" "$RUNNER_TEMP/certs-after.pem" <<'PY'
+          import sys
+          from pathlib import Path
+          from cryptography import x509
+
+          def serials(path):
+              data = Path(path).read_bytes() if Path(path).exists() else b""
+              if b"BEGIN CERTIFICATE" not in data:
+                  return set()
+              return {format(c.serial_number, "X") for c in x509.load_pem_x509_certificates(data)}
+
+          for serial in sorted(serials(sys.argv[2]) - serials(sys.argv[1])):
+              print(serial)
+          PY
+          )"
+          if [ -z "$new_serials" ]; then
+            echo "Signing created no new development certificate."
+            exit 0
+          fi
+          python - "$AC_KEY_PATH" "$AC_API_KEY_ID" "$AC_API_ISSUER_ID" > "$AC_TOKEN_PATH" <<'PY'
+          import sys
+          import time
+          import jwt
+
+          key_path, key_id, issuer_id = sys.argv[1:]
+          with open(key_path, "rb") as key_file:
+              private_key = key_file.read()
+          now = int(time.time())
+          print(jwt.encode(
+              {"iss": issuer_id, "iat": now, "exp": now + 1199, "aud": "appstoreconnect-v1"},
+              private_key,
+              algorithm="ES256",
+              headers={"kid": key_id, "typ": "JWT"},
+          ))
+          PY
+          token="$(cat "$AC_TOKEN_PATH")"
+          api() {
+            curl --globoff --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer $token" \
+              -H 'Content-Type: application/json' "$@"
+          }
+          certs="$RUNNER_TEMP/run-certificates.json"
+          api 'https://api.appstoreconnect.apple.com/v1/certificates?filter[certificateType]=DEVELOPMENT,IOS_DEVELOPMENT&fields[certificates]=serialNumber,displayName&limit=200' > "$certs"
+          for serial in $new_serials; do
+            # Apple and OpenSSL may disagree on leading zeros; compare without them.
+            id="$(jq -r --arg s "$serial" '.data[] | select((.attributes.serialNumber | ascii_upcase | sub("^0+"; "")) == ($s | sub("^0+"; ""))) | .id' "$certs" | head -1)"
+            if [ -n "$id" ]; then
+              api -X DELETE "https://api.appstoreconnect.apple.com/v1/certificates/$id"
+              echo "Revoked this run's development certificate (serial $serial)."
+            else
+              echo "Serial $serial is not on the team's certificate list; nothing to revoke."
+            fi
+          done
 
       - name: Remove temporary credentials
         if: always()
