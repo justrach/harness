@@ -24,6 +24,13 @@ final class PhoneSplitUITests: XCTestCase {
         app.buttons["new-session"]
     }
 
+    /// A Max-class iPhone is regular width in landscape: it gets the sidebar and the two-pane split screen
+    /// (SplitScreenUITests), never the compact phone split, so the landscape cases here do not apply.
+    private func skipIfRegularWidthInLandscape(_ app: XCUIApplication) throws {
+        let width = app.windows.firstMatch.frame.width
+        try XCTSkipIf(width >= 900, "a Max-class iPhone in landscape is regular width (window is \(width)pt wide)")
+    }
+
     private func attachScreenshot(named name: String) {
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = name
@@ -31,8 +38,9 @@ final class PhoneSplitUITests: XCTestCase {
         add(shot)
     }
 
-    func testSideBySideKeepsTheListBesideTheOpenSession() {
+    func testSideBySideKeepsTheListBesideTheOpenSession() throws {
         let app = launch("sideBySide", orientation: .landscapeLeft)
+        try skipIfRegularWidthInLandscape(app)
         XCTAssertTrue(header(app).waitForExistence(timeout: 10), "the session did not open")
         Thread.sleep(forTimeInterval: 1)
         attachScreenshot(named: "side-by-side")
@@ -78,8 +86,9 @@ final class PhoneSplitUITests: XCTestCase {
         app.descendants(matching: .any)["split-offer"]
     }
 
-    func testTheOfferAppearsWithRoomAndTryingItSplitsTheScreen() {
+    func testTheOfferAppearsWithRoomAndTryingItSplitsTheScreen() throws {
         let app = launchJuggling(orientation: .landscapeLeft)
+        try skipIfRegularWidthInLandscape(app)
         XCTAssertTrue(offer(app).waitForExistence(timeout: 10), "juggling with room should offer the split")
         attachScreenshot(named: "split-offer")
         app.buttons["split-offer-try"].tap()
@@ -88,8 +97,9 @@ final class PhoneSplitUITests: XCTestCase {
         XCTAssertFalse(offer(app).exists, "the offer goes away once answered")
     }
 
-    func testNotNowHidesTheOfferAndLeavesTheSplitOff() {
+    func testNotNowHidesTheOfferAndLeavesTheSplitOff() throws {
         let app = launchJuggling(orientation: .landscapeLeft)
+        try skipIfRegularWidthInLandscape(app)
         XCTAssertTrue(offer(app).waitForExistence(timeout: 10))
         app.buttons["split-offer-later"].tap()
         XCTAssertFalse(offer(app).waitForExistence(timeout: 2))
