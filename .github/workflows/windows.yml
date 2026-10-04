@@ -158,6 +158,9 @@ jobs:
         run: ./scripts/test-windows-lifecycle.ps1
       - name: Rendering tests
         run: ./scripts/test-windows-rendering.ps1
+      - name: Titlebar capture
+        if: always()
+        run: ./scripts/test-windows-titlebar.ps1
       - name: Upload GUI test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -170,4 +173,6 @@ jobs:
             target/windows-render-*/stderr.txt
             target/windows-lifecycle-*/result.txt
             target/windows-lifecycle-*/run-*.txt
+            target/windows-titlebar-*/*.png
+            target/windows-titlebar-*/*.txt
           if-no-files-found: warn
