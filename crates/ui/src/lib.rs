@@ -21,6 +21,7 @@ pub mod browser;
 pub mod change_requests;
 pub mod changes;
 pub mod codegraff_jobs;
+pub mod codegraff_sandboxes;
 mod comment_ui;
 pub mod comments;
 pub mod composer;

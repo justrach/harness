@@ -747,6 +747,17 @@ impl RegistryDoc {
         Ok(true)
     }
 
+    /// Tombstone a device row: an offline device (a finished cloud sandbox, a computer that is
+    /// gone) leaves the list. A device that comes back upserts its row on boot, which revives it.
+    /// `false` when no such row.
+    pub fn forget_device(&mut self, device_id: &str) -> Result<bool, DocError> {
+        if !self.row_exists(KIND_DEVICES, device_id) {
+            return Ok(false);
+        }
+        self.delete_row_ops(&[(KIND_DEVICES, device_id)]);
+        Ok(true)
+    }
+
     /// Stamp `lastSeenAt` on an existing device row (boot/shutdown only —
     /// periodic liveness rides presence frames, never rows).
     pub fn set_device_last_seen(
