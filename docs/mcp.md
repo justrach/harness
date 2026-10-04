@@ -88,6 +88,12 @@ edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
 
+Waits are capped at 3600 s, or at 120 s when the server speaks for a chat
+(`HARNESS_CHAT_ID` set). A chat that waits on another chat parks its own turn
+behind a silent tool call, and the recipient replies into the sender's chat
+anyway, so a chat caller's timed-out wait carries a `note` telling it to end
+its turn instead of waiting again.
+
 ## Smoke recipe
 
 ```sh
