@@ -22,6 +22,35 @@ async fn eval(
         pause(cx, 20).await;
     }
 }
+pub(super) async fn wait_for_fixture_window(cx: &mut AsyncApp) -> anyhow::Result<()> {
+    // Wayland captures the enclosing Weston window supplied by the launcher.
+    if std::env::var_os("HARNESS_BROWSER_CAPTURE_WINDOW").is_some() {
+        return Ok(());
+    }
+    // Opening a GPUI window is not a guarantee that the X11 window manager
+    // has mapped it yet. Yield to the app loop while waiting, rather than
+    // taking the first screenshot after an arbitrary startup delay.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let windows = std::process::Command::new("xdotool")
+            .args([
+                "search",
+                "--onlyvisible",
+                "--pid",
+                &std::process::id().to_string(),
+            ])
+            .output()?;
+        if windows.status.success() && !windows.stdout.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "fixture window did not become visible within 10 seconds"
+        );
+        pause(cx, 20).await;
+    }
+}
+
 pub(super) fn dispatch(
     window: WindowHandle<shell::Shell>,
     event: PlatformInput,
