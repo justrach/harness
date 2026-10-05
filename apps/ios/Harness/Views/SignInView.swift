@@ -10,6 +10,9 @@ import SwiftUI
 
 /// Production cloud endpoints — mirrors edge/wrangler.jsonc.
 enum Endpoints {
+    static let privacyURL = URL(string: "https://codegraff.com/privacy#harness")!
+    static let supportURL = URL(string: "https://codegraff.com/support")!
+    static let supportEmailURL = URL(string: "mailto:rach@codegraff.com")!
     static let edgeURL = URL(string: "https://edge.codegraff.com")!
     static let codegraffClientId = "cg_client_43e753878956c2cf7b5b0f53"
     static let codegraffAPIBase = "https://codegraff.com"
@@ -84,6 +87,12 @@ struct SignInView: View {
                             .foregroundStyle(Theme.danger)
                             .multilineTextAlignment(.center)
                     }
+                    HStack(spacing: 20) {
+                        Link("Privacy policy", destination: Endpoints.privacyURL)
+                        Link("Help", destination: Endpoints.supportURL)
+                    }
+                    .font(Theme.sans(13))
+                    .foregroundStyle(Theme.textMuted)
                 }
 
                 Spacer()

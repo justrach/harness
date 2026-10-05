@@ -58,7 +58,7 @@ struct PerformanceView: View {
                         Toggle("Share anonymous performance data", isOn: $share)
                             .accessibilityIdentifier("settings-share-performance")
                     } footer: {
-                        Text("Sends numbers only: how long things took, grouped into ranges, your device model and the app and OS versions, under a random id that changes on every launch. No chat content, account or device identifiers. You can turn this off at any time.")
+                        Text("Off until you choose to share. Sends how long things took, grouped into ranges, your device model, refresh rate and the app and OS versions, under a random id that changes on every launch. No chat content, account or persistent device identifiers. Reports are retained for 90 days. You can turn this off at any time.")
                     }
                 }
                 Section {

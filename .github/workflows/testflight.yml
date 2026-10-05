@@ -159,6 +159,19 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO build-for-testing
 
+      - name: Verify mobile contracts and privacy consent
+        if: inputs.ci_certificates != 'list'
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          simulator_id="$(xcrun simctl list devices available --json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for runtime,group in d["devices"].items() if "iOS" in runtime for v in group if v["name"].startswith("iPhone")))')"
+          xcodebuild -project Harness.xcodeproj -scheme Harness \
+            -destination "platform=iOS Simulator,id=$simulator_id" \
+            -only-testing:HarnessTests/ParityTests \
+            -only-testing:HarnessTests/PerfMonitorTests \
+            CODE_SIGNING_ALLOWED=NO test
+
       - name: Archive build
         if: inputs.ci_certificates != 'list'
         working-directory: apps/ios

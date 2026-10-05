@@ -331,7 +331,7 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(hz["min"], PerfStatsBatch.refreshHzRange.lowerBound)
         XCTAssertEqual(hz["max"], PerfStatsBatch.refreshHzRange.upperBound)
         XCTAssertEqual(v["minIntervalMs"] as? Int, PerfUploader.minIntervalMs)
-        XCTAssertEqual(v["sharingDefault"] as? Bool, PerfSharing.defaultEnabled)
+        XCTAssertEqual(v["iosSharingDefault"] as? Bool, PerfSharing.defaultEnabled)
         XCTAssertEqual(v["endpoint"] as? String, PerfSharing.endpoint)
         XCTAssertTrue(PerfTransport.isAllowed(try XCTUnwrap(v["endpoint"] as? String)))
         let wire = try XCTUnwrap(try load("perf-contract.json")["wire"] as? [String: String])
@@ -432,7 +432,9 @@ final class ParityTests: XCTestCase {
     }
 
     func testThePerformancePageUsesTheContractStrings() throws {
-        let strings = try XCTUnwrap(try load("perf-contract.json")["strings"] as? [String: String])
+        let contract = try load("perf-contract.json")
+        var strings = try XCTUnwrap(contract["strings"] as? [String: String])
+        strings.merge(contract["iosStrings"] as? [String: String] ?? [:]) { _, ios in ios }
         let source = try sources(under: "apps/ios/Harness", ext: "swift")
         for value in strings.values {
             XCTAssertTrue(source.contains("\"\(value)\""), "\(value) is missing from the SwiftUI app")

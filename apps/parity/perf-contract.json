@@ -24,5 +24,8 @@
     "home.group": "home_group_ms",
     "send.apply": "send_apply_ms",
     "main.stall": "main_stall_ms"
+  },
+  "iosStrings": {
+    "shareFootnote": "Off until you choose to share. Sends how long things took, grouped into ranges, your device model, refresh rate and the app and OS versions, under a random id that changes on every launch. No chat content, account or persistent device identifiers. Reports are retained for 90 days. You can turn this off at any time."
   }
 }

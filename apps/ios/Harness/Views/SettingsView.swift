@@ -94,6 +94,9 @@ struct SettingsView: View {
 
                 Section("About") {
                     LabeledContent("Version", value: version)
+                    Link("Privacy policy", destination: Endpoints.privacyURL)
+                    Link("Help and feedback", destination: Endpoints.supportURL)
+                    Link("Email support", destination: Endpoints.supportEmailURL)
                 }
 
                 if model.canDeleteAccount {

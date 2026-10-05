@@ -8,7 +8,7 @@ const source = readFileSync(new URL("./public/telemetry.js", import.meta.url), "
 const html = readFileSync(new URL("./public/index.html", import.meta.url), "utf8");
 const placements = { "nav-download": "nav", "hero-download": "hero", "closing-download": "closing" };
 
-function load({ url = "https://harness.codegraff.com/", referrer = "", navigator = {}, transport, clock = Date } = {}) {
+function load({ url = "https://codegraff.com/", referrer = "", navigator = {}, transport, clock = Date } = {}) {
   const requests = [];
   const links = Object.fromEntries(Object.keys(placements).map((id) => {
     const href = html.match(new RegExp(`id="${id}" href="([^"]+)"`))[1];
@@ -64,7 +64,7 @@ test("captures one anonymous pageview using the US ingestion endpoint", () => {
   assert.match(request.payload.properties.distinct_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(request.payload.properties.$process_person_profile, false);
   assert.equal(request.payload.properties.$geoip_disable, true);
-  assert.equal(request.payload.properties.$current_url, "https://harness.codegraff.com/");
+  assert.equal(request.payload.properties.$current_url, "https://codegraff.com/");
   assert.equal(request.payload.properties.$referring_domain, "$direct");
 });
 
@@ -129,11 +129,11 @@ for (const [elapsed, rotates] of [[86400000 - 1, false], [86400000, true], [8640
 
 test("drops query strings, fragments, and referrer paths and credentials", () => {
   const { requests } = load({
-    url: "https://harness.codegraff.com/?email=private%40example.invalid#secret",
+    url: "https://codegraff.com/?email=private%40example.invalid#secret",
     referrer: "https://user:password@search.example.invalid/private?token=secret#fragment",
   });
   const properties = requests[0].payload.properties;
-  assert.equal(properties.$current_url, "https://harness.codegraff.com/");
+  assert.equal(properties.$current_url, "https://codegraff.com/");
   assert.equal(properties.$referrer, "https://search.example.invalid/");
   assert.equal(properties.$referring_domain, "search.example.invalid");
   assert.doesNotMatch(requests[0].body, /private|secret|password|user:|fragment/);
@@ -179,7 +179,7 @@ test("counts middle clicks but ignores right clicks", () => {
   assert.equal(requests.length, 2);
 });
 
-for (const href of ["https://example.invalid/releases/harness-1.2.3-macos-arm64.dmg", "https://harness.codegraff.com/private", "invalid"]) {
+for (const href of ["https://example.invalid/releases/harness-1.2.3-macos-arm64.dmg", "https://codegraff.com/private", "invalid"]) {
   test(`does not report unexpected download targets: ${href}`, () => {
     const { requests, links } = load();
     links["hero-download"].href = href;
@@ -188,7 +188,7 @@ for (const href of ["https://example.invalid/releases/harness-1.2.3-macos-arm64.
   });
 }
 
-for (const url of ["http://localhost:8000/", "https://preview.workers.dev/", "http://harness.codegraff.com/", "https://harness.codegraff.com/private", "https://harness.codegraff.com:8000/"]) {
+for (const url of ["http://localhost:8000/", "https://preview.workers.dev/", "http://codegraff.com/", "https://codegraff.com/private", "https://codegraff.com:8000/"]) {
   test(`does not track development or unexpected URLs: ${url}`, () => {
     const { requests, links } = load({ url });
     links["hero-download"].activate();
@@ -197,7 +197,7 @@ for (const url of ["http://localhost:8000/", "https://preview.workers.dev/", "ht
 }
 
 test("tracks the legacy production hostname", () => {
-  assert.equal(load({ url: "https://harness.codegraff.com/" }).requests.length, 1);
+  assert.equal(load({ url: "https://codegraff.com/" }).requests.length, 1);
 });
 
 for (const navigator of [{ doNotTrack: "1" }, { doNotTrack: "yes" }, { globalPrivacyControl: true }]) {

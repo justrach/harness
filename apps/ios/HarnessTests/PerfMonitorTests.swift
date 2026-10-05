@@ -133,12 +133,16 @@ final class PerfMonitorTests: XCTestCase {
         XCTAssertEqual(refused, 0, "plain http to a real host must not be sent")
     }
 
-    func testSharingIsOnUntilThePersonTurnsItOffAndStaysOff() {
+    func testSharingRequiresFreshConsentAndCanBeTurnedOff() {
         let key = PerfSharing.key
         let saved = UserDefaults.standard.object(forKey: key)
+        let oldKey = "share-performance"
+        let oldSaved = UserDefaults.standard.object(forKey: oldKey)
+        defer { if let oldSaved { UserDefaults.standard.set(oldSaved, forKey: oldKey) } else { UserDefaults.standard.removeObject(forKey: oldKey) } }
+        UserDefaults.standard.set(true, forKey: oldKey)
         defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) } }
         UserDefaults.standard.removeObject(forKey: key)
-        XCTAssertTrue(PerfSharing.enabled, "a never-chosen setting reads as on")
+        XCTAssertFalse(PerfSharing.enabled, "a never-chosen setting must not upload")
         UserDefaults.standard.set(false, forKey: key)
         XCTAssertFalse(PerfSharing.enabled, "an explicit off must stay off")
         UserDefaults.standard.set(true, forKey: key)
