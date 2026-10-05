@@ -462,6 +462,25 @@ impl CodegraffAuth {
         }
     }
 
+    /// graff has a key on this machine (its credential file, or
+    /// `CODEGRAFF_API_KEY`).
+    pub fn has_key(&self) -> bool {
+        self.current_key().is_some()
+    }
+
+    /// Adopt the graff key a Harness sign-in minted for this device, so one
+    /// sign-in covers the app and `graff` in the terminal. A key graff
+    /// already has is never replaced.
+    pub async fn adopt_sign_in_key(&self, key: &str, email: String) -> Result<(), String> {
+        if !key.starts_with("cg_sk_") {
+            return Err("not a Codegraff key".into());
+        }
+        if self.has_key() {
+            return Ok(());
+        }
+        self.finish(key, Some(email), None).await
+    }
+
     async fn finish(
         &self,
         key: &str,

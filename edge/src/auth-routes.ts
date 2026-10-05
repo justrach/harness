@@ -1,7 +1,7 @@
 /**
  * OAuth bridge for the CodeGraff public Harness client:
  *
- *  - POST /auth/exchange     — CodeGraff code + PKCE → Harness tokens.
+ *  - POST /auth/exchange     — CodeGraff code + PKCE → Harness tokens (and, when asked, a graff CLI key).
  *  - POST /auth/refresh      — rotate CodeGraff refresh token.
  *  - POST /auth/sandbox      — a cloud sandbox's lease-bound token → Harness access token.
  *  - GET  /auth/orgs         — the caller's personal workspace.
@@ -55,13 +55,24 @@ export const handleAuthRoute = async (
 
   if (parts[1] === "exchange" && parts.length === 2 && request.method === "POST") {
     if (!configured) return notConfigured();
-    const body = await bodyJson<{ code?: string; codeVerifier?: string; redirectUri?: string; nonce?: string }>(request);
+    const body = await bodyJson<{
+      code?: string;
+      codeVerifier?: string;
+      redirectUri?: string;
+      nonce?: string;
+      graffKey?: boolean;
+      deviceLabel?: string;
+    }>(request);
     if (typeof body?.code !== "string" || typeof body.codeVerifier !== "string" ||
         typeof body.redirectUri !== "string" || typeof body.nonce !== "string") {
       return json({ error: "code, codeVerifier, redirectUri, and nonce are required" }, 400);
     }
+    // A device with no graff CLI key asks for one in the same sign-in.
+    const graffKey = body.graffKey === true
+      ? { deviceLabel: typeof body.deviceLabel === "string" ? body.deviceLabel : undefined }
+      : undefined;
     try {
-      return json(await exchange(env, body.code, body.codeVerifier, body.redirectUri, body.nonce));
+      return json(await exchange(env, body.code, body.codeVerifier, body.redirectUri, body.nonce, graffKey));
     } catch (e) {
       return authFailed(e);
     }
