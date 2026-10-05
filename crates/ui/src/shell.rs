@@ -1328,7 +1328,8 @@ enum UpdateFlow {
 
 /// Whether a fresh `UpdateStatus` should kick off a background download:
 /// desktop install, enabled, not already in flight or staged, and not a
-/// version whose automatic download already failed (a click still retries).
+/// version whose download already failed — a `Failed` flow for an older
+/// version retries a newer one on its own; a click still retries the same.
 fn should_auto_download(
     status: &harness_update::UpdateStatus,
     flow: &UpdateFlow,
@@ -1339,7 +1340,7 @@ fn should_auto_download(
     status.update_available
         && desktop_update
         && enabled
-        && matches!(flow, UpdateFlow::Idle)
+        && !matches!(flow, UpdateFlow::Downloading | UpdateFlow::Ready(_))
         && !failed.is_some_and(|v| status.latest_version.as_deref() == Some(v))
 }
 
@@ -4029,12 +4030,15 @@ impl Shell {
     }
 
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
-        if !self.prepare_exit(PendingExit::Quit, cx) {
-            return false;
-        }
-        // A staged update installs on the way out — no relaunch, the next
-        // launch runs the new version. Take the flow so it can't run twice,
-        // and never let a failed swap block the quit.
+        self.prepare_exit(PendingExit::Quit, cx)
+    }
+
+    /// Swap a staged update over the install on the way out — no relaunch,
+    /// the next launch runs the new version. Runs only once every window
+    /// agreed to quit (a per-window call could install before another
+    /// window's unsaved files cancel the quit). Take the flow so it can't
+    /// run twice, and never let a failed swap block the quit.
+    pub(crate) fn install_staged_update_on_quit(&mut self) {
         if harness_update::desktop_auto_update_enabled()
             && let UpdateFlow::Ready(staged) =
                 std::mem::replace(&mut self.update_flow, UpdateFlow::Idle)
@@ -4043,7 +4047,6 @@ impl Shell {
                 tracing::error!(error = %err, "install on quit failed");
             }
         }
-        true
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
@@ -12395,15 +12398,21 @@ mod tests {
             false,
             None
         ));
-        // In flight, staged, or failed — the strip owns the flow now.
+        // In flight or staged — the strip owns the flow now.
         for flow in [
             UpdateFlow::Downloading,
             UpdateFlow::Ready(PathBuf::from("/tmp/staged")),
-            UpdateFlow::Failed("boom".into()),
         ] {
             assert!(!should_auto_download(&available, &flow, true, true, None));
         }
-        // Same version already failed: no retry loop. A newer one retries.
+        // A Failed flow for the same version still doesn't retry on its own.
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Failed("boom".into()),
+            true,
+            true,
+            Some("1.1.0")
+        ));
         assert!(!should_auto_download(
             &available,
             &UpdateFlow::Idle,
@@ -12411,9 +12420,18 @@ mod tests {
             true,
             Some("1.1.0")
         ));
+        // …but a newer version retries, from Idle or from Failed.
+        let newer = status(Some("1.2.0"));
         assert!(should_auto_download(
-            &status(Some("1.2.0")),
+            &newer,
             &UpdateFlow::Idle,
+            true,
+            true,
+            Some("1.1.0")
+        ));
+        assert!(should_auto_download(
+            &newer,
+            &UpdateFlow::Failed("boom".into()),
             true,
             true,
             Some("1.1.0")
