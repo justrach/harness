@@ -945,6 +945,7 @@ impl Shell {
         struct Card {
             title: SharedString,
             project: SharedString,
+            harness: Option<harness_proto::HarnessId>,
         }
         let (cards, preview) = {
             let state = self.state.read(cx);
@@ -964,9 +965,19 @@ impl Shell {
                     } else {
                         split.projects.get(ix).cloned().flatten()
                     };
+                    let chat = pane_chat(ix)
+                        .and_then(|id| state.chats.iter().find(|c| c.id == id));
+                    let harness = if let Some(chat) = chat {
+                        chat.config.as_ref().map(|config| config.harness)
+                    } else if ix == split.focus {
+                        self.current_canvas_draft(cx).harness
+                    } else {
+                        split.drafts.get(ix).and_then(|draft| draft.as_ref())
+                            .and_then(|draft| draft.harness)
+                    };
                     Card {
-                        title: pane_chat(ix)
-                            .and_then(|id| state.chats.iter().find(|c| c.id == id))
+                        harness,
+                        title: chat
                             .map(|c| transcript::single_line(&c.title.clone().unwrap_or_else(|| "Untitled".into())))
                             .unwrap_or_else(|| "New session".into())
                             .into(),
@@ -1023,11 +1034,18 @@ impl Shell {
                             .items_center()
                             .gap(px(5.0))
                             .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(if focused { theme.accent } else { theme.text_muted })
-                                    .child(SharedString::from(pane_glyph(split.axis, ix, len))),
+                                {
+                                    let (path, tint) = card.harness
+                                        .map(crate::pickers::harness_brand_icon)
+                                        .unwrap_or((icons::CHAT_ROUND_LINE, None));
+                                    icon(path)
+                                        .size(px(11.0))
+                                        .text_color(tint.unwrap_or(if focused {
+                                            theme.accent
+                                        } else {
+                                            theme.text_muted
+                                        }))
+                                },
                             )
                             .child(
                                 div()
