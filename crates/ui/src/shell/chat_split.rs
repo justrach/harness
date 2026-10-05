@@ -523,14 +523,12 @@ impl Shell {
         };
         let Some(target) = split.close_focused() else {
             self.chat_split = None;
-            motion::reveal_reset(STRIP_REVEAL_KEY);
             return false;
         };
         let project = split.projects[split.focus].clone();
         let draft = split.drafts[split.focus].take().filter(|_| target.is_none());
         if split.panes.len() == 1 {
             self.chat_split = None;
-            motion::reveal_reset(STRIP_REVEAL_KEY);
         }
         self.chat_split_selected = target.clone();
         self.state.update(cx, |s, cx| s.select_chat(target, cx));
@@ -932,21 +930,18 @@ fn space_label(space: &harness_proto::Space) -> String {
 impl Shell {
     /// A strip of mini cards mirroring the split above the session list:
     /// each shows its pane's session, with the focused one lit.
-    /// Click a card to move into that pane. Hovering the strip eases
-    /// open a preview of the hovered card's conversation underneath.
+    /// Click a card to move into that pane.
     pub(super) fn render_pane_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let split = self
             .chat_split
             .clone()
             .filter(|_| matches!(self.route, Route::Chat))?;
         let len = split.panes.len();
-        let hovered = self.pane_strip_hovered.min(len - 1);
-        let t = motion::reveal_t(STRIP_REVEAL_KEY);
         struct Card {
             title: SharedString,
             harness: Option<harness_proto::HarnessId>,
         }
-        let (cards, preview) = {
+        let cards = {
             let state = self.state.read(cx);
             let selected = state.selected_chat.clone();
             let pane_chat = |ix: usize| {
@@ -983,19 +978,12 @@ impl Shell {
                     }
                 })
                 .collect();
-            // Only build the preview while it is (becoming) visible.
-            let preview = (t > 0.001).then(|| match pane_chat(hovered) {
-                Some(_) if hovered == split.focus => conversation_preview(&state.transcript),
-                Some(id) => conversation_preview(state.sub_transcript(&id)),
-                None => ConversationPreview::default(),
-            });
-            (cards, preview)
+            cards
         };
 
         let mut row: Vec<AnyElement> = Vec::with_capacity(len);
         for (ix, card) in cards.into_iter().enumerate() {
             let focused = ix == split.focus;
-            let lit = t > 0.001 && ix == hovered;
             row.push(
                 div()
                     .id(("chat-pane-card", ix))
@@ -1006,14 +994,9 @@ impl Shell {
                     .rounded(px(10.0))
                     .border_1()
                     .border_color(if focused { theme.accent.opacity(0.55) } else { theme.border })
-                    .bg(if focused || lit { theme.ink(0.05) } else { theme.ink(0.015) })
+                    .bg(if focused { theme.ink(0.05) } else { theme.ink(0.015) })
+                    .hover(|style| style.bg(theme.ink(0.05)))
                     .cursor_pointer()
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.pane_strip_hovered != ix {
-                            this.pane_strip_hovered = ix;
-                            cx.notify();
-                        }
-                    }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if this.chat_split.as_ref().is_some_and(|s| s.focus == ix) {
                             window.focus(&this.composer.focus_handle(cx), cx);
@@ -1055,46 +1038,6 @@ impl Shell {
             );
         }
 
-        let panel = preview.map(|preview| {
-            let line = |label: &'static str, text: Option<SharedString>, lines: usize| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(SharedString::from(label)),
-                    )
-                    .child(
-                        div()
-                            .h(px(17.0 * lines as f32))
-                            .overflow_hidden()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.text)
-                            .child(text.unwrap_or_else(|| "—".into())),
-                    )
-            };
-            div()
-                .h(px(PREVIEW_HEIGHT * t))
-                .opacity(t)
-                .overflow_hidden()
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .p(px(10.0))
-                        .rounded(px(10.0))
-                        .bg(theme.ink(0.035))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(line("You", preview.prompt, 1))
-                        .child(line(if preview.streaming { "Working…" } else { "Reply" }, preview.reply, 3)),
-                )
-        });
-
         Some(
             div()
                 .id("sidebar-pane-strip")
@@ -1102,9 +1045,7 @@ impl Shell {
                 .pb(px(8.0))
                 .flex()
                 .flex_col()
-                .on_hover(motion::reveal_listener(STRIP_REVEAL_KEY))
                 .child(div().flex().flex_row().flex_wrap().items_start().gap(px(6.0)).children(row))
-                .children(panel)
                 .into_any_element(),
         )
     }
@@ -1172,101 +1113,9 @@ impl Shell {
     }
 }
 
-pub(super) const STRIP_REVEAL_KEY: &str = "chat-pane-strip";
-/// Revealed height of the hover preview (prompt line + three reply lines).
-const PREVIEW_HEIGHT: f32 = 132.0;
-
-/// Markdown to one line of prose: drop heading/quote/list markers and
-/// emphasis/code fences, collapse whitespace.
-fn plain_text(markdown: &str) -> String {
-    markdown
-        .lines()
-        .map(|line| {
-            let line = line.trim_start();
-            let line = line.trim_start_matches('#').trim_start_matches('>');
-            let line = line
-                .strip_prefix("- ")
-                .or_else(|| line.strip_prefix("* "))
-                .unwrap_or(line);
-            if line.trim_start().starts_with("```") { "" } else { line }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[derive(Default)]
-struct ConversationPreview {
-    prompt: Option<SharedString>,
-    reply: Option<SharedString>,
-    streaming: bool,
-}
-
-/// The latest prompt and reply text of a transcript, for the hover preview.
-fn conversation_preview(entries: &[harness_doc::SessionMessageEntry]) -> ConversationPreview {
-    // The latest text part (a reply streams its newest words last), with
-    // markdown markers dropped so the preview reads as prose.
-    let text = |entry: &harness_doc::SessionMessageEntry| {
-        entry
-            .parts
-            .iter()
-            .rev()
-            .find_map(|part| match part {
-                harness_doc::MessagePart::Text { text, .. } => Some(plain_text(text)),
-                _ => None,
-            })
-            .filter(|text| !text.is_empty())
-            .map(SharedString::from)
-    };
-    let mut preview = ConversationPreview {
-        streaming: entries
-            .last()
-            .is_some_and(|e| e.status == Some(harness_doc::MessageStatus::Streaming)),
-        ..Default::default()
-    };
-    for entry in entries.iter().rev() {
-        match entry.role {
-            harness_doc::MessageRole::User if preview.prompt.is_none() => preview.prompt = text(entry),
-            harness_doc::MessageRole::Assistant if preview.reply.is_none() && preview.prompt.is_none() => {
-                preview.reply = text(entry)
-            }
-            _ => {}
-        }
-        if preview.prompt.is_some() {
-            break;
-        }
-    }
-    preview
-}
-
 #[cfg(test)]
 mod chat_split_tests {
     use super::*;
-
-    fn entry(role: harness_doc::MessageRole, text: &str) -> harness_doc::SessionMessageEntry {
-        serde_json::from_value(serde_json::json!({
-            "id": text, "role": role, "createdAt": 0, "deviceId": "d",
-            "parts": [{"kind": "text", "id": "p", "text": text}],
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn preview_takes_the_latest_prompt_and_its_reply() {
-        use harness_doc::MessageRole::{Assistant, User};
-        let entries = [entry(User, "old"), entry(Assistant, "old reply"), entry(User, "fix  the\nbuild"), entry(Assistant, "done")];
-        let p = conversation_preview(&entries);
-        assert_eq!(p.prompt.as_deref(), Some("fix the build"));
-        assert_eq!(p.reply.as_deref(), Some("done"));
-        let p = conversation_preview(&entries[..3]);
-        assert_eq!(p.reply, None, "no reply to the latest prompt yet");
-        assert_eq!(plain_text("## Plan\n- **fix** the `build`\n```rust\nlet x;\n```"), "Plan fix the build let x;");
-    }
 
     fn two(selected: &str) -> ChatSplit {
         ChatSplit::split(None, SplitAxis::Horizontal, Some(selected.into()), Some("p".into())).unwrap()

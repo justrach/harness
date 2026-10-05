@@ -115,9 +115,6 @@ impl Shell {
     fn load_chat_tab(&mut self, tab: ChatTab, window: &mut Window, cx: &mut Context<Self>) {
         self.chat_split = tab.split;
         self.chat_split_selected = tab.selected.clone();
-        if self.chat_split.is_none() {
-            motion::reveal_reset(chat_split::STRIP_REVEAL_KEY);
-        }
         let draft = tab.draft.filter(|_| tab.selected.is_none());
         self.state.update(cx, |s, cx| s.select_chat(tab.selected, cx));
         // Filter first: the tab's own parked project must have the last word.
