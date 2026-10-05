@@ -446,6 +446,150 @@ async fn steer_racing_the_turn_end_never_emits_steered_after_done() {
     );
 }
 
+/// A message arriving while the agent runs a turn it started itself (a
+/// background-task wake) must not cancel that work: it waits for the agent
+/// to go quiet, then goes out as the next prompt.
+#[tokio::test]
+async fn steer_into_self_continued_turn_waits_instead_of_cancelling() {
+    let (controls, steer, _token) = controls();
+    let harness = harness();
+    let stream = harness
+        .run(request("scenario:busy-steer"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(15), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        let mut steer = Some(steer);
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(ev, AgentEvent::ToolCall { ref id, .. } if id == "sc-1")
+                && let Some(steer) = &steer
+            {
+                steer
+                    .send(SteerMessage {
+                        prompt: "what about now".into(),
+                        message_id: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .expect("steer sent");
+            }
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "fresh answer") {
+                steer = None;
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    assert!(
+        !events.contains(&AgentEvent::TextDelta {
+            text: "CANCELLED-SELF-CONTINUED-WORK".into()
+        }),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "fresh answer".into()
+        }),
+        "{events:?}"
+    );
+    let finished = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ToolResult { id, .. } if id == "sc-1"))
+        .expect("self-continued tool finished");
+    let steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("held steer delivered");
+    assert!(
+        finished < steered,
+        "steer must wait for the self-continued work: {events:?}"
+    );
+}
+
+/// Several messages during one self-continued turn: no cancel, and each goes
+/// out once, in order, after the agent's own work finishes.
+#[tokio::test]
+async fn burst_of_steers_into_self_continued_turn_all_deliver_in_order() {
+    let (controls, steer, _token) = controls();
+    let harness = harness();
+    let stream = harness
+        .run(request("scenario:busy-burst"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(30), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        let mut steer = Some(steer);
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let word = match &ev {
+                AgentEvent::ToolCall { id, .. } if id == "sc-3" => Some("one"),
+                AgentEvent::TextDelta { text } if text == "tick-1" => Some("two"),
+                AgentEvent::TextDelta { text } if text == "tick-3" => Some("three"),
+                _ => None,
+            };
+            if let (Some(word), Some(steer)) = (word, &steer) {
+                steer
+                    .send(SteerMessage {
+                        prompt: format!("msg {word}"),
+                        message_id: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .expect("steer sent");
+            }
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "reply three") {
+                steer = None;
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !texts
+            .iter()
+            .any(|t| t.starts_with("CANCELLED") || t.starts_with("OUT-OF-ORDER")),
+        "{events:?}"
+    );
+    let replies: Vec<&str> = texts
+        .iter()
+        .copied()
+        .filter(|t| t.starts_with("reply "))
+        .collect();
+    assert_eq!(
+        replies,
+        ["reply one", "reply two", "reply three"],
+        "{events:?}"
+    );
+    let finished = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ToolResult { id, .. } if id == "sc-3"))
+        .expect("self-continued tool finished");
+    let first_steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("held steers delivered");
+    assert!(
+        finished < first_steered,
+        "steers must wait for the self-continued work: {events:?}"
+    );
+}
+
 #[tokio::test]
 async fn rejected_steer_queues_and_delivers_at_the_turn_boundary() {
     let (controls, steer, _token) = controls();

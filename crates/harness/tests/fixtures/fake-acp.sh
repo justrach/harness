@@ -362,15 +362,20 @@ case "$promptline" in
   # Prevention: the turn settles, then the agent SELF-CONTINUES (a turn no
   # prompt started, visible as an open tool call). A steer arriving now
   # must NOT become a session/prompt (the adapter drops that reply — the
-  # verified starve): the harness cancels the unowned turn first, then
-  # prompts after the flush window.
+  # verified starve) and must NOT cancel the agent's work: the harness holds
+  # it until the agent goes quiet, then prompts.
   update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
   emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
   update '{"sessionUpdate":"tool_call","toolCallId":"sc-1","title":"self-continued work","kind":"execute","status":"pending","rawInput":{"command":"make"}}'
-  read -r cancelline || exit 1
-  has "$cancelline" '"method":"session/cancel"' || exit 1
+  # The steer arrives while the tool runs; anything it writes buffers here.
+  sleep 1
   update '{"sessionUpdate":"tool_call_update","toolCallId":"sc-1","status":"completed","content":[]}'
   read -r followline || exit 1
+  if has "$followline" '"method":"session/cancel"'; then
+    # Cancelling would kill the agent's in-flight work: fail loudly.
+    update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"CANCELLED-SELF-CONTINUED-WORK"}}'
+    exit 1
+  fi
   fid=$(rid "$followline")
   if has "$followline" '"method":"session/prompt"' && has "$followline" 'what about now'; then
     update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fresh answer"}}'
@@ -378,6 +383,35 @@ case "$promptline" in
   else
     emit "{\"id\":$fid,\"result\":{\"stopReason\":\"refusal\"}}"
   fi
+  ;;
+
+*scenario:busy-burst*)
+  # Several messages land while a self-continued turn streams and runs a
+  # long tool. None may cancel it; all go out afterwards, once each, in order.
+  update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"first"}}'
+  emit "{\"id\":$pid,\"result\":{\"stopReason\":\"end_turn\"}}"
+  update '{"sessionUpdate":"tool_call","toolCallId":"sc-3","title":"self-continued work","kind":"execute","status":"pending","rawInput":{"command":"make"}}'
+  for i in 1 2 3 4; do
+    sleep 0.5
+    update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"tick-$i\"}}"
+  done
+  update '{"sessionUpdate":"tool_call_update","toolCallId":"sc-3","status":"completed","content":[]}'
+  for word in one two three; do
+    read -r followline || exit 1
+    if has "$followline" '"method":"session/cancel"'; then
+      update '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"CANCELLED-SELF-CONTINUED-WORK"}}'
+      exit 1
+    fi
+    fid=$(rid "$followline")
+    if has "$followline" '"method":"session/prompt"' && has "$followline" "msg $word"; then
+      update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"reply $word\"}}"
+      emit "{\"id\":$fid,\"result\":{\"stopReason\":\"end_turn\"}}"
+    else
+      update "{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"OUT-OF-ORDER-$word\"}}"
+      emit "{\"id\":$fid,\"result\":{\"stopReason\":\"refusal\"}}"
+      exit 1
+    fi
+  done
   ;;
 
 *scenario:native-busy-steer*)
