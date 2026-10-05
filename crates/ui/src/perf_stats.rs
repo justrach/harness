@@ -1,6 +1,8 @@
 //! Anonymous performance stats — field RUM for the four journeys "How we made
 //! Claude.ai faster" tracks (launch, conversation start/load, message send)
-//! plus streaming latency and frame health.
+//! plus streaming latency, frame health and native macOS process resources.
+//! Resource samples distinguish empty, small/large settled and streaming views;
+//! they include the embedded engine, but never child-agent processes or content.
 //!
 //! Samples aggregate locally into fixed log-spaced histograms (bounds pinned
 //! to the telemetry worker's `DESKTOP_STATS_BUCKETS_MS`) and upload as one
@@ -20,8 +22,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::App;
 
-/// Bucket upper bounds in ms; the last bucket is everything above. Must stay
-/// identical to zigrepper services/harness-telemetry/src/desktop_stats.ts.
+#[cfg(target_os = "macos")]
+mod resources;
+
+/// Shared numeric bucket bounds; latency uses ms, CPU uses percent of one
+/// core, and physical footprint uses MiB. The wire's legacy sum_ms/max_ms names
+/// retain the metric's units. Must match the telemetry worker.
 pub const BUCKETS_MS: [f64; 22] = [
     1.0, 2.0, 4.0, 8.33, 16.67, 33.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 500.0, 750.0,
     1000.0, 1500.0, 2000.0, 3000.0, 5000.0, 10000.0, 20000.0, 60000.0,
@@ -56,16 +62,32 @@ pub enum Metric {
     Turn,
     /// Interval between transcript frames while a reply streams.
     Frame,
+    CpuEmpty,
+    CpuSettledSmall,
+    CpuSettledLarge,
+    CpuStreaming,
+    FootprintEmpty,
+    FootprintSettledSmall,
+    FootprintSettledLarge,
+    FootprintStreaming,
 }
 
 impl Metric {
-    const ALL: [Metric; 6] = [
+    const ALL: [Metric; 14] = [
         Metric::AppLaunch,
         Metric::ConversationLoad,
         Metric::MessageSend,
         Metric::FirstToken,
         Metric::Turn,
         Metric::Frame,
+        Metric::CpuEmpty,
+        Metric::CpuSettledSmall,
+        Metric::CpuSettledLarge,
+        Metric::CpuStreaming,
+        Metric::FootprintEmpty,
+        Metric::FootprintSettledSmall,
+        Metric::FootprintSettledLarge,
+        Metric::FootprintStreaming,
     ];
 
     fn name(self) -> &'static str {
@@ -76,6 +98,14 @@ impl Metric {
             Metric::FirstToken => "first_token_ms",
             Metric::Turn => "turn_ms",
             Metric::Frame => "frame_ms",
+            Metric::CpuEmpty => "process_cpu_empty_pct",
+            Metric::CpuSettledSmall => "process_cpu_settled_small_pct",
+            Metric::CpuSettledLarge => "process_cpu_settled_large_pct",
+            Metric::CpuStreaming => "process_cpu_streaming_pct",
+            Metric::FootprintEmpty => "process_footprint_empty_mib",
+            Metric::FootprintSettledSmall => "process_footprint_settled_small_mib",
+            Metric::FootprintSettledLarge => "process_footprint_settled_large_mib",
+            Metric::FootprintStreaming => "process_footprint_streaming_mib",
         }
     }
 }
@@ -378,9 +408,13 @@ fn endpoint() -> Option<String> {
     }
 }
 
-/// Start the periodic uploader. Recording is always local and cheap; only
-/// the upload is gated on the setting, re-read at every flush.
-pub fn start(data_dir: PathBuf, cx: &mut App) {
+/// Start local resource sampling and the periodic uploader. Only uploads are
+/// gated on the setting, re-read at every flush; local diagnostics stay local.
+pub fn start(data_dir: PathBuf, state: gpui::Entity<crate::state::AppState>, cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    resources::start(state, cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = state;
     let Some(endpoint) = endpoint() else {
         return;
     };
@@ -514,6 +548,25 @@ mod tests {
         let (_, _, metrics) = take_window().unwrap();
         assert_eq!(metrics[0].name, "frame_ms");
         assert_eq!(metrics[0].count, 1);
+    }
+
+    #[test]
+    fn resource_histograms_keep_native_units_and_fixed_names() {
+        let _guard = reset();
+        with(|r| {
+            r.add(Metric::CpuEmpty, 250.0);
+            r.add(Metric::FootprintSettledLarge, 1024.0);
+        });
+        let (_, _, metrics) = take_window().unwrap();
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].name, "process_cpu_empty_pct");
+        assert_eq!(metrics[0].max_ms, 250.0, "CPU isn't capped at one core");
+        assert_eq!(metrics[1].name, "process_footprint_settled_large_mib");
+        assert_eq!(metrics[1].sum_ms, 1024.0);
+        let wire = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(wire[0].as_object().unwrap().len(), 5);
+        assert_eq!(metrics[0].buckets.iter().sum::<u64>(), 1);
+        assert!(take_window().is_none());
     }
 
     #[test]

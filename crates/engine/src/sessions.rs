@@ -1398,6 +1398,10 @@ struct SubagentSink {
 impl SubagentSink {
     fn flush(&mut self, device_id: &str) {
         if !self.dirty || self.folded.is_empty() {
+            // Boundaries and metadata can leave an empty fold marked dirty.
+            // There is nothing to commit; leaving it dirty keeps the expired
+            // session commit timer ready and spins the adapter polling loop.
+            self.dirty = false;
             return;
         }
         let rendered = render_parts(&self.folded);
