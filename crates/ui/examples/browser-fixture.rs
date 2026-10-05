@@ -217,6 +217,8 @@ fn main() -> anyhow::Result<()> {
                 });
                 let (first_id, first) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 500).await;
+                #[cfg(target_os = "linux")]
+                linux::wait_for_fixture_window(cx).await?;
                 capture(&output, "browser-empty-dark")?;
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {

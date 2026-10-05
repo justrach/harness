@@ -75,6 +75,8 @@ mod sidebar_pins;
 mod sidebar_sections;
 mod spaces;
 mod tabs;
+#[cfg(test)]
+mod titlebar_tests;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
@@ -5930,10 +5932,8 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let can_back = self.nav.can_back();
         let can_forward = self.nav.can_forward();
-        // The titlebar is the single owner of the new-session action in both
-        // sidebar states. Hide it on the new-session canvas: opening another
-        // blank canvas from an already blank canvas has no effect and used to
-        // leave two competing + placements across the responsive variants.
+        // The titlebar + shares Cmd+T's new-tab behavior in both sidebar states.
+        // Keep its existing visibility: show it only for an established session.
         let plus_alpha = self.titlebar_plus_alpha(cx);
         let show_plus = plus_alpha > 0.01;
         let island_target = if matches!(self.route, Route::Chat)
@@ -6037,13 +6037,13 @@ impl Shell {
                         "titlebar-new-session",
                         icons::PLUS,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.open_new_session(cx)),
+                        cx.listener(|this, _, window, cx| this.new_chat_tab(None, window, cx)),
                     ))
             }))
             .into_any_element()
     }
 
-    /// The titlebar owns new-session creation regardless of sidebar state. It
+    /// The titlebar opens a new tab regardless of sidebar state. It
     /// is useful only while an existing session is selected.
     pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
         titlebar_new_session_alpha(
@@ -11028,6 +11028,7 @@ fn window_control_button(
     let fade_key = format!("window-control-{id}");
     div()
         .id(id)
+        .debug_selector(move || id.into())
         .size(px(24.0))
         .flex_none()
         .flex()
@@ -12418,14 +12419,6 @@ mod tests {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
         assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
         assert_eq!(TERMINAL_RESIZE_HITBOX_HEIGHT, 10.0);
-    }
-
-    #[test]
-    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-        assert_eq!(titlebar_new_session_alpha(true, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(true, false), 0.0);
-        assert_eq!(titlebar_new_session_alpha(false, true), 0.0);
-        assert_eq!(titlebar_new_session_alpha(false, false), 0.0);
     }
 
     #[test]
