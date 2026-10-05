@@ -2205,6 +2205,9 @@ impl Harness for AcpHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let mut launch_args = if self.id() == HarnessId::Graff {
+            // Session start is the natural moment for a graff update check;
+            // it never blocks and this session keeps the resolved binary.
+            crate::graff_bundle::maybe_check_soon();
             request.model = request
                 .model
                 .take()

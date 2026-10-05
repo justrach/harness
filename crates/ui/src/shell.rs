@@ -1872,6 +1872,15 @@ pub struct Shell {
     /// download/stage of it has come in this process.
     update_flow: UpdateFlow,
     update_task: Option<Task<()>>,
+    /// Latest graff engine lifecycle notice from the background updater's
+    /// watch channel — rendered as a bottom-right card until dismissed.
+    graff_notice: Option<harness_adapters::graff_bundle::GraffNotice>,
+    /// "Update" on the card — an InstallHarness call is in flight.
+    graff_notice_updating: bool,
+    /// InstallHarness error shown inline on the card.
+    graff_notice_error: Option<SharedString>,
+    _graff_notice_task: Option<Task<()>>,
+    graff_update_task: Option<Task<()>>,
     /// Version whose update strip the user dismissed (advisory installs only —
     /// a newer release shows the strip again).
     update_dismissed: Option<String>,
@@ -2158,6 +2167,30 @@ impl Shell {
         let transcript_invalidation = cx.observe_self(|shell, cx| {
             shell.transcript.update(cx, |_, cx| cx.notify());
         });
+        // The background graff updater publishes lifecycle notices on a
+        // process-wide watch channel; each value lands on `graff_notice`.
+        // Skipped under cfg(test): the shared channel would let a publish in
+        // one test wake local tasks owned by another test's scheduler.
+        #[cfg(not(test))]
+        let graff_notice_task = Some(cx.spawn(async move |this, cx| {
+            let mut notices = harness_adapters::graff_bundle::notices();
+            loop {
+                let notice = notices.borrow().clone();
+                this.update(cx, |shell: &mut Shell, cx| {
+                    if shell.graff_notice != notice {
+                        shell.graff_notice = notice;
+                        shell.graff_notice_error = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+                if notices.changed().await.is_err() {
+                    return;
+                }
+            }
+        }));
+        #[cfg(test)]
+        let graff_notice_task: Option<Task<()>> = None;
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
             shell: shell.downgrade(),
@@ -2276,6 +2309,11 @@ impl Shell {
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
+            graff_notice: None,
+            graff_notice_updating: false,
+            graff_notice_error: None,
+            _graff_notice_task: graff_notice_task,
+            graff_update_task: None,
             update_dismissed: None,
             install: harness_update::detect_install(),
             org: None,
@@ -7786,6 +7824,201 @@ impl Shell {
         Some(strip.into_any_element())
     }
 
+    /// The graff engine card: bottom-right, floating over the content, until
+    /// the user dismisses that version (persisted on UiSettings — a newer
+    /// stable re-raises it). "Updated" reports a swap the background updater
+    /// already made; "Available" (auto-update off) offers the install inline.
+    fn render_graff_notice(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use harness_adapters::graff_bundle::GraffNotice;
+        let notice = self.graff_notice.clone()?;
+        let (title, body, version, can_update): (SharedString, SharedString, String, bool) =
+            match &notice {
+                GraffNotice::Updated { from, to } => (
+                    "Codegraff engine updated".into(),
+                    match from {
+                        Some(from) => format!(
+                            "v{from} → v{to}. New chats use it; open chats keep their current session."
+                        ),
+                        None => format!("Now on v{to}."),
+                    }
+                    .into(),
+                    to.clone(),
+                    false,
+                ),
+                GraffNotice::Available { current, latest } => (
+                    "Codegraff engine update available".into(),
+                    format!(
+                        "{} → v{latest}",
+                        current
+                            .as_deref()
+                            .map(|v| format!("v{v}"))
+                            .unwrap_or_else(|| "Not installed".into())
+                    )
+                    .into(),
+                    latest.clone(),
+                    true,
+                ),
+            };
+        if self.settings.graff_notice_dismissed.as_deref() == Some(version.as_str()) {
+            return None;
+        }
+        let button = |id: &'static str, selector: &'static str, label: SharedString| {
+            div()
+                .id(id)
+                .debug_selector(move || selector.into())
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(crate::typography::ui_rems(11.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.ink(0.06)))
+                .child(label)
+        };
+        let release_url = format!("https://github.com/justrach/codegraff/releases/tag/v{version}");
+        let mut buttons = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap(px(6.0));
+        if can_update {
+            buttons = buttons.child(
+                button(
+                    "graff-notice-update",
+                    "graff-notice-update",
+                    if self.graff_notice_updating {
+                        "Updating…".into()
+                    } else {
+                        "Update".into()
+                    },
+                )
+                .text_color(theme.accent)
+                .when(!self.graff_notice_updating, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| this.graff_notice_update(cx)))
+                }),
+            );
+        }
+        buttons = buttons
+            .child(
+                button(
+                    "graff-notice-whats-new",
+                    "graff-notice-whats-new",
+                    "What's new".into(),
+                )
+                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&release_url))),
+            )
+            .child(
+                button(
+                    "graff-notice-dismiss",
+                    "graff-notice-dismiss",
+                    "Dismiss".into(),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.dismiss_graff_notice(cx))),
+            );
+
+        Some(
+            popover::popover_card(theme)
+                .debug_selector(|| "graff-notice".into())
+                .occlude()
+                .absolute()
+                .right(px(16.0))
+                .bottom(px(16.0))
+                .w(px(300.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .text_color(theme.text_muted)
+                        .line_height(px(17.0))
+                        .child(body),
+                )
+                .when_some(self.graff_notice_error.clone(), |el, error| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                })
+                .child(buttons)
+                .into_any_element(),
+        )
+    }
+
+    /// Dismiss the card for this version — persisted so it stays gone across
+    /// launches; a newer stable re-raises it.
+    fn dismiss_graff_notice(&mut self, cx: &mut Context<Self>) {
+        use harness_adapters::graff_bundle::GraffNotice;
+        let version = match &self.graff_notice {
+            Some(GraffNotice::Updated { to, .. }) => to.clone(),
+            Some(GraffNotice::Available { latest, .. }) => latest.clone(),
+            None => return,
+        };
+        self.settings.graff_notice_dismissed = Some(version.clone());
+        settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+            settings.graff_notice_dismissed = Some(version);
+        });
+        cx.notify();
+    }
+
+    /// "Update" on the card: the same InstallHarness call the Harnesses
+    /// settings page makes for a stable graff install, run on this engine.
+    fn graff_notice_update(&mut self, cx: &mut Context<Self>) {
+        use harness_adapters::graff_bundle::GraffNotice;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if self.graff_notice_updating {
+            return;
+        }
+        let params = crate::settings::harnesses::install_params(
+            harness_proto::HarnessId::Graff,
+            &None,
+            false,
+        );
+        self.graff_notice_updating = true;
+        self.graff_notice_error = None;
+        self.graff_update_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::INSTALL_HARNESS, params).await;
+            this.update(cx, |shell: &mut Shell, cx| {
+                shell.graff_notice_updating = false;
+                match result {
+                    // The managed graff did update — keep the channel and the
+                    // card in step with what the updater would report.
+                    Ok(_) => {
+                        if let Some(GraffNotice::Available { current, latest }) =
+                            shell.graff_notice.clone()
+                        {
+                            let notice = GraffNotice::Updated {
+                                from: current,
+                                to: latest,
+                            };
+                            shell.graff_notice = Some(notice.clone());
+                            harness_adapters::graff_bundle::publish_notice(notice);
+                        }
+                    }
+                    Err(error) => shell.graff_notice_error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
     /// installs → dismiss for this version.
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
@@ -8936,6 +9169,9 @@ impl Shell {
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
             overlays.push(sync);
+        }
+        if let Some(card) = self.render_graff_notice(&theme, cx) {
+            overlays.push(card);
         }
 
         overlays

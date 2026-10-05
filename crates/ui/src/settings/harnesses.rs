@@ -101,7 +101,11 @@ fn install_label(name: &str) -> String {
     format!("Installing {name}…")
 }
 
-fn install_params(harness: HarnessId, target: &Option<String>, beta: bool) -> serde_json::Value {
+pub(crate) fn install_params(
+    harness: HarnessId,
+    target: &Option<String>,
+    beta: bool,
+) -> serde_json::Value {
     serde_json::json!({"harness": harness, "targetDeviceId": target, "beta": beta})
 }
 

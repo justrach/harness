@@ -8,7 +8,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const GRAFF_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const GRAFF_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const GRAFF_CHECK_INITIAL_DELAY: Duration = Duration::from_secs(30);
 
 /// What the headed start should open: a `harness://` link passed through, a
@@ -131,20 +131,16 @@ pub fn install_path_shims() {
 /// Keep the bundled app's managed graff CLI current with CodeGraff's latest
 /// stable GitHub release. This runs on the existing off-launch-path thread,
 /// so a slow network never delays the GUI. A user-selected graff executable
-/// remains entirely under the user's control.
+/// remains entirely under the user's control. With auto-update off
+/// (`HARNESS_GRAFF_AUTO_UPDATE=0`) the loop still runs, but only checks and
+/// publishes an `Available` notice — the user installs from the card.
 pub fn install_path_shims_and_auto_update_graff() {
+    use harness_adapters::graff_bundle as bundle;
     install_path_shims();
-    if app_bundle().is_none()
-        || std::env::var_os("GRAFF_EXECUTABLE").is_some_and(|value| !value.is_empty())
-        || std::env::var("HARNESS_GRAFF_AUTO_UPDATE").is_ok_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-    {
+    if !bundle::managed_updates_allowed() {
         return;
     }
+    let auto_update = bundle::auto_update_enabled();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -158,14 +154,45 @@ pub fn install_path_shims_and_auto_update_graff() {
     runtime.block_on(async {
         tokio::time::sleep(GRAFF_CHECK_INITIAL_DELAY).await;
         loop {
-            match harness_adapters::graff_bundle::check_and_update_managed().await {
-                Ok(harness_adapters::graff_bundle::UpdateOutcome::Updated { from, to }) => {
-                    tracing::info!(?from, %to, "graff updated from CodeGraff GitHub release");
+            bundle::note_check_started();
+            if auto_update {
+                match bundle::check_and_update_managed().await {
+                    Ok(bundle::UpdateOutcome::Updated { from, to }) => {
+                        tracing::info!(?from, %to, "graff updated from CodeGraff GitHub release");
+                        bundle::publish_notice(bundle::GraffNotice::Updated { from, to });
+                    }
+                    Ok(bundle::UpdateOutcome::AlreadyCurrent { version }) => {
+                        tracing::debug!(%version, "graff is current");
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "graff automatic update check failed")
+                    }
                 }
-                Ok(harness_adapters::graff_bundle::UpdateOutcome::AlreadyCurrent { version }) => {
-                    tracing::debug!(%version, "graff is current");
+            } else {
+                // Check only: surface a newer stable without installing it.
+                // Beta installs manage their own channel and never see this.
+                match bundle::latest_stable().await {
+                    Ok(latest) => {
+                        if let Some(managed) = bundle::managed_path()
+                            && bundle::installed_beta_tag(&managed).is_none()
+                            && let Some(latest_parts) = bundle::parse_dotted(&latest)
+                        {
+                            let current = bundle::version_of(&managed);
+                            if current
+                                .as_deref()
+                                .is_none_or(|c| c < latest_parts.as_slice())
+                            {
+                                bundle::publish_notice(bundle::GraffNotice::Available {
+                                    current: current.as_deref().map(bundle::display_version),
+                                    latest,
+                                });
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "graff update check failed")
+                    }
                 }
-                Err(err) => tracing::warn!(error = %err, "graff automatic update check failed"),
             }
             tokio::time::sleep(GRAFF_CHECK_INTERVAL).await;
         }

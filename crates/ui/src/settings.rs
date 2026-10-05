@@ -881,6 +881,10 @@ pub struct UiSettings {
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// The graff engine update card's dismissed version — re-raised only when
+    /// a newer stable exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graff_notice_dismissed: Option<String>,
     /// Pre-theme settings used `accentColor`. Read it once, migrate to
     /// [`Self::accent`], and never write it again.
     #[serde(default, rename = "accentColor", skip_serializing)]
@@ -961,6 +965,7 @@ impl Default for UiSettings {
             surface: harness_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            graff_notice_dismissed: None,
             legacy_accent_color: None,
         }
     }
@@ -2446,6 +2451,7 @@ mod tests {
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            graff_notice_dismissed: Some("0.0.9".into()),
             legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
