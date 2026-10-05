@@ -156,7 +156,7 @@ pub fn chatgpt_plan_granted(output: &str) -> bool {
     output.lines().any(|line| {
         let line = strip_ansi(line);
         let line = line.trim();
-        line.starts_with("✓ signed in to ChatGPT as ") && line.ends_with("; plan usage is on.")
+        line.starts_with("✓ signed in to ChatGPT as ") && line.contains("; plan usage is on.")
     })
 }
 
@@ -187,6 +187,9 @@ mod tests {
     fn reauth_chatgpt_requires_explicit_plan_grant() {
         assert!(chatgpt_plan_granted(
             "✓ signed in to ChatGPT as fixture; plan usage is on.\n"
+        ));
+        assert!(chatgpt_plan_granted(
+            "✓ signed in to ChatGPT as fixture; plan usage is on. Use it with /model chatgpt-new or `graff --model chatgpt-new/gpt-6.1-sol`. Manage usage: https://chatgpt.com/settings/usage\n"
         ));
         for output in [
             "✓ signed in to ChatGPT as fixture, but plan usage was not allowed.\n",
