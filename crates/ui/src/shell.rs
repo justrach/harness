@@ -1755,8 +1755,6 @@ pub struct Shell {
     chat_tab: usize,
     /// Live read-only transcripts for unfocused panes, keyed by chat id.
     peer_chat_views: std::collections::HashMap<String, chat_split::PeerChatView>,
-    /// Which pane card the sidebar strip last had under the pointer.
-    pane_strip_hovered: usize,
     /// A split divider being dragged, and the split root's measured bounds.
     chat_split_drag: Option<chat_split::DividerDrag>,
     /// Launch restored (or deliberately skipped) the previous chat + layout;
@@ -2204,7 +2202,6 @@ impl Shell {
             chat_tabs: Vec::new(),
             chat_tab: 0,
             peer_chat_views: std::collections::HashMap::new(),
-            pane_strip_hovered: 0,
             chat_split_drag: None,
             boot_restored: false,
             codegraff: None,
