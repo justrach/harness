@@ -98,10 +98,19 @@ export const sandboxExchange = async (env: Env, token: string, fetchImpl: typeof
     throw new CodegraffAuthFailed("the gateway returned an incomplete identity");
   }
   const id = String(who.user_id);
+  // The gateway stamps the verified sandbox id on the identity reply; that is
+  // the exact sandbox→device link the device publishes at boot. Anything odd
+  // (missing, wrong type, implausible) is simply left out — older gateways
+  // never sent it.
+  const sandboxId =
+    typeof who.sandbox_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(who.sandbox_id)
+      ? who.sandbox_id
+      : undefined;
   return {
     user: { id, email: who.email },
     orgId: personalOrgId(id),
-    accessToken: await issueToken(env, id)
+    accessToken: await issueToken(env, id),
+    ...(sandboxId ? { sandboxId } : {})
   };
 };
 

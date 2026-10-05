@@ -32,6 +32,28 @@ describe("sandbox sign-in", () => {
     expect(g.calls).toEqual([{ url: "https://gateway.codegraff.com/v1/harness/identity", auth: `Bearer ${TOKEN}` }]);
   });
 
+  it("returns the verified sandbox id when the gateway sends one", async () => {
+    const g = gateway(() => Response.json({ user_id: 42, email: "a@b.test", sandbox_id: "sbx_01-AbC" }));
+    const out = await sandboxExchange(env, TOKEN, g.impl);
+    expect(out.sandboxId).toBe("sbx_01-AbC");
+  });
+
+  it("omits the sandbox id when the gateway leaves it out", async () => {
+    const g = gateway(() => Response.json({ user_id: 42, email: "a@b.test" }));
+    const out = await sandboxExchange(env, TOKEN, g.impl);
+    expect(out.sandboxId).toBeUndefined();
+    expect("sandboxId" in out).toBe(false);
+  });
+
+  it("omits an implausible sandbox id instead of failing the sign-in", async () => {
+    for (const sandbox_id of [42, "has space", "x".repeat(65), "dot.name", null]) {
+      const g = gateway(() => Response.json({ user_id: 42, email: "a@b.test", sandbox_id }));
+      const out = await sandboxExchange(env, TOKEN, g.impl);
+      expect(out.sandboxId).toBeUndefined();
+      expect("sandboxId" in out).toBe(false);
+    }
+  });
+
   it("does not call the gateway for anything that is not a sandbox token", async () => {
     const g = gateway(() => Response.json({ user_id: 1, email: "x@y.test" }));
     for (const bad of ["", "cg_sk_" + "a".repeat(48), "cg_lt_short", `${TOKEN}x`, "../etc"]) {

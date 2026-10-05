@@ -247,6 +247,7 @@ fn device(id: &str, name: &str) -> Device {
         version: Some("0.1.0".into()),
         cursor_sdk_version: Some("1.0.31".into()),
         capabilities: Vec::new(),
+        cloud_sandbox_id: None,
     }
 }
 

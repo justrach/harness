@@ -226,6 +226,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
         version: Some("0.2.12".into()),
         cursor_sdk_version: None,
         capabilities: harness_proto::capabilities::current(),
+        cloud_sandbox_id: None,
     });
     let client_a = harness_rpc::memory_client(core_a.rpc_service());
     client_a

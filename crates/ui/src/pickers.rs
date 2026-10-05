@@ -8106,6 +8106,7 @@ mod tests {
             version: None,
             cursor_sdk_version: None,
             capabilities: Vec::new(),
+            cloud_sandbox_id: None,
         }
     }
 

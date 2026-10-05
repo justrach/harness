@@ -728,6 +728,10 @@ impl RegistryDoc {
             ),
             ("cursorSdkEngineVersion", opt_str(device.version.as_deref())),
             ("capabilities", json!(device.capabilities)),
+            (
+                "cloudSandboxId",
+                opt_str(device.cloud_sandbox_id.as_deref()),
+            ),
         ]);
         self.write(KIND_DEVICES, &device.id.clone(), OpKind::Upsert, set);
         Ok(())
@@ -1303,6 +1307,10 @@ impl RegistryDoc {
                     ),
                     ("cursorSdkEngineVersion", opt_str(device.version.as_deref())),
                     ("capabilities", json!(device.capabilities)),
+                    (
+                        "cloudSandboxId",
+                        opt_str(device.cloud_sandbox_id.as_deref()),
+                    ),
                 ]),
             );
         }

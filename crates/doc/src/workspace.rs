@@ -118,6 +118,7 @@ impl WorkspaceDoc {
             "capabilities",
             crate::schema::loro_value_from_json(&serde_json::json!(&device.capabilities)),
         )?;
+        set_opt_str(&row, "cloudSandboxId", device.cloud_sandbox_id.as_deref())?;
         self.doc.commit();
         Ok(())
     }
@@ -619,6 +620,8 @@ pub(crate) struct RawDevice {
     cursor_sdk_engine_version: Option<String>,
     #[serde(default)]
     capabilities: Vec<String>,
+    #[serde(default)]
+    cloud_sandbox_id: Option<String>,
 }
 
 impl From<RawDevice> for Device {
@@ -635,6 +638,7 @@ impl From<RawDevice> for Device {
             version: raw.version,
             cursor_sdk_version: sdk_version,
             capabilities: raw.capabilities,
+            cloud_sandbox_id: raw.cloud_sandbox_id,
         }
     }
 }
@@ -809,7 +813,35 @@ mod tests {
             version: Some("0.1.0".into()),
             cursor_sdk_version: None,
             capabilities: Vec::new(),
+            cloud_sandbox_id: None,
         }
+    }
+
+    #[test]
+    fn cloud_sandbox_id_roundtrips_and_old_rows_read_none() {
+        let doc = WorkspaceDoc::new();
+        let mut row = device("sandboxed", "Harness cloud");
+        row.cloud_sandbox_id = Some("sbx_123".into());
+        doc.upsert_device(&row).unwrap();
+        doc.upsert_device(&device("plain", "laptop")).unwrap();
+        let devices = doc.read_devices().unwrap();
+        assert_eq!(
+            devices
+                .iter()
+                .find(|d| d.id == "sandboxed")
+                .unwrap()
+                .cloud_sandbox_id
+                .as_deref(),
+            Some("sbx_123")
+        );
+        assert_eq!(
+            devices
+                .iter()
+                .find(|d| d.id == "plain")
+                .unwrap()
+                .cloud_sandbox_id,
+            None
+        );
     }
 
     #[test]

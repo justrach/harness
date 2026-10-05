@@ -155,6 +155,9 @@ pub mod methods {
     pub const CODEGRAFF_CREATE_SANDBOX: &str = "CodegraffCreateSandbox";
     /// `{id, action: "start" | "stop" | "delete"}` on one sandbox.
     pub const CODEGRAFF_SANDBOX_ACTION: &str = "CodegraffSandboxAction";
+    /// Reuse or wake the account's cloud sandbox and wait for its device to
+    /// come online (`{allowCreate?: false, waitSecs?: 240 clamp 10..=600}`).
+    pub const CODEGRAFF_ENSURE_SANDBOX: &str = "CodegraffEnsureSandbox";
     /// Agent rooms: one call to the edge's `/rooms…` or `/room/{id}/…` routes
     /// (`{method, path, query?, body?}` → `{status, body}`), made with the
     /// engine's own sign-in. harness-mcp's room tools compose it.

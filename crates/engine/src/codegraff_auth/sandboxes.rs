@@ -22,13 +22,19 @@ use std::time::Duration;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use super::{CodegraffAuth, http, urlencode};
 
 const FLEET: &str = "fleet";
 const SANDBOX_NAME: &str = "Harness cloud";
-/// The gateway pauses a persistent sandbox this long after its last activity.
+/// Lease length requested at create. Fleet leases are fixed windows the
+/// gateway caps (30 min max, ~10 min on a plain resume) — activity does NOT
+/// extend them, and the sandbox pauses when the window ends.
 const AUTO_STOP_MINUTES: u32 = 30;
+/// A device counts as online when `lastSeenAt` is this fresh — the same
+/// window the Devices page uses (crates/ui `DEVICE_ONLINE_WINDOW_SECS`).
+const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
 const QUICK: Duration = Duration::from_secs(20);
 /// Creating or waking a sandbox boots a machine.
 const BOOT: Duration = Duration::from_secs(90);
@@ -402,6 +408,186 @@ impl CodegraffAuth {
             .await
             .map_err(|f| f.sentence("CodeGraff couldn't read the sandbox's usage"))
     }
+
+    /// Reuse or wake the account's Harness cloud sandbox and wait for its
+    /// device to come online — the agent-facing "give me a machine to run on".
+    ///
+    /// Sandboxes are joined to devices by the exact `cloudSandboxId` the
+    /// sandbox's engine stamps at boot, never by name. `allow_create` gates the
+    /// only billed step (`POST /v1/sandboxes`); waking or reattaching an
+    /// existing sandbox stays inside its bounded fleet lease. `devices` is the
+    /// workspace host's device watch: the answer is the device row carrying
+    /// this sandbox's id once it reports in, bounded by `wait`.
+    ///
+    /// Single-flight per process: `POST /v1/sandboxes` has no idempotency key,
+    /// so concurrent ensures queue here instead of double-creating.
+    pub async fn ensure_sandbox(
+        &self,
+        allow_create: bool,
+        wait: Duration,
+        devices: watch::Receiver<Vec<harness_proto::Device>>,
+    ) -> Result<EnsuredSandbox, String> {
+        static FLIGHT: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _flight = FLIGHT.get_or_init(Default::default).lock().await;
+        self.ensure_sandbox_inner(allow_create, wait, devices).await
+    }
+
+    async fn ensure_sandbox_inner(
+        &self,
+        allow_create: bool,
+        wait: Duration,
+        mut devices: watch::Receiver<Vec<harness_proto::Device>>,
+    ) -> Result<EnsuredSandbox, String> {
+        let online = |device: &harness_proto::Device| {
+            device.last_seen_at.is_some_and(|at| {
+                chrono::Utc::now().signed_duration_since(at).num_seconds()
+                    <= DEVICE_ONLINE_WINDOW_SECS
+            })
+        };
+        fn matched<'a>(
+            devices: &'a [harness_proto::Device],
+            id: &str,
+        ) -> Option<&'a harness_proto::Device> {
+            devices
+                .iter()
+                .find(|d| d.cloud_sandbox_id.as_deref() == Some(id))
+        }
+
+        // a. pick a live fleet sandbox — one a device already claims by exact
+        // id beats a running one, which beats a paused one.
+        let list = self
+            .sandboxes()
+            .await
+            .map_err(|e| format!("list: {e}"))?
+            .ok_or_else(|| "Sign in with Codegraff first.".to_string())?;
+        let mut candidates: Vec<&CodegraffSandbox> = list
+            .sandboxes
+            .iter()
+            .filter(|s| s.provider == FLEET)
+            .filter(|s| !matches!(s.state.as_str(), "error" | "stopping"))
+            .collect();
+        candidates.sort_by_key(|s| {
+            if matched(&devices.borrow(), &s.id).is_some() {
+                0
+            } else {
+                match s.state.as_str() {
+                    "running" => 1,
+                    "paused" => 2,
+                    _ => 3,
+                }
+            }
+        });
+
+        let mut created = false;
+        let mut woke = false;
+        let mut expires_at;
+        let sandbox_id = match candidates.first() {
+            // b. nothing to reuse — creating is billed, so it is opt-in.
+            None if !allow_create => {
+                return Err(
+                    "No cloud sandbox on this account. Creating one adds billed compute; \
+                     call again with allowCreate: true to create it."
+                        .into(),
+                );
+            }
+            None => {
+                let made = self
+                    .create_sandbox()
+                    .await
+                    .map_err(|e| format!("boot: {e}"))?;
+                created = true;
+                expires_at = made.expires_at.clone();
+                made.id
+            }
+            Some(sandbox) => {
+                let id = sandbox.id.clone();
+                expires_at = sandbox.expires_at.clone();
+                // c. wake when paused; reattach Harness when it runs but its
+                // device has not yet reported this sandbox id (never on the
+                // already-online fast path — zero POSTs).
+                let needs_attach = matched(&devices.borrow(), &id).is_none_or(|d| !online(d));
+                if sandbox.state == "paused" || needs_attach {
+                    self.start_sandbox(&id)
+                        .await
+                        .map_err(|e| format!("setup: {e}"))?;
+                    woke = sandbox.state == "paused";
+                }
+                id
+            }
+        };
+
+        // Cheap only when we changed something: the lease clock moved.
+        if created || woke {
+            if let Ok(Some(fresh)) = self.sandboxes().await {
+                if let Some(s) = fresh.sandboxes.iter().find(|s| s.id == sandbox_id) {
+                    expires_at = s.expires_at.clone();
+                }
+            }
+        }
+
+        // d. wait for the device row carrying this exact sandbox id.
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if let Some(device) = matched(&devices.borrow(), &sandbox_id).filter(|d| online(d)) {
+                return Ok(EnsuredSandbox {
+                    sandbox_id,
+                    device_id: device.id.clone(),
+                    device_name: device.name.clone(),
+                    created,
+                    woke,
+                    expires_at,
+                });
+            }
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                break;
+            };
+            if tokio::time::timeout(remaining, devices.changed())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        // Timed out: a name-matched device online means an older build that
+        // cannot stamp the exact id — name it, but never return it.
+        let expected_name = self
+            .device_names()
+            .get(&sandbox_id)
+            .cloned()
+            .unwrap_or_else(|| device_name_for(&sandbox_id));
+        let name_match = devices
+            .borrow()
+            .iter()
+            .find(|d| d.name == expected_name && online(d))
+            .map(|d| {
+                format!(
+                    " A device named \"{}\" is online but did not report this sandbox id — \
+                     an unverified name match; its Harness build may predate exact sandbox ids.",
+                    d.name
+                )
+            })
+            .unwrap_or_default();
+        Err(format!(
+            "The sandbox is running but no device has reported this sandbox id within {} s.{}",
+            wait.as_secs(),
+            name_match
+        ))
+    }
+}
+
+/// What [`CodegraffAuth::ensure_sandbox`] answers: the sandbox plus the device
+/// row that verifiably belongs to it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsuredSandbox {
+    pub sandbox_id: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub created: bool,
+    pub woke: bool,
+    pub expires_at: Option<Value>,
 }
 
 #[cfg(test)]
@@ -989,5 +1175,242 @@ mod tests {
                 "{never} must never be called"
             );
         }
+    }
+
+    fn cloud_device(id: &str, sandbox: Option<&str>, name: &str) -> harness_proto::Device {
+        harness_proto::Device {
+            id: id.into(),
+            name: name.into(),
+            platform: "linux".into(),
+            last_seen_at: Some(chrono::Utc::now()),
+            created_at: Some(chrono::Utc::now()),
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: Vec::new(),
+            cloud_sandbox_id: sandbox.map(str::to_owned),
+        }
+    }
+
+    fn device_watch(
+        list: Vec<harness_proto::Device>,
+    ) -> watch::Receiver<Vec<harness_proto::Device>> {
+        watch::channel(list).1
+    }
+
+    fn posts(seen: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        lines(seen)
+            .into_iter()
+            .filter(|l| l.starts_with("POST"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn ensure_reuses_a_running_sandbox_with_an_online_device_without_posting() {
+        let (gateway, seen) = fake(vec![(
+            "GET /v1/sandboxes ",
+            200,
+            r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started","expiresAt":1790000000}]}"#,
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(false, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert_eq!(ensured.sandbox_id, "cnd_1");
+        assert_eq!(ensured.device_id, "dev-9");
+        assert_eq!(ensured.device_name, "Harness cloud 1");
+        assert!(!ensured.created && !ensured.woke);
+        assert_eq!(ensured.expires_at, Some(json!(1790000000)));
+        assert_eq!(posts(&seen), Vec::<String>::new(), "no POSTs at all");
+    }
+
+    #[tokio::test]
+    async fn ensure_wakes_a_paused_sandbox_and_reports_woke() {
+        let (gateway, seen) = fake(vec![
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"paused"}]}"#,
+            ),
+            ("GET /v1/sandboxes/cnd_1 ", 200, r#"{"id":"cnd_1","state":"paused"}"#),
+            ("POST /v1/sandboxes/cnd_1/start ", 200, r#"{"state":"started"}"#),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started","expiresAt":1790001234}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(false, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert!(ensured.woke && !ensured.created);
+        assert_eq!(ensured.expires_at, Some(json!(1790001234)));
+        let posts = posts(&seen);
+        assert!(
+            posts.iter().any(|l| l == "POST /v1/sandboxes/cnd_1/start")
+                && posts
+                    .iter()
+                    .any(|l| l == "POST /v1/sandboxes/cnd_1/harness"),
+            "{posts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_without_allow_create_never_creates() {
+        let (gateway, seen) = fake(vec![("GET /v1/sandboxes ", 200, r#"{"sandboxes":[]}"#)]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let error = auth
+            .ensure_sandbox(false, Duration::from_secs(1), device_watch(vec![]))
+            .await
+            .unwrap_err();
+        assert!(error.contains("allowCreate"), "{error}");
+        assert!(posts(&seen).is_empty(), "no POST /v1/sandboxes");
+    }
+
+    #[tokio::test]
+    async fn ensure_with_allow_create_creates_once() {
+        let (gateway, seen) = fake(vec![
+            ("GET /v1/sandboxes ", 200, r#"{"sandboxes":[]}"#),
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_new","provider":"fleet","state":"started","expiresAt":1790000000}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_new/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_new","provider":"fleet","state":"started"}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_new"),
+            "Harness cloud new",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(true, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert!(ensured.created && !ensured.woke);
+        assert_eq!(ensured.sandbox_id, "cnd_new");
+        let creates = lines(&seen)
+            .iter()
+            .filter(|l| l.as_str() == "POST /v1/sandboxes")
+            .count();
+        assert_eq!(creates, 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_ensures_create_exactly_one_sandbox() {
+        let (gateway, seen) = fake(vec![
+            ("GET /v1/sandboxes ", 200, r#"{"sandboxes":[]}"#),
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_1","provider":"fleet","state":"started"}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            // The second ensure's list, after the first created the sandbox.
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started"}]}"#,
+            ),
+            // The first ensure's refresh after creating.
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started"}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let (tx, rx) = watch::channel(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let (a, b) = tokio::join!(
+            auth.ensure_sandbox(true, Duration::from_secs(5), rx.clone()),
+            auth.ensure_sandbox(true, Duration::from_secs(5), rx),
+        );
+        a.unwrap();
+        b.unwrap();
+        drop(tx);
+        let creates = lines(&seen)
+            .iter()
+            .filter(|l| l.as_str() == "POST /v1/sandboxes")
+            .count();
+        assert_eq!(creates, 1, "{:?}", lines(&seen));
+    }
+
+    #[tokio::test]
+    async fn ensure_times_out_on_a_name_only_match_and_says_so() {
+        let (gateway, seen) = fake(vec![
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_ab12","provider":"fleet","state":"started"}]}"#,
+            ),
+            (
+                "GET /v1/sandboxes/cnd_ab12 ",
+                200,
+                r#"{"id":"cnd_ab12","state":"started"}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_ab12/harness ", 200, r#"{}"#),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        // An online device wearing the expected name but no exact id — an
+        // old build that predates cloudSandboxId.
+        let mut device = cloud_device("dev-old", None, "Harness cloud ab12");
+        device.name = "Harness cloud ab12".into();
+        let devices = device_watch(vec![device]);
+        let error = auth
+            .ensure_sandbox(false, Duration::from_millis(300), devices)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("no device has reported this sandbox id"),
+            "{error}"
+        );
+        assert!(error.contains("\"Harness cloud ab12\""), "{error}");
+        assert!(error.contains("unverified name match"), "{error}");
+        // It reattached Harness on the running sandbox (setup), never created.
+        assert!(
+            posts(&seen).iter().all(|l| l != "POST /v1/sandboxes"),
+            "{:?}",
+            posts(&seen)
+        );
     }
 }

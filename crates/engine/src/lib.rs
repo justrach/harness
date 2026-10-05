@@ -254,6 +254,9 @@ impl EngineCore {
                 org_id: profile.org_id().to_string(),
                 user_id: profile.user_id().to_string(),
                 edge: edge.clone(),
+                // Auth is not attached yet at assembly — the verified sandbox
+                // id is restamped by `set_auth` once it is.
+                cloud_sandbox_id: None,
             },
         )?;
         doc_host.set_workspace(workspace.clone());
@@ -368,6 +371,9 @@ impl EngineCore {
 
     /// Attach the auth service (before building the RPC service / relays).
     pub fn set_auth(&self, auth: Auth) {
+        // A cloud sandbox restamps its exact sandbox→device link now that the
+        // verified startup sign-in is attached.
+        self.workspace.set_cloud_sandbox_id(auth.cloud_sandbox_id());
         *self
             .auth
             .lock()

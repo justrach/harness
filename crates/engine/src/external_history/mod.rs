@@ -537,6 +537,7 @@ mod tests {
                 org_id: "org".into(),
                 user_id: "user".into(),
                 edge: None,
+                cloud_sandbox_id: None,
             },
         )
         .unwrap();
