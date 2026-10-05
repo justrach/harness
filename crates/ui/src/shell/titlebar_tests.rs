@@ -140,3 +140,103 @@ fn titlebar_plus_preserves_split_tab_in_new_tab(cx: &mut gpui::TestAppContext) {
         assert_plus_opens_tab(cx, collapsed, true);
     }
 }
+
+#[gpui::test]
+fn graff_notice_card_shows_dismisses_and_resurfaces(cx: &mut gpui::TestAppContext) {
+    use harness_adapters::graff_bundle::GraffNotice;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        crate::history::init(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+    });
+    let (shell, cx) = cx.add_window_view(|_, cx| {
+        let state = cx.new(|_| AppState::new());
+        let mut shell = Shell::new(
+            state,
+            EngineBootConfig {
+                data_dir: dir.path().into(),
+                ipc_port: 0,
+                edge_url: "http://127.0.0.1:1".into(),
+                edge_token: None,
+                org_id: None,
+                codegraff_client_id: None,
+                default_harness: harness_proto::HarnessId::Mock,
+            },
+            cx,
+        );
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell
+    });
+    // Shell::new doesn't spawn the watch-channel reader under cfg(test)
+    // (the process-wide channel would wake another test's scheduler), so the
+    // test applies the notices itself, exactly as the reader does.
+    shell.update(cx, |shell, cx| {
+        shell.graff_notice = Some(GraffNotice::Updated {
+            from: Some("1.0.0".into()),
+            to: "1.0.1".into(),
+        });
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        cx.debug_bounds("graff-notice").is_some(),
+        "an Updated notice shows the card"
+    );
+
+    let dismiss = cx.debug_bounds("graff-notice-dismiss").unwrap();
+    cx.simulate_click(dismiss.center(), Default::default());
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        cx.debug_bounds("graff-notice").is_none(),
+        "dismiss hides the card"
+    );
+    shell.read_with(cx, |_, cx| {
+        assert_eq!(
+            settings::current(cx).graff_notice_dismissed.as_deref(),
+            Some("1.0.1"),
+            "dismiss persists the dismissed version"
+        );
+    });
+
+    // The same version stays hidden; a newer one re-raises the card.
+    // Shell::new doesn't spawn the watch-channel reader under cfg(test)
+    // (the process-wide channel would wake another test's scheduler), so the
+    // test applies the notices itself, exactly as the reader does.
+    shell.update(cx, |shell, cx| {
+        shell.graff_notice = Some(GraffNotice::Updated {
+            from: Some("1.0.0".into()),
+            to: "1.0.1".into(),
+        });
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        cx.debug_bounds("graff-notice").is_none(),
+        "a dismissed version never shows again"
+    );
+
+    shell.update(cx, |shell, cx| {
+        shell.graff_notice = Some(GraffNotice::Available {
+            current: Some("1.0.1".into()),
+            latest: "1.0.2".into(),
+        });
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        cx.debug_bounds("graff-notice").is_some(),
+        "a newer version shows again"
+    );
+    assert!(cx.debug_bounds("graff-notice-update").is_some());
+    assert!(cx.debug_bounds("graff-notice-whats-new").is_some());
+}
