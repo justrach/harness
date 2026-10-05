@@ -79,7 +79,9 @@ tertulis, dan dapat dicabut. Materi lain tetap membawa hak cipta dan lisensi
 asalnya. Lihat [pemberitahuan pihak ketiga](THIRD_PARTY_NOTICES.md).
 
 **Perusahaan memerlukan lisensi komersial.** Setiap versi setelah v0.2.108
-menambahkan satu ketentuan. Organisasi Anda, dihitung bersama afiliasinya,
+menambahkan satu ketentuan. Organisasi Anda, dihitung bersama organisasi yang
+mengendalikannya, yang dikendalikannya, atau yang berada di bawah pengendalian
+yang sama dengannya,
 memerlukan lisensi komersial untuk penggunaan Harness apa pun (termasuk di
 mesin, cloud, CI, dan jaringannya sendiri) jika memenuhi **salah satu** dari:
 
