@@ -146,3 +146,10 @@ perpetual unless they breach it. Commercial permission without copyleft exists
 only if **all three grant it jointly in writing**, and is revocable. Earlier and
 third-party material keeps its own copyright and license notices; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
+
+**Funded companies.** Every version after v0.2.108 adds one term: a company
+that has raised more than US$500k, at any valuation and counting its
+affiliates, may use Harness only under a commercial license, including on its
+own machines, CI and network. Individuals and other organizations use Harness
+under the AGPL. Versions up to v0.2.108 keep the license they shipped with.
+Contact [rach@standardharness.com](mailto:rach@standardharness.com).
