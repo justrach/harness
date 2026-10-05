@@ -53,7 +53,7 @@ the third.
 This reservation runs solely to the three Licensors named above. EVERY OTHER
 PERSON OR ENTITY receives, copies, runs, modifies, conveys, and interacts with
 this software strictly and only under the AGPL-3.0 as set out below, subject
-to the FUNDED COMPANIES term that follows -- including its Section 13
+to the COVERED COMPANIES term that follows -- including its Section 13
 obligation to offer the Corresponding Source to all users who interact with a
 modified version remotely over a network. Nothing in this carve-out grants any
 right to anyone other than the three named Licensors, and nothing in it
@@ -86,7 +86,7 @@ each recipient's license under the AGPL-3.0 is irrevocable except by reason of
 that recipient's own material breach.
 
 --------------------------------------------------------------------------------
-FUNDED COMPANIES (Additional Term for versions after 0.2.108)
+COVERED COMPANIES (Additional Term for versions after 0.2.108)
 --------------------------------------------------------------------------------
 
 This Additional Term is part of this License for every version of this
@@ -95,27 +95,46 @@ contains it. A version whose LICENSE does not contain it remains licensed as
 that LICENSE states. As with the carve-out above, it applies to the Licensor
 Material only; Third-Party Material keeps its own license.
 
-A "Funded Company" is any company, partnership, or other organization that,
-together with its Affiliates, has raised more than US$500,000 in total from
-investors or lenders, through equity, convertible notes, SAFEs, or similar
-instruments, at any valuation. An "Affiliate" is any organization that
-controls, is controlled by, or is under common control with it.
+1. WHO IS A COVERED COMPANY. A "Covered Company" is any company, partnership,
+   or other organization that, counted together with its Affiliates, meets ANY
+   ONE of the following tests. Meeting a single test is enough.
 
-A Funded Company, and anyone using this software on its behalf (including its
-employees, contractors, and agents), may use the Licensor Material for any
-purpose only under a separate commercial license granted jointly by all three
-Licensors. "Use" includes running this software on the Funded Company's
-computers, servers, continuous-integration systems, or networks, and making it
-available to its personnel or users over a network. The AGPL-3.0 license below
-is not granted to a Funded Company, or to anyone acting on its behalf, for any
-such use of the Licensor Material.
+   (a) FUNDING. It has raised more than US$500,000 in total, at any time, from
+       investors or lenders, through equity, convertible notes, SAFEs, loans,
+       grants, or similar instruments, at any valuation.
 
-An organization that becomes a Funded Company may continue its existing use
-for 30 days, within which it must obtain a commercial license or stop using
-this software.
+   (b) NET WORTH. Its net worth (total assets minus total liabilities) or its
+       most recent valuation (pre-money or post-money, whichever is higher) is
+       more than US$500,000.
 
-Individuals using this software for themselves, and organizations that are not
-Funded Companies, receive this software under the AGPL-3.0 as set out below.
+   (c) REVENUE. Its gross revenue, from any source, was more than US$100,000
+       in its most recent fiscal year or in any period of 12 consecutive
+       months.
+
+   An "Affiliate" is any organization that controls, is controlled by, or is
+   under common control with it. Amounts in other currencies are converted to
+   US dollars at the exchange rate on the date the amount is measured.
+
+2. WHAT A COVERED COMPANY MUST DO. A Covered Company, and anyone using this
+   software on its behalf (including its employees, contractors, and agents),
+   may use the Licensor Material for any purpose only under a separate
+   commercial license granted jointly by all three Licensors. "Use" includes
+   installing or running this software on the Covered Company's computers,
+   servers, cloud accounts, continuous-integration systems, or networks, and
+   making it available to its personnel or users over a network. The AGPL-3.0
+   license below is not granted to a Covered Company, or to anyone acting on
+   its behalf, for any such use of the Licensor Material.
+
+3. CROSSING A THRESHOLD. An organization that becomes a Covered Company may
+   continue its existing use for 30 days from the date it first meets any test
+   in section 1, within which it must obtain a commercial license or stop
+   using this software.
+
+4. WHO IS NOT AFFECTED. Individuals using this software for themselves, and
+   organizations that meet none of the tests in section 1, receive this
+   software under the AGPL-3.0 as set out below. If you are unsure whether
+   your organization is a Covered Company, treat it as one and contact the
+   Licensors.
 
 All three Licensors have agreed to this Additional Term.
 

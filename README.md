@@ -147,9 +147,18 @@ only if **all three grant it jointly in writing**, and is revocable. Earlier and
 third-party material keeps its own copyright and license notices; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
-**Funded companies.** Every version after v0.2.108 adds one term: a company
-that has raised more than US$500k, at any valuation and counting its
-affiliates, may use Harness only under a commercial license, including on its
-own machines, CI and network. Individuals and other organizations use Harness
-under the AGPL. Versions up to v0.2.108 keep the license they shipped with.
+**Companies need a commercial license.** Every version after v0.2.108 adds one
+term. Your organization, counted together with its affiliates, needs a
+commercial license for any use of Harness (including on its own machines,
+cloud, CI and network) if it meets **any one** of these:
+
+- it has raised more than **US$500k** in total from investors or lenders;
+- its net worth or latest valuation is more than **US$500k**;
+- its gross revenue was more than **US$100k** in its last fiscal year or any
+  12-month period.
+
+A company that crosses a line has 30 days to get a license. Individuals, and
+organizations that meet none of these, use Harness under the AGPL. Versions up
+to v0.2.108 keep the license they shipped with. Unsure? Treat yourself as
+covered and get in touch.
 Contact [rach@standardharness.com](mailto:rach@standardharness.com).
