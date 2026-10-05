@@ -5,6 +5,8 @@ import UIKit
 
 struct NativeTranscriptTable: UIViewRepresentable {
     let rows: [TranscriptRow]
+    /// Rows held back above the tail window; scrolling near the top grows it.
+    var hiddenRows: Int = 0
     let scroll: ScrollState
     let runwayID: String?
     let expansionHeight: CGFloat
@@ -119,6 +121,8 @@ final class TranscriptViewport: UIView {
 final class TranscriptTableView: UITableView, UITableViewDataSource, UITableViewDelegate {
     private let follow: ScrollState
     private var rows: [TranscriptRow] = []
+    private var hiddenRows = 0
+    private var topGrowScheduled = false
     private var render: ((TranscriptRow) -> AnyView)?
     private var runwayID: String?
     private var expansionHeight: CGFloat = 0
@@ -225,8 +229,11 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         follow.pinned = false
         setContentOffset(CGPoint(x: 0, y: target), animated: false)
         layoutIfNeeded()
+        // Paging up through history is user scrolling too — grow the window.
+        scheduleTopGrowth()
         if step > 0, contentSize.height - bounds.height - contentOffset.y <= TranscriptView.stickThreshold {
             follow.arm()
+            follow.resetRowLimit()
             goToLatest(animated: false)
         }
         UIAccessibility.post(notification: .pageScrolled,
@@ -251,6 +258,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         let newSubmission = input.runwayID != nil && input.runwayID != runwayID && hasPositioned
         let presentationChanged = configurationID != input.configurationID
         configurationID = input.configurationID
+        hiddenRows = input.hiddenRows
         runwayID = input.runwayID
         expansionHeight = input.expansionHeight
         bottomSpacing = input.bottomSpacing
@@ -296,6 +304,16 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             }
         }
         updating = false
+        if let pending = pendingScroll {
+            let windowRow = pending.row - hiddenRows
+            if windowRow >= 0 && windowRow < rows.count {
+                pendingScroll = nil
+                super.scrollToRow(at: IndexPath(row: windowRow, section: 0),
+                                  at: pending.position, animated: false)
+            } else if hiddenRows == 0 {
+                pendingScroll = nil
+            }
+        }
         guard !rows.isEmpty, bounds.height > 0 else { return }
         if !hasPositioned {
             hasPositioned = true
@@ -443,6 +461,8 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         setContentOffset(contentOffset, animated: false)
         follow.userScrolling = false
         follow.userDragging = false
+        follow.resetRowLimit()
+        pendingScroll = nil
         cancelFollowAnimation()
         goToLatest(animated: animated)
     }
@@ -558,6 +578,65 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
             offset: contentOffset.y + contentInset.top, bottom: contentSize.height - contentOffset.y - bounds.height)
         follow.observe(old: lastGeometry, new: geometry)
         lastGeometry = geometry
+        // Reading into history: grow the tail window as the top edge nears.
+        if follow.userScrolling { scheduleTopGrowth() }
+    }
+
+    /// Grow the tail window once per pass, dispatched — never mutate row
+    /// state inside a layout pass.
+    private func scheduleTopGrowth() {
+        guard !topGrowScheduled, hiddenRows > 0,
+              contentOffset.y + contentInset.top < viewportHeight * 1.5 else { return }
+        topGrowScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.topGrowScheduled = false
+            guard self.hiddenRows > 0 else { return }
+            self.follow.growRowLimit(total: self.hiddenRows + self.rows.count)
+        }
+    }
+
+    /// A scroll target out of the window — grows until it lands.
+    private var pendingScroll: (row: Int, position: UITableView.ScrollPosition)?
+
+    /// Callers scroll in TABLE space; a path beyond `rows.count` is read as
+    /// TRANSCRIPT space (e.g. tests and deep links into history). Rows held
+    /// above the window first grow it, then the pending scroll lands in
+    /// `update` once the row materializes.
+    override func scrollToRow(at indexPath: IndexPath,
+                              at position: UITableView.ScrollPosition, animated: Bool) {
+        if indexPath.row < rows.count {
+            super.scrollToRow(at: indexPath, at: position, animated: animated)
+            return
+        }
+        let transcriptTotal = hiddenRows + rows.count
+        let transcriptIndex = min(indexPath.row, transcriptTotal - 1)
+        let windowRow = transcriptIndex - hiddenRows
+        if windowRow >= 0 {
+            super.scrollToRow(at: IndexPath(row: windowRow, section: 0),
+                              at: position, animated: animated)
+            return
+        }
+        guard transcriptTotal > 0 else { return }
+        pendingScroll = (transcriptIndex, position)
+        follow.revealRow(atTranscriptIndex: transcriptIndex, total: transcriptTotal)
+    }
+
+    /// Same table/transcript-space rule as scrollToRow for lookup APIs: a
+    /// path beyond `rows.count` is transcript space and maps into the window.
+    private func windowPath(_ indexPath: IndexPath) -> IndexPath {
+        guard indexPath.row >= rows.count, hiddenRows > 0 else { return indexPath }
+        let windowRow = indexPath.row - hiddenRows
+        guard windowRow >= 0, windowRow < rows.count else { return indexPath }
+        return IndexPath(row: windowRow, section: indexPath.section)
+    }
+
+    override func cellForRow(at indexPath: IndexPath) -> UITableViewCell? {
+        super.cellForRow(at: windowPath(indexPath))
+    }
+
+    override func rectForRow(at indexPath: IndexPath) -> CGRect {
+        super.rectForRow(at: windowPath(indexPath))
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -568,7 +647,10 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
 
     private func finishGesture() {
         follow.endGesture()
-        if follow.pinned { goToLatest(animated: false) }
+        if follow.pinned {
+            follow.resetRowLimit()
+            goToLatest(animated: false)
+        }
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
