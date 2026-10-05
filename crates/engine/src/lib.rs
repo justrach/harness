@@ -834,6 +834,9 @@ impl Engine {
             // burning attempts. No-op on platforms without a monitor.
             harness_sync::net_path::spawn_path_monitor();
         }
+        // A cloned sandbox data dir must not publish over the snapshot
+        // source's device row — bind BEFORE the device id is first read.
+        bind_device_to_cloud_sandbox(profile.device_root(), auth.cloud_sandbox_id().as_deref())?;
         let device_id = load_or_create_device_id(profile.device_root())?;
         let edge = edge_enabled.then(|| {
             EdgeConfig::new(config.edge_url.clone(), Arc::new(auth.clone())).with_device(device_id)
@@ -1343,6 +1346,70 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// Small same-directory write: temp file + rename, so readers never see a
+/// half-written identity file.
+fn write_small_file(data_dir: &Path, name: &str, contents: &str) -> Result<(), EngineError> {
+    let temp_path = data_dir.join(format!(".{name}.tmp-{}-{}", std::process::id(), new_id()));
+    std::fs::write(&temp_path, contents)?;
+    match std::fs::rename(&temp_path, data_dir.join(name)) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            // Windows refuses to rename over an existing file.
+            let _ = std::fs::remove_file(data_dir.join(name));
+            std::fs::rename(&temp_path, data_dir.join(name)).map_err(|_| first.into())
+        }
+    }
+}
+
+/// Bind the device identity to the verified cloud sandbox it belongs to.
+///
+/// Fleet workspace snapshots carry the Harness data dir, so a sandbox restored
+/// from a snapshot of sandbox A boots inside sandbox B with A's `device-id`
+/// and would publish over A's device row. `cloud-sandbox-id` records which
+/// sandbox this data dir last identified as:
+/// - `sandbox_id` `None`: not a sandbox, or the sign-in gave no id — never
+///   rotate on missing information.
+/// - file missing/empty: first boot or an upgrade from an older build — record
+///   the id, keep the device id.
+/// - file equal: normal pause/resume — nothing.
+/// - file different: cloned data dir — rotate `device-id` to a fresh id and
+///   record the new sandbox id.
+fn bind_device_to_cloud_sandbox(
+    data_dir: &Path,
+    sandbox_id: Option<&str>,
+) -> Result<(), EngineError> {
+    let Some(sandbox_id) = sandbox_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(data_dir)?;
+    // The same critical section `load_or_create_device_id` holds, so a racing
+    // engine sees either the old pair or the new pair, never a mix.
+    let _identity_lock = DeviceIdentityLock::acquire(data_dir)?;
+    let recorded = std::fs::read_to_string(data_dir.join("cloud-sandbox-id"))
+        .ok()
+        .map(|id| id.trim().to_string());
+    match recorded.as_deref() {
+        None | Some("") => write_small_file(data_dir, "cloud-sandbox-id", sandbox_id),
+        Some(id) if id == sandbox_id => Ok(()),
+        Some(previous) => {
+            let old_device = std::fs::read_to_string(data_dir.join("device-id"))
+                .ok()
+                .map(|id| id.trim().to_string());
+            let fresh = new_id();
+            write_small_file(data_dir, "device-id", &fresh)?;
+            write_small_file(data_dir, "cloud-sandbox-id", sandbox_id)?;
+            tracing::info!(
+                previous_sandbox = previous,
+                sandbox = sandbox_id,
+                old_device_id = ?old_device,
+                device_id = %fresh,
+                "cloned cloud sandbox data dir: rotated device identity"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Stable per-installation device id, persisted at `{data_dir}/device-id`.
 fn load_or_create_device_id(data_dir: &Path) -> Result<String, EngineError> {
     std::fs::create_dir_all(data_dir)?;
@@ -1482,5 +1549,67 @@ fn replace_empty_device_id(temp_path: &Path, path: &Path) -> std::io::Result<()>
             Err(err) => return Err(err),
         }
         std::fs::hard_link(temp_path, path)
+    }
+}
+
+#[cfg(test)]
+mod bind_device_tests {
+    use super::{bind_device_to_cloud_sandbox, load_or_create_device_id};
+
+    #[test]
+    fn first_bind_keeps_the_device_id_and_records_the_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = load_or_create_device_id(dir.path()).unwrap();
+        bind_device_to_cloud_sandbox(dir.path(), Some("cnd_a")).unwrap();
+        assert_eq!(load_or_create_device_id(dir.path()).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cloud-sandbox-id")).unwrap(),
+            "cnd_a"
+        );
+    }
+
+    #[test]
+    fn the_same_sandbox_id_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = load_or_create_device_id(dir.path()).unwrap();
+        bind_device_to_cloud_sandbox(dir.path(), Some("cnd_a")).unwrap();
+        bind_device_to_cloud_sandbox(dir.path(), Some("cnd_a")).unwrap();
+        assert_eq!(load_or_create_device_id(dir.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn a_cloned_data_dir_rotates_the_device_id() {
+        let source = tempfile::tempdir().unwrap();
+        let source_device = load_or_create_device_id(source.path()).unwrap();
+        bind_device_to_cloud_sandbox(source.path(), Some("cnd_a")).unwrap();
+        // Restore into a different sandbox: same data dir contents, new id.
+        let clone = tempfile::tempdir().unwrap();
+        for name in ["device-id", "cloud-sandbox-id"] {
+            std::fs::copy(source.path().join(name), clone.path().join(name)).unwrap();
+        }
+        bind_device_to_cloud_sandbox(clone.path(), Some("cnd_b")).unwrap();
+        let rotated = load_or_create_device_id(clone.path()).unwrap();
+        assert_ne!(rotated, source_device);
+        assert_eq!(
+            std::fs::read_to_string(clone.path().join("cloud-sandbox-id")).unwrap(),
+            "cnd_b"
+        );
+        // Binding again to the same sandbox keeps the rotated id.
+        bind_device_to_cloud_sandbox(clone.path(), Some("cnd_b")).unwrap();
+        assert_eq!(load_or_create_device_id(clone.path()).unwrap(), rotated);
+    }
+
+    #[test]
+    fn no_sandbox_id_leaves_both_files_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = load_or_create_device_id(dir.path()).unwrap();
+        std::fs::write(dir.path().join("cloud-sandbox-id"), "cnd_a").unwrap();
+        bind_device_to_cloud_sandbox(dir.path(), None).unwrap();
+        bind_device_to_cloud_sandbox(dir.path(), Some("   ")).unwrap();
+        assert_eq!(load_or_create_device_id(dir.path()).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cloud-sandbox-id")).unwrap(),
+            "cnd_a"
+        );
     }
 }

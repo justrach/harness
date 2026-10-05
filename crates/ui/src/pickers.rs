@@ -697,7 +697,11 @@ fn parse_cloud(value: &serde_json::Value) -> (bool, Vec<CloudSandbox>) {
     (enabled, sandboxes)
 }
 
-/// The id of the device a cloud sandbox registered, when it is online: matched by name, platform linux.
+/// The id of the device a cloud sandbox registered, when it is online. The
+/// exact `cloudSandboxId` link (the sandbox's engine stamped it from its
+/// verified sign-in) decides first; the pre-upgrade fallback is name +
+/// platform linux, and only a device carrying NO sandbox id may take it — a
+/// different `cloudSandboxId` can never hide behind the same name.
 fn online_cloud_device(
     devices: &[harness_proto::Device],
     sandbox: &CloudSandbox,
@@ -706,9 +710,16 @@ fn online_cloud_device(
     devices
         .iter()
         .find(|d| {
-            d.name == sandbox.device_name
-                && d.platform == "linux"
+            d.cloud_sandbox_id.as_deref() == Some(sandbox.id.as_str())
                 && crate::settings::devices::device_online(d.last_seen_at, now)
+        })
+        .or_else(|| {
+            devices.iter().find(|d| {
+                d.cloud_sandbox_id.is_none()
+                    && d.name == sandbox.device_name
+                    && d.platform == "linux"
+                    && crate::settings::devices::device_online(d.last_seen_at, now)
+            })
         })
         .map(|d| d.id.clone())
 }
@@ -8239,6 +8250,41 @@ mod tests {
             Some("d")
         );
         assert_eq!(online_cloud_device(&devices[..3], &sandbox, now), None);
+    }
+
+    #[test]
+    fn the_online_cloud_device_prefers_the_exact_sandbox_id() {
+        let now = chrono::Utc::now();
+        let sandbox = CloudSandbox {
+            id: "cnd_1".into(),
+            state: "started".into(),
+            device_name: "Harness cloud".into(),
+        };
+        // The exact link wins even under a different name.
+        let mut exact = device("d1", "anything", "linux", 5);
+        exact.cloud_sandbox_id = Some("cnd_1".into());
+        let mut collision = device("d2", "Harness cloud", "linux", 5);
+        collision.cloud_sandbox_id = Some("cnd_other".into());
+        let legacy = device("d3", "Harness cloud", "linux", 5);
+        let devices = [collision.clone(), legacy.clone(), exact.clone()];
+        assert_eq!(
+            online_cloud_device(&devices, &sandbox, now).as_deref(),
+            Some("d1")
+        );
+        // A name-carrying device bound to a different sandbox never
+        // satisfies the name fallback.
+        assert_eq!(online_cloud_device(&[collision], &sandbox, now), None);
+        // Legacy pre-upgrade device (no id at all) still name-matches.
+        assert_eq!(
+            online_cloud_device(&[legacy], &sandbox, now).as_deref(),
+            Some("d3")
+        );
+        // …which keeps the running sandbox's row hidden only when its
+        // own device is online.
+        assert_eq!(
+            cloud_row(&cloud_with("started"), &devices, now),
+            CloudRow::Hidden
+        );
     }
 }
 

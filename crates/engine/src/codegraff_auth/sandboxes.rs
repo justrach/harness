@@ -28,6 +28,9 @@ use super::{CodegraffAuth, http, urlencode};
 
 const FLEET: &str = "fleet";
 const SANDBOX_NAME: &str = "Harness cloud";
+/// The shared agent sandbox role: the gateway keeps at most one per account
+/// and returns it (instead of creating another) on repeat requests.
+const DEFAULT_ROLE: &str = "harness-default";
 /// Lease length requested at create. Fleet leases are fixed windows the
 /// gateway caps (30 min max, ~10 min on a plain resume) — activity does NOT
 /// extend them, and the sandbox pauses when the window ends.
@@ -59,6 +62,9 @@ pub struct CodegraffSandbox {
     pub harness: bool,
     /// The name its device registers under (remembered at create time).
     pub device_name: Option<String>,
+    /// Gateway-assigned role (`"harness-default"` for the shared agent
+    /// sandbox ensure reuses); absent on older rows.
+    pub role: Option<String>,
 }
 
 /// `enabled: false` means this build doesn't offer cloud sandboxes (the UI hides the card).
@@ -101,6 +107,7 @@ fn parse_sandbox(value: &Value) -> CodegraffSandbox {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         device_name: None,
+        role: text("/role"),
     }
 }
 
@@ -217,6 +224,20 @@ impl CodegraffAuth {
         body: Option<Value>,
         timeout: Duration,
     ) -> Result<Value, Failure> {
+        self.sandbox_call_status(method, path, body, timeout)
+            .await
+            .map(|(_, body)| body)
+    }
+
+    /// The same call with the HTTP status kept: `POST /v1/sandboxes` uses
+    /// 200 (existing default), 201 (created) and 202 (pending) deliberately.
+    async fn sandbox_call_status(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        timeout: Duration,
+    ) -> Result<(u16, Value), Failure> {
         let key = self
             .current_key()
             .ok_or_else(|| Failure::local("Sign in with Codegraff first"))?;
@@ -236,7 +257,7 @@ impl CodegraffAuth {
         let status = response.status();
         let body = response.json::<Value>().await.ok();
         if status.is_success() {
-            Ok(body.unwrap_or(Value::Null))
+            Ok((status.as_u16(), body.unwrap_or(Value::Null)))
         } else {
             Err(Failure {
                 status: status.as_u16(),
@@ -402,11 +423,16 @@ impl CodegraffAuth {
         Ok(())
     }
 
-    /// Usage for one sandbox, as the gateway sends it.
+    /// Usage for one sandbox, as the gateway sends it. 501 means the provider
+    /// can't report it — a fact about the sandbox, not a failure.
     pub async fn sandbox_meter(&self, id: &str) -> Result<Value, String> {
-        self.sandbox_call(Method::GET, &Self::sandbox_path(id, "/meter"), None, QUICK)
+        match self
+            .sandbox_call(Method::GET, &Self::sandbox_path(id, "/meter"), None, QUICK)
             .await
-            .map_err(|f| f.sentence("CodeGraff couldn't read the sandbox's usage"))
+        {
+            Err(f) if f.status == 501 => Ok(json!({ "supported": false })),
+            other => other.map_err(|f| f.sentence("CodeGraff couldn't read the sandbox's usage")),
+        }
     }
 
     /// Reuse or wake the account's Harness cloud sandbox and wait for its
@@ -454,7 +480,7 @@ impl CodegraffAuth {
         }
 
         // a. pick a live fleet sandbox — one a device already claims by exact
-        // id beats a running one, which beats a paused one.
+        // id beats the shared default, which beats running, then paused.
         let list = self
             .sandboxes()
             .await
@@ -469,52 +495,45 @@ impl CodegraffAuth {
         candidates.sort_by_key(|s| {
             if matched(&devices.borrow(), &s.id).is_some() {
                 0
+            } else if s.role.as_deref() == Some(DEFAULT_ROLE) {
+                1
             } else {
                 match s.state.as_str() {
-                    "running" => 1,
-                    "paused" => 2,
-                    _ => 3,
+                    "running" => 2,
+                    "paused" => 3,
+                    _ => 4,
                 }
             }
         });
 
-        let mut created = false;
-        let mut woke = false;
-        let mut expires_at;
-        let sandbox_id = match candidates.first() {
-            // b. nothing to reuse — creating is billed, so it is opt-in.
-            None if !allow_create => {
-                return Err(
-                    "No cloud sandbox on this account. Creating one adds billed compute; \
-                     call again with allowCreate: true to create it."
-                        .into(),
-                );
-            }
-            None => {
-                let made = self
-                    .create_sandbox()
-                    .await
-                    .map_err(|e| format!("boot: {e}"))?;
-                created = true;
-                expires_at = made.expires_at.clone();
-                made.id
-            }
-            Some(sandbox) => {
-                let id = sandbox.id.clone();
-                expires_at = sandbox.expires_at.clone();
-                // c. wake when paused; reattach Harness when it runs but its
-                // device has not yet reported this sandbox id (never on the
-                // already-online fast path — zero POSTs).
-                let needs_attach = matched(&devices.borrow(), &id).is_none_or(|d| !online(d));
-                if sandbox.state == "paused" || needs_attach {
-                    self.start_sandbox(&id)
-                        .await
-                        .map_err(|e| format!("setup: {e}"))?;
-                    woke = sandbox.state == "paused";
-                }
-                id
-            }
+        let deadline = tokio::time::Instant::now() + wait;
+
+        // b. nothing to reuse — creating is billed, so it is opt-in.
+        if candidates.is_empty() && !allow_create {
+            return Err(
+                "No cloud sandbox on this account. Creating one adds billed compute; \
+                 call again with allowCreate: true to create it."
+                    .into(),
+            );
+        }
+        let (chosen, created) = match candidates.first() {
+            None => self.create_default_sandbox(deadline).await?,
+            Some(sandbox) => ((**sandbox).clone(), false),
         };
+
+        // c. wake when paused; reattach Harness when it runs but its device
+        // has not yet reported this sandbox id (never on the already-online
+        // fast path — zero POSTs).
+        let sandbox_id = chosen.id.clone();
+        let mut expires_at = chosen.expires_at.clone();
+        let needs_attach = matched(&devices.borrow(), &sandbox_id).is_none_or(|d| !online(d));
+        let mut woke = false;
+        if chosen.state == "paused" || needs_attach {
+            self.start_sandbox(&sandbox_id)
+                .await
+                .map_err(|e| format!("setup: {e}"))?;
+            woke = chosen.state == "paused";
+        }
 
         // Cheap only when we changed something: the lease clock moved.
         if created || woke {
@@ -526,7 +545,6 @@ impl CodegraffAuth {
         }
 
         // d. wait for the device row carrying this exact sandbox id.
-        let deadline = tokio::time::Instant::now() + wait;
         loop {
             if let Some(device) = matched(&devices.borrow(), &sandbox_id).filter(|d| online(d)) {
                 return Ok(EnsuredSandbox {
@@ -574,6 +592,73 @@ impl CodegraffAuth {
             wait.as_secs(),
             name_match
         ))
+    }
+
+    /// Join or start the account's default agent sandbox — the only create
+    /// `ensure_sandbox` performs (the Settings card's `create_sandbox` stays
+    /// role-free and makes its own).
+    ///
+    /// `POST /v1/sandboxes {role: "harness-default"}` contract:
+    /// - 200 — the existing (possibly paused) default, untouched;
+    /// - 201 — a new default was created;
+    /// - 202 — creation is pending under a stable `operationId`; re-POST the
+    ///   SAME request to join it, never a differently-shaped one.
+    /// A gateway that does not know `role` simply answers 200/201 for a fresh
+    /// create, which lands in the same unified wake path.
+    ///
+    /// Returns the sandbox and whether it was created now (201).
+    async fn create_default_sandbox(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(CodegraffSandbox, bool), String> {
+        let body = json!({
+            "provider": FLEET,
+            "persistent": true,
+            "name": SANDBOX_NAME,
+            "autoStopMinutes": AUTO_STOP_MINUTES,
+            "role": DEFAULT_ROLE,
+        });
+        loop {
+            let (status, value) = self
+                .sandbox_call_status(Method::POST, "/v1/sandboxes", Some(body.clone()), BOOT)
+                .await
+                .map_err(|f| {
+                    format!(
+                        "boot: {}",
+                        f.sentence("CodeGraff couldn't create the sandbox")
+                    )
+                })?;
+            match status {
+                200 | 201 => {
+                    let sandbox = parse_sandbox(&value);
+                    if sandbox.id.is_empty() {
+                        return Err(
+                            "boot: CodeGraff created a sandbox but didn't say which one.".into(),
+                        );
+                    }
+                    return Ok((sandbox, status == 201));
+                }
+                202 => {
+                    let operation = value
+                        .get("operationId")
+                        .or_else(|| value.get("operation_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let Some(remaining) =
+                        deadline.checked_duration_since(tokio::time::Instant::now())
+                    else {
+                        return Err(format!(
+                            "boot: the default sandbox is still being created (operation \
+                             {operation}); call ensure_sandbox again to join it"
+                        ));
+                    };
+                    tokio::time::sleep(remaining.min(Duration::from_secs(2))).await;
+                }
+                other => {
+                    return Err(format!("boot: unexpected {other} creating the sandbox."));
+                }
+            }
+        }
     }
 }
 
@@ -1297,6 +1382,11 @@ mod tests {
                 201,
                 r#"{"id":"cnd_new","provider":"fleet","state":"started","expiresAt":1790000000}"#,
             ),
+            (
+                "GET /v1/sandboxes/cnd_new ",
+                200,
+                r#"{"id":"cnd_new","state":"started"}"#,
+            ),
             ("POST /v1/sandboxes/cnd_new/harness ", 200, r#"{}"#),
             (
                 "GET /v1/sandboxes ",
@@ -1335,14 +1425,19 @@ mod tests {
                 201,
                 r#"{"id":"cnd_1","provider":"fleet","state":"started"}"#,
             ),
+            (
+                "GET /v1/sandboxes/cnd_1 ",
+                200,
+                r#"{"id":"cnd_1","state":"started"}"#,
+            ),
             ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
-            // The second ensure's list, after the first created the sandbox.
+            // The first ensure's refresh after creating.
             (
                 "GET /v1/sandboxes ",
                 200,
                 r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started"}]}"#,
             ),
-            // The first ensure's refresh after creating.
+            // The second ensure's list, after the first created the sandbox.
             (
                 "GET /v1/sandboxes ",
                 200,
@@ -1412,5 +1507,145 @@ mod tests {
             "{:?}",
             posts(&seen)
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_joins_a_pending_default_and_reports_created() {
+        let (gateway, seen) = fake(vec![
+            ("GET /v1/sandboxes ", 200, r#"{"sandboxes":[]}"#),
+            (
+                "POST /v1/sandboxes ",
+                202,
+                r#"{"operationId":"op_9","state":"pending"}"#,
+            ),
+            (
+                "POST /v1/sandboxes ",
+                202,
+                r#"{"operationId":"op_9","state":"pending"}"#,
+            ),
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_1","provider":"fleet","state":"started","role":"harness-default"}"#,
+            ),
+            ("GET /v1/sandboxes/cnd_1 ", 200, r#"{"id":"cnd_1","state":"started"}"#),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started","role":"harness-default"}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(true, Duration::from_secs(30), devices)
+            .await
+            .unwrap();
+        assert!(ensured.created && !ensured.woke);
+        assert_eq!(ensured.sandbox_id, "cnd_1");
+        // Every retry is the SAME role request — never a differently-shaped one.
+        let creates: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.starts_with("POST /v1/sandboxes "))
+            .cloned()
+            .collect();
+        assert_eq!(creates.len(), 3, "{creates:?}");
+        for request in &creates {
+            assert!(request.contains(r#""role":"harness-default""#), "{request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_wakes_a_returned_default_without_creating() {
+        let (gateway, seen) = fake(vec![
+            ("GET /v1/sandboxes ", 200, r#"{"sandboxes":[]}"#),
+            // 200: the account's paused default, returned without waking it.
+            (
+                "POST /v1/sandboxes ",
+                200,
+                r#"{"id":"cnd_1","provider":"fleet","state":"paused","role":"harness-default"}"#,
+            ),
+            ("GET /v1/sandboxes/cnd_1 ", 200, r#"{"id":"cnd_1","state":"paused"}"#),
+            ("POST /v1/sandboxes/cnd_1/start ", 200, r#"{"state":"started"}"#),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started","expiresAt":1790001234,"role":"harness-default"}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(true, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert!(!ensured.created && ensured.woke);
+        assert_eq!(ensured.expires_at, Some(json!(1790001234)));
+        let posts = posts(&seen);
+        assert!(
+            posts.iter().any(|l| l == "POST /v1/sandboxes/cnd_1/start")
+                && posts
+                    .iter()
+                    .any(|l| l == "POST /v1/sandboxes/cnd_1/harness"),
+            "{posts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_reports_a_still_pending_default_at_the_deadline() {
+        let (gateway, seen) = fake(vec![
+            ("GET /v1/sandboxes ", 200, r#"{"sandboxes":[]}"#),
+            (
+                "POST /v1/sandboxes ",
+                202,
+                r#"{"operationId":"op_7","state":"pending"}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let error = auth
+            .ensure_sandbox(true, Duration::from_millis(100), device_watch(vec![]))
+            .await
+            .unwrap_err();
+        assert!(error.contains("still being created"), "{error}");
+        assert!(error.contains("op_7"), "{error}");
+        // Only same-role retries — never /start or /harness on nothing.
+        for line in posts(&seen) {
+            assert_eq!(line, "POST /v1/sandboxes");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_meter_the_provider_cannot_report_is_unsupported_not_an_error() {
+        let (gateway, _seen) = fake(vec![(
+            "GET /v1/sandboxes/cnd_1/meter ",
+            501,
+            r#"{"error":{"type":"not_implemented","message":"no meter"}}"#,
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        let meter = auth.sandbox_meter("cnd_1").await.unwrap();
+        assert_eq!(meter, json!({ "supported": false }));
     }
 }

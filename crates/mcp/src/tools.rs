@@ -527,6 +527,7 @@ impl Tools {
                 json!({
                     "id": id,
                     "state": s.get("state").cloned().unwrap_or(Value::Null),
+                    "role": s.get("role").cloned().unwrap_or(Value::Null),
                     "expiresAt": s.get("expiresAt").cloned().unwrap_or(Value::Null),
                     "deviceId": device.map(|d| d.id.clone()),
                     "online": device.is_some_and(|d| online(d)),
