@@ -157,8 +157,8 @@ cloud, CI and network) if it meets **any one** of these:
 - its gross revenue was more than **US$100k** in its last fiscal year or any
   12-month period.
 
-A company that crosses a line must contact us within 5 working days. Individuals, and
-organizations that meet none of these, use Harness under the AGPL. Versions up
+A company that crosses a line must contact us within 5 working days. Individuals always use Harness under the AGPL, whatever they earn,
+and so do organizations that meet none of these tests. Versions up
 to v0.2.108 keep the license they shipped with. Unsure? Treat yourself as
 covered and get in touch.
 Contact [rach@standardharness.com](mailto:rach@standardharness.com).
