@@ -1781,6 +1781,38 @@ pub fn rows_for_entry(
                             },
                         });
                     }
+                    MessagePart::Delegation { id: part_id, info } => {
+                        // Render as task diagnostics, not as assistant reply
+                        // text. Escape runner-supplied reasons as plain text.
+                        let caption = info.caption();
+                        let mut text = String::with_capacity(caption.len());
+                        for ch in caption.chars() {
+                            if matches!(
+                                ch,
+                                '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '!'
+                            ) {
+                                text.push('\\');
+                            }
+                            text.push(ch);
+                        }
+                        let key = format!("{}#{}", entry.id, part_id);
+                        let tree = parse(&key, &text);
+                        for block_ix in 0..tree.blocks.len() {
+                            rows.push(Row {
+                                id: format!("{key}.{block_ix}").into(),
+                                version: fnv1a(text.as_bytes()),
+                                turn_start: false,
+                                entry_id: entry_id.clone(),
+                                timestamp: None,
+                                copy_text: None,
+                                compact_fold: None,
+                                kind: RowKind::Markdown {
+                                    tree: tree.clone(),
+                                    block_ix,
+                                },
+                            });
+                        }
+                    }
                     MessagePart::Input {
                         id: part_id,
                         questions,
@@ -12625,6 +12657,42 @@ mod tests {
                 this.refresh_protected_attachments(cx);
             });
         });
+    }
+
+    #[test]
+    fn delegation_diagnostics_render_without_becoming_an_answer_or_zero_charge() {
+        let info = harness_proto::DelegationInfo {
+            context_bytes: 32768,
+            used_bytes: 4096,
+            summarized: true,
+            usage_reported: false,
+            usage_unavailable_reason: Some("Print mode exposes no settled charge.".into()),
+        };
+        let caption = info.caption();
+        assert!(caption.contains("32768 bytes supplied → 4096 bytes used (summarized)"));
+        assert!(caption.contains("no settled charge"));
+        assert!(!caption.contains("$0"));
+        let entry = assistant(
+            "a",
+            MessageStatus::Complete,
+            vec![
+                tool_part("task-1", "run_task"),
+                MessagePart::Delegation {
+                    id: "delegation:task-1".into(),
+                    info,
+                },
+                text_part("answer", "Actual answer"),
+            ],
+        );
+        for compact in [false, true] {
+            let rows = rows_for_entry(&entry, false, compact, &mut parse);
+            assert!(rows.iter().any(|r| r.id.starts_with("a#delegation:task-1")
+                && matches!(r.kind, RowKind::Markdown { .. })));
+            assert_eq!(
+                assistant_copy_text(&entry).unwrap().as_ref(),
+                "Actual answer"
+            );
+        }
     }
 
     #[test]

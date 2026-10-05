@@ -1363,6 +1363,189 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn dismiss_input_cancels_without_answering_and_rejects_stale_requests() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    struct AskingHarness {
+        runs: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl Harness for AskingHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Asking"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> SteeringMode {
+            SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _: RunRequest,
+            controls: RunControls,
+        ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let cancelled = self.cancelled.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let answer = (controls.request_input)(vec![harness_proto::UserInputQuestion {
+                    id: "q1".into(),
+                    header: "Publish".into(),
+                    question: "Publish this change?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    multi_select: false,
+                }])
+                .await;
+                cancelled.store(answer.is_err(), Ordering::SeqCst);
+                controls.interrupt.cancelled().await;
+                drop(tx);
+            });
+            Ok(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            })
+            .boxed())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let core = assemble(
+        dir.path(),
+        Arc::new(AskingHarness {
+            runs: runs.clone(),
+            cancelled: cancelled.clone(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "run-dismiss",
+        SessionCommandPayload::Run {
+            request: run_request("ask before publishing"),
+            message_id: "m-dismiss".into(),
+        },
+    );
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|entry| {
+                entry.parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "pending question",
+    )
+    .await;
+    let request_id = entries(&core)
+        .iter()
+        .find_map(|entry| {
+            entry.parts.iter().find_map(|part| match part {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "dismiss-wrong",
+        SessionCommandPayload::DismissInput {
+            request_id: "wrong-request".into(),
+        },
+    );
+    wait_for(
+        || {
+            command_status(&core, "dismiss-wrong")
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Rejected)
+        },
+        "wrong dismissal rejected",
+    )
+    .await;
+    assert!(!cancelled.load(Ordering::SeqCst));
+    assert_eq!(
+        core.sessions.session_status(CHAT).unwrap().status,
+        SessionStatus::AwaitingInput
+    );
+
+    queue_as_viewer(
+        handle.doc(),
+        "dismiss-right",
+        SessionCommandPayload::DismissInput {
+            request_id: request_id.clone(),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|row| row.status) == Some(SessionStatus::Idle),
+        "dismissed turn settled",
+    )
+    .await;
+    wait_for(
+        || cancelled.load(Ordering::SeqCst),
+        "resolver cancelled rather than answered",
+    )
+    .await;
+    assert!(
+        entries(&core)
+            .iter()
+            .all(|entry| entry.parts.iter().all(|part| {
+                !matches!(
+                    part,
+                    MessagePart::Input {
+                        resolved: false,
+                        ..
+                    }
+                )
+            }))
+    );
+    assert!(
+        entries(&core)
+            .iter()
+            .any(|entry| entry.status == Some(MessageStatus::Aborted))
+    );
+    assert_eq!(
+        command_status(&core, "dismiss-right"),
+        Some((SessionCommandStatus::Applied, None))
+    );
+    queue_as_viewer(
+        handle.doc(),
+        "dismiss-again",
+        SessionCommandPayload::DismissInput { request_id },
+    );
+    wait_for(
+        || {
+            command_status(&core, "dismiss-again")
+                .is_some_and(|(status, _)| status == SessionCommandStatus::Rejected)
+        },
+        "duplicate dismissal rejected",
+    )
+    .await;
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "dismissal must never replay a prompt or start a turn"
+    );
+}
+
 /// Resilience: interrupting a run that is BLOCKED on a question unparks the
 /// harness immediately (the pending resolver is failed with empty answers),
 /// the entry settles `aborted`, the chip flips terminal (never dangles

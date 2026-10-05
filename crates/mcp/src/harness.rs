@@ -432,6 +432,38 @@ impl Harness {
         expect_turn: bool,
         timeout: Duration,
     ) -> anyhow::Result<(TurnOutcome, Option<Session>)> {
+        if timeout.is_zero() {
+            // Agent callers get one bounded RPC snapshot, not a wait that
+            // parks their own conversation behind the recipient's work.
+            let session = session_for(&self.sessions().await?, chat);
+            let outcome = match session.as_ref() {
+                None if !expect_turn => TurnOutcome::Completed,
+                Some(row)
+                    if !expect_turn
+                        || baseline.is_none_or(|b| {
+                            row.updated_at > b.updated_at
+                                || row.last_completed_turn != b.last_completed_turn
+                        }) =>
+                {
+                    match row.status {
+                        SessionStatus::AwaitingInput => TurnOutcome::AwaitingInput,
+                        SessionStatus::Errored => TurnOutcome::Errored,
+                        SessionStatus::Idle
+                            if !expect_turn
+                                || row.last_completed_turn.is_some()
+                                    && baseline.is_none_or(|b| {
+                                        b.last_completed_turn != row.last_completed_turn
+                                    }) =>
+                        {
+                            TurnOutcome::Completed
+                        }
+                        _ => TurnOutcome::TimedOut,
+                    }
+                }
+                _ => TurnOutcome::TimedOut,
+            };
+            return Ok((outcome, session));
+        }
         let deadline = Instant::now() + timeout;
         let mut saw_working = false;
         let mut last: Option<Session> = baseline.cloned();

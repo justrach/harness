@@ -421,7 +421,8 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             // result inline instead of a follow-up update.
             if let Some(resolved) = resolved_result(update, id.clone()) {
                 events.push(resolved);
-                events.extend(tool_view(update, id));
+                events.extend(tool_view(update, id.clone()));
+                events.extend(tool_delegation(update, id));
             }
             events
         }
@@ -444,7 +445,8 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
             }
             if let Some(resolved) = resolved_result(update, id.clone()) {
                 events.push(resolved);
-                events.extend(tool_view(update, id));
+                events.extend(tool_view(update, id.clone()));
+                events.extend(tool_delegation(update, id));
             } else if let Some(output) = tool_output(update) {
                 // Content with no terminal status: the tool is still running
                 // and this is its live output (graff streams a subagent's
@@ -562,6 +564,30 @@ fn tool_view(update: &Value, id: String) -> Option<AgentEvent> {
     Some(AgentEvent::ToolView { id, view })
 }
 
+/// Graff's MCP diagnostics forwarded on the completed ACP update. Whitelist
+/// scalars only: neither the answer nor the caller's context enters the doc.
+fn tool_delegation(update: &Value, id: String) -> Option<AgentEvent> {
+    let meta = update.pointer("/_meta/codegraff~1runTask")?;
+    let usage_reported = meta.get("usage_reported")?.as_bool()?;
+    Some(AgentEvent::DelegationInfo {
+        id,
+        info: harness_proto::DelegationInfo {
+            context_bytes: meta.get("context_chars")?.as_u64()?,
+            used_bytes: meta.get("context_used_chars")?.as_u64()?,
+            summarized: meta.get("context_summarized")?.as_bool()?,
+            usage_reported,
+            usage_unavailable_reason: if usage_reported {
+                None
+            } else {
+                meta.get("usage_unavailable_reason")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| cap_text(s, 512))
+            },
+        },
+    })
+}
+
 /// Decode an `availableCommands` array (`{name, description, input: {hint}}`).
 pub(crate) fn parse_commands(value: Option<&Value>) -> Vec<SlashCommand> {
     value
@@ -604,6 +630,81 @@ mod tests {
     use super::*;
     use harness_proto::ReasoningLevel;
     use serde_json::json;
+
+    #[test]
+    fn run_task_context_metadata_is_bounded_and_never_billing_usage() {
+        let input = json!({"prompt":"Task", "context":"Reference only", "model":"existing-choice"});
+        let opening = map_update(&json!({
+            "sessionUpdate":"tool_call", "toolCallId":"task-1", "title":"run_task",
+            "kind":"other", "rawInput":input,
+        }));
+        assert!(
+            matches!(&opening[0], AgentEvent::ToolCall { call: ToolCall::Unknown { input: Some(raw), .. }, .. } if raw == &input)
+        );
+        let mut update = json!({
+            "sessionUpdate":"tool_call_update", "toolCallId":"task-1", "status":"completed",
+            "content":[{"type":"content", "content":{"type":"text","text":"Task answer"}}],
+            "_meta":{
+                "graff/view":{"kind":"html","id":"0123456789abcdef0123456789abcdef"},
+                "codegraff/runTask":{
+                    "context_chars":32768, "context_used_chars":4096, "context_summarized":true,
+                    "usage_reported":false, "usage_unavailable_reason":"Print mode exposes no settled charge.",
+                    "text":"Task answer", "context":"private-reference", "cost_usd":99.0,
+                },
+            },
+        });
+        let events = map_update(&update);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolView { .. }))
+        );
+        let info = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::DelegationInfo { id, info } => {
+                    assert_eq!(id, "task-1");
+                    Some(info)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(info.context_bytes, 32768);
+        assert_eq!(info.used_bytes, 4096);
+        assert!(info.summarized);
+        assert!(!info.usage_reported);
+        let stored = serde_json::to_string(info).unwrap();
+        assert!(!stored.contains("private-reference"));
+        assert!(!stored.contains("Task answer"));
+        assert!(!stored.contains("cost_usd"));
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Usage { .. } | AgentEvent::ContextUsage { .. }
+        )));
+        update["_meta"]["codegraff/runTask"]["usage_unavailable_reason"] = json!("é".repeat(1000));
+        let events = map_update(&update);
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::DelegationInfo { info, .. } => info.usage_unavailable_reason.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        assert!(reason.len() < 550);
+        update["_meta"]["codegraff/runTask"]["context_chars"] = json!(-1);
+        assert!(
+            !map_update(&update)
+                .iter()
+                .any(|e| matches!(e, AgentEvent::DelegationInfo { .. }))
+        );
+        update["_meta"]["codegraff/runTask"]["context_chars"] = json!(0);
+        update["status"] = json!("in_progress");
+        assert!(
+            !map_update(&update)
+                .iter()
+                .any(|e| matches!(e, AgentEvent::DelegationInfo { .. }))
+        );
+    }
 
     #[test]
     fn message_and_thought_chunks_map_to_deltas() {

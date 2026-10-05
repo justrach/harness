@@ -507,6 +507,12 @@ pub enum AgentEvent {
         id: String,
         view: ToolView,
     },
+    /// Completed delegated-task diagnostics. Counts are bytes, not parent
+    /// context tokens; this event never adds a charge to account totals.
+    DelegationInfo {
+        id: String,
+        info: crate::DelegationInfo,
+    },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
     #[serde(rename_all = "camelCase")]
