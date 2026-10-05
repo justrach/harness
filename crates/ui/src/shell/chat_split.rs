@@ -897,14 +897,14 @@ impl Shell {
             )
             // Ghostty dims unfocused splits.
             .child(div().flex_1().min_h_0().flex().flex_col().opacity(0.8).child(body))
-            // Focus on release, not press: focusing swaps which transcript
-            // draws this chat, so doing it on press threw away a text drag
-            // the moment it started (text in an unfocused pane couldn't be
-            // selected at all).
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.release_on_peer_pane(ix, window, cx)),
-            )
+            // Focus on release so text drags retain their transcript. Capture
+            // first so thought-process and other controls cannot swallow the
+            // activation; leave propagation intact for their own interactions.
+            .capture_any_mouse_up(cx.listener(move |this, event: &gpui::MouseUpEvent, window, cx| {
+                if event.button == gpui::MouseButton::Left {
+                    this.release_on_peer_pane(ix, window, cx);
+                }
+            }))
             .into_any_element()
     }
 }
