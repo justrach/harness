@@ -1326,6 +1326,24 @@ enum UpdateFlow {
     Failed(SharedString),
 }
 
+/// Whether a fresh `UpdateStatus` should kick off a background download:
+/// desktop install, enabled, not already in flight or staged, and not a
+/// version whose download already failed — a `Failed` flow for an older
+/// version retries a newer one on its own; a click still retries the same.
+fn should_auto_download(
+    status: &harness_update::UpdateStatus,
+    flow: &UpdateFlow,
+    desktop_update: bool,
+    enabled: bool,
+    failed: Option<&str>,
+) -> bool {
+    status.update_available
+        && desktop_update
+        && enabled
+        && !matches!(flow, UpdateFlow::Downloading | UpdateFlow::Ready(_))
+        && !failed.is_some_and(|v| status.latest_version.as_deref() == Some(v))
+}
+
 /// Account lifecycle owned by this process. Sign-in on a local workspace
 /// flows through the in-place switch wizard (offer → switch → import → done);
 /// `RestartPending` survives only as the fallback when the in-place swap
@@ -1872,6 +1890,9 @@ pub struct Shell {
     /// download/stage of it has come in this process.
     update_flow: UpdateFlow,
     update_task: Option<Task<()>>,
+    /// The version whose automatic download already failed in this process —
+    /// blocks a retry loop; a newer version is attempted afresh.
+    auto_download_failed: Option<String>,
     /// Latest graff engine lifecycle notice from the background updater's
     /// watch channel — rendered as a bottom-right card until dismissed.
     graff_notice: Option<harness_adapters::graff_bundle::GraffNotice>,
@@ -2309,6 +2330,7 @@ impl Shell {
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
+            auto_download_failed: None,
             graff_notice: None,
             graff_notice_updating: false,
             graff_notice_error: None,
@@ -2439,6 +2461,7 @@ impl Shell {
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
         self.chat_split_on_state_changed(cx);
+        self.maybe_auto_download_update(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
@@ -4008,6 +4031,22 @@ impl Shell {
 
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::Quit, cx)
+    }
+
+    /// Swap a staged update over the install on the way out — no relaunch,
+    /// the next launch runs the new version. Runs only once every window
+    /// agreed to quit (a per-window call could install before another
+    /// window's unsaved files cancel the quit). Take the flow so it can't
+    /// run twice, and never let a failed swap block the quit.
+    pub(crate) fn install_staged_update_on_quit(&mut self) {
+        if harness_update::desktop_auto_update_enabled()
+            && let UpdateFlow::Ready(staged) =
+                std::mem::replace(&mut self.update_flow, UpdateFlow::Idle)
+        {
+            if let Err(err) = self.install.install_on_exit(&staged) {
+                tracing::error!(error = %err, "install on quit failed");
+            }
+        }
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
@@ -7780,7 +7819,16 @@ impl Shell {
             match &self.update_flow {
                 UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
                 UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
-                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
+                UpdateFlow::Ready(_) => {
+                    if harness_update::desktop_auto_update_enabled() {
+                        (
+                            "Update ready — restart now or it installs on quit".into(),
+                            true,
+                        )
+                    } else {
+                        ("Update ready — restart to apply".into(), true)
+                    }
+                }
                 UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
             }
         } else {
@@ -8039,6 +8087,22 @@ impl Shell {
         }
     }
 
+    /// Auto-download once an update is reported: staging is idempotent, so a
+    /// failed attempt is remembered by version and never retried on its own.
+    fn maybe_auto_download_update(&mut self, cx: &mut Context<Self>) {
+        let status = self.state.read(cx).update.clone();
+        let Some(status) = status else { return };
+        if should_auto_download(
+            &status,
+            &self.update_flow,
+            self.install.supports_desktop_update(),
+            harness_update::desktop_auto_update_enabled(),
+            self.auto_download_failed.as_deref(),
+        ) {
+            self.begin_update_download(cx);
+        }
+    }
+
     /// Fetch the manifest and stage the new Harness desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
@@ -8061,6 +8125,14 @@ impl Shell {
                     Ok(staged) => UpdateFlow::Ready(staged),
                     Err(message) => {
                         tracing::warn!(%message, "update download failed");
+                        // Remember the version so the auto-download doesn't
+                        // retry in a loop; a newer version starts over.
+                        shell.auto_download_failed = shell
+                            .state
+                            .read(cx)
+                            .update
+                            .as_ref()
+                            .and_then(|status| status.latest_version.clone());
                         UpdateFlow::Failed(message.into())
                     }
                 };
@@ -12282,6 +12354,89 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_download_only_starts_when_idle_enabled_and_not_previously_failed() {
+        let status = |latest: Option<&str>| harness_update::UpdateStatus {
+            current_version: "1.0.0".into(),
+            latest_version: latest.map(str::to_owned),
+            update_available: true,
+            checked_at: None,
+            error: None,
+        };
+        let available = status(Some("1.1.0"));
+        assert!(should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            None
+        ));
+
+        // Nothing to fetch.
+        let mut quiet = available.clone();
+        quiet.update_available = false;
+        assert!(!should_auto_download(
+            &quiet,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            None
+        ));
+        // Report-only install, and the off switch.
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            false,
+            true,
+            None
+        ));
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            true,
+            false,
+            None
+        ));
+        // In flight or staged — the strip owns the flow now.
+        for flow in [
+            UpdateFlow::Downloading,
+            UpdateFlow::Ready(PathBuf::from("/tmp/staged")),
+        ] {
+            assert!(!should_auto_download(&available, &flow, true, true, None));
+        }
+        // A Failed flow for the same version still doesn't retry on its own.
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Failed("boom".into()),
+            true,
+            true,
+            Some("1.1.0")
+        ));
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            Some("1.1.0")
+        ));
+        // …but a newer version retries, from Idle or from Failed.
+        let newer = status(Some("1.2.0"));
+        assert!(should_auto_download(
+            &newer,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            Some("1.1.0")
+        ));
+        assert!(should_auto_download(
+            &newer,
+            &UpdateFlow::Failed("boom".into()),
+            true,
+            true,
+            Some("1.1.0")
+        ));
+    }
 
     fn chat_with_path(cwd: Option<&str>, source: Option<(&str, &str)>) -> harness_proto::Chat {
         harness_proto::Chat {

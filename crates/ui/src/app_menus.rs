@@ -95,6 +95,16 @@ fn prepare_quit(cx: &mut App) {
         }
     }
     if ready {
+        // Every window agreed: install staged updates now, not inside each
+        // prepare_quit — a window that installs before another window vetoes
+        // the quit would leave the running app on a replaced bundle.
+        for window in cx.windows() {
+            if let Some(window) = window.downcast::<shell::Shell>() {
+                let _ = window.update(cx, |shell, _, _| {
+                    shell.install_staged_update_on_quit();
+                });
+            }
+        }
         quit_after_save(cx);
     }
 }
