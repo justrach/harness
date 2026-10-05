@@ -185,7 +185,7 @@ impl Shell {
         true
     }
 
-    /// `+` in the titlebar: open the new-session canvas. A set sidebar filter
+    /// The new-session action: open the canvas in place. A set sidebar filter
     /// re-homes the canvas onto that project; under "All" the current pick
     /// (the last selected project, restored from composer defaults) stands.
     ///
