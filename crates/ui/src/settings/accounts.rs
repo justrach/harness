@@ -1659,7 +1659,22 @@ impl AccountsPage {
     /// The new ChatGPT route is separate from legacy Codex and remains
     /// available even if an account-list probe fails. Stored credentials are
     /// not evidence that a token is valid; sign-in can always be requested.
+    /// The row reflects the same credential listing as the other graff rows,
+    /// so a completed sign-in (which reloads that listing) shows up here.
     fn render_chatgpt_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let signed_in = match &self.graff_logins {
+            Loadable::Ready(providers) => providers
+                .iter()
+                .any(|provider| provider.id == "chatgpt-new" && provider.signed_in),
+            _ => false,
+        };
+        let status = match &self.graff_logins {
+            Loadable::Ready(_) if signed_in => {
+                "Signed in on this device · separate from Codex · token validity checked when used"
+            }
+            Loadable::Ready(_) => "Not signed in · separate from Codex · graff login chatgpt-new",
+            _ => "Separate from Codex · graff login chatgpt-new · token validity checked when used",
+        };
         div()
             .mt(px(24.0))
             .flex()
@@ -1683,8 +1698,8 @@ impl AccountsPage {
                         1000,
                         Some("chatgpt-new"),
                         "ChatGPT (graff)",
-                        "Separate from Codex · graff login chatgpt-new · token validity checked when used".into(),
-                        false,
+                        status.into(),
+                        signed_in,
                         theme,
                         cx,
                     )),
