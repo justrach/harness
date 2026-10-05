@@ -1663,6 +1663,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_wakes_a_freshly_created_default_that_came_back_paused() {
+        // A recovered creation can answer 201 already paused — the unified
+        // wake path must not trust "created" to mean running.
+        let (gateway, seen) = fake(vec![
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_1","provider":"fleet","state":"paused","reused":false}"#,
+            ),
+            (
+                "GET /v1/sandboxes/cnd_1 ",
+                200,
+                r#"{"id":"cnd_1","state":"paused"}"#,
+            ),
+            (
+                "POST /v1/sandboxes/cnd_1/start ",
+                200,
+                r#"{"state":"started"}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started"}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(true, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert!(ensured.created && ensured.woke);
+        assert_eq!(ensured.sandbox_id, "cnd_1");
+        let posts = posts(&seen);
+        assert_eq!(
+            posts,
+            vec![
+                "POST /v1/sandboxes".to_string(),
+                "POST /v1/sandboxes/cnd_1/start".to_string(),
+                "POST /v1/sandboxes/cnd_1/harness".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_meter_the_provider_cannot_report_is_unsupported_not_an_error() {
         let (gateway, _seen) = fake(vec![(
             "GET /v1/sandboxes/cnd_1/meter ",
