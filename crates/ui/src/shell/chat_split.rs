@@ -931,8 +931,8 @@ fn space_label(space: &harness_proto::Space) -> String {
 
 impl Shell {
     /// A strip of mini cards mirroring the split above the session list:
-    /// each shows its pane's session and workspace (project), the focused
-    /// one lit. Click a card to move into that pane. Hovering the strip eases
+    /// each shows its pane's session, with the focused one lit.
+    /// Click a card to move into that pane. Hovering the strip eases
     /// open a preview of the hovered card's conversation underneath.
     pub(super) fn render_pane_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let split = self
@@ -944,7 +944,6 @@ impl Shell {
         let t = motion::reveal_t(STRIP_REVEAL_KEY);
         struct Card {
             title: SharedString,
-            project: SharedString,
             harness: Option<harness_proto::HarnessId>,
         }
         let (cards, preview) = {
@@ -959,33 +958,27 @@ impl Shell {
             };
             let cards: Vec<Card> = (0..len)
                 .map(|ix| {
-                    // The focused pane's workspace is the live sidebar filter.
-                    let project = if ix == split.focus {
-                        self.settings.space_filter.clone()
-                    } else {
-                        split.projects.get(ix).cloned().flatten()
-                    };
-                    let chat = pane_chat(ix)
-                        .and_then(|id| state.chats.iter().find(|c| c.id == id));
+                    let chat = pane_chat(ix).and_then(|id| state.chats.iter().find(|c| c.id == id));
                     let harness = if let Some(chat) = chat {
                         chat.config.as_ref().map(|config| config.harness)
                     } else if ix == split.focus {
                         self.current_canvas_draft(cx).harness
                     } else {
-                        split.drafts.get(ix).and_then(|draft| draft.as_ref())
+                        split
+                            .drafts
+                            .get(ix)
+                            .and_then(|draft| draft.as_ref())
                             .and_then(|draft| draft.harness)
                     };
                     Card {
                         harness,
                         title: chat
-                            .map(|c| transcript::single_line(&c.title.clone().unwrap_or_else(|| "Untitled".into())))
+                            .map(|c| {
+                                transcript::single_line(
+                                    &c.title.clone().unwrap_or_else(|| "Untitled".into()),
+                                )
+                            })
                             .unwrap_or_else(|| "New session".into())
-                            .into(),
-                        project: project
-                            .as_deref()
-                            .and_then(|id| state.spaces.iter().find(|s| s.id == id))
-                            .map(space_label)
-                            .unwrap_or_else(|| "All projects".into())
                             .into(),
                     }
                 })
@@ -1057,15 +1050,6 @@ impl Shell {
                                     .text_color(if focused { theme.text } else { theme.text_muted })
                                     .child(card.title),
                             ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(2.0))
-                            .pl(px(16.0))
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted.opacity(0.75))
-                            .child(card.project),
                     )
                     .into_any_element(),
             );

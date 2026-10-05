@@ -330,6 +330,48 @@ struct MessageEntry: Identifiable, Hashable {
     var deviceId: String
     var status: MessageStatus?
     var continuationOf: String?
+    /// Decode-generation marker, NOT content: a fresh value every time the
+    /// entry is (re)built lets the transcript row cache rebuild only the
+    /// entries a doc update actually touched. Excluded from ==/hash so a
+    /// cached projection still compares equal to a whole-doc decode.
+    var stamp: UInt64
+
+    init(id: String, role: MessageRole, parts: [MessagePart], createdAt: Int64,
+         deviceId: String, status: MessageStatus? = nil, continuationOf: String? = nil) {
+        self.id = id
+        self.role = role
+        self.parts = parts
+        self.createdAt = createdAt
+        self.deviceId = deviceId
+        self.status = status
+        self.continuationOf = continuationOf
+        self.stamp = Self.nextStamp()
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id && lhs.role == rhs.role && lhs.parts == rhs.parts
+            && lhs.createdAt == rhs.createdAt && lhs.deviceId == rhs.deviceId
+            && lhs.status == rhs.status && lhs.continuationOf == rhs.continuationOf
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(role)
+        hasher.combine(parts)
+        hasher.combine(createdAt)
+        hasher.combine(deviceId)
+        hasher.combine(status)
+        hasher.combine(continuationOf)
+    }
+
+    private static let stampLock = NSLock()
+    nonisolated(unsafe) private static var stampCounter: UInt64 = 0
+    static func nextStamp() -> UInt64 {
+        stampLock.lock()
+        defer { stampLock.unlock() }
+        stampCounter &+= 1
+        return stampCounter
+    }
 }
 
 // MARK: - Folder browsing (add-space palette data)

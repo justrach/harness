@@ -31,12 +31,14 @@ struct TranscriptView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     var body: some View {
-        let rows = store.transcriptCache.rows(revision: store.revision,
+        let allRows = store.transcriptCache.rows(revision: store.revision,
                                               entries: store.entries,
                                               pendingSends: store.pendingSends)
+        let rows = scroll.tailWindow(allRows)
         let runway = store.lastSubmittedMessageId
         let earlierErrors = Self.earlierReauthRows(rows)
-        NativeTranscriptTable(rows: rows, scroll: scroll, runwayID: runway,
+        NativeTranscriptTable(rows: rows, hiddenRows: allRows.count - rows.count,
+            scroll: scroll, runwayID: runway,
             expansionHeight: runway.flatMap { userExpansionHeights[$0] } ?? 0,
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,
             reduceMotion: reduceMotion,
@@ -206,6 +208,12 @@ struct TranscriptGeometry: Equatable {
 final class ScrollState {
     var pinned = true
     var showJump = false
+    /// Tail window: only the newest `rowLimit` rows reach the table, so a long
+    /// transcript never lays out its full history at once. Scrolling near the
+    /// top grows it by `rowLimitStep`; jumping back to the bottom resets it.
+    static let defaultRowLimit = 200
+    static let rowLimitStep = 200
+    var rowLimit = defaultRowLimit
     @ObservationIgnored weak var nativeScrollView: UIScrollView?
     @ObservationIgnored var refreshLayout: (() -> Void)?
     @ObservationIgnored var jumpToLatest: ((Bool) -> Void)?
@@ -244,6 +252,28 @@ final class ScrollState {
         showJump = false
         movedAway = false
     }
+
+    /// The newest `rowLimit` rows — older ones stay unbuilt (no layout, no
+    /// cells) until the user scrolls into them.
+    func tailWindow(_ rows: [TranscriptRow]) -> [TranscriptRow] {
+        rows.count > rowLimit ? Array(rows.suffix(rowLimit)) : rows
+    }
+
+    /// Grow the window toward `total` rows; never below the default, never
+    /// above the transcript's actual row count.
+    func growRowLimit(total: Int) {
+        rowLimit = max(Self.defaultRowLimit, min(total, rowLimit + Self.rowLimitStep))
+    }
+
+    /// Grow the window just enough that transcript row `index` is inside it.
+    func revealRow(atTranscriptIndex index: Int, total: Int) {
+        guard index >= 0 else { return }
+        rowLimit = max(Self.defaultRowLimit, min(total, max(rowLimit, index + 1)))
+    }
+
+    func resetRowLimit() {
+        rowLimit = Self.defaultRowLimit
+    }
 }
 
 /// Row-build cache: one incremental parser per streaming part plus a memo of
@@ -253,6 +283,10 @@ final class ScrollState {
 final class TranscriptBuilderCache {
     private var parsers: [String: IncrementalMarkdownParser] = [:]
     private var completed: [String: CompletedParse] = [:]
+    /// Per-entry row memo: on a doc update only the entries the update
+    /// touched (a new decode `stamp`) re-walk their parts; every other entry
+    /// contributes its rows verbatim.
+    private var entryRows: [String: TranscriptRowBuilder.EntryRowCache] = [:]
     private var cachedRevision: UInt64?
     private var cachedRows: [TranscriptRow] = []
     private var prewarming = false
@@ -265,7 +299,8 @@ final class TranscriptBuilderCache {
         if cachedRevision == revision { return cachedRows }
         cachedRows = Perf.measure(PerfSpan.transcriptRows) {
             TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
-                                      parsers: &parsers, completed: &completed)
+                                      parsers: &parsers, completed: &completed,
+                                      entryRows: &entryRows)
         }
         cachedRevision = revision
         return cachedRows
@@ -501,6 +536,18 @@ struct MarkdownRowView: View {
 @Observable
 final class ToolGroupFolds {
     var values: [String: Bool] = [:]
+    /// Groups the user expanded past the visible cap ("Show N earlier"),
+    /// keyed by group row id.
+    var revealed: Set<String> = []
+}
+
+/// An open group with more than `cap` tools renders only the tail plus a
+/// "Show N earlier" affordance — a 30-minute turn can produce groups of
+/// hundreds, and every chip is a hosted view inside one self-sizing cell.
+func toolGroupTail(_ tools: [ToolItem], revealAll: Bool,
+                   cap: Int = 20) -> (visible: ArraySlice<ToolItem>, hidden: Int) {
+    guard !revealAll, tools.count > cap else { return (tools[...], 0) }
+    return (tools.suffix(cap), tools.count - cap)
 }
 
 private struct HostedToolGroup: View {
@@ -513,7 +560,13 @@ private struct HostedToolGroup: View {
 
     var body: some View {
         let open = folds.values[id] ?? autoOpen
+        let window = toolGroupTail(tools, revealAll: folds.revealed.contains(id))
         ToolGroupView(tools: tools, open: open, userToggled: folds.values[id] != nil,
+            hiddenEarlier: window.hidden,
+            onShowEarlier: {
+                folds.revealed.insert(id)
+                onResize()
+            },
             toggle: {
                 withAnimation(reduceMotion ? nil : Motion.resize) { folds.values[id] = !open }
             }, onDetailChanged: onResize)
@@ -543,9 +596,17 @@ struct ToolGroupView: View {
     let tools: [ToolItem]
     let open: Bool
     let userToggled: Bool
+    /// Tools older than the visible cap, hidden behind "Show N earlier".
+    var hiddenEarlier: Int = 0
+    var onShowEarlier: () -> Void = {}
     let toggle: () -> Void
     var onDetailChanged: () -> Void = {}
     @State private var retainingDetails = false
+
+    /// The tools actually rendered — the tail after the hidden prefix.
+    private var visibleTools: ArraySlice<ToolItem> {
+        tools.suffix(tools.count - min(hiddenEarlier, tools.count))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -572,8 +633,20 @@ struct ToolGroupView: View {
             ToolRevealLayout(progress: open ? 1 : 0) {
                 if open || retainingDetails {
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(tools.enumerated()), id: \.offset) { index, tool in
-                            ToolChipRow(tool: tool, continues: index < tools.count - 1, onResize: onDetailChanged)
+                        if hiddenEarlier > 0 {
+                            Button(action: onShowEarlier) {
+                                Text("Show \(hiddenEarlier) earlier")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textMuted)
+                                    .frame(maxWidth: .infinity, minHeight: 36)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("show-earlier-tools")
+                        }
+                        let shown = Array(visibleTools.enumerated())
+                        ForEach(shown, id: \.offset) { index, tool in
+                            ToolChipRow(tool: tool, continues: index < shown.count - 1, onResize: onDetailChanged)
                         }
                     }
                 }

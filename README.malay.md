@@ -77,3 +77,23 @@ Lesen AGPL penerima kekal kecuali penerima sendiri melanggarnya. Kebenaran
 komersial tanpa copyleft hanya wujud jika ketiga-tiganya memberikannya bersama
 secara bertulis, dan boleh ditarik balik. Bahan lain kekal dengan hak cipta dan
 lesen asalnya. Lihat [notis pihak ketiga](THIRD_PARTY_NOTICES.md).
+
+**Syarikat memerlukan lesen komersial.** Setiap versi selepas v0.2.108
+menambah satu terma. Organisasi anda, dikira bersama organisasi yang mengawalnya,
+yang dikawalnya, atau yang berada di bawah kawalan yang sama,
+memerlukan lesen komersial untuk sebarang penggunaan Harness (termasuk pada
+mesin, awan, CI dan rangkaiannya sendiri) jika memenuhi **mana-mana satu**
+daripada:
+
+- telah mengumpul lebih daripada **US$500 ribu** secara keseluruhan daripada
+  pelabur atau pemberi pinjaman;
+- kekayaan bersih (jumlah aset tolak jumlah liabiliti) atau
+  penilaian terkininya melebihi **US$500 ribu**;
+- hasil kasarnya melebihi **US$100 ribu** dalam tahun kewangan terakhir atau
+  dalam mana-mana tempoh 12 bulan.
+
+Syarikat yang melepasi mana-mana had mesti menghubungi kami dalam masa 5 hari
+bekerja. Individu sentiasa menggunakan Harness di bawah AGPL, tidak kira
+pendapatan mereka, begitu juga organisasi yang tidak memenuhi mana-mana terma
+ini. Versi sehingga v0.2.108 kekal dengan lesen yang disertakan semasa
+dikeluarkan. Tidak pasti? Anggap organisasi anda diliputi dan hubungi [rach@standardharness.com](mailto:rach@standardharness.com).
