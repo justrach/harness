@@ -145,6 +145,11 @@ fn render_one(entry: &SessionMessageEntry, options: RenderOptions) -> RenderedMe
                     }));
                 }
             }
+            MessagePart::Delegation { info, .. } => {
+                if options.include_tools {
+                    tools.push(info.caption());
+                }
+            }
             MessagePart::Error { message, .. } => errors.push(message.clone()),
         }
     }

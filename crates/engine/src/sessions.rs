@@ -729,6 +729,26 @@ impl SessionsEngine {
         Ok(true)
     }
 
+    /// Cancel only the run that still owns this question. A stale dismissal
+    /// must never stop a newer turn or resume an orphaned question as an answer.
+    pub fn dismiss_input(&self, chat_id: &str, request_id: &str) -> bool {
+        let runs = lock(&self.inner.runs);
+        let Some(run) = runs.get(chat_id) else {
+            return false;
+        };
+        let mut pending = lock(&run.pending_inputs);
+        let Some(resolver) = pending.remove(request_id) else {
+            return false;
+        };
+        // Publish cancellation before waking the adapter, as in interrupt().
+        // Dropping the resolver communicates cancellation, not an empty answer.
+        let _ = run.cancel.send(true);
+        drop(resolver);
+        pending.clear();
+        run.interrupt_token.cancel();
+        true
+    }
+
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
     /// mid-stream), stamp this device's abandoned `streaming` doc entries `aborted`
     /// with a VISIBLE "Run interrupted by engine restart" error part, close the

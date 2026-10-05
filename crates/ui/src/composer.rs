@@ -610,6 +610,13 @@ fn interrupt_params(chat_id: &str) -> serde_json::Value {
     })
 }
 
+fn dismiss_input_params(chat_id: &str, request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "chatId": chat_id,
+        "command": { "kind": "dismissInput", "requestId": request_id },
+    })
+}
+
 fn escape_dismisses_completion(key: &str, completion_open: bool) -> bool {
     key == "escape" && completion_open
 }
@@ -5698,7 +5705,42 @@ impl Composer {
     }
 
     pub(crate) fn can_edit_queue_in_composer(&self) -> bool {
-        !self.sending && self.wizard.is_none()
+        !self.sending
+    }
+
+    fn wizard_active(&self) -> bool {
+        self.wizard.is_some() && self.editing_queued.is_none()
+    }
+
+    pub(crate) fn prepare_queue_edit_input(&mut self, cx: &mut Context<Self>) {
+        // Pause auto-submit while the composer belongs to the queued row.
+        // The wizard's picks and its displaced free-text draft stay intact.
+        self.advance_task = None;
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder("Edit queued message…", cx);
+            input.set_key_context(MESSAGE_COMPOSER_CONTEXT, cx);
+        });
+    }
+
+    pub(crate) fn restore_question_input(&mut self, cx: &mut Context<Self>) {
+        if self.wizard.as_ref().is_some_and(|wizard| {
+            input_request_resolved(&self.state.read(cx).transcript, &wizard.request_id)
+        }) {
+            self.wizard = None;
+            self.advance_task = None;
+        }
+        let active = self.wizard_active();
+        self.input.update(cx, |input, cx| {
+            input.set_placeholder(
+                if active {
+                    "Type your own answer, or pick an option above"
+                } else {
+                    "Do anything…"
+                },
+                cx,
+            );
+            input.set_key_context(message_input_context(active), cx);
+        });
     }
 
     // ---- attachment staging (use-attachments.ts) ----
@@ -6345,7 +6387,12 @@ impl Composer {
     }
 
     /// Paperclip: the native file picker. Images and other files both attach.
-    fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+        if self.queue_edit_finishing {
+            return;
+        }
+        let target_key = self.current_key.clone();
+        let edited_row = self.editing_queued.clone();
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -6356,7 +6403,14 @@ impl Composer {
             let result = rx.await;
             this.update(cx, |composer, cx| {
                 if let Ok(Ok(Some(paths))) = result {
-                    composer.add_paths(paths, cx);
+                    if composer.current_key == target_key && composer.editing_queued == edited_row
+                        && !composer.queue_edit_finishing
+                    {
+                        composer.add_paths(paths, cx);
+                    } else {
+                        composer.failure = Some("The attachment target changed. Reopen the message and choose the images again.".into());
+                        composer.failure_key = Some(target_key);
+                    }
                 }
                 // Both Attach and Cancel return to the draft.
                 composer.focus_pending = true;
@@ -6609,7 +6663,7 @@ impl Composer {
     }
 
     fn on_input_edited(&mut self, cx: &mut Context<Self>) {
-        if self.wizard.is_some() {
+        if self.wizard_active() {
             if self.mention.token.is_some() || self.mention_task.is_some() {
                 self.reset_mention(None, cx);
             }
@@ -8669,6 +8723,9 @@ impl Composer {
     // ---- wizard glue ----
 
     fn wizard_select(&mut self, option_ix: usize, cx: &mut Context<Self>) {
+        if self.question_cancellation_pending(cx) {
+            return;
+        }
         let Some(wizard) = self.wizard.as_mut() else {
             return;
         };
@@ -8703,6 +8760,9 @@ impl Composer {
     }
 
     fn wizard_advance(&mut self, cx: &mut Context<Self>) {
+        if self.question_cancellation_pending(cx) {
+            return;
+        }
         // What is in the box answers this page however it is submitted — the
         // Submit button and a bare Enter used to skip it and send a blank.
         let typed = self.input.read(cx).text().trim().to_string();
@@ -8734,8 +8794,86 @@ impl Composer {
         }
     }
 
+    fn question_cancellation_pending(&self, cx: &App) -> bool {
+        self.state
+            .read(cx)
+            .selected_chat
+            .as_ref()
+            .is_some_and(|chat| self.interrupting.contains(chat))
+    }
+
+    fn wizard_dismiss(&mut self, cx: &mut Context<Self>) {
+        let Some(request_id) = self.wizard.as_ref().map(|w| w.request_id.clone()) else {
+            return;
+        };
+        let (Some(chat_id), Some(engine)) = (
+            self.state.read(cx).selected_chat.clone(),
+            self.state.read(cx).engine().cloned(),
+        ) else {
+            self.failure = Some("Connect to the chat host to cancel this question".into());
+            cx.notify();
+            return;
+        };
+        if !engine
+            .engine_info()
+            .supports(capabilities::DISMISS_INPUT_V1)
+            || !self
+                .state
+                .read(cx)
+                .chat_host_supports(&chat_id, capabilities::DISMISS_INPUT_V1)
+        {
+            self.failure = Some("Update the chat host to cancel questions safely".into());
+            self.failure_key = Some(chat_id);
+            cx.notify();
+            return;
+        }
+        if !begin_interrupt(&mut self.interrupting, &chat_id) {
+            return;
+        }
+        self.advance_task = None;
+        let params = dismiss_input_params(&chat_id, &request_id);
+        let task_chat_id = chat_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = attachments::call_with_timeout(
+                &engine,
+                cx.background_executor(),
+                methods::QUEUE_COMMAND,
+                params,
+                Duration::from_secs(30),
+            )
+            .await;
+            if let Err(err) = result {
+                this.update(cx, |composer, cx| {
+                    composer.interrupting.remove(&task_chat_id);
+                    composer.failure = Some(format!("Question cancellation failed: {err}").into());
+                    composer.failure_key = Some(task_chat_id);
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
+            // A durable command may still be waiting for a remote host.
+            // Keep the question honest and retryable if it has not settled.
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            this.update(cx, |composer, cx| {
+                if pending_input_request(&composer.state.read(cx).transcript)
+                    .is_some_and(|(id, _)| id == request_id)
+                {
+                    composer.interrupting.remove(&task_chat_id);
+                    cx.notify();
+                }
+            })
+            .ok();
+        });
+        self.interrupt_tasks.insert(chat_id, task);
+        cx.notify();
+    }
+
     /// Submit RespondInput and retire the panel.
     fn wizard_finish(&mut self, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
+        if self.question_cancellation_pending(cx) {
+            return;
+        }
         let Some(wizard) = self.wizard.take() else {
             return;
         };
@@ -8915,7 +9053,8 @@ impl Composer {
         let page = wizard.page;
         let last = page + 1 >= wizard.questions.len();
         let typed_empty = self.input.read(cx).is_empty();
-        let can_advance = wizard.page_has_pick() || !typed_empty;
+        let cancelling = self.question_cancellation_pending(cx);
+        let can_advance = !cancelling && (wizard.page_has_pick() || !typed_empty);
 
         let options = question.options.iter().enumerate().map(|(ix, label)| {
             // Selection reads on the row only while no typed override exists
@@ -9111,6 +9250,23 @@ impl Composer {
                     .px(px(16.0))
                     .pb(px(16.0))
                     .pt(px(4.0))
+                    .child(
+                        crate::popover::btn_ghost(
+                            &theme,
+                            if cancelling {
+                                "Cancelling…"
+                            } else {
+                                "Cancel question"
+                            },
+                            "wizard-cancel",
+                        )
+                        .id("wizard-cancel")
+                        .debug_selector(|| "wizard-cancel".into())
+                        .role(Role::Button)
+                        .aria_label("Cancel question without answering and stop its turn")
+                        .when(cancelling, |el| el.opacity(0.4))
+                        .on_click(cx.listener(|this, _, _, cx| this.wizard_dismiss(cx))),
+                    )
                     .child(if page > 0 {
                         crate::popover::btn_ghost(&theme, "Back", "wizard-back")
                             .id("wizard-back")
@@ -9213,7 +9369,7 @@ impl Render for Composer {
             window.focus(&focus, cx);
         }
         let theme = Theme::of(cx).clone();
-        let wizard_active = self.wizard.is_some();
+        let wizard_active = self.wizard_active();
         if self.mention.token.is_some()
             && (wizard_active || !self.input.focus_handle(cx).is_focused(window))
         {
@@ -9450,6 +9606,33 @@ impl Render for Composer {
                 ))
             });
 
+        // What is waiting to be sent, stacked directly above the box it was
+        // typed in — the queue is a property of this composer, not a panel
+        // somewhere else.
+        let show_queue_latest_shortcut = !wizard_active
+            && self.queue_shortcut_revealed
+            && self.editing_queued.is_none()
+            && !self.pickers.read(cx).is_open()
+            && !composer_has_content(
+                self.input.read(cx).text(),
+                self.staged().len() + self.staged_appshots().len(),
+                self.staged_comments(cx).len(),
+            );
+        let container = container.when_some(
+            self.render_queue_panel(show_queue_latest_shortcut, window, cx),
+            |el, panel| {
+                el.child(motion::fade_quick(
+                    "composer-queue",
+                    div()
+                        .mx(px(QUEUE_SIDE_INSET))
+                        // Cancel the column gap, then tuck the tray one pixel
+                        // behind the composer painted after it.
+                        .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
+                        .child(panel),
+                ))
+            },
+        );
+
         if wizard_active {
             let viewport = window.viewport_size();
             let available = self.available_height.unwrap_or(f32::from(viewport.height));
@@ -9538,31 +9721,6 @@ impl Render for Composer {
         }
         self.wizard_expanded = false;
 
-        // What is waiting to be sent, stacked directly above the box it was
-        // typed in — the queue is a property of this composer, not a panel
-        // somewhere else.
-        let show_queue_latest_shortcut = self.queue_shortcut_revealed
-            && self.editing_queued.is_none()
-            && !self.pickers.read(cx).is_open()
-            && !composer_has_content(
-                self.input.read(cx).text(),
-                self.staged().len() + self.staged_appshots().len(),
-                self.staged_comments(cx).len(),
-            );
-        let container = container.when_some(
-            self.render_queue_panel(show_queue_latest_shortcut, window, cx),
-            |el, panel| {
-                el.child(motion::fade_quick(
-                    "composer-queue",
-                    div()
-                        .mx(px(QUEUE_SIDE_INSET))
-                        // Cancel the column gap, then tuck the tray one pixel
-                        // behind the composer painted after it.
-                        .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
-                        .child(panel),
-                ))
-            },
-        );
         // Escape backs out of a queue-row edit (the row keeps its old text).
         // Bound here rather than in the input: the input's own Escape belongs
         // to the mention/slash popups, which outrank this while they're open.
@@ -10844,6 +11002,77 @@ mod tests {
                 assert_eq!(composer.input, input);
                 assert_eq!(input.read(cx).text(), draft);
                 assert_eq!(input.read(cx).selected_range, 2..8);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn queued_image_edit_preserves_question_picks_and_original_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (dir, handle) = composer_focus_window(cx);
+        let path = dir.path().join("queued.png");
+        let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1cAAAAASUVORK5CYII=").unwrap();
+        std::fs::write(&path, &png).unwrap();
+        handle
+            .update(cx, |composer, _, cx| {
+                let original = attachments::stage_png_bytes("draft.png".into(), png);
+                let original_id = original.id.clone();
+                let mut wizard =
+                    Wizard::new("request".into(), vec![question("q", &["Yes", "No"], false)]);
+                wizard.select(1);
+                composer.wizard = Some(wizard);
+                assert!(
+                    composer.can_edit_queue_in_composer(),
+                    "a question must not prevent queue editing"
+                );
+                composer.queue_edit_draft = Some(("unsent answer".into(), vec![original], vec![]));
+                composer.editing_queued = Some("row".into());
+                composer.prepare_queue_edit_input(cx);
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("queued text", cx));
+                composer.add_paths(vec![path.clone()], cx);
+                assert!(!composer.wizard_active());
+                assert_eq!(composer.staged().len(), 1);
+                assert_eq!(composer.input.read(cx).text(), "queued text");
+                let id = composer.staged()[0].id.clone();
+                composer.remove_attachment(&id, cx);
+                assert!(composer.staged().is_empty());
+                composer.add_paths(vec![path], cx);
+                assert_eq!(composer.staged().len(), 1);
+                composer.clear_queue_edit(cx);
+                assert_eq!(composer.input.read(cx).text(), "unsent answer");
+                assert_eq!(composer.staged()[0].id, original_id);
+                assert!(composer.wizard_active());
+                assert!(composer.wizard.as_ref().unwrap().is_picked(1));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn queued_image_picker_never_attaches_to_another_draft(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let path = dir.path().join("image.png");
+        std::fs::write(&path, b"not decoded unless incorrectly staged").unwrap();
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.editing_queued = Some("row".into());
+                composer.open_file_picker(cx);
+                composer.editing_queued = None;
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("original draft", cx));
+            })
+            .unwrap();
+        cx.simulate_path_prompt_response(move |_| Some(vec![path]));
+        cx.run_until_parked();
+        handle
+            .read_with(cx, |composer, cx| {
+                assert!(composer.staged().is_empty());
+                assert_eq!(composer.input.read(cx).text(), "original draft");
+                assert!(composer.failure.is_some());
             })
             .unwrap();
     }
@@ -14230,6 +14459,16 @@ mod tests {
         let params = interrupt_params("chat-a");
         assert_eq!(params["chatId"], "chat-a");
         assert_eq!(params["command"]["kind"], "interrupt");
+    }
+
+    #[test]
+    fn question_dismissal_is_request_scoped_and_never_an_answer() {
+        let params = dismiss_input_params("chat-a", "request-a");
+        assert_eq!(params["chatId"], "chat-a");
+        assert_eq!(params["command"]["kind"], "dismissInput");
+        assert_eq!(params["command"]["requestId"], "request-a");
+        assert!(params["command"].get("answers").is_none());
+        assert!(params["command"].get("prompt").is_none());
     }
 
     #[test]

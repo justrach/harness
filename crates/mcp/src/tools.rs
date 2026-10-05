@@ -25,10 +25,8 @@ use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
 /// Default and ceiling for the blocking waits.
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 const MAX_WAIT: Duration = Duration::from_secs(3600);
-/// Ceiling when the caller is itself a chat. A wait parks the caller's turn
-/// behind a silent tool call, and the recipient replies into the caller's chat
-/// anyway (see `attribute`), so a chat never needs to block for long.
-const CHAT_MAX_WAIT: Duration = Duration::from_secs(120);
+/// A chat caller receives the recipient's reply asynchronously (see
+/// `attribute`), so its waits are status snapshots, never blocking tool calls.
 /// Attached to a chat caller's timed-out wait so it ends its turn rather than
 /// waiting again.
 const CHAT_WAIT_NOTE: &str = "The chat is still working. Its reply arrives in your chat as a \
@@ -133,7 +131,7 @@ fn catalog() -> Vec<ToolDef> {
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
                     "cwd": { "type": "string", "description": "Working directory override (an existing worktree path). Defaults to the project folder." },
                     "prompt": { "type": "string", "description": "First message to send right away." },
-                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply. From a chat, waits stop after 120 seconds." },
+                    "wait": { "type": "boolean", "default": false, "description": "With prompt: block until the first turn finishes and return the reply. From a chat, returns a status snapshot immediately; replies arrive asynchronously." },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
                 }
             }),
@@ -150,7 +148,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send a message to a chat. Messages are attributed to your chat. mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes and returns the assistant's reply. From a chat, waits stop after 120 seconds: the recipient replies into your chat on its own, so prefer wait=false and end your turn.",
+            description: "Send a message to a chat. Messages are attributed to your chat. mode 'auto' starts a turn when the chat is idle, steers a running turn when the harness supports it, and otherwise queues for the end of the turn. With wait=true, blocks until the turn finishes and returns the assistant's reply. From a chat, returns a status snapshot immediately: the recipient replies into your chat on its own, so end your turn.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -160,7 +158,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. From a chat, waits stop after 120 seconds.",
+            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. From a chat, returns a status snapshot immediately; replies arrive asynchronously.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
@@ -169,6 +167,13 @@ fn catalog() -> Vec<ToolDef> {
             name: "interrupt_chat",
             description: "Stop the chat's running turn.",
             input_schema: chat_key_schema(json!({})),
+        },
+        ToolDef {
+            name: "dismiss_input",
+            description: "Cancel a pending question without answering or granting approval. Stops only its originating turn; an orphaned question is dismissed without resuming it.",
+            input_schema: chat_key_schema(json!({
+                "request_id": { "type": "string", "description": "The pending request id. Defaults to the chat's current pending question." }
+            })),
         },
         ToolDef {
             name: "respond_to_input",
@@ -290,10 +295,12 @@ fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
 }
 
 fn wait_duration(secs: Option<u64>, from_chat: bool) -> Duration {
-    let ceiling = if from_chat { CHAT_MAX_WAIT } else { MAX_WAIT };
+    if from_chat {
+        return Duration::ZERO;
+    }
     secs.map(Duration::from_secs)
         .unwrap_or(DEFAULT_WAIT)
-        .min(ceiling)
+        .min(MAX_WAIT)
 }
 
 fn now_millis() -> i64 {
@@ -396,6 +403,7 @@ impl Tools {
             "wait_for_turn" => self.wait_for_turn(parse(args)?).await,
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
+            "dismiss_input" => self.dismiss_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
             other if rooms::handles(other) => return self.call_room_tool(other, args).await,
             other => return Err(format!("unknown tool: {other}")),
@@ -799,6 +807,39 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "commandId": command_id }))
     }
 
+    async fn dismiss_input(&self, args: RespondArgs) -> anyhow::Result<Value> {
+        let chat = self.harness.resolve_chat(&args.chat).await?;
+        if !args.answers.is_empty() {
+            anyhow::bail!("dismiss_input never accepts answers");
+        }
+        let request_id = match args.request_id {
+            Some(id) => id,
+            None => {
+                let entries = self.harness.transcript(&chat.id).await?;
+                let rendered = render_entries(&entries, RenderOptions::default());
+                last_pending_input(&rendered)
+                    .and_then(|p| {
+                        p.get("requestId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("chat {} has no pending question", short(&chat.id))
+                    })?
+            }
+        };
+        let command_id = self
+            .harness
+            .queue_command(
+                &chat.id,
+                &SessionCommandPayload::DismissInput {
+                    request_id: request_id.clone(),
+                },
+            )
+            .await?;
+        Ok(json!({ "chatId": chat.id, "requestId": request_id, "commandId": command_id }))
+    }
+
     async fn respond_to_input(&self, args: RespondArgs) -> anyhow::Result<Value> {
         let chat = self.harness.resolve_chat(&args.chat).await?;
         let request_id = match args.request_id {
@@ -992,7 +1033,7 @@ impl Tools {
             .filter(|m| m.role == harness_doc::MessageRole::Assistant)
             .filter(|m| m.created_at >= since_millis.saturating_sub(2_000))
             .collect();
-        let replies: Vec<&RenderedMessage> = if replies.is_empty() {
+        let replies: Vec<&RenderedMessage> = if since_millis == 0 || replies.is_empty() {
             rendered
                 .iter()
                 .rev()
@@ -1347,6 +1388,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dismiss_input_queues_cancellation_not_answers() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        tools
+            .call(
+                "dismiss_input",
+                json!({ "chat": "alpha", "request_id": "question-1" }),
+            )
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        let (method, params) = writes.last().unwrap();
+        assert_eq!(method, methods::QUEUE_COMMAND);
+        assert_eq!(params["command"]["kind"], "dismissInput");
+        assert_eq!(params["command"]["requestId"], "question-1");
+        assert!(params["command"].get("answers").is_none());
+        drop(writes);
+        assert!(
+            tools
+                .call(
+                    "dismiss_input",
+                    json!({
+                        "chat": "alpha", "request_id": "question-1",
+                        "answers": [{ "question_id": "q", "labels": ["Yes"] }]
+                    })
+                )
+                .await
+                .unwrap_err()
+                .contains("never accepts answers")
+        );
+    }
+
+    #[tokio::test]
     async fn wait_on_an_idle_chat_returns_immediately() {
         let world = Arc::new(World::default());
         let tools = tools(world, Origin::default());
@@ -1381,10 +1455,10 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_caller_waits_at_most_two_minutes() {
-        assert_eq!(wait_duration(Some(3600), true), CHAT_MAX_WAIT);
-        assert_eq!(wait_duration(None, true), CHAT_MAX_WAIT);
-        assert_eq!(wait_duration(Some(30), true), Duration::from_secs(30));
+    fn a_chat_caller_never_blocks_on_recipient_work() {
+        assert_eq!(wait_duration(Some(3600), true), Duration::ZERO);
+        assert_eq!(wait_duration(None, true), Duration::ZERO);
+        assert_eq!(wait_duration(Some(30), true), Duration::ZERO);
         assert_eq!(wait_duration(Some(3600), false), MAX_WAIT);
         assert_eq!(wait_duration(None, false), DEFAULT_WAIT);
     }
@@ -1399,15 +1473,24 @@ mod tests {
                 device_id: Some("dev-local".into()),
             },
         );
-        let sent = tools
-            .call(
+        let sent = tokio::time::timeout(
+            Duration::from_millis(500),
+            tools.call(
                 "send_message",
-                json!({ "chat": "alpha", "text": "hi", "wait": true, "timeout_secs": 1 }),
-            )
-            .await
-            .unwrap();
+                json!({ "chat": "alpha", "text": "hi", "wait": true, "timeout_secs": 3600 }),
+            ),
+        )
+        .await
+        .expect("a chat caller must not wait for recipient work")
+        .unwrap();
         assert_eq!(sent["turn"]["outcome"], "timedOut");
         assert_eq!(sent["turn"]["note"], CHAT_WAIT_NOTE);
+        let idle = tools
+            .call("wait_for_turn", json!({ "chat": "alpha" }))
+            .await
+            .unwrap();
+        assert_eq!(idle["turn"]["outcome"], "completed");
+        assert_eq!(idle["turn"]["replies"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

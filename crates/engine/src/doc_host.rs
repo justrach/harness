@@ -5258,6 +5258,31 @@ impl DocHost {
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
             }
+            SessionCommandPayload::DismissInput { request_id } => {
+                let _drain = handle.drain_lock.lock().await;
+                let open = handle.doc.read_entries()?.iter().any(|entry| {
+                    entry.parts.iter().any(|part| {
+                        matches!(part,
+                            MessagePart::Input { request_id: id, resolved: false, .. }
+                                if id == request_id
+                        )
+                    })
+                });
+                if !open {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("no pending input request".into()),
+                    ));
+                }
+                // Freeze delivery before waking the cancelled adapter. An
+                // orphaned question resolves locally without dispatching a run.
+                let was_paused = handle.queue_paused.swap(true, Ordering::AcqRel);
+                if !sessions.dismiss_input(chat_id, request_id) {
+                    handle.queue_paused.store(was_paused, Ordering::Release);
+                    handle.doc.resolve_input(request_id)?;
+                }
+                Ok((SessionCommandStatus::Applied, None))
+            }
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
