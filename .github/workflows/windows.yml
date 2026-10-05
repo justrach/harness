@@ -85,7 +85,7 @@ jobs:
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
-        run: cargo test --release --locked -p harness -p harness-update
+        run: cargo test --release --locked -p harness -p harness-update -p harness-observe
       - name: Engine unit tests
         run: cargo test --release --locked -p harness-engine --lib
       - name: Harness catalog and login tests

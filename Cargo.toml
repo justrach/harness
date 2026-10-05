@@ -13,6 +13,7 @@ members = [
     "crates/ui",
     "crates/syntax",
     "crates/mcp",
+    "crates/observe",
     "apps/harness",
 ]
 # Vendored forks are their own (trimmed) workspaces.
@@ -37,6 +38,7 @@ harness-ui = { path = "crates/ui" }
 harness-syntax = { path = "crates/syntax" }
 harness-theme = { path = "crates/theme" }
 harness-mcp = { path = "crates/mcp" }
+harness-observe = { path = "crates/observe" }
 
 # CRDT
 loro = "1.13"
