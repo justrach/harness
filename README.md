@@ -157,7 +157,7 @@ cloud, CI and network) if it meets **any one** of these:
 - its gross revenue was more than **US$100k** in its last fiscal year or any
   12-month period.
 
-A company that crosses a line has 30 days to get a license. Individuals, and
+A company that crosses a line must contact us within 5 working days. Individuals, and
 organizations that meet none of these, use Harness under the AGPL. Versions up
 to v0.2.108 keep the license they shipped with. Unsure? Treat yourself as
 covered and get in touch.
