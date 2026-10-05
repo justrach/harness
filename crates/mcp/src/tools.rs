@@ -85,7 +85,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "ensure_sandbox",
-            description: "Reuse or wake the account's Codegraff cloud sandbox and wait for its device to come online; returns the deviceId to pass to create_chat(device=…, harness=\"graff\"). Creating is billed compute and requires allowCreate: true; waking an existing sandbox is billed for its bounded lease.",
+            description: "Join or wake the account's default Codegraff cloud sandbox and wait for its device to come online; returns the deviceId to pass to create_chat(device=…, harness=\"graff\"). With allowCreate false it only reads or joins — provisioning a new default is billed compute and happens only with allowCreate: true; waking an existing sandbox is billed for its bounded lease.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
