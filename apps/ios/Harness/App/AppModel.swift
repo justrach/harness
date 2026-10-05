@@ -903,6 +903,18 @@ final class AppModel {
     func archive(chatId: String) { setArchived(chatId: chatId, archived: true) }
     func unarchive(chatId: String) { setArchived(chatId: chatId, archived: false) }
 
+    func rename(chatId: String, title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let chat = chat(id: chatId), chat.title != trimmed else { return }
+        if let demo {
+            if let ix = demo.chats.firstIndex(where: { $0.id == chatId }) {
+                demo.chats[ix].title = trimmed
+            }
+            return
+        }
+        workspace?.rename(chatId: chatId, title: trimmed)
+    }
+
     var pinsReady: Bool {
         if demo != nil { return true }
         guard let workspace else { return false }

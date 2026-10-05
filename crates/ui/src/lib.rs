@@ -175,7 +175,6 @@ pub fn run_app(config: UiConfig) {
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
         settings::init(ui_settings.clone(), data_dir.clone(), cx);
-        perf_stats::start(data_dir.clone(), cx);
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
@@ -211,6 +210,7 @@ pub fn run_app(config: UiConfig) {
         cx.register_url_scheme("harness").detach();
 
         let state = cx.new(|_| state::AppState::new());
+        perf_stats::start(data_dir.clone(), state.clone(), cx);
         let url_state = state.clone();
         cx.spawn(async move |cx| {
             while let Some(url) = url_rx.next().await {
