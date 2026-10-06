@@ -1,0 +1,3 @@
+# Static MSVC C runtime: a clean Windows install has no VCRUNTIME140.dll (#171).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
