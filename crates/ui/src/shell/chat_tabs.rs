@@ -368,9 +368,9 @@ impl Shell {
         true
     }
 
-    /// Tab titles, active tab from the live state: the focused chat's title
-    /// and how many panes the tab holds.
-    fn chat_tab_labels(&self, cx: &App) -> Vec<(SharedString, usize)> {
+    /// Tab titles, active tab from the live state: the focused chat's title.
+    /// The lit tab's pane strip shows its panes, so rows carry titles only.
+    fn chat_tab_labels(&self, cx: &App) -> Vec<SharedString> {
         let state = self.state.read(cx);
         let title = |selected: Option<&str>| -> SharedString {
             selected
@@ -384,15 +384,9 @@ impl Shell {
             .enumerate()
             .map(|(ix, tab)| {
                 if ix == self.chat_tab {
-                    (
-                        title(state.selected_chat.as_deref()),
-                        self.chat_split.as_ref().map_or(1, |s| s.panes.len()),
-                    )
+                    title(state.selected_chat.as_deref())
                 } else {
-                    (
-                        title(tab.selected.as_deref()),
-                        tab.split.as_ref().map_or(1, |s| s.panes.len()),
-                    )
+                    title(tab.selected.as_deref())
                 }
             })
             .collect()
@@ -433,15 +427,9 @@ impl Shell {
                         .justify_between()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted.opacity(0.8))
-                        .child(SharedString::from(format!("Tabs · {}", labels.len())))
-                        // The live binding: the tab-cycling shortcut is rebindable.
-                        .child(
-                            div().text_color(theme.text_muted.opacity(0.6)).child(SharedString::from(
-                                crate::settings::badge_combo(&self.settings.keymap.next_session),
-                            )),
-                        ),
+                        .child(SharedString::from(format!("Tabs · {}", labels.len()))),
                 )
-                .children(labels.into_iter().enumerate().flat_map(|(ix, (title, panes))| {
+                .children(labels.into_iter().enumerate().flat_map(|(ix, title)| {
                     let lit = ix == active;
                     let key: SharedString = format!("chat-tab-{ix}").into();
                     let row = div()
@@ -496,15 +484,6 @@ impl Shell {
                                 .child(SharedString::from(format!("{}", ix + 1))),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(title))
-                        .when(panes > 1, |row| {
-                            row.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted.opacity(0.7))
-                                    .child(SharedString::from(format!("{panes} panes"))),
-                            )
-                        })
                         .into_any_element();
                     let strip = if lit { pane_strip.take() } else { None };
                     std::iter::once(row).chain(strip)
