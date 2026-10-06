@@ -8,6 +8,12 @@ Push-Location $root
 try {
     cargo build --release --locked -p harness
     if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+    # The CRT is statically linked (.cargo/config.toml); a leftover
+    # VCRUNTIME140 import would break clean installs without the VC++ redist.
+    $exe = './target/release/harness.exe'
+    if ([System.Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe)) -match 'VCRUNTIME140') {
+        throw 'harness.exe still imports VCRUNTIME140.dll — expected a static CRT'
+    }
     # Explicit pipes also work for the GUI-subsystem executable in CI. A
     # PowerShell collection match does not populate the scalar $Matches map.
     $probe = [Diagnostics.ProcessStartInfo]::new()
