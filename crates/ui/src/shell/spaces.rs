@@ -2067,6 +2067,14 @@ pub(super) struct AddSpaceFlow {
     _search_events: Subscription,
 }
 
+impl AddSpaceFlow {
+    /// Where keyboard focus belongs while the palette is open — the shell's
+    /// blur-recovery prefers this over the composer.
+    pub(super) fn search_focus(&self, cx: &App) -> FocusHandle {
+        self.search.focus_handle(cx)
+    }
+}
+
 /// Segment-aware "is `path` at or under `base`" (`/media/a` is not under
 /// `/media/ab`); a root base covers everything.
 fn path_under(path: &str, base: &str) -> bool {
@@ -5773,8 +5781,12 @@ impl Shell {
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let flow = self.add_space.as_mut()?;
-        if std::mem::take(&mut flow.focus_pending) {
-            window.focus(&flow.search.focus_handle(cx), cx);
+        let search_focus = flow.search.focus_handle(cx);
+        // focus_pending forces focus on flow transitions; clicks inside the
+        // card can blur it meanwhile, so recover whenever the field lost
+        // focus while the palette is open.
+        if std::mem::take(&mut flow.focus_pending) || !search_focus.is_focused(window) {
+            window.focus(&search_focus, cx);
         }
         let step = flow.step;
         let search = flow.search.clone();
@@ -6181,6 +6193,16 @@ impl Shell {
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     this.add_space_key(event, cx)
                 }))
+                // A left click that lands outside the search field would
+                // blur it (the input's own mouse-down-out); refocus right
+                // away without stopping propagation, so row/crumb/footer
+                // clicks still do their work.
+                .on_mouse_down(gpui::MouseButton::Left, {
+                    let search_focus = search_focus.clone();
+                    cx.listener(move |_, _, window, cx| {
+                        window.focus(&search_focus, cx);
+                    })
+                })
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.add_space = None;
                     cx.notify();
@@ -6672,5 +6694,94 @@ mod project_flow_tests {
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
         });
+    }
+
+    /// Clicking inside the palette but outside the search field blurs the
+    /// field (the input's mouse-down-out); the palette must take focus back
+    /// so arrows/enter/esc keep working (#178).
+    #[gpui::test]
+    fn palette_recovers_search_focus_after_an_inside_click_blur(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), data.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.devices = serde_json::from_value(serde_json::json!([
+                    {"id":"local","name":"Studio","platform":"macos","lastSeenAt":null},
+                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
+                ]))
+                .unwrap();
+                state
+            });
+            let mut shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell
+        });
+        let search_focus = window
+            .update(cx, |shell, _, cx| {
+                shell.open_add_space(cx);
+                shell.add_space.as_ref().unwrap().search.focus_handle(cx)
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |_, window, cx| {
+                assert!(
+                    search_focus.is_focused(window),
+                    "the search field starts focused"
+                );
+            })
+            .unwrap();
+
+        // What a click on a row gap / the footer does: blur the field.
+        window.update(cx, |_, window, _| window.blur()).unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |_, window, cx| {
+                assert!(
+                    search_focus.is_focused(window),
+                    "the palette refocuses its search field"
+                );
+            })
+            .unwrap();
+
+        cx.simulate_keystrokes(window.into(), "down");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.add_space.as_ref().unwrap().active,
+                    1,
+                    "↓ still moves the palette highlight after the blur"
+                );
+            })
+            .unwrap();
     }
 }
