@@ -11746,7 +11746,13 @@ impl Render for Shell {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 let root = this.shortcut_focus.clone();
                 let unfocused = this.unfocused.clone();
-                let preferred = this.composer.focus_handle(cx);
+                // While the add-space palette owns the keyboard, blur belongs
+                // to its search field, not the composer.
+                let preferred = this
+                    .add_space
+                    .as_ref()
+                    .map(|flow| flow.search_focus(cx))
+                    .unwrap_or_else(|| this.composer.focus_handle(cx));
                 window.on_next_frame(move |window, cx| {
                     restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
                 });
@@ -11755,7 +11761,11 @@ impl Render for Shell {
         }
         let shortcut_focus = self.shortcut_focus.clone();
         let unfocused = self.unfocused.clone();
-        let preferred_focus = self.composer.focus_handle(cx);
+        let preferred_focus = self
+            .add_space
+            .as_ref()
+            .map(|flow| flow.search_focus(cx))
+            .unwrap_or_else(|| self.composer.focus_handle(cx));
         window.defer(cx, move |window, cx| {
             restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
         });
