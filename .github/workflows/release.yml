@@ -4,6 +4,8 @@ name: release
 #   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
 #   - macOS dmg (Apple silicon) via scripts/package-macos.sh
 #   - Windows portable zip (x86_64) via scripts/package-windows.ps1
+#   - TUI tarballs (macOS arm64, Linux x86_64 + aarch64) via the tui-release
+#     workflow, called after publish so a TUI failure cannot hold up the app
 # then create a GitHub Release AND upload everything to the
 # `harness-releases` R2 bucket (served at edge.codegraff.com/releases/* for
 # `curl -fsSL https://edge.codegraff.com/install.sh | sh`), bumping latest.txt.
@@ -237,3 +239,13 @@ jobs:
           printf '%s' "$VERSION" > latest.txt
           npx wrangler@4 r2 object put harness-releases/latest.txt \
             --file latest.txt --remote
+
+  # The TUI builds last, attached to the just-published release; it is a heavy
+  # build, so it must never block the app artifacts publish already uploaded.
+  tui:
+    needs: publish
+    permissions:
+      contents: write
+    uses: ./.github/workflows/tui-release.yml
+    with:
+      tag: ${{ github.ref_name }}

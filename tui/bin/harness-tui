@@ -7,7 +7,17 @@
 # builds them from source and points HARNESS_TUI_BRIDGE_BIN and HARNESS_TUI_BIN at its own.
 set -eu
 
-here=$(cd "$(dirname "$0")/.." && pwd)
+# Resolve $0 through symlinks (the tarball also ships bin/graff-tui -> harness-tui, and
+# installers link it into ~/.local/bin), so libexec is found from the real location.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case "$link" in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+here=$(cd "$(dirname "$self")/.." && pwd)
 bridge_bin=${HARNESS_TUI_BRIDGE_BIN:-$here/libexec/harness-tui-bridge}
 tui_bin=${HARNESS_TUI_BIN:-$here/libexec/harness-tui}
 

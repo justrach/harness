@@ -4,7 +4,8 @@
 #   tui/package.sh            # release build (slow: one heavy build at a time)
 #   PROFILE=debug tui/package.sh   # pack the debug binaries, for checking the layout
 #
-# Layout: bin/harness-tui (the wrapper), libexec/harness-tui, libexec/harness-tui-bridge.
+# Layout: bin/harness-tui (the wrapper) plus bin/graff-tui -> harness-tui (the name `graff tui`
+# looks up beside graff or on PATH), libexec/harness-tui, libexec/harness-tui-bridge.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -33,6 +34,7 @@ stage=$here/dist/$name
 rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/libexec"
 cp "$here/bin/harness-tui" "$stage/bin/"
+ln -s harness-tui "$stage/bin/graff-tui"
 cp "$here/bridge/target/$profile/harness-tui-bridge" "$here/launcher/target/$profile/harness-tui" "$stage/libexec/"
 cp "$here/../LICENSE"* "$stage/" 2>/dev/null || true
 tar -C "$here/dist" -czf "$here/dist/$name.tar.gz" "$name"
