@@ -43,7 +43,7 @@
             "strong": "#5b43e8",
             "wash": "#5b43e81f",
             "on": "#ffffff",
-            "selection": "#5b43e83d",
+            "selection": "#5b43e880",
             "caret": "#5b43e8",
             "activity": "#5b43e8",
             "glyph": [
@@ -82,7 +82,7 @@
           "terminal": {
             "background": "#fafafa",
             "foreground": "#303035",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#1f1f1f",
               "#dc2626",
@@ -107,7 +107,7 @@
             "url": "https://github.com/zeronsh/comet",
             "revision": "d138049",
             "license": "MIT",
-            "assetHash": "sha256:667029f987f73b79e10a124f58ff0010f2272d1d02751cb66c916da015fd7af5"
+            "assetHash": "sha256:174dcfb6bd6f8c234547bb6fd956fba4d38bad277127eb139865c9bc909215c4"
           }
         },
         {
@@ -261,7 +261,7 @@
             "strong": "#c77d20",
             "wash": "#c77d201f",
             "on": "#000000",
-            "selection": "#c77d203d",
+            "selection": "#c77d2080",
             "caret": "#c77d20",
             "activity": "#c77d20",
             "glyph": [
@@ -300,7 +300,7 @@
           "terminal": {
             "background": "#faf8f3",
             "foreground": "#1a1813",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#1a1813",
               "#b14228",
@@ -325,7 +325,7 @@
             "url": "https://github.com/justrach/codegraff",
             "revision": "20652a1f7587971a07349b2e26ef12aaf2cdf443",
             "license": "MIT",
-            "assetHash": "sha256:d77ce55875b39b4026336d39e9603d5f976a062dde7cf9215110d4accd850267"
+            "assetHash": "sha256:22a537be5df876447f4e80ff34be91e6fbdb024f8c5e6119744ccc2677a7d897"
           }
         },
         {
@@ -479,7 +479,7 @@
             "strong": "#0078d4",
             "wash": "#0078d41f",
             "on": "#000000",
-            "selection": "#0078d43d",
+            "selection": "#0078d480",
             "caret": "#0078d4",
             "activity": "#0078d4",
             "glyph": [
@@ -518,7 +518,7 @@
           "terminal": {
             "background": "#ffffff",
             "foreground": "#1f1f1f",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#1f1f1f",
               "#dc2626",
@@ -543,7 +543,7 @@
             "url": "https://github.com/microsoft/vscode",
             "revision": "e33d147d4c0fa65ce17cb73ec9d798f064b4bf1f",
             "license": "MIT",
-            "assetHash": "sha256:32f32ccb9224138a81e61d9cb81ec41593030c1d82730fb9c2fdf2ee0e46f5c1"
+            "assetHash": "sha256:ef0bebe416eaf6cc76b7c283e9184677b42d55bad81b80814fff3292934d8c9f"
           }
         },
         {
@@ -697,7 +697,7 @@
             "strong": "#8839ef",
             "wash": "#8839ef1f",
             "on": "#ffffff",
-            "selection": "#8839ef3d",
+            "selection": "#8839ef80",
             "caret": "#8839ef",
             "activity": "#8839ef",
             "glyph": [
@@ -736,7 +736,7 @@
           "terminal": {
             "background": "#eff1f5",
             "foreground": "#4c4f69",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#5c5f77",
               "#d20f39",
@@ -761,7 +761,7 @@
             "url": "https://github.com/catppuccin/vscode",
             "revision": "befc9e6fc41980f4241408f7049755d47c06ff45",
             "license": "MIT",
-            "assetHash": "sha256:bf96048a5097b880e28672b3d0d6822eaf643bfee60aea56e7cfc2b0579f95d2"
+            "assetHash": "sha256:376ec30600ae2c61ec78053449e2080695bc0431aeb34e55b83e47ff8bec4f4a"
           }
         },
         {
@@ -915,7 +915,7 @@
             "strong": "#34548a",
             "wash": "#34548a1f",
             "on": "#ffffff",
-            "selection": "#34548a3d",
+            "selection": "#34548a80",
             "caret": "#34548a",
             "activity": "#34548a",
             "glyph": [
@@ -954,7 +954,7 @@
           "terminal": {
             "background": "#d5d6db",
             "foreground": "#343b59",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#0f0f14",
               "#8c4351",
@@ -979,7 +979,7 @@
             "url": "https://github.com/tokyo-night/tokyo-night-vscode-theme",
             "revision": "7c0f11eaef322f293621ca7befe462214b7ea468",
             "license": "MIT",
-            "assetHash": "sha256:7f5f1b58ae06b8b770eb5800cc5da588c92c6b09b5ddff609b9023eb691ef206"
+            "assetHash": "sha256:a2799c8710c249c9548c4c1d54be5abe942b15ee8bf6a06ec97bbcc3a9a17381"
           }
         },
         {
@@ -1245,7 +1245,7 @@
             "strong": "#0969da",
             "wash": "#0969da1f",
             "on": "#ffffff",
-            "selection": "#0969da3d",
+            "selection": "#0969da80",
             "caret": "#0969da",
             "activity": "#0969da",
             "glyph": [
@@ -1284,7 +1284,7 @@
           "terminal": {
             "background": "#ffffff",
             "foreground": "#1f2328",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#24292f",
               "#cf222e",
@@ -1309,7 +1309,7 @@
             "url": "https://github.com/primer/github-vscode-theme",
             "revision": "cd78e5e4e7bcf132a6f428ae0f32264bb1b729cf",
             "license": "MIT",
-            "assetHash": "sha256:f78346569b339d0a01f37c4eb5a15f8ea690b77734c0fd5f7f675e8dae4c9e71"
+            "assetHash": "sha256:f11ab4f64b4ed8f90a723e20f2adae0b247ec9e1fc9c17c080e2b5609ea367f8"
           }
         },
         {
@@ -1463,7 +1463,7 @@
             "strong": "#ce8014",
             "wash": "#ce80141f",
             "on": "#000000",
-            "selection": "#ce80143d",
+            "selection": "#ce801480",
             "caret": "#ce8014",
             "activity": "#ce8014",
             "glyph": [
@@ -1502,7 +1502,7 @@
           "terminal": {
             "background": "#f8f9fa",
             "foreground": "#5c6166",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#000000",
               "#f06b6c",
@@ -1527,7 +1527,7 @@
             "url": "https://github.com/ayu-theme/vscode-ayu",
             "revision": "444ef92911cb75c3933c8003e3a7c79b6b6c914f",
             "license": "MIT",
-            "assetHash": "sha256:9f537fa821f5f3d45edd5a7c9ab5ff5691b00502f867d046a743606b36af7bae"
+            "assetHash": "sha256:5ea047c4c4df5600a9f29a911a1301177db95e68b28a544358070bedc92eacdc"
           }
         },
         {
@@ -1787,7 +1787,7 @@
             "strong": "#076678",
             "wash": "#0766781f",
             "on": "#ffffff",
-            "selection": "#0766783d",
+            "selection": "#07667880",
             "caret": "#076678",
             "activity": "#076678",
             "glyph": [
@@ -1826,7 +1826,7 @@
           "terminal": {
             "background": "#fbf1c7",
             "foreground": "#3c3836",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#ebdbb2",
               "#cc241d",
@@ -1851,7 +1851,7 @@
             "url": "https://github.com/jdinhify/vscode-theme-gruvbox",
             "revision": "ca3b8ad203e84a884ca33fb84b5795cf43032709",
             "license": "MIT",
-            "assetHash": "sha256:6156dcbc8183a19a3536e0f1c0bbe9540444fe11e1dc25d9235549a24d9f5e9a"
+            "assetHash": "sha256:39eb68418091e138f133575a657e7e8fba2f2ea2471bb9d82395073fd61d246c"
           }
         },
         {
@@ -2005,7 +2005,7 @@
             "strong": "#907aa9",
             "wash": "#907aa91f",
             "on": "#000000",
-            "selection": "#907aa93d",
+            "selection": "#907aa980",
             "caret": "#907aa9",
             "activity": "#907aa9",
             "glyph": [
@@ -2044,7 +2044,7 @@
           "terminal": {
             "background": "#faf4ed",
             "foreground": "#575279",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#f2e9e1",
               "#b4637a",
@@ -2069,7 +2069,7 @@
             "url": "https://github.com/rose-pine/vscode",
             "revision": "d8f5ebe8e096fa833e997c07eb7685ee1677a4ba",
             "license": "MIT",
-            "assetHash": "sha256:d8e19b2c7b10e982d380c3a426b01216e1f93a4145c0822b975c93c5e690553a"
+            "assetHash": "sha256:e5376cc524d7bb80bc4deff9058766d7424d37d750098b7a1cc14e10ff355465"
           }
         },
         {
@@ -2559,7 +2559,7 @@
             "strong": "#4876d6",
             "wash": "#4876d61f",
             "on": "#000000",
-            "selection": "#4876d63d",
+            "selection": "#4876d680",
             "caret": "#4876d6",
             "activity": "#4876d6",
             "glyph": [
@@ -2598,7 +2598,7 @@
           "terminal": {
             "background": "#f6f6f6",
             "foreground": "#403f53",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#403f53",
               "#de3d3b",
@@ -2623,7 +2623,7 @@
             "url": "https://github.com/sdras/night-owl-vscode-theme",
             "revision": "cc291eba7976b20d7c66bde6883c27b902196b07",
             "license": "MIT",
-            "assetHash": "sha256:cf30ba19b6aeec55b0cc81fd4ffd45f599d6a13192fcfd6f14d454abb630140d"
+            "assetHash": "sha256:f52bdb57fc9f186aca714f4c45ae7ff6cd8e7d0598ba58996aa08e0eed64ebda"
           }
         },
         {
@@ -2777,7 +2777,7 @@
             "strong": "#2f86d2",
             "wash": "#2f86d21f",
             "on": "#000000",
-            "selection": "#2f86d23d",
+            "selection": "#2f86d280",
             "caret": "#2f86d2",
             "activity": "#2f86d2",
             "glyph": [
@@ -2816,7 +2816,7 @@
           "terminal": {
             "background": "#ffffff",
             "foreground": "#1857a4",
-            "selection": "#00000029",
+            "selection": "#00000047",
             "ansi": [
               "#011627",
               "#de3d3b",
@@ -2841,7 +2841,7 @@
             "url": "https://github.com/johnpapa/vscode-winteriscoming",
             "revision": "260547834cb6ac37dd5b8bb5842cc1c8d3164946",
             "license": "MIT",
-            "assetHash": "sha256:e8887d44bc11d7afd78d7994efabb20fe9d08ff655b6e49dd4195e9f08242439"
+            "assetHash": "sha256:88ee12602e6f71767f5a78b437cc502916057250363dd87ba448bb517a7bd02d"
           }
         },
         {
