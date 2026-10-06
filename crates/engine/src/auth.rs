@@ -184,6 +184,9 @@ pub struct SandboxSession {
     user: AuthUser,
     org_id: Option<String>,
     access_token: String,
+    /// The gateway-verified sandbox id the edge echoed back (`sandboxId`),
+    /// when it sent one — the exact sandbox→device link stamped at boot.
+    sandbox_id: Option<String>,
 }
 
 impl AuthConfig {
@@ -238,6 +241,8 @@ pub async fn sandbox_sign_in(
         user: AuthUser,
         org_id: Option<String>,
         access_token: String,
+        #[serde(default)]
+        sandbox_id: Option<String>,
     }
     let http = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -268,6 +273,7 @@ pub async fn sandbox_sign_in(
         user: reply.user,
         org_id: reply.org_id,
         access_token: reply.access_token,
+        sandbox_id: reply.sandbox_id,
     }))
 }
 
@@ -906,6 +912,17 @@ impl Auth {
             access_token: body.access_token,
             refresh_token: body.refresh_token,
         })
+    }
+
+    /// The gateway-verified cloud sandbox id from the startup sign-in — the
+    /// exact sandbox→device link stamped on this device's registry row.
+    /// `None` on every non-sandbox install.
+    pub fn cloud_sandbox_id(&self) -> Option<String> {
+        self.inner
+            .config
+            .sandbox_session
+            .as_ref()
+            .and_then(|session| session.sandbox_id.clone())
     }
 
     /// Sign a sandbox back in from its token file (`POST /auth/sandbox`). Does nothing when the file

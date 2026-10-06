@@ -1673,6 +1673,26 @@ impl RpcService for EngineRpc {
                 .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
+            methods::CODEGRAFF_ENSURE_SANDBOX => {
+                let allow_create = params
+                    .get("allowCreate")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let wait_secs = params
+                    .get("waitSecs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(240)
+                    .clamp(10, 600);
+                let ensured = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .ensure_sandbox(
+                        allow_create,
+                        Duration::from_secs(wait_secs),
+                        self.workspace.watch_devices(),
+                    )
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&ensured)
+            }
             methods::ROOM_REQUEST => {
                 #[derive(Deserialize)]
                 struct P {

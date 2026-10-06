@@ -150,6 +150,9 @@ pub struct WorkspaceHostConfig {
     /// When present, the host joins `/registry/{orgId}/ws`. `None` = fully offline
     /// (local snapshots only; the registry still drives everything device-side).
     pub edge: Option<EdgeConfig>,
+    /// The gateway-verified Codegraff cloud sandbox this engine runs in, if any —
+    /// stamped on this device's registry row every boot (`None` elsewhere).
+    pub cloud_sandbox_id: Option<String>,
 }
 
 struct WorkspaceHostInner {
@@ -273,6 +276,9 @@ impl WorkspaceHost {
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             cursor_sdk_version: Some(harness_adapters::CursorHarness::sdk_version().into()),
             capabilities: harness_proto::capabilities::current(),
+            // Restamped from the verified startup sign-in on every boot; `None`
+            // clears a stale value if this binary ever left a sandbox.
+            cloud_sandbox_id: config.cloud_sandbox_id.clone(),
         })?;
 
         let state = doc.read_all()?;
@@ -488,6 +494,26 @@ impl WorkspaceHost {
     /// the engine points this at `LinkCache::reset_cooldown`.
     pub fn set_peer_alive_hook(&self, hook: PeerAliveHook) {
         *lock(&self.inner.peer_alive) = Some(hook);
+    }
+
+    /// Restamp this device's verified cloud-sandbox link once auth is attached
+    /// — the startup sign-in lands after the boot upsert in [`Self::open`].
+    /// `None` clears it (the engine is not running inside a cloud sandbox).
+    pub fn set_cloud_sandbox_id(&self, cloud_sandbox_id: Option<String>) {
+        let Some(mut device) = self
+            .watch_devices()
+            .borrow()
+            .iter()
+            .find(|d| d.id == self.inner.config.device_id)
+            .cloned()
+        else {
+            return;
+        };
+        if device.cloud_sandbox_id == cloud_sandbox_id {
+            return;
+        }
+        device.cloud_sandbox_id = cloud_sandbox_id;
+        self.upsert_device_row(&device);
     }
 
     /// Test seam: write a foreign device row (the relay version gate and the
@@ -1760,6 +1786,7 @@ mod tests {
                 org_id: "test-org".into(),
                 user_id: "test-user".into(),
                 edge: None,
+                cloud_sandbox_id: None,
             },
         )
         .unwrap();
@@ -1816,6 +1843,7 @@ mod tests {
                 org_id: "test-org".into(),
                 user_id: "test-user".into(),
                 edge: None,
+                cloud_sandbox_id: None,
             },
         )
         .unwrap();

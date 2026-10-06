@@ -699,6 +699,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
                 version: Some("0.1.17".into()),
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                cloud_sandbox_id: None,
             })
             .unwrap();
         legacy

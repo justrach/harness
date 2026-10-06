@@ -22,13 +22,22 @@ use std::time::Duration;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use super::{CodegraffAuth, http, urlencode};
 
 const FLEET: &str = "fleet";
 const SANDBOX_NAME: &str = "Harness cloud";
-/// The gateway pauses a persistent sandbox this long after its last activity.
+/// The shared agent sandbox role: the gateway keeps at most one per account
+/// and returns it (instead of creating another) on repeat requests.
+const DEFAULT_ROLE: &str = "harness-default";
+/// Lease length requested at create. Fleet leases are fixed windows the
+/// gateway caps (30 min max, ~10 min on a plain resume) — activity does NOT
+/// extend them, and the sandbox pauses when the window ends.
 const AUTO_STOP_MINUTES: u32 = 30;
+/// A device counts as online when `lastSeenAt` is this fresh — the same
+/// window the Devices page uses (crates/ui `DEVICE_ONLINE_WINDOW_SECS`).
+const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
 const QUICK: Duration = Duration::from_secs(20);
 /// Creating or waking a sandbox boots a machine.
 const BOOT: Duration = Duration::from_secs(90);
@@ -53,6 +62,9 @@ pub struct CodegraffSandbox {
     pub harness: bool,
     /// The name its device registers under (remembered at create time).
     pub device_name: Option<String>,
+    /// Gateway-assigned role (`"harness-default"` for the shared agent
+    /// sandbox ensure reuses); absent on older rows.
+    pub role: Option<String>,
 }
 
 /// `enabled: false` means this build doesn't offer cloud sandboxes (the UI hides the card).
@@ -95,6 +107,7 @@ fn parse_sandbox(value: &Value) -> CodegraffSandbox {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         device_name: None,
+        role: text("/role"),
     }
 }
 
@@ -211,6 +224,21 @@ impl CodegraffAuth {
         body: Option<Value>,
         timeout: Duration,
     ) -> Result<Value, Failure> {
+        self.sandbox_call_status(method, path, body, timeout)
+            .await
+            .map(|(_, body, _)| body)
+    }
+
+    /// The same call with the HTTP status and `Retry-After` hint kept:
+    /// `POST /v1/sandboxes` uses 200 (existing default), 201 (created) and
+    /// 202 (pending, retry the identical request) deliberately.
+    async fn sandbox_call_status(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        timeout: Duration,
+    ) -> Result<(u16, Value, Option<u64>), Failure> {
         let key = self
             .current_key()
             .ok_or_else(|| Failure::local("Sign in with Codegraff first"))?;
@@ -228,9 +256,14 @@ impl CodegraffAuth {
             .await
             .map_err(|e| Failure::local(format!("couldn't reach CodeGraff: {e}")))?;
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
         let body = response.json::<Value>().await.ok();
         if status.is_success() {
-            Ok(body.unwrap_or(Value::Null))
+            Ok((status.as_u16(), body.unwrap_or(Value::Null), retry_after))
         } else {
             Err(Failure {
                 status: status.as_u16(),
@@ -396,12 +429,256 @@ impl CodegraffAuth {
         Ok(())
     }
 
-    /// Usage for one sandbox, as the gateway sends it.
+    /// Usage for one sandbox, as the gateway sends it. 501 means the provider
+    /// can't report it — a fact about the sandbox, not a failure.
     pub async fn sandbox_meter(&self, id: &str) -> Result<Value, String> {
-        self.sandbox_call(Method::GET, &Self::sandbox_path(id, "/meter"), None, QUICK)
+        match self
+            .sandbox_call(Method::GET, &Self::sandbox_path(id, "/meter"), None, QUICK)
             .await
-            .map_err(|f| f.sentence("CodeGraff couldn't read the sandbox's usage"))
+        {
+            Err(f) if f.status == 501 => Ok(json!({ "supported": false })),
+            other => other.map_err(|f| f.sentence("CodeGraff couldn't read the sandbox's usage")),
+        }
     }
+
+    /// Join or wake the account's default Harness cloud sandbox and wait for
+    /// its device to come online — the agent-facing "give me a machine to
+    /// run on".
+    ///
+    /// Every call starts with the role request (`POST /v1/sandboxes
+    /// {role: "harness-default", allowCreate}`): with `allow_create` false it
+    /// is a side-effect-free read that never provisions — it only joins or
+    /// reconciles the account's default, answering 409 when there is none.
+    /// A random fleet sandbox is never treated as the default, and sandboxes
+    /// are joined to devices by the exact `cloudSandboxId` the sandbox's
+    /// engine stamps at boot, never by name. `devices` is the workspace
+    /// host's device watch: the answer is the device row carrying this
+    /// sandbox's id once it reports in, bounded by `wait`.
+    ///
+    /// Single-flight per process: `POST /v1/sandboxes` has no idempotency
+    /// key, so concurrent ensures queue here instead of racing creates.
+    pub async fn ensure_sandbox(
+        &self,
+        allow_create: bool,
+        wait: Duration,
+        devices: watch::Receiver<Vec<harness_proto::Device>>,
+    ) -> Result<EnsuredSandbox, String> {
+        static FLIGHT: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _flight = FLIGHT.get_or_init(Default::default).lock().await;
+        self.ensure_sandbox_inner(allow_create, wait, devices).await
+    }
+
+    async fn ensure_sandbox_inner(
+        &self,
+        allow_create: bool,
+        wait: Duration,
+        mut devices: watch::Receiver<Vec<harness_proto::Device>>,
+    ) -> Result<EnsuredSandbox, String> {
+        let online = |device: &harness_proto::Device| {
+            device.last_seen_at.is_some_and(|at| {
+                chrono::Utc::now().signed_duration_since(at).num_seconds()
+                    <= DEVICE_ONLINE_WINDOW_SECS
+            })
+        };
+        fn matched<'a>(
+            devices: &'a [harness_proto::Device],
+            id: &str,
+        ) -> Option<&'a harness_proto::Device> {
+            devices
+                .iter()
+                .find(|d| d.cloud_sandbox_id.as_deref() == Some(id))
+        }
+
+        let deadline = tokio::time::Instant::now() + wait;
+
+        // The role request is the one entry to the account's default: read or
+        // join with allowCreate false, provision only with true. 409
+        // sandbox_default_missing gets the plain-language error.
+        let (chosen, created) = match self.default_sandbox(allow_create, deadline).await {
+            Ok(ok) => ok,
+            Err(error) => {
+                return Err(if error == "sandbox_default_missing" {
+                    "No cloud sandbox on this account. Creating one adds billed compute; \
+                     call again with allowCreate: true to create it."
+                        .into()
+                } else {
+                    error
+                });
+            }
+        };
+
+        // The gateway never wakes anything: paused → /start + /harness;
+        // running but its device has not yet reported this sandbox id →
+        // /harness again (idempotent setup). An exact-matched online device
+        // needs nothing further.
+        let sandbox_id = chosen.id.clone();
+        let mut expires_at = chosen.expires_at.clone();
+        let needs_attach = matched(&devices.borrow(), &sandbox_id).is_none_or(|d| !online(d));
+        let mut woke = false;
+        if chosen.state == "paused" || needs_attach {
+            self.start_sandbox(&sandbox_id)
+                .await
+                .map_err(|e| format!("setup: {e}"))?;
+            woke = chosen.state == "paused";
+        }
+
+        // Cheap only when we changed something: the lease clock moved.
+        if created || woke {
+            if let Ok(Some(fresh)) = self.sandboxes().await {
+                if let Some(s) = fresh.sandboxes.iter().find(|s| s.id == sandbox_id) {
+                    expires_at = s.expires_at.clone();
+                }
+            }
+        }
+
+        // d. wait for the device row carrying this exact sandbox id.
+        loop {
+            if let Some(device) = matched(&devices.borrow(), &sandbox_id).filter(|d| online(d)) {
+                return Ok(EnsuredSandbox {
+                    sandbox_id,
+                    device_id: device.id.clone(),
+                    device_name: device.name.clone(),
+                    created,
+                    woke,
+                    expires_at,
+                });
+            }
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                break;
+            };
+            if tokio::time::timeout(remaining, devices.changed())
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        // Timed out: a name-matched device online means an older build that
+        // cannot stamp the exact id — name it, but never return it.
+        let expected_name = self
+            .device_names()
+            .get(&sandbox_id)
+            .cloned()
+            .unwrap_or_else(|| device_name_for(&sandbox_id));
+        let name_match = devices
+            .borrow()
+            .iter()
+            .find(|d| d.name == expected_name && online(d))
+            .map(|d| {
+                format!(
+                    " A device named \"{}\" is online but did not report this sandbox id — \
+                     an unverified name match; its Harness build may predate exact sandbox ids.",
+                    d.name
+                )
+            })
+            .unwrap_or_default();
+        Err(format!(
+            "The sandbox is running but no device has reported this sandbox id within {} s.{}",
+            wait.as_secs(),
+            name_match
+        ))
+    }
+
+    /// Read, join or start the account's default agent sandbox — the one
+    /// create `ensure_sandbox` performs (the Settings card's `create_sandbox`
+    /// stays role-free and makes its own).
+    ///
+    /// `POST /v1/sandboxes {role: "harness-default", allowCreate}` contract:
+    /// - 200 — the existing (possibly paused) default, `reused: true`,
+    ///   NOT woken by the gateway;
+    /// - 201 — a new default was created (`reused: false`, only possible
+    ///   with `allowCreate: true`);
+    /// - 202 — creation is pending under a stable `operationId` and `stage`;
+    ///   repeat the identical request after `Retry-After` seconds (clamped
+    ///   1..=10, default 2) to join or reconcile — never a differently-shaped
+    ///   request and never an Idempotency-Key;
+    /// - 409 `sandbox_default_missing` — no default and `allowCreate` was
+    ///   false, so nothing was provisioned.
+    /// The gateway never wakes anything: Harness wakes via /start + /harness
+    /// on the unified path after this returns.
+    ///
+    /// Returns the sandbox and whether it was created now (201). The magic
+    /// error string `"sandbox_default_missing"` lets the caller translate the
+    /// typed gateway error into app words.
+    async fn default_sandbox(
+        &self,
+        allow_create: bool,
+        deadline: tokio::time::Instant,
+    ) -> Result<(CodegraffSandbox, bool), String> {
+        let body = json!({
+            "provider": FLEET,
+            "persistent": true,
+            "name": SANDBOX_NAME,
+            "autoStopMinutes": AUTO_STOP_MINUTES,
+            "role": DEFAULT_ROLE,
+            "allowCreate": allow_create,
+        });
+        loop {
+            let (status, value, retry_after) = match self
+                .sandbox_call_status(Method::POST, "/v1/sandboxes", Some(body.clone()), BOOT)
+                .await
+            {
+                Ok(ok) => ok,
+                Err(f) if f.error_type() == Some("sandbox_default_missing") => {
+                    return Err("sandbox_default_missing".into());
+                }
+                Err(f) => {
+                    return Err(format!(
+                        "boot: {}",
+                        f.sentence("CodeGraff couldn't create the sandbox")
+                    ));
+                }
+            };
+            match status {
+                200 | 201 => {
+                    let sandbox = parse_sandbox(&value);
+                    if sandbox.id.is_empty() {
+                        return Err("boot: CodeGraff answered without a sandbox id.".into());
+                    }
+                    return Ok((sandbox, status == 201));
+                }
+                202 => {
+                    let operation = value
+                        .get("operationId")
+                        .or_else(|| value.get("operation_id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let stage = value
+                        .get("stage")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let Some(remaining) =
+                        deadline.checked_duration_since(tokio::time::Instant::now())
+                    else {
+                        return Err(format!(
+                            "boot: the default sandbox is still being created (operation \
+                             {operation}, stage {stage}); call ensure_sandbox again to join it"
+                        ));
+                    };
+                    let retry_secs = retry_after.unwrap_or(2).clamp(1, 10);
+                    tokio::time::sleep(remaining.min(Duration::from_secs(retry_secs))).await;
+                }
+                other => {
+                    return Err(format!("boot: unexpected {other} answering the default."));
+                }
+            }
+        }
+    }
+}
+
+/// What [`CodegraffAuth::ensure_sandbox`] answers: the sandbox plus the device
+/// row that verifiably belongs to it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnsuredSandbox {
+    pub sandbox_id: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub created: bool,
+    pub woke: bool,
+    pub expires_at: Option<Value>,
 }
 
 #[cfg(test)]
@@ -505,8 +782,22 @@ mod tests {
 
     /// A fake gateway. Each request takes the first matching route not yet used; when every
     /// match is used, the last one repeats. Every request is recorded in full.
+    /// The optional fourth tuple element carries extra response headers
+    /// (e.g. `"Retry-After: 1"`).
     async fn fake(
         routes: Vec<(&'static str, u16, &'static str)>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        fake_with_headers(
+            routes
+                .into_iter()
+                .map(|(route, status, body)| (route, status, body, ""))
+                .collect(),
+        )
+        .await
+    }
+
+    async fn fake_with_headers(
+        routes: Vec<(&'static str, u16, &'static str, &'static str)>,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -524,7 +815,7 @@ mod tests {
                 let matching: Vec<usize> = (0..routes.len())
                     .filter(|&i| line.starts_with(routes[i].0))
                     .collect();
-                let (status, body) = {
+                let (status, body, extra_headers) = {
                     let mut used = used.lock().unwrap();
                     let pick = matching
                         .iter()
@@ -534,14 +825,19 @@ mod tests {
                     match pick {
                         Some(i) => {
                             used[i] = true;
-                            (routes[i].1, routes[i].2)
+                            (routes[i].1, routes[i].2, routes[i].3)
                         }
-                        None => (404, "{}"),
+                        None => (404, "{}", ""),
                     }
                 };
                 let response = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                    extra = if extra_headers.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{extra_headers}\r\n")
+                    },
                 );
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
@@ -989,5 +1285,447 @@ mod tests {
                 "{never} must never be called"
             );
         }
+    }
+
+    fn cloud_device(id: &str, sandbox: Option<&str>, name: &str) -> harness_proto::Device {
+        harness_proto::Device {
+            id: id.into(),
+            name: name.into(),
+            platform: "linux".into(),
+            last_seen_at: Some(chrono::Utc::now()),
+            created_at: Some(chrono::Utc::now()),
+            version: None,
+            cursor_sdk_version: None,
+            capabilities: Vec::new(),
+            cloud_sandbox_id: sandbox.map(str::to_owned),
+        }
+    }
+
+    fn device_watch(
+        list: Vec<harness_proto::Device>,
+    ) -> watch::Receiver<Vec<harness_proto::Device>> {
+        watch::channel(list).1
+    }
+
+    fn posts(seen: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        lines(seen)
+            .into_iter()
+            .filter(|l| l.starts_with("POST"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn ensure_joins_a_running_default_with_one_read_only_post() {
+        let (gateway, seen) = fake(vec![(
+            "POST /v1/sandboxes ",
+            200,
+            r#"{"id":"cnd_1","provider":"fleet","state":"started","reused":true,"expiresAt":1790000000}"#,
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(false, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert_eq!(ensured.sandbox_id, "cnd_1");
+        assert_eq!(ensured.device_id, "dev-9");
+        assert!(!ensured.created && !ensured.woke);
+        assert_eq!(ensured.expires_at, Some(json!(1790000000)));
+        // Exactly one POST — the role request, a read with allowCreate:false.
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(posts(&seen), vec!["POST /v1/sandboxes".to_string()]);
+        let role_request = sent
+            .iter()
+            .find(|r| r.starts_with("POST /v1/sandboxes "))
+            .unwrap();
+        assert!(
+            role_request.contains(r#""allowCreate":false"#),
+            "{role_request}"
+        );
+        assert!(
+            role_request.contains(r#""role":"harness-default""#),
+            "{role_request}"
+        );
+        assert!(
+            !role_request.to_ascii_lowercase().contains("idempotency"),
+            "{role_request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_wakes_a_paused_default_and_reports_woke() {
+        let (gateway, seen) = fake(vec![
+            (
+                "POST /v1/sandboxes ",
+                200,
+                r#"{"id":"cnd_1","provider":"fleet","state":"paused","reused":true}"#,
+            ),
+            ("GET /v1/sandboxes/cnd_1 ", 200, r#"{"id":"cnd_1","state":"paused"}"#),
+            ("POST /v1/sandboxes/cnd_1/start ", 200, r#"{"state":"started"}"#),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started","expiresAt":1790001234}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(false, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert!(ensured.woke && !ensured.created);
+        assert_eq!(ensured.expires_at, Some(json!(1790001234)));
+        let posts = posts(&seen);
+        assert!(
+            posts.iter().any(|l| l == "POST /v1/sandboxes/cnd_1/start")
+                && posts
+                    .iter()
+                    .any(|l| l == "POST /v1/sandboxes/cnd_1/harness"),
+            "{posts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_without_allow_create_gets_the_missing_default_error() {
+        let (gateway, seen) = fake(vec![(
+            "POST /v1/sandboxes ",
+            409,
+            r#"{"error":{"type":"sandbox_default_missing","message":"no default"}}"#,
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let error = auth
+            .ensure_sandbox(false, Duration::from_secs(1), device_watch(vec![]))
+            .await
+            .unwrap_err();
+        assert!(error.contains("allowCreate"), "{error}");
+        // Only the read request went out — and it declared allowCreate:false.
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(posts(&seen), vec!["POST /v1/sandboxes".to_string()]);
+        let role_request = sent
+            .iter()
+            .find(|r| r.starts_with("POST /v1/sandboxes "))
+            .unwrap();
+        assert!(
+            role_request.contains(r#""allowCreate":false"#),
+            "{role_request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_with_allow_create_creates_the_default_once() {
+        let (gateway, seen) = fake(vec![
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_new","provider":"fleet","state":"started","reused":false,"expiresAt":1790000000}"#,
+            ),
+            (
+                "GET /v1/sandboxes/cnd_new ",
+                200,
+                r#"{"id":"cnd_new","state":"started"}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_new/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_new","provider":"fleet","state":"started"}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_new"),
+            "Harness cloud new",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(true, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert!(ensured.created && !ensured.woke);
+        assert_eq!(ensured.sandbox_id, "cnd_new");
+        let creates = lines(&seen)
+            .iter()
+            .filter(|l| l.as_str() == "POST /v1/sandboxes")
+            .count();
+        assert_eq!(creates, 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_ensures_share_the_one_default() {
+        let (gateway, seen) = fake(vec![
+            // The first ensure creates the default; the second joins it.
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_1","provider":"fleet","state":"started","reused":false}"#,
+            ),
+            (
+                "GET /v1/sandboxes/cnd_1 ",
+                200,
+                r#"{"id":"cnd_1","state":"started"}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            // The first ensure's refresh after creating.
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started"}]}"#,
+            ),
+            // The second ensure's role request reuses the same default.
+            (
+                "POST /v1/sandboxes ",
+                200,
+                r#"{"id":"cnd_1","provider":"fleet","state":"started","reused":true}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let (tx, rx) = watch::channel(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let (a, b) = tokio::join!(
+            auth.ensure_sandbox(true, Duration::from_secs(5), rx.clone()),
+            auth.ensure_sandbox(true, Duration::from_secs(5), rx),
+        );
+        assert_eq!(a.unwrap().sandbox_id, "cnd_1");
+        assert_eq!(b.unwrap().sandbox_id, "cnd_1");
+        drop(tx);
+        // Two role requests — one create, one join — never two creates.
+        assert_eq!(
+            lines(&seen)
+                .iter()
+                .filter(|l| l.as_str() == "POST /v1/sandboxes")
+                .count(),
+            2,
+            "{:?}",
+            lines(&seen)
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_times_out_on_a_name_only_match_and_says_so() {
+        let (gateway, seen) = fake(vec![
+            (
+                "POST /v1/sandboxes ",
+                200,
+                r#"{"id":"cnd_ab12","provider":"fleet","state":"started","reused":true}"#,
+            ),
+            (
+                "GET /v1/sandboxes/cnd_ab12 ",
+                200,
+                r#"{"id":"cnd_ab12","state":"started"}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_ab12/harness ", 200, r#"{}"#),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        // An online device wearing the expected name but no exact id — an
+        // old build that predates cloudSandboxId.
+        let mut device = cloud_device("dev-old", None, "Harness cloud ab12");
+        device.name = "Harness cloud ab12".into();
+        let devices = device_watch(vec![device]);
+        let error = auth
+            .ensure_sandbox(false, Duration::from_millis(300), devices)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("no device has reported this sandbox id"),
+            "{error}"
+        );
+        assert!(error.contains("\"Harness cloud ab12\""), "{error}");
+        assert!(error.contains("unverified name match"), "{error}");
+        // The role request plus the idempotent /harness reattach — nothing
+        // else, and no /start on a running sandbox.
+        let posts = posts(&seen);
+        assert_eq!(
+            posts,
+            vec![
+                "POST /v1/sandboxes".to_string(),
+                "POST /v1/sandboxes/cnd_ab12/harness".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_joins_a_pending_default_after_retry_after() {
+        let (gateway, seen) = fake_with_headers(vec![
+            (
+                "POST /v1/sandboxes ",
+                202,
+                r#"{"state":"pending","operationId":"op_9","stage":"boot"}"#,
+                "Retry-After: 1",
+            ),
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_1","provider":"fleet","state":"started","reused":false}"#,
+                "",
+            ),
+            (
+                "GET /v1/sandboxes/cnd_1 ",
+                200,
+                r#"{"id":"cnd_1","state":"started"}"#,
+                "",
+            ),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#, ""),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started"}]}"#,
+                "",
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(true, Duration::from_secs(30), devices)
+            .await
+            .unwrap();
+        assert!(ensured.created && !ensured.woke);
+        assert_eq!(ensured.sandbox_id, "cnd_1");
+        // Both role requests are byte-identical (same allowCreate:true body,
+        // no idempotency key) — the 202 retry rejoins, it never reshapes.
+        let creates: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.starts_with("POST /v1/sandboxes "))
+            .cloned()
+            .collect();
+        assert_eq!(creates.len(), 2, "{creates:?}");
+        for request in &creates {
+            assert!(request.contains(r#""allowCreate":true"#), "{request}");
+            assert!(request.contains(r#""role":"harness-default""#), "{request}");
+            assert!(
+                !request.to_ascii_lowercase().contains("idempotency"),
+                "{request}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_reports_a_still_pending_default_at_the_deadline() {
+        let (gateway, seen) = fake_with_headers(vec![(
+            "POST /v1/sandboxes ",
+            202,
+            r#"{"state":"pending","operationId":"op_7","stage":"boot"}"#,
+            "Retry-After: 1",
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let error = auth
+            .ensure_sandbox(true, Duration::from_millis(1200), device_watch(vec![]))
+            .await
+            .unwrap_err();
+        assert!(error.contains("still being created"), "{error}");
+        assert!(error.contains("op_7"), "{error}");
+        // Only same-shape role retries — never /start or /harness on nothing.
+        for line in posts(&seen) {
+            assert_eq!(line, "POST /v1/sandboxes");
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_wakes_a_freshly_created_default_that_came_back_paused() {
+        // A recovered creation can answer 201 already paused — the unified
+        // wake path must not trust "created" to mean running.
+        let (gateway, seen) = fake(vec![
+            (
+                "POST /v1/sandboxes ",
+                201,
+                r#"{"id":"cnd_1","provider":"fleet","state":"paused","reused":false}"#,
+            ),
+            (
+                "GET /v1/sandboxes/cnd_1 ",
+                200,
+                r#"{"id":"cnd_1","state":"paused"}"#,
+            ),
+            (
+                "POST /v1/sandboxes/cnd_1/start ",
+                200,
+                r#"{"state":"started"}"#,
+            ),
+            ("POST /v1/sandboxes/cnd_1/harness ", 200, r#"{}"#),
+            (
+                "GET /v1/sandboxes ",
+                200,
+                r#"{"sandboxes":[{"id":"cnd_1","provider":"fleet","state":"started"}]}"#,
+            ),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        enable();
+        let devices = device_watch(vec![cloud_device(
+            "dev-9",
+            Some("cnd_1"),
+            "Harness cloud 1",
+        )]);
+        let ensured = auth
+            .ensure_sandbox(true, Duration::from_secs(5), devices)
+            .await
+            .unwrap();
+        assert!(ensured.created && ensured.woke);
+        assert_eq!(ensured.sandbox_id, "cnd_1");
+        let posts = posts(&seen);
+        assert_eq!(
+            posts,
+            vec![
+                "POST /v1/sandboxes".to_string(),
+                "POST /v1/sandboxes/cnd_1/start".to_string(),
+                "POST /v1/sandboxes/cnd_1/harness".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_meter_the_provider_cannot_report_is_unsupported_not_an_error() {
+        let (gateway, _seen) = fake(vec![(
+            "GET /v1/sandboxes/cnd_1/meter ",
+            501,
+            r#"{"error":{"type":"not_implemented","message":"no meter"}}"#,
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = signed_in(dir.path(), gateway);
+        let meter = auth.sandbox_meter("cnd_1").await.unwrap();
+        assert_eq!(meter, json!({ "supported": false }));
     }
 }

@@ -16,6 +16,7 @@ use harness_proto::{
     Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
     Space, UserInputAnswer,
 };
+use harness_rpc::methods;
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 
@@ -34,6 +35,9 @@ const CHAT_WAIT_NOTE: &str = "The chat is still working. Its reply arrives in yo
 /// A session row older than this is not trusted to still be working
 /// (the UI's staleness window): a crashed host must not read as busy forever.
 const SESSION_STALE: chrono::Duration = chrono::Duration::seconds(45);
+/// A device counts as online when `lastSeenAt` is this fresh — the same
+/// window the Devices page uses (crates/ui `DEVICE_ONLINE_WINDOW_SECS`).
+const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +77,33 @@ fn catalog() -> Vec<ToolDef> {
             name: "list_devices",
             description: "Devices in this workspace (the local engine's device is flagged). Chats and projects are hosted on a device.",
             input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "list_sandboxes",
+            description: "The account's Codegraff cloud sandboxes joined to devices by their exact cloudSandboxId. Fleet leases are fixed windows (~10 min after a wake, 30 max) that pause at expiry — a paused sandbox's agents stop running.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "ensure_sandbox",
+            description: "Join or wake the account's default Codegraff cloud sandbox and wait for its device to come online; returns the deviceId to pass to create_chat(device=…, harness=\"graff\"). With allowCreate false it only reads or joins — provisioning a new default is billed compute and happens only with allowCreate: true; waking an existing sandbox is billed for its bounded lease.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "allowCreate": { "type": "boolean", "default": false, "description": "Permit creating a billed cloud sandbox when none exists." },
+                    "waitSecs": { "type": "integer", "minimum": 10, "maximum": 600, "default": 240, "description": "How long to wait for the sandbox's device to report online." }
+                }
+            }),
+        },
+        ToolDef {
+            name: "stop_sandbox",
+            description: "Pause a Codegraff cloud sandbox (memory kept; agents inside stop running).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Sandbox id (see list_sandboxes)." }
+                },
+                "required": ["id"]
+            }),
         },
         ToolDef {
             name: "list_projects",
@@ -213,6 +244,18 @@ struct ChatArgs {
 #[derive(Deserialize)]
 struct ListModelsArgs {
     harness: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct EnsureSandboxArgs {
+    allow_create: Option<bool>,
+    wait_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SandboxArgs {
+    id: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -392,6 +435,9 @@ impl Tools {
         let result = match name {
             "whoami" => self.whoami().await,
             "list_devices" => self.list_devices().await,
+            "list_sandboxes" => self.list_sandboxes().await,
+            "ensure_sandbox" => self.ensure_sandbox(parse(args)?).await,
+            "stop_sandbox" => self.stop_sandbox(parse(args)?).await,
             "list_projects" => self.list_projects().await,
             "list_harnesses" => self.list_harnesses().await,
             "list_models" => self.list_models(parse(args)?).await,
@@ -450,8 +496,66 @@ impl Tools {
                 "local": d.id == local,
                 "lastSeenAt": d.last_seen_at,
                 "version": d.version,
+                "cloudSandboxId": d.cloud_sandbox_id,
             })).collect::<Vec<_>>()
         }))
+    }
+
+    /// Cloud sandboxes joined to devices by the exact `cloudSandboxId`, never
+    /// by name — a stale "Harness cloud xy" name is only a hint.
+    async fn list_sandboxes(&self) -> anyhow::Result<Value> {
+        let (reply, devices) = tokio::try_join!(
+            self.harness.call(methods::CODEGRAFF_SANDBOXES, json!({})),
+            self.harness.devices()
+        )?;
+        let online = |device: &harness_proto::Device| {
+            device.last_seen_at.is_some_and(|at| {
+                chrono::Utc::now().signed_duration_since(at).num_seconds()
+                    <= DEVICE_ONLINE_WINDOW_SECS
+            })
+        };
+        let sandboxes = reply
+            .get("sandboxes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(json!({
+            "enabled": reply.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+            "sandboxes": sandboxes.iter().map(|s| {
+                let id = s.get("id").and_then(Value::as_str).unwrap_or_default();
+                let device = devices.iter().find(|d| d.cloud_sandbox_id.as_deref() == Some(id));
+                json!({
+                    "id": id,
+                    "state": s.get("state").cloned().unwrap_or(Value::Null),
+                    "role": s.get("role").cloned().unwrap_or(Value::Null),
+                    "expiresAt": s.get("expiresAt").cloned().unwrap_or(Value::Null),
+                    "deviceId": device.map(|d| d.id.clone()),
+                    "online": device.is_some_and(|d| online(d)),
+                    "deviceNameHint": s.get("deviceName").cloned().unwrap_or(Value::Null),
+                })
+            }).collect::<Vec<_>>()
+        }))
+    }
+
+    async fn ensure_sandbox(&self, args: EnsureSandboxArgs) -> anyhow::Result<Value> {
+        self.harness
+            .call(
+                methods::CODEGRAFF_ENSURE_SANDBOX,
+                json!({
+                    "allowCreate": args.allow_create.unwrap_or(false),
+                    "waitSecs": args.wait_secs.unwrap_or(240),
+                }),
+            )
+            .await
+    }
+
+    async fn stop_sandbox(&self, args: SandboxArgs) -> anyhow::Result<Value> {
+        self.harness
+            .call(
+                methods::CODEGRAFF_SANDBOX_ACTION,
+                json!({ "id": args.id, "action": "stop" }),
+            )
+            .await
     }
 
     async fn list_projects(&self) -> anyhow::Result<Value> {
@@ -1115,10 +1219,39 @@ mod tests {
                 methods::ENGINE_INFO => RpcReply::Value(json!({
                     "deviceId": "dev-local", "workspaceScope": "local"
                 })),
-                methods::WATCH_DEVICES => stream(json!([{
-                    "id": "dev-local", "name": "Laptop", "platform": "linux",
-                    "lastSeenAt": null
-                }])),
+                methods::WATCH_DEVICES => stream(json!([
+                    { "id": "dev-local", "name": "Laptop", "platform": "linux",
+                      "lastSeenAt": null },
+                    { "id": "dev-cloud", "name": "Harness cloud live", "platform": "linux",
+                      "lastSeenAt": chrono::Utc::now().to_rfc3339(),
+                      "cloudSandboxId": "cnd_live" }
+                ])),
+                methods::CODEGRAFF_SANDBOXES => RpcReply::Value(json!({
+                    "enabled": true,
+                    "sandboxes": [
+                        { "id": "cnd_live", "state": "running", "expiresAt": 1790000000,
+                          "deviceName": "Harness cloud live" },
+                        // A name that collides with the live device but no
+                        // cloudSandboxId anywhere — must NOT join.
+                        { "id": "cnd_other", "state": "paused", "expiresAt": null,
+                          "deviceName": "Harness cloud live" }
+                    ]
+                })),
+                methods::CODEGRAFF_ENSURE_SANDBOX | methods::CODEGRAFF_SANDBOX_ACTION => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    if method == methods::CODEGRAFF_ENSURE_SANDBOX {
+                        RpcReply::Value(json!({
+                            "sandboxId": "cnd_live", "deviceId": "dev-cloud",
+                            "deviceName": "Harness cloud live",
+                            "created": false, "woke": true, "expiresAt": 1790000000
+                        }))
+                    } else {
+                        RpcReply::Value(json!({ "ok": true }))
+                    }
+                }
                 methods::WATCH_SPACES => stream(json!([{
                     "id": "space-1", "deviceId": "dev-local", "path": "/repo/comet",
                     "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
@@ -1529,5 +1662,68 @@ mod tests {
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
         );
+    }
+
+    #[tokio::test]
+    async fn sandbox_tools_join_devices_by_exact_id() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        assert!(
+            tools.has("list_sandboxes") && tools.has("ensure_sandbox") && tools.has("stop_sandbox")
+        );
+
+        let listed = tools.call("list_sandboxes", json!({})).await.unwrap();
+        assert_eq!(listed["enabled"], true);
+        let sandboxes = listed["sandboxes"].as_array().unwrap();
+        assert_eq!(sandboxes.len(), 2);
+        // Exact cloudSandboxId match joins; the name-colliding sandbox does not.
+        assert_eq!(sandboxes[0]["id"], "cnd_live");
+        assert_eq!(sandboxes[0]["deviceId"], "dev-cloud");
+        assert_eq!(sandboxes[0]["online"], true);
+        assert_eq!(sandboxes[1]["id"], "cnd_other");
+        assert_eq!(sandboxes[1]["deviceId"], Value::Null);
+        assert_eq!(sandboxes[1]["online"], false);
+        assert_eq!(sandboxes[1]["deviceNameHint"], "Harness cloud live");
+
+        let ensured = tools
+            .call(
+                "ensure_sandbox",
+                json!({ "allowCreate": true, "waitSecs": 60 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ensured["deviceId"], "dev-cloud");
+        let (_, params) = world
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(m, _)| m == methods::CODEGRAFF_ENSURE_SANDBOX)
+            .unwrap()
+            .clone();
+        assert_eq!(params["allowCreate"], true);
+        assert_eq!(params["waitSecs"], 60);
+
+        tools
+            .call("stop_sandbox", json!({ "id": "cnd_live" }))
+            .await
+            .unwrap();
+        let (_, params) = world
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(m, _)| m == methods::CODEGRAFF_SANDBOX_ACTION)
+            .unwrap()
+            .clone();
+        assert_eq!(params, json!({ "id": "cnd_live", "action": "stop" }));
+
+        // No delete is exposed.
+        assert!(!tools.has("delete_sandbox"));
+        let err = tools
+            .call("delete_sandbox", json!({ "id": "x" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown tool"), "{err}");
     }
 }

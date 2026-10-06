@@ -94,6 +94,10 @@ pub struct Device {
     /// this device row. Missing on older builds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Set by a Codegraff cloud sandbox's engine from its verified sign-in;
+    /// the exact sandbox→device link (name matching was only a heuristic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_sandbox_id: Option<String>,
 }
 
 impl Device {
