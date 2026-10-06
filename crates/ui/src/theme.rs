@@ -117,7 +117,7 @@ impl AccentColor {
                 Appearance::Dark => strong.opacity(0.45),
                 Appearance::Light => primary.opacity(0.10),
             },
-            selection: primary.opacity(if appearance.is_dark() { 0.35 } else { 0.24 }),
+            selection: primary.opacity(if appearance.is_dark() { 0.35 } else { 0.50 }),
             caret: primary,
             code_text: primary,
             code_wash: primary.opacity(match appearance {
@@ -2099,6 +2099,51 @@ mod tests {
         assert!(painted_contrast(theme.terminal.foreground, theme.terminal.background) >= 4.5);
     }
 
+    /// The selection wash must be plainly discernible on every light content
+    /// surface — content, card, and the code-block frame's ink wash. The wash
+    /// needs 1.6:1 against its surface (a visible boundary, above dark mode's
+    /// ~1.5-1.7) and text over it keeps WCAG non-text 3:1 — selection is
+    /// transient, so 4.5 isn't required (and is unreachable on light washes).
+    #[test]
+    fn light_mode_selection_wash_stays_legible_on_content_surfaces() {
+        let mut themes = vec![("default".to_string(), Theme::light())];
+        themes.extend(
+            ThemeRegistry::builtin()
+                .variants_for(harness_theme::Appearance::Light)
+                .map(|variant| {
+                    (
+                        variant.id.clone(),
+                        Theme::from_variant(
+                            variant,
+                            AccentSelection::ThemeDefault,
+                            SurfacePreference::Opaque,
+                        ),
+                    )
+                }),
+        );
+        for (name, theme) in themes {
+            debug_assert_eq!(theme.appearance, Appearance::Light, "{name}");
+            let code_block = flatten(theme.ink(0.035), theme.bg);
+            for (surface_name, surface) in [
+                ("content", theme.bg),
+                ("card", theme.surface_card),
+                ("code block", code_block),
+            ] {
+                let wash = flatten(theme.selection, surface);
+                assert!(
+                    contrast_ratio(wash, surface) >= 1.6,
+                    "{name} selection is only {:.2}:1 on the {surface_name} surface",
+                    contrast_ratio(wash, surface)
+                );
+                assert!(
+                    contrast_ratio(theme.text, wash) >= 3.0,
+                    "{name} text on the selection wash is only {:.2}:1 on the {surface_name} surface",
+                    contrast_ratio(theme.text, wash)
+                );
+            }
+        }
+    }
+
     #[test]
     fn runtime_hardening_leaves_curated_builtin_text_unchanged() {
         for variant in ThemeRegistry::builtin()
@@ -2169,7 +2214,7 @@ mod tests {
                     theme.accent.opacity(if theme.appearance.is_dark() {
                         0.35
                     } else {
-                        0.24
+                        0.50
                     })
                 );
                 assert!(hue_distance(theme.accent.h, theme.accent_strong.h) <= 0.04);
