@@ -6099,7 +6099,12 @@ impl Shell {
                         can_back,
                         &theme,
                         cx.listener(|this, _, window, cx| {
-                            this.switch_chat_tab(this.chat_tab - 1, window, cx)
+                            // Tabs can change between render and click —
+                            // re-check the boundary rather than the stale
+                            // enabled state that was painted.
+                            if let Some(prev) = this.chat_tab.checked_sub(1) {
+                                this.switch_chat_tab(prev, window, cx);
+                            }
                         }),
                     ))
                     .child(nav_history_button(
@@ -6108,7 +6113,9 @@ impl Shell {
                         can_forward,
                         &theme,
                         cx.listener(|this, _, window, cx| {
-                            this.switch_chat_tab(this.chat_tab + 1, window, cx)
+                            if this.chat_tab + 1 < this.chat_tabs.len() {
+                                this.switch_chat_tab(this.chat_tab + 1, window, cx);
+                            }
                         }),
                     )),
             )
