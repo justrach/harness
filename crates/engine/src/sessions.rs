@@ -121,6 +121,9 @@ struct RunHandle {
     /// and re-dispatches each entry as a fresh turn, so an accepted message
     /// can never silently evaporate from a transcript that shows it as sent.
     routed_steers: Arc<Mutex<std::collections::VecDeque<RoutedSteer>>>,
+    /// Bounded explicit-intake lane: `show_image` requests join the run's
+    /// sequential event pipeline instead of bypassing it.
+    image_tx: mpsc::Sender<ShowImageRequest>,
 }
 
 /// One accepted-but-unconfirmed steer: enough to re-dispatch it verbatim.
@@ -129,6 +132,28 @@ struct RoutedSteer {
     prompt: String,
     message_id: String,
 }
+
+/// One explicit image-publication request (MCP `show_image` → engine RPC →
+/// run mailbox). Only identifiers travel on the channel — bytes never do.
+struct ShowImageRequest {
+    id: String,
+    path: String,
+    caption: Option<String>,
+    reply: oneshot::Sender<Result<crate::uploads::ImportedImage, EngineError>>,
+}
+
+/// A `show_image` request whose image is imported and queued but not yet
+/// journaled/folded. Keyed by the namespaced `GeneratedImage` id; the ACK
+/// oneshot resolves at the normal publish+sync point, never before.
+struct PendingShowImage {
+    request_id: String,
+    image: crate::uploads::ImportedImage,
+    reply: oneshot::Sender<Result<crate::uploads::ImportedImage, EngineError>>,
+}
+
+/// The only message callers may see for an import/jail rejection: no paths,
+/// no filesystem internals.
+const SHOW_IMAGE_ATTACH_ERROR: &str = "show_image could not attach the file; use a supported raster image inside the active workspace (maximum 24 MiB)";
 
 struct Inner {
     device_id: String,
@@ -506,6 +531,7 @@ impl SessionsEngine {
         let (steer_tx, steer_rx) = mpsc::channel::<SteerMessage>(32);
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (engine_tx, engine_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (image_tx, image_rx) = mpsc::channel::<ShowImageRequest>(8);
         let pending_inputs: PendingInputs = Arc::new(Mutex::new(HashMap::new()));
 
         // Input bridge: the harness asks questions; we mint the request id, park the
@@ -546,6 +572,7 @@ impl SessionsEngine {
                 engine_tx,
                 pending_inputs,
                 routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                image_tx,
             },
         );
         self.set_status(chat_id, SessionStatus::Working, true);
@@ -571,6 +598,7 @@ impl SessionsEngine {
             handle.writer(),
             controls,
             engine_rx,
+            image_rx,
             cancel_rx,
             RunResumeState {
                 user_message_id: user_id,
@@ -749,6 +777,64 @@ impl SessionsEngine {
         true
     }
 
+    /// Explicit agent-initiated image publication (MCP `show_image` → engine
+    /// RPC). The request joins the live run's sequential mailbox, so the
+    /// published `GeneratedImage` lands in transcript order and still wins
+    /// against an immediately following `Done` (the prepared queue drains
+    /// before the stream is polled again).
+    ///
+    /// ACK semantics: the reply oneshot resolves only after the image has
+    /// been imported into managed uploads AND journaled + synced into the
+    /// chat document — "accepted into the host journal/doc", not rendered
+    /// (a connected UI may materialize it later). A failed journal append
+    /// (seq 0) or doc sync error rejects the call.
+    pub async fn show_image(
+        &self,
+        chat_id: &str,
+        id: &str,
+        path: &str,
+        caption: Option<String>,
+    ) -> Result<crate::uploads::ImportedImage, EngineError> {
+        // Direct callers get the same contract as the RPC layer, which
+        // re-checks these bounds for its own params.
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(EngineError::Other("show_image id is invalid".into()));
+        }
+        if path.trim().is_empty() || path.chars().count() > 4096 {
+            return Err(EngineError::Other(SHOW_IMAGE_ATTACH_ERROR.into()));
+        }
+        if caption.as_deref().is_some_and(|c| c.chars().count() > 200) {
+            return Err(EngineError::Other(SHOW_IMAGE_ATTACH_ERROR.into()));
+        }
+        let tx = lock(&self.inner.runs)
+            .get(chat_id)
+            .map(|h| h.image_tx.clone());
+        let Some(tx) = tx else {
+            return Err(EngineError::Other(
+                "No active run accepts images for this chat".into(),
+            ));
+        };
+        let (reply, rx) = oneshot::channel();
+        tx.send(ShowImageRequest {
+            id: id.to_string(),
+            path: path.to_string(),
+            caption,
+            reply,
+        })
+        .await
+        .map_err(|_| EngineError::Other("Run no longer accepts image requests".into()))?;
+        // The run task drops pending replies on retirement, so this can never
+        // hang on a dead run.
+        rx.await.map_err(|_| {
+            EngineError::Other("Run ended before the image request completed".into())
+        })?
+    }
+
     /// Boot recovery: for every journal whose last event is not `Done` (a run died
     /// mid-stream), stamp this device's abandoned `streaming` doc entries `aborted`
     /// with a VISIBLE "Run interrupted by engine restart" error part, close the
@@ -905,6 +991,39 @@ impl SessionsEngine {
 }
 
 impl Inner {
+    /// Import one explicitly requested workspace image through the same file
+    /// jail, pinned-directory walk, signature check, and size cap as the
+    /// Codex-source importer — resolved against the run's CURRENT cwd, not
+    /// the caller's. Relative paths join `run_cwd`; absolutes must still
+    /// canonicalize inside it. Never URL/data-URL input: plain paths only.
+    /// Uses only the configured uploads store, not the Codex source root.
+    async fn import_show_image(
+        &self,
+        run_cwd: &str,
+        chat_id: &str,
+        run_id: &str,
+        request_id: &str,
+        path: &str,
+    ) -> Result<crate::uploads::ImportedImage, EngineError> {
+        let Some((uploads, _)) = self.generated_images.get() else {
+            return Err(EngineError::Other("Image intake is not configured".into()));
+        };
+        let raw = std::path::Path::new(path);
+        let source = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            std::path::Path::new(run_cwd).join(raw)
+        };
+        let uploads = uploads.clone();
+        let root = std::path::PathBuf::from(run_cwd);
+        let stable_key = format!("{chat_id}\0{run_id}\0{request_id}");
+        tokio::task::spawn_blocking(move || {
+            uploads.import_generated_image(&source, &root, &stable_key)
+        })
+        .await
+        .unwrap_or_else(|err| Err(EngineError::Other(err.to_string())))
+    }
+
     /// Journal + broadcast one event (the two unconditional legs of the pipeline).
     /// Sanitize before ANY journal/publish path, including nested subagent events.
     async fn prepare_generated_image(
@@ -1717,6 +1836,7 @@ async fn drive_run(
     doc: crate::doc_host::DocWriter,
     controls: RunControls,
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    mut image_rx: mpsc::Receiver<ShowImageRequest>,
     mut cancel_rx: watch::Receiver<bool>,
     resume_state: RunResumeState,
 ) {
@@ -1807,6 +1927,13 @@ async fn drive_run(
         }
     }
     let mut prepared_events = std::collections::VecDeque::new();
+    // Request-id → successful import, so a re-sent `show_image` request (the
+    // RPC unary-reconnect retry reuses the same id) resolves to the one
+    // published image instead of minting a duplicate.
+    let mut seen_show_images: HashMap<String, crate::uploads::ImportedImage> = HashMap::new();
+    // Namespaced GeneratedImage id → request waiting for its journal+doc ACK.
+    // Entries drop with the run, so a retiring run never strands a caller.
+    let mut pending_show_images: HashMap<String, PendingShowImage> = HashMap::new();
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
@@ -1944,6 +2071,82 @@ async fn drive_run(
                     }
                     break SessionStatus::Idle;
                 }
+                // Explicit image-publication requests run through the SAME
+                // sequential pipeline as harness events: the import happens on
+                // the run's current cwd and the event is queued (not folded
+                // out-of-band), so publication order is preserved and a queued
+                // image still beats an immediately following Done.
+                Some(req) = image_rx.recv() => {
+                    if interrupted || *cancel_rx.borrow() {
+                        let _ = req.reply.send(Err(EngineError::Other(
+                            "Run was interrupted; no image can be published".into(),
+                        )));
+                        continue;
+                    }
+                    if idle_since.is_some() {
+                        let _ = req.reply.send(Err(EngineError::Other(
+                            "Run is parked idle; no image can be published".into(),
+                        )));
+                        continue;
+                    }
+                    if let Some(image) = seen_show_images.get(&req.id) {
+                        // Same request id re-sent (unary reconnect retry): the
+                        // one published import resolves again, no second event.
+                        let _ = req.reply.send(Ok(image.clone()));
+                        continue;
+                    }
+                    match inner
+                        .import_show_image(&run_cwd, &chat_id, &run_id, &req.id, &req.path)
+                        .await
+                    {
+                        Ok(mut image) => {
+                            // Cancellation can land during the blocking import:
+                            // the copied file stays in uploads (untouched like
+                            // any other managed file) but no event publishes.
+                            if interrupted || *cancel_rx.borrow() {
+                                let _ = req.reply.send(Err(EngineError::Other(
+                                    "Run was interrupted; no image can be published".into(),
+                                )));
+                                continue;
+                            }
+                            let image_id = format!("show-image:{}", req.id);
+                            if let Some(caption) = req
+                                .caption
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|c| !c.is_empty())
+                            {
+                                image.name = caption.to_string();
+                            }
+                            // Namespaced so it can never collide with a
+                            // Codex-generated id in `seen_images`. The reply
+                            // oneshot parks in `pending_show_images` and ACKs
+                            // at the normal publish+fold+sync point below.
+                            pending_show_images.insert(
+                                image_id.clone(),
+                                PendingShowImage {
+                                    request_id: req.id,
+                                    image: image.clone(),
+                                    reply: req.reply,
+                                },
+                            );
+                            prepared_events.push_back(AgentEvent::GeneratedImage {
+                                id: image_id,
+                                path: image.path,
+                                name: image.name,
+                                mime_type: image.mime_type,
+                            });
+                            continue;
+                        }
+                        Err(err) => {
+                            tracing::warn!(chat = %chat_id, error = %err, "show_image import rejected");
+                            let _ = req.reply.send(Err(EngineError::Other(
+                                SHOW_IMAGE_ATTACH_ERROR.into(),
+                            )));
+                            continue;
+                        }
+                    }
+                }
                 Some(event) = engine_rx.recv() => event,
                 next = stream.next() => match next {
                     Some(Ok(event)) => event,
@@ -2072,6 +2275,19 @@ async fn drive_run(
             };
             event
         };
+
+        // A queued explicit image never publishes once the run was cancelled
+        // between its import and this fold turn: drop the event, reject the
+        // parked ACK. The copied file stays in managed uploads untouched.
+        if let AgentEvent::GeneratedImage { id, .. } = &event
+            && (interrupted || *cancel_rx.borrow())
+            && let Some(pending) = pending_show_images.remove(id)
+        {
+            let _ = pending.reply.send(Err(EngineError::Other(
+                "Run was interrupted; no image can be published".into(),
+            )));
+            continue;
+        }
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
@@ -2551,7 +2767,7 @@ async fn drive_run(
             _ => {}
         }
 
-        inner.publish(&chat_id, &event);
+        let publish_seq = inner.publish(&chat_id, &event);
 
         // Defensive rule from harness: a mid-run SessionStarted re-emission (Claude SDK
         // background re-invocations) must not wipe the segment being written.
@@ -2564,6 +2780,36 @@ async fn drive_run(
             // journal. To reintroduce: `harness_doc::sidecar_payload(&event)`
             // → `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`, all
             // still in place and tested.
+        }
+
+        // Explicit `show_image` attachments ACK here — journaled (seq > 0)
+        // AND folded AND doc-synced — not at mailbox time. A failed append or
+        // doc write reports a generic tool error and caches nothing.
+        if let AgentEvent::GeneratedImage { id, .. } = &event
+            && let Some(pending) = pending_show_images.remove(id)
+        {
+            let synced = publish_seq != 0
+                && sync_segment(
+                    doc_ref,
+                    &mut writer,
+                    &entry_id,
+                    &device_id,
+                    segment_started,
+                    &folded,
+                )
+                .map_err(|err| {
+                    tracing::warn!(chat = %chat_id, error = %err, "show_image doc sync failed");
+                    err
+                })
+                .is_ok();
+            let result = if synced {
+                dirty = false;
+                seen_show_images.insert(pending.request_id.clone(), pending.image.clone());
+                Ok(pending.image)
+            } else {
+                Err(EngineError::Other(SHOW_IMAGE_ATTACH_ERROR.into()))
+            };
+            let _ = pending.reply.send(result);
         }
 
         if let AgentEvent::Done { status, .. } = &event {

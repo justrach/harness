@@ -200,6 +200,28 @@ fn catalog() -> Vec<ToolDef> {
                 "archived": { "type": "boolean", "default": true }
             })),
         },
+        ToolDef {
+            name: "show_image",
+            description: "Display an existing screenshot or raster image inline in this chat for the user to inspect. The file must be inside the active chat workspace and within the image size limit. This attaches a copy; it does not capture the screen, generate an image, send a message, or start another model run.",
+            input_schema: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "description": "Image file path, relative to the active workspace or an absolute path within it."
+                    },
+                    "caption": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "description": "Optional short label for the image preview."
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
     ]
 }
 
@@ -290,6 +312,15 @@ struct AnswerArg {
     labels: Vec<String>,
 }
 
+/// `show_image` args: unknown fields (chat, id, targetDeviceId) are rejected —
+/// the destination is always the injected origin chat, never caller-chosen.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShowImageArgs {
+    path: String,
+    caption: Option<String>,
+}
+
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|e| format!("invalid arguments: {e}"))
 }
@@ -378,6 +409,11 @@ impl Tools {
 
     pub fn list(&self) -> Vec<ToolDef> {
         let mut tools = catalog();
+        if self.harness.origin().chat_id.is_none() {
+            // Without an injected origin chat there is no destination to
+            // publish into; hide rather than offer an arbitrary selector.
+            tools.retain(|t| t.name != "show_image");
+        }
         tools.extend(rooms::catalog());
         tools
     }
@@ -405,6 +441,7 @@ impl Tools {
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "dismiss_input" => self.dismiss_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            "show_image" => self.show_image(parse(args)?).await,
             other if rooms::handles(other) => return self.call_room_tool(other, args).await,
             other => return Err(format!("unknown tool: {other}")),
         };
@@ -1058,6 +1095,40 @@ impl Tools {
         Ok(turn)
     }
 
+    /// Publish an existing workspace image into the origin chat. The request
+    /// id is minted per invocation (never caller-supplied), so the client's
+    /// one reconnect retry re-sends the same id and dedupes to one image.
+    async fn show_image(&self, args: ShowImageArgs) -> anyhow::Result<Value> {
+        let chat_id = self.harness.origin().chat_id.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "show_image needs a chat context: this server is not running inside a chat"
+            )
+        })?;
+        // Whitespace is legal in filenames — only a fully blank path fails;
+        // the raw string forwards unchanged.
+        if args.path.trim().is_empty() || args.path.chars().count() > 4096 {
+            anyhow::bail!("show_image path must be 1-4096 characters");
+        }
+        if args
+            .caption
+            .as_deref()
+            .is_some_and(|c| c.chars().count() > 200)
+        {
+            anyhow::bail!("show_image caption is limited to 200 characters");
+        }
+        self.harness
+            .call(
+                harness_rpc::methods::SHOW_IMAGE,
+                json!({
+                    "chatId": chat_id,
+                    "id": uuid::Uuid::new_v4().to_string(),
+                    "path": args.path,
+                    "caption": args.caption,
+                }),
+            )
+            .await
+    }
+
     /// Whether this server speaks for a chat (an agent-to-agent caller).
     fn from_chat(&self) -> bool {
         self.harness.origin().chat_id.is_some()
@@ -1159,6 +1230,21 @@ mod tests {
                         .unwrap()
                         .push((method.to_owned(), params));
                     RpcReply::Value(json!({ "commandId": "cmd-1", "id": "q-1" }))
+                }
+                methods::SHOW_IMAGE => {
+                    self.writes
+                        .lock()
+                        .unwrap()
+                        .push((method.to_owned(), params.clone()));
+                    if params["path"].as_str() == Some("bad.png") {
+                        return Err(RpcError::Failed("no active run accepts images".into()));
+                    }
+                    RpcReply::Value(json!({
+                        "attached": true,
+                        "id": params["id"],
+                        "name": params["caption"].as_str().unwrap_or("generated.png"),
+                        "mimeType": "image/png",
+                    }))
                 }
                 methods::ROOM_REQUEST => {
                     let path = params["path"].as_str().unwrap_or_default().to_owned();
@@ -1529,5 +1615,148 @@ mod tests {
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
         );
+    }
+    #[tokio::test]
+    async fn show_image_requires_origin_chat() {
+        let world = Arc::new(World::default());
+        let tools = tools(world.clone(), Origin::default());
+        // Hidden without an injected origin: the tool cannot publish anywhere.
+        assert!(tools.has("show_image"));
+        assert!(tools.list().iter().all(|t| t.name != "show_image"));
+        let err = tools
+            .call("show_image", json!({ "path": "shot.png" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("chat context"), "{err}");
+        assert!(world.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn show_image_rejects_unknown_fields_so_chat_and_id_cannot_be_spoofed() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        for args in [
+            json!({ "path": "shot.png", "chat": "chat-alpha-1" }),
+            json!({ "path": "shot.png", "id": "fixed-id" }),
+            json!({ "path": "shot.png", "targetDeviceId": "dev-other" }),
+            json!({ "path": "shot.png", "chatId": "chat-alpha-1" }),
+        ] {
+            let err = tools.call("show_image", args).await.unwrap_err();
+            assert!(err.contains("invalid arguments"), "{err}");
+        }
+        assert!(world.writes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn show_image_forwards_origin_chat_path_caption_and_minted_id() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        assert!(tools.list().iter().any(|t| t.name == "show_image"));
+        let result = tools
+            .call(
+                "show_image",
+                json!({ "path": "shots/one.png", "caption": "build pane" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["attached"], true);
+        assert_eq!(result["mimeType"], "image/png");
+        assert_eq!(result["name"], "build pane");
+        // The success payload never echoes the workspace path or image bytes.
+        assert!(result.get("path").is_none());
+        assert!(result.get("bytes").is_none());
+        assert!(result.get("base64").is_none());
+
+        let writes = world.writes.lock().unwrap();
+        let (method, params) = writes.iter().find(|(m, _)| m == "ShowImage").unwrap();
+        assert_eq!(method, "ShowImage");
+        assert_eq!(params["chatId"], "chat-beta-2");
+        assert_eq!(params["path"], "shots/one.png");
+        assert_eq!(params["caption"], "build pane");
+        assert!(uuid::Uuid::parse_str(params["id"].as_str().unwrap()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_image_schema_and_length_validation() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        let def = tools
+            .list()
+            .into_iter()
+            .find(|t| t.name == "show_image")
+            .unwrap();
+        assert_eq!(
+            def.description,
+            "Display an existing screenshot or raster image inline in this chat for the user to inspect. The file must be inside the active chat workspace and within the image size limit. This attaches a copy; it does not capture the screen, generate an image, send a message, or start another model run."
+        );
+        assert_eq!(def.input_schema["additionalProperties"], false);
+        assert_eq!(def.input_schema["required"], json!(["path"]));
+        let path = &def.input_schema["properties"]["path"];
+        assert_eq!(path["minLength"], 1);
+        assert_eq!(path["maxLength"], 4096);
+        assert_eq!(
+            path["description"],
+            "Image file path, relative to the active workspace or an absolute path within it."
+        );
+        let caption = &def.input_schema["properties"]["caption"];
+        assert_eq!(caption["maxLength"], 200);
+        assert_eq!(
+            caption["description"],
+            "Optional short label for the image preview."
+        );
+
+        // Blank/empty and oversize inputs are rejected before the engine call.
+        for args in [
+            json!({ "path": "" }),
+            json!({ "path": "   " }),
+            json!({ "path": "x".repeat(4097) }),
+            json!({ "path": "ok.png", "caption": "c".repeat(201) }),
+        ] {
+            assert!(tools.call("show_image", args).await.is_err());
+        }
+        assert!(world.writes.lock().unwrap().is_empty());
+        // A legal whitespace-bearing filename forwards verbatim.
+        tools
+            .call("show_image", json!({ "path": " shots/one.png " }))
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        let (_, params) = writes.iter().find(|(m, _)| m == "ShowImage").unwrap();
+        assert_eq!(params["path"], " shots/one.png ");
+    }
+
+    #[tokio::test]
+    async fn show_image_engine_failure_is_a_tool_error() {
+        let world = Arc::new(World::default());
+        let tools = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-beta-2".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        let err = tools
+            .call("show_image", json!({ "path": "bad.png" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("no active run"), "{err}");
     }
 }
