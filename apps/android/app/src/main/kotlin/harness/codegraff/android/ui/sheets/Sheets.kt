@@ -1,5 +1,12 @@
 package harness.codegraff.android.ui.sheets
 
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import harness.codegraff.android.demo.FolderListing
+import harness.codegraff.android.model.ConnectivityRules
+import harness.codegraff.android.ui.components.MiniSpinner
+import kotlinx.coroutines.launch
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -68,7 +75,7 @@ fun SessionHostPickerSheet(state: WorkspaceState, selectedDeviceId: String?, onS
                         ) {
                             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text(device.name, style = sans(16f), color = p.text)
-                                Text(if (state.deviceOnline(device.id)) "Online" else "Offline — sends are saved", style = sans(12f), color = p.textMuted)
+                                Text(ConnectivityRules.hostStatusLine(state.hostStatus(device.id)), style = sans(12f), color = p.textMuted)
                             }
                             if (selectedDeviceId == device.id) GlyphView(Glyph.Check, 16.dp, p.text, strokeWidth = 2.4f)
                         }
@@ -93,7 +100,21 @@ fun NewSpaceSheet(state: WorkspaceState, model: AppModel, onCreated: (String) ->
     val selectedDevice = deviceId ?: devices.firstOrNull()?.id
     var path by remember(selectedDevice) { mutableStateOf<String?>(null) }
     var currentIsRepo by remember(selectedDevice) { mutableStateOf(false) }
-    val listing = selectedDevice?.let { DemoDataset.listFolders(it, path) }
+    // Asked of the computer over the relay; the last listing stays up while the next one loads.
+    var listing by remember(selectedDevice) { mutableStateOf<FolderListing?>(null) }
+    var loading by remember(selectedDevice) { mutableStateOf(false) }
+    var error by remember(selectedDevice) { mutableStateOf<String?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(selectedDevice, path) {
+        val device = selectedDevice ?: return@LaunchedEffect
+        loading = true
+        error = null
+        val result = model.listFolders(device, path)
+        loading = false
+        if (result != null) listing = result
+        else if (listing == null) error = "Couldn't reach ${state.deviceName(device)}. Make sure it's online."
+    }
 
     HarnessSheet("New space", onDismiss) {
         if (devices.isEmpty()) {
@@ -102,7 +123,12 @@ fun NewSpaceSheet(state: WorkspaceState, model: AppModel, onCreated: (String) ->
                 Text("No devices yet", style = sans(15f, FontWeight.Medium), color = p.text)
                 Text("Run Harness on a computer first — its folders will show up here.", style = sans(13f), color = p.textMuted, textAlign = TextAlign.Center)
             }
-        } else if (listing != null) {
+        } else if (listing == null) {
+            Column(Modifier.fillMaxWidth().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                error?.let { Text(it, style = sans(13f), color = p.danger, textAlign = TextAlign.Center) } ?: MiniSpinner()
+            }
+        } else {
+            val listing = listing!!
             Column(Modifier.fillMaxWidth().heightIn(max = 620.dp)) {
                 // Device tabs.
                 Row(
@@ -134,11 +160,13 @@ fun NewSpaceSheet(state: WorkspaceState, model: AppModel, onCreated: (String) ->
                         }
                     }
                     Text(listing.path, style = mono(12f), color = p.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    if (loading) MiniSpinner()
                 }
                 // Folders.
                 Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 12.dp)) {
+                    error?.let { Text(it, style = sans(13f), color = p.danger, modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) }
                     val folders = listing.entries.filter { it.isDir }
-                    if (folders.isEmpty()) {
+                    if (folders.isEmpty() && !loading && error == null) {
                         Text("No folders here", style = sans(13f), color = p.textFaint, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(vertical = 28.dp))
                     } else {
                         SheetCard {
@@ -165,13 +193,22 @@ fun NewSpaceSheet(state: WorkspaceState, model: AppModel, onCreated: (String) ->
                             }
                         }
                     }
+                    if (listing.truncated) {
+                        Text("Listing truncated — this folder has more entries.", style = sans(12f), color = p.textFaint, modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp))
+                    }
                 }
                 val name = listing.path.trimEnd('/').substringAfterLast('/')
                 Box(Modifier.background(p.surfaceDialog.opacity(0.94f)).padding(horizontal = 20.dp).padding(top = 8.dp, bottom = 6.dp)) {
                     SheetPrimaryButton(if (name.isEmpty()) "Use this folder" else "Use “$name”") {
-                        val id = model.createSpace(selectedDevice!!, listing.path, null)
-                        onDismiss()
-                        onCreated(id)
+                        if (creating) return@SheetPrimaryButton
+                        creating = true
+                        scope.launch {
+                            // The git flag the engine stamped when we descended into this folder; the host re-checks it.
+                            val id = model.createSpace(selectedDevice!!, listing.path, null, currentIsRepo)
+                            creating = false
+                            onDismiss()
+                            onCreated(id)
+                        }
                     }
                 }
             }

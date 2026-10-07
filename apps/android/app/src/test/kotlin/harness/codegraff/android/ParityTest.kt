@@ -605,4 +605,24 @@ class ParityTest {
             })
         }
     }
+
+    // MARK: Presence (the rule runs in the native core)
+
+    @Test
+    fun thePresenceRuleMatches() {
+        val vector = load("vectors/presence-rule.json")
+        for (c in vector.rows("cases")) {
+            val name = c.getString("name")
+            val input = harness.codegraff.android.core.PresenceInput(
+                now = c.getLong("now"),
+                received = if (c.isNull("received")) null else c.getLong("received"),
+                connected = c.getBoolean("connected"),
+                joinedAt = if (c.isNull("joinedAt")) null else c.getLong("joinedAt"),
+                rowLastSeen = if (c.isNull("rowLastSeen")) null else c.getLong("rowLastSeen"),
+            )
+            assertEquals(name, c.getString("status"), harness.codegraff.android.core.presenceStatus(input).name.lowercase())
+            assertEquals(name, c.getString("liveness"), harness.codegraff.android.core.presenceLiveness(input).name.lowercase())
+            assertEquals(name, if (c.isNull("nextChange")) null else c.getLong("nextChange"), harness.codegraff.android.core.presenceNextChange(input))
+        }
+    }
 }

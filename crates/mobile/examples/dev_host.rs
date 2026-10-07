@@ -1,6 +1,7 @@
 //! A stand-in desktop host for trying the phone against a dev-mode edge: it publishes a computer, a project and two
 //! sessions to the registry, writes a transcript into one session's chat2 room, then streams a reply into it word by
-//! word so the phone shows a live session.
+//! word so the phone shows a live session. It also answers the phone's requests over its device room (folders, agents,
+//! models, branches, and a pull request for the first session's branch), and beats presence so it reads online.
 //!
 //! ```sh
 //! (cd edge && npm run dev)                                   # AUTH_MODE=dev edge on :27640
@@ -34,6 +35,41 @@ impl ChatDocSink for HostSink {
             .unwrap_or(false)
     }
     fn advance_cursor(&self, _cursor: u64) {}
+}
+
+/// The engine as far as the phone asks it anything.
+struct DevEngine;
+
+#[async_trait::async_trait]
+impl harness_rpc::RpcService for DevEngine {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<harness_rpc::RpcReply, harness_rpc::RpcError> {
+        use harness_rpc::RpcReply::{Stream, Value};
+        Ok(match method {
+            "ListHarnesses" => Value(json!([
+                {"id": "graff", "name": "Graff"}, {"id": "claude-code", "name": "Claude Code"}, {"id": "codex", "name": "Codex"}
+            ])),
+            "ListModels" => Value(json!([
+                {"id": "dev-model", "label": "Dev Model", "reasoningLevels": ["low", "medium", "high"]},
+                {"id": "dev-model-mini", "label": "Dev Model Mini", "reasoningLevels": []}
+            ])),
+            "ListFolders" => {
+                let path = params.get("path").and_then(|p| p.as_str()).unwrap_or("/Users/dev").to_owned();
+                Value(json!({"path": path, "truncated": false, "entries": [
+                    {"name": "harness", "isDir": true, "isRepo": true},
+                    {"name": "notes", "isDir": true, "isRepo": false}
+                ]}))
+            }
+            "ListRefs" => Value(json!([{"name": "main", "current": true}, {"name": "feature/android"}])),
+            "WatchCheckoutChangeRequest" => {
+                let cwd = params["cwd"].as_str().unwrap_or_default().to_owned();
+                let item = json!({"checkoutId": "", "deviceId": "dev-host", "cwd": cwd, "branch": "main", "updatedAt": "now",
+                    "changeRequest": {"provider": "github", "number": 230, "title": "Android: live sync",
+                        "url": "https://example.invalid/pull/230", "state": "open", "baseRef": "main", "headRef": "main"}});
+                Stream(Box::pin(futures::StreamExt::chain(futures::stream::iter(vec![item]), futures::stream::pending())))
+            }
+            other => return Err(harness_rpc::RpcError::UnknownMethod(other.into())),
+        })
+    }
 }
 
 struct NoCheckpoint;
@@ -116,7 +152,12 @@ async fn main() {
     .expect("registry join");
     client.nudge();
     client.set_presence(now_ms());
-    println!("registry: published a computer, a project and two sessions");
+    let _relay = harness_rpc::HostRelay::spawn(
+        harness_rpc::HostRelayConfig::new(edge.clone(), "dev-host", Arc::new(harness_rpc::StaticToken(bearer.clone()))),
+        Arc::new(DevEngine),
+        Arc::new(|_| true),
+    );
+    println!("registry: published a computer, a project and two sessions; relay: serving");
 
     let session = SessionDoc::init("dev-chat-1").unwrap();
     session

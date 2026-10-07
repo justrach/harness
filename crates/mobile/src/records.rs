@@ -110,10 +110,16 @@ pub struct WorkspaceSnapshot {
     pub desktop_appearance: Option<DesktopAppearanceRecord>,
     /// Device id to the epoch ms of its last presence beat heard this session.
     pub presence: HashMap<String, i64>,
+    /// Each chat's pull request, when its host has resolved one for the chat's checkout.
+    pub change_requests: HashMap<String, crate::change_requests::ChangeRequestRecord>,
+    /// What the screens may say about each device (see `presence.rs`).
+    pub host_statuses: HashMap<String, crate::presence::HostStatus>,
     /// The registry socket is joined.
     pub connected: bool,
     /// Server state has reached this session over any transport (socket or HTTPS pull).
     pub synced: bool,
+    /// Epoch ms of the registry's next redial while it is down.
+    pub retry_at_ms: Option<i64>,
 }
 
 // ── session docs ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -249,4 +255,6 @@ pub struct SessionSnapshot {
     pub retry_at_ms: Option<i64>,
     /// The chat is still on the legacy room generation, which the phone does not join (the host migrates it).
     pub waiting_for_migration: bool,
+    /// The room has dialed (a room that never dialed is not "degraded").
+    pub room_active: bool,
 }

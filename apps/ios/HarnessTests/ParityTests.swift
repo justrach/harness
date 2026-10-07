@@ -516,4 +516,30 @@ final class ParityTests: XCTestCase {
             }, strings(c["rows"]), name)
         }
     }
+
+    // MARK: Presence (Android runs this rule in crates/mobile)
+
+    func testThePresenceRuleMatches() throws {
+        let vector = try load("vectors/presence-rule.json")
+        XCTAssertEqual(PresenceRule.liveFreshMs, (vector["liveFreshMs"] as? NSNumber)?.int64Value)
+        XCTAssertEqual(PresenceRule.darkMs, (vector["darkMs"] as? NSNumber)?.int64Value)
+        XCTAssertEqual(PresenceRule.warmupMs, (vector["warmupMs"] as? NSNumber)?.int64Value)
+        for c in try rows(vector, "cases") {
+            let name = c["name"] as? String ?? "?"
+            let now = try XCTUnwrap((c["now"] as? NSNumber)?.int64Value)
+            let received = (c["received"] as? NSNumber)?.int64Value
+            let connected = c["connected"] as? Bool ?? false
+            let joinedAt = (c["joinedAt"] as? NSNumber)?.int64Value
+            let row = (c["rowLastSeen"] as? NSNumber)?.int64Value
+            let status = PresenceRule.status(now: now, received: received, connected: connected, joinedAt: joinedAt,
+                                             rowLastSeen: row)
+            XCTAssertEqual("\(status)", c["status"] as? String, name)
+            let liveness = PresenceRule.liveness(now: now, received: received, connected: connected,
+                                                 joinedAt: joinedAt, rowLastSeen: row)
+            XCTAssertEqual("\(liveness)", c["liveness"] as? String, name)
+            XCTAssertEqual(PresenceRule.nextChange(after: now, received: received, connected: connected,
+                                                   joinedAt: joinedAt, rowLastSeen: row),
+                           (c["nextChange"] as? NSNumber)?.int64Value, name)
+        }
+    }
 }
