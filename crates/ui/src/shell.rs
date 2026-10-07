@@ -1900,6 +1900,9 @@ pub struct Shell {
     graff_notice_updating: bool,
     /// InstallHarness error shown inline on the card.
     graff_notice_error: Option<SharedString>,
+    /// The new engine's own "What's new" lines for the releases this update
+    /// spans, read from its `--version`; empty until loaded or when absent.
+    graff_notice_highlights: Vec<SharedString>,
     _graff_notice_task: Option<Task<()>>,
     graff_update_task: Option<Task<()>>,
     /// Version whose update strip the user dismissed (advisory installs only —
@@ -2197,14 +2200,39 @@ impl Shell {
             let mut notices = harness_adapters::graff_bundle::notices();
             loop {
                 let notice = notices.borrow().clone();
-                this.update(cx, |shell: &mut Shell, cx| {
-                    if shell.graff_notice != notice {
-                        shell.graff_notice = notice;
-                        shell.graff_notice_error = None;
-                        cx.notify();
-                    }
-                })
-                .ok();
+                let changed = this
+                    .update(cx, |shell: &mut Shell, cx| {
+                        let changed = shell.graff_notice != notice;
+                        if changed {
+                            shell.graff_notice = notice.clone();
+                            shell.graff_notice_error = None;
+                            shell.graff_notice_highlights.clear();
+                            cx.notify();
+                        }
+                        changed
+                    })
+                    .unwrap_or(false);
+                // The card's body is the new engine's own release lines:
+                // run its `--version` off the UI thread once per notice.
+                if changed
+                    && let Some(harness_adapters::graff_bundle::GraffNotice::Updated { from, to }) =
+                        notice.clone()
+                {
+                    let lines = cx
+                        .background_executor()
+                        .spawn(async move {
+                            harness_adapters::graff_bundle::release_highlights(from.as_deref(), &to)
+                        })
+                        .await;
+                    this.update(cx, |shell: &mut Shell, cx| {
+                        if shell.graff_notice == notice {
+                            shell.graff_notice_highlights =
+                                lines.into_iter().map(SharedString::from).collect();
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                }
                 if notices.changed().await.is_err() {
                     return;
                 }
@@ -2334,6 +2362,7 @@ impl Shell {
             graff_notice: None,
             graff_notice_updating: false,
             graff_notice_error: None,
+            graff_notice_highlights: Vec::new(),
             _graff_notice_task: graff_notice_task,
             graff_update_task: None,
             update_dismissed: None,
@@ -7875,41 +7904,32 @@ impl Shell {
     /// The graff engine card: bottom-right, floating over the content, until
     /// the user dismisses that version (persisted on UiSettings — a newer
     /// stable re-raises it). "Updated" reports a swap the background updater
-    /// already made; "Available" (auto-update off) offers the install inline.
+    /// already made and lists the new engine's own release lines; "Available"
+    /// (auto-update off) offers the install inline.
     fn render_graff_notice(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use harness_adapters::graff_bundle::GraffNotice;
+        /// Release lines shown inline; the rest are one click away.
+        const MAX_HIGHLIGHTS: usize = 4;
         let notice = self.graff_notice.clone()?;
-        let (title, body, version, can_update): (SharedString, SharedString, String, bool) =
+        let (title, from, to, can_update): (SharedString, Option<String>, String, bool) =
             match &notice {
                 GraffNotice::Updated { from, to } => (
                     "Codegraff engine updated".into(),
-                    match from {
-                        Some(from) => format!(
-                            "v{from} → v{to}. New chats use it; open chats keep their current session."
-                        ),
-                        None => format!("Now on v{to}."),
-                    }
-                    .into(),
+                    from.clone(),
                     to.clone(),
                     false,
                 ),
                 GraffNotice::Available { current, latest } => (
                     "Codegraff engine update available".into(),
-                    format!(
-                        "{} → v{latest}",
-                        current
-                            .as_deref()
-                            .map(|v| format!("v{v}"))
-                            .unwrap_or_else(|| "Not installed".into())
-                    )
-                    .into(),
+                    current.clone(),
                     latest.clone(),
                     true,
                 ),
             };
-        if self.settings.graff_notice_dismissed.as_deref() == Some(version.as_str()) {
+        if self.settings.graff_notice_dismissed.as_deref() == Some(to.as_str()) {
             return None;
         }
+        let ui = crate::typography::ui_rems;
         let button = |id: &'static str, selector: &'static str, label: SharedString| {
             div()
                 .id(id)
@@ -7919,14 +7939,149 @@ impl Shell {
                 .rounded(px(Theme::CONTROL_RADIUS))
                 .border_1()
                 .border_color(theme.border)
-                .text_size(crate::typography::ui_rems(11.5))
+                .text_size(ui(11.5))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.ink(0.06)))
                 .child(label)
         };
-        let release_url = format!("https://github.com/justrach/codegraff/releases/tag/v{version}");
+        let release_url = format!("https://github.com/justrach/codegraff/releases/tag/v{to}");
+
+        // Header: the engine mark, the title, and the version step with the
+        // new version as an accent chip.
+        let version_chip = div()
+            .px(px(6.0))
+            .py(px(1.0))
+            .rounded(px(Theme::CONTROL_RADIUS))
+            .bg(theme.accent_wash)
+            .text_color(theme.accent)
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(format!("v{to}"));
+        let versions = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(ui(11.0))
+            .text_color(theme.text_muted)
+            .when_some(from.clone(), |el, from| {
+                el.child(format!("v{from}")).child(
+                    icon(icons::ARROW_RIGHT)
+                        .size(px(11.0))
+                        .text_color(theme.text_faint),
+                )
+            })
+            .when(from.is_none() && can_update, |el| {
+                el.child("Not installed").child(
+                    icon(icons::ARROW_RIGHT)
+                        .size(px(11.0))
+                        .text_color(theme.text_faint),
+                )
+            })
+            .child(version_chip);
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .size(px(30.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .bg(theme.accent_wash)
+                    .child(
+                        icon(icons::GRAFF_MARK)
+                            .size(px(16.0))
+                            .text_color(theme.accent),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .min_w_0()
+                    .child(
+                        div()
+                            .text_size(ui(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .child(versions),
+            );
+
+        // Body: what this update brings, straight from the engine.
+        let highlights = &self.graff_notice_highlights;
+        let hidden = highlights.len().saturating_sub(MAX_HIGHLIGHTS);
+        let body = (!highlights.is_empty()).then(|| {
+            div()
+                .debug_selector(|| "graff-notice-highlights".into())
+                .flex()
+                .flex_col()
+                .gap(px(5.0))
+                .pt(px(10.0))
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .text_size(ui(10.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text_faint)
+                        .child("WHAT'S NEW"),
+                )
+                .children(highlights.iter().take(MAX_HIGHLIGHTS).map(|line| {
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .mt(px(6.0))
+                                .size(px(5.0))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(theme.accent),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(ui(12.0))
+                                .line_height(px(17.0))
+                                .text_color(theme.text)
+                                .child(line.clone()),
+                        )
+                }))
+                .when(hidden > 0, |el| {
+                    el.child(
+                        div()
+                            .pl(px(13.0))
+                            .text_size(ui(11.0))
+                            .text_color(theme.text_muted)
+                            .child(format!("+{hidden} more in the release notes")),
+                    )
+                })
+        });
+
+        // What happens to work in progress.
+        let footnote: Option<SharedString> = match (&notice, &from) {
+            (GraffNotice::Updated { .. }, Some(from)) => Some(
+                format!("New chats use it. Open chats stay on v{from} until you start a new one.")
+                    .into(),
+            ),
+            (GraffNotice::Updated { .. }, None) => Some("New chats use it.".into()),
+            (GraffNotice::Available { .. }, _) => {
+                Some("Installs in the background; open chats keep their current session.".into())
+            }
+        };
+
         let mut buttons = div()
             .flex()
             .flex_row()
@@ -7955,17 +8110,27 @@ impl Shell {
                 button(
                     "graff-notice-whats-new",
                     "graff-notice-whats-new",
-                    "What's new".into(),
+                    "Release notes".into(),
                 )
                 .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&release_url))),
             )
             .child(
-                button(
-                    "graff-notice-dismiss",
-                    "graff-notice-dismiss",
-                    "Dismiss".into(),
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.dismiss_graff_notice(cx))),
+                div()
+                    .id("graff-notice-dismiss")
+                    .debug_selector(|| "graff-notice-dismiss".into())
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .border_1()
+                    .border_color(theme.solid)
+                    .bg(theme.solid)
+                    .text_size(ui(11.5))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.on_solid)
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.9))
+                    .child("Got it")
+                    .on_click(cx.listener(|this, _, _, cx| this.dismiss_graff_notice(cx))),
             );
 
         Some(
@@ -7975,28 +8140,41 @@ impl Shell {
                 .absolute()
                 .right(px(16.0))
                 .bottom(px(16.0))
-                .w(px(300.0))
+                .w(px(340.0))
+                .p(px(14.0))
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.5))
-                        .text_color(theme.text_muted)
-                        .line_height(px(17.0))
-                        .child(body),
-                )
+                .gap(px(10.0))
+                .child(header)
+                .children(body)
+                .when_some(footnote, |el, note| {
+                    el.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(6.0))
+                            .child(
+                                icon(icons::INFO_CIRCLE)
+                                    .mt(px(2.0))
+                                    .size(px(12.0))
+                                    .text_color(theme.text_faint),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(ui(11.0))
+                                    .line_height(px(16.0))
+                                    .text_color(theme.text_muted)
+                                    .child(note),
+                            ),
+                    )
+                })
                 .when_some(self.graff_notice_error.clone(), |el, error| {
                     el.child(
                         div()
-                            .text_size(crate::typography::ui_rems(11.5))
+                            .text_size(ui(11.5))
                             .text_color(theme.danger)
                             .child(error),
                     )
