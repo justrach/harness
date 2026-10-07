@@ -3271,6 +3271,7 @@ impl RpcService for EngineRpc {
                 let rows = self
                     .agent_accounts
                     .sign_out_graff_login(&p.provider)
+                    .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&rows)
             }

@@ -20,6 +20,7 @@ pub mod badges;
 pub mod browser;
 pub mod change_requests;
 pub mod changes;
+pub(crate) mod chatgpt_plan;
 pub mod codegraff_jobs;
 pub mod codegraff_sandboxes;
 mod comment_ui;

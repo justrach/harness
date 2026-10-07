@@ -1126,6 +1126,12 @@ impl Pickers {
             .and_then(|list| offered_harnesses(list).first().map(|d| d.id))
     }
 
+    /// Whether the effective picks run on graff's ChatGPT plan route, so the
+    /// composer says "Using ChatGPT plan".
+    pub fn uses_chatgpt_plan(&self, cx: &App) -> bool {
+        crate::chatgpt_plan::is_plan_model(self.effective_harness(cx), self.effective_model_id(cx))
+    }
+
     /// Effective model id: the draft pick, the selected chat's config, or (on
     /// the new-chat canvas) the remembered last-used model for the harness.
     fn effective_model_id<'a>(&'a self, cx: &'a App) -> Option<&'a str> {

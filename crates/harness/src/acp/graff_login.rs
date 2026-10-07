@@ -43,9 +43,36 @@ pub async fn login_command(
     Ok(cmd)
 }
 
+/// A ready-to-spawn `graff logout <provider>`. Only ChatGPT's plan sign-in
+/// has one: it revokes the session and keeps graff's app registration, so the
+/// next sign-in skips consent. graff's other sign-ins are a file to remove.
+pub async fn logout_command(provider: &str) -> Result<Command, HarnessError> {
+    if provider != "chatgpt-new" {
+        return Err(HarnessError::Protocol(format!(
+            "graff has no sign-out command for {provider}"
+        )));
+    }
+    let (program, _) = super::AcpHarness::graff().resolve_program(false).await?;
+    let mut cmd = Command::new(&program);
+    crate::compose_child_path(&mut cmd, &program);
+    cmd.arg("logout").arg(provider).env("NO_COLOR", "1");
+    Ok(cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_chatgpt_has_a_sign_out_command() {
+        for other in ["xai", "kimi", "zai", "", "--help"] {
+            let err = logout_command(other).await.unwrap_err();
+            assert!(
+                matches!(&err, HarnessError::Protocol(m) if m.contains("no sign-out command")),
+                "{other:?} -> {err}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn only_graffs_own_sign_in_providers_are_launchable() {

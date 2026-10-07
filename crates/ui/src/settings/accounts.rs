@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use harness_proto::{
     AgentAccount, AgentAccountsSnapshot, AgentLoginMode, AgentLoginPoll, AgentLoginStart,
-    AgentLoginStatus, GRAFF_LOGIN_PROVIDERS, GraffLoginProvider, HarnessId,
+    AgentLoginStatus, CHATGPT_MANAGE_USAGE_URL, GRAFF_LOGIN_PROVIDERS, GraffLoginProvider,
+    HarnessId,
 };
 use harness_rpc::methods;
 
@@ -208,6 +209,64 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
         .unwrap_or("graff")
 }
 
+/// Where OpenAI API keys are made: the other way to use graff's ChatGPT
+/// models when plan usage is off.
+const OPENAI_API_KEYS_URL: &str = "https://platform.openai.com/api-keys";
+
+/// graff's ChatGPT (plan) sign-in as the Accounts row shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatgptPlanRow {
+    /// The listing hasn't loaded (or failed).
+    Unknown,
+    SignedOut,
+    /// Signed in with plan usage: ready.
+    Ready {
+        account: Option<String>,
+    },
+    /// Signed in, but plan usage wasn't granted: can't run on the plan.
+    PlanOff {
+        account: Option<String>,
+    },
+}
+
+impl ChatgptPlanRow {
+    /// Read the `chatgpt-new` row of graff's listing. Pure.
+    pub fn from_listing(rows: Option<&[GraffLoginProvider]>) -> Self {
+        let Some(rows) = rows else {
+            return Self::Unknown;
+        };
+        match rows.iter().find(|row| row.id == "chatgpt-new") {
+            Some(row) if row.signed_in => Self::Ready {
+                account: row.account.clone(),
+            },
+            Some(row) if row.plan_usage == Some(false) => Self::PlanOff {
+                account: row.account.clone(),
+            },
+            _ => Self::SignedOut,
+        }
+    }
+
+    /// The row's status line. Pure.
+    pub fn status(&self) -> String {
+        let signed_in_as = |account: &Option<String>| match account {
+            Some(account) => format!("Signed in as {account}"),
+            None => "Signed in".to_string(),
+        };
+        match self {
+            Self::Unknown => "Separate from Codex · graff login chatgpt-new".into(),
+            Self::SignedOut => "Not signed in · separate from Codex".into(),
+            Self::Ready { account } => {
+                format!("{} · using your ChatGPT plan", signed_in_as(account))
+            }
+            Self::PlanOff { account } => format!(
+                "{} · plan usage is off. Continue with ChatGPT and allow it, or use an \
+                 OpenAI API key (graff key set openai).",
+                signed_in_as(account)
+            ),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entity
 // ---------------------------------------------------------------------------
@@ -299,6 +358,9 @@ pub struct AccountsPage {
     graff_task: Option<Task<()>>,
     /// Provider id with an in-flight sign-out.
     busy_graff: Option<String>,
+    /// The one-time "You're using your ChatGPT plan" confirmation after
+    /// graff's first ChatGPT sign-in on the shown device, until dismissed.
+    plan_confirmation: Option<SharedString>,
     login: Option<LoginFlow>,
     /// The sign-in link was just copied (the button reads "Copied").
     login_url_copied: bool,
@@ -343,6 +405,7 @@ impl AccountsPage {
             graff_logins: Loadable::Idle,
             graff_task: None,
             busy_graff: None,
+            plan_confirmation: None,
             login: None,
             login_url_copied: false,
             copy_task: None,
@@ -1340,15 +1403,27 @@ impl AccountsPage {
                     .call(methods::POLL_AGENT_LOGIN, params.clone())
                     .await;
                 let outcome = this.update(cx, |page, cx| {
-                    let Some(LoginFlow::Browser { message, error, .. }) = &mut page.login else {
+                    let Some(LoginFlow::Browser {
+                        message,
+                        error,
+                        provider,
+                        ..
+                    }) = &mut page.login
+                    else {
                         return true; // dialog dismissed — stop polling
                     };
+                    let chatgpt = provider.as_deref() == Some("chatgpt-new");
                     match result.as_ref().ok().and_then(|value| {
                         serde_json::from_value::<AgentLoginPoll>(value.clone()).ok()
                     }) {
                         Some(poll) => match poll.status {
                             AgentLoginStatus::Done => {
                                 page.login = None;
+                                // graff's first ChatGPT sign-in on this device
+                                // carries the one-time plan confirmation.
+                                if chatgpt && let Some(text) = poll.message {
+                                    page.plan_confirmation = Some(text.into());
+                                }
                                 page.load(force_usage_for(LoadTrigger::PostLogin), cx);
                                 cx.notify();
                                 true
@@ -1359,6 +1434,11 @@ impl AccountsPage {
                                         .unwrap_or_else(|| "Login failed".to_string())
                                         .into(),
                                 );
+                                // A sign-in without plan usage still landed:
+                                // the row should say plan usage is off.
+                                if chatgpt {
+                                    page.load_graff_logins(cx);
+                                }
                                 cx.notify();
                                 true
                             }
@@ -1656,25 +1736,115 @@ impl AccountsPage {
             .into_any_element()
     }
 
-    /// The new ChatGPT route is separate from legacy Codex and remains
-    /// available even if an account-list probe fails. Stored credentials are
-    /// not evidence that a token is valid; sign-in can always be requested.
-    /// The row reflects the same credential listing as the other graff rows,
-    /// so a completed sign-in (which reloads that listing) shows up here.
+    /// graff's ChatGPT (plan) sign-in, separate from legacy Codex. It stays
+    /// offered even if the listing fails. Ready means signed in with plan
+    /// usage; a sign-in without it says so and offers both ways forward (sign
+    /// in again and allow it, or an API key). OpenAI's UI guidelines: Manage
+    /// usage beside the plan, and a one-time confirmation after the first
+    /// sign-in. Token validity is checked when used, not here.
     fn render_chatgpt_section(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let signed_in = match &self.graff_logins {
-            Loadable::Ready(providers) => providers
-                .iter()
-                .any(|provider| provider.id == "chatgpt-new" && provider.signed_in),
-            _ => false,
+        let row = ChatgptPlanRow::from_listing(match &self.graff_logins {
+            Loadable::Ready(rows) => Some(rows.as_slice()),
+            _ => None,
+        });
+        let link = |id: &'static str, label: &'static str, url: &'static str| {
+            popover::btn_ghost(theme, label, id)
+                .id(id)
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(6.0))
+                .text_size(crate::typography::ui_rems(11.5))
+                .on_click(move |_, _, cx| cx.open_url(url))
         };
-        let status = match &self.graff_logins {
-            Loadable::Ready(_) if signed_in => {
-                "Signed in on this device · separate from Codex · token validity checked when used"
-            }
-            Loadable::Ready(_) => "Not signed in · separate from Codex · graff login chatgpt-new",
-            _ => "Separate from Codex · graff login chatgpt-new · token validity checked when used",
+        let plan_links = match &row {
+            ChatgptPlanRow::Ready { .. } => Some(
+                div()
+                    .flex()
+                    .justify_end()
+                    .px(px(14.0))
+                    .pb(px(10.0))
+                    .child(link(
+                        "chatgpt-manage-usage",
+                        "Manage usage",
+                        CHATGPT_MANAGE_USAGE_URL,
+                    )),
+            ),
+            // Not ready, so no badge or sign-out on the row itself.
+            ChatgptPlanRow::PlanOff { .. } => Some(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(4.0))
+                    .px(px(14.0))
+                    .pb(px(10.0))
+                    .child(link(
+                        "chatgpt-use-api-key",
+                        "Use an API key",
+                        OPENAI_API_KEYS_URL,
+                    ))
+                    .child(
+                        popover::btn_ghost(theme, "Sign out", "chatgpt-plan-off-sign-out")
+                            .id("chatgpt-plan-off-sign-out")
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(6.0))
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .when(self.busy_graff.as_deref() == Some("chatgpt-new"), |el| {
+                                el.opacity(0.5)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sign_out_graff("chatgpt-new".into(), cx);
+                            })),
+                    ),
+            ),
+            _ => None,
         };
+        let confirmation = self.plan_confirmation.clone().map(|title| {
+            div()
+                .px(px(20.0))
+                .py(px(12.0))
+                .border_t_1()
+                .border_color(theme.border)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(widgets::row_title(theme, title))
+                        .child(
+                            div()
+                                .mt(px(4.0))
+                                .text_size(crate::typography::ui_rems(11.5))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(
+                                    "graff's ChatGPT models now run on your plan and count \
+                                     toward its usage limits.",
+                                )),
+                        ),
+                )
+                .child(link(
+                    "chatgpt-confirm-manage-usage",
+                    "Manage usage",
+                    CHATGPT_MANAGE_USAGE_URL,
+                ))
+                .child(
+                    popover::btn_ghost(theme, "Got it", "chatgpt-confirm-dismiss")
+                        .id("chatgpt-confirm-dismiss")
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.plan_confirmation = None;
+                            cx.notify();
+                        })),
+                )
+        });
         div()
             .mt(px(24.0))
             .flex()
@@ -1698,11 +1868,13 @@ impl AccountsPage {
                         1000,
                         Some("chatgpt-new"),
                         "ChatGPT (graff)",
-                        status.into(),
-                        signed_in,
+                        row.status(),
+                        matches!(row, ChatgptPlanRow::Ready { .. }),
                         theme,
                         cx,
-                    )),
+                    ))
+                    .children(plan_links)
+                    .children(confirmation),
             )
             .into_any_element()
     }
@@ -2846,6 +3018,38 @@ impl Render for AccountsPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    #[test]
+    fn chatgpt_row_is_ready_only_with_plan_usage() {
+        let row = |signed_in, plan_usage, account: Option<&str>| GraffLoginProvider {
+            id: "chatgpt-new".into(),
+            name: "ChatGPT".into(),
+            signed_in,
+            account: account.map(Into::into),
+            plan_usage,
+        };
+        assert_eq!(ChatgptPlanRow::from_listing(None), ChatgptPlanRow::Unknown);
+        assert_eq!(
+            ChatgptPlanRow::from_listing(Some(&[])),
+            ChatgptPlanRow::SignedOut
+        );
+        assert_eq!(
+            ChatgptPlanRow::from_listing(Some(&[row(false, None, None)])),
+            ChatgptPlanRow::SignedOut
+        );
+        let ready = ChatgptPlanRow::from_listing(Some(&[row(true, Some(true), Some("a@b.c"))]));
+        assert_eq!(
+            ready.status(),
+            "Signed in as a@b.c · using your ChatGPT plan"
+        );
+        let off = ChatgptPlanRow::from_listing(Some(&[row(false, Some(false), Some("a@b.c"))]));
+        assert!(matches!(off, ChatgptPlanRow::PlanOff { .. }));
+        assert!(
+            off.status()
+                .starts_with("Signed in as a@b.c · plan usage is off.")
+        );
+        assert!(off.status().contains("or use an"));
+    }
 
     fn job(value: serde_json::Value) -> CodegraffJob {
         serde_json::from_value(value).unwrap()

@@ -1,11 +1,18 @@
-//! graff's own provider sign-ins (xAI, Kimi, Z.AI) as the accounts screen sees
-//! them: which are signed in, sign-out, and reading `graff login <id>`'s output.
+//! graff's own provider sign-ins (xAI, Kimi, Z.AI, ChatGPT) as the accounts
+//! screen sees them: which are signed in, sign-out, and reading
+//! `graff login <id>`'s output.
 //!
 //! graff keeps each of these as one file, `<home>/.<id>/credentials/graff-oauth.json`
 //! (its `credential_store.oauthPath`), written atomically and only on success.
 //! Signed-in is that file's presence, the same test graff's own route listing
 //! uses: it never refreshes a token or touches the network. CodeGraff's account
 //! and the Codex (ChatGPT) login live elsewhere, so they are not here.
+//!
+//! ChatGPT's plan sign-in (`chatgpt-new`) is one record,
+//! `<home>/.graff/credentials/chatgpt-new.json`, that outlives a sign-out: graff
+//! keeps the app registration and account so the next sign-in skips consent.
+//! So it counts as signed in only while the record holds a token, and as ready
+//! only when that token was granted plan usage ([`CHATGPT_PLAN_SCOPE`]).
 //!
 //! `graff login` exits 0 even when it refuses (`✗ …` and return), so nothing
 //! here trusts the exit code: a sign-in counts only when the credential file
@@ -15,6 +22,56 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use harness_proto::{GRAFF_LOGIN_PROVIDERS, GraffLoginProvider};
+
+/// The scope a ChatGPT sign-in needs before requests can run on the plan.
+pub const CHATGPT_PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
+
+/// What graff's ChatGPT record says. Token values are never kept: only
+/// whether one is there.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ChatgptRecord {
+    /// The account the registration belongs to.
+    pub account: Option<String>,
+    /// graff registered itself in that account (an issued client id), so a
+    /// sign-in from here is a returning one that skips consent.
+    pub registered: bool,
+    /// A token is stored: signed in, as opposed to signed out (tokens cleared).
+    pub signed_in: bool,
+    /// The token was granted plan usage.
+    pub plan_usage: bool,
+}
+
+/// Read graff's ChatGPT record under `home`; `None` when there is none or it
+/// can't be read.
+pub fn chatgpt_record(home: &Path) -> Option<ChatgptRecord> {
+    let path = credential_path(home, "chatgpt-new")?;
+    parse_chatgpt_record(&std::fs::read(path).ok()?)
+}
+
+fn parse_chatgpt_record(bytes: &[u8]) -> Option<ChatgptRecord> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        email: String,
+        #[serde(default)]
+        client_id: String,
+        #[serde(default, rename = "access_token", deserialize_with = "present")]
+        signed_in: bool,
+        #[serde(default)]
+        scopes: Vec<String>,
+    }
+    fn present<'de, D: serde::Deserializer<'de>>(de: D) -> Result<bool, D::Error> {
+        let token: Option<String> = serde::Deserialize::deserialize(de)?;
+        Ok(token.is_some_and(|token| !token.is_empty()))
+    }
+    let raw: Raw = serde_json::from_slice(bytes).ok()?;
+    Some(ChatgptRecord {
+        account: (!raw.email.is_empty()).then_some(raw.email),
+        registered: !raw.client_id.is_empty(),
+        signed_in: raw.signed_in,
+        plan_usage: raw.signed_in && raw.scopes.iter().any(|s| s == CHATGPT_PLAN_SCOPE),
+    })
+}
 
 /// The credential file for `provider`, or `None` for an id graff does not sign
 /// into itself (so an RPC param can never name an arbitrary path).
@@ -35,15 +92,32 @@ pub fn credential_path(home: &Path, provider: &str) -> Option<PathBuf> {
         })
 }
 
-/// Every provider with whether a credential file exists for it, in the order
-/// of [`GRAFF_LOGIN_PROVIDERS`].
+/// Every provider with whether it is signed in, in the order of
+/// [`GRAFF_LOGIN_PROVIDERS`]: a credential file for most, a plan-granted
+/// token in the record for ChatGPT.
 pub fn list(home: &Path) -> Vec<GraffLoginProvider> {
     GRAFF_LOGIN_PROVIDERS
         .iter()
-        .map(|(id, name)| GraffLoginProvider {
-            id: (*id).to_string(),
-            name: (*name).to_string(),
-            signed_in: credential_path(home, id).is_some_and(|path| path.is_file()),
+        .map(|(id, name)| {
+            if *id == "chatgpt-new" {
+                // Ready only with plan usage; a sign-in without it still
+                // names its account so the screen can say plan usage is off.
+                let record = chatgpt_record(home).filter(|record| record.signed_in);
+                return GraffLoginProvider {
+                    id: (*id).to_string(),
+                    name: (*name).to_string(),
+                    signed_in: record.as_ref().is_some_and(|record| record.plan_usage),
+                    account: record.as_ref().and_then(|record| record.account.clone()),
+                    plan_usage: record.map(|record| record.plan_usage),
+                };
+            }
+            GraffLoginProvider {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                signed_in: credential_path(home, id).is_some_and(|path| path.is_file()),
+                account: None,
+                plan_usage: None,
+            }
         })
         .collect()
 }
@@ -56,7 +130,9 @@ pub fn credential_stamp(home: &Path, provider: &str) -> Option<SystemTime> {
         .ok()
 }
 
-/// Remove the credential file. Already signed out is success.
+/// Remove the credential file. Already signed out is success. ChatGPT's
+/// record is not removed here: `graff logout chatgpt-new` revokes its session
+/// and keeps the registration (see `AgentAccounts::sign_out_graff_login`).
 pub fn sign_out(home: &Path, provider: &str) -> std::io::Result<()> {
     let Some(path) = credential_path(home, provider) else {
         return Err(std::io::Error::new(
@@ -160,6 +236,17 @@ pub fn chatgpt_plan_granted(output: &str) -> bool {
     })
 }
 
+/// graff signed in to ChatGPT but plan usage was not allowed: its
+/// `✓ signed in to ChatGPT as …, but plan usage was not allowed.` line.
+pub fn chatgpt_plan_denied(output: &str) -> bool {
+    output.lines().any(|line| {
+        let line = strip_ansi(line);
+        let line = line.trim();
+        line.starts_with("✓ signed in to ChatGPT as ")
+            && line.contains("but plan usage was not allowed")
+    })
+}
+
 /// What to tell the user when a sign-in ended without one: graff's `✗` line,
 /// else its last line of output, else a plain sentence.
 pub fn failure_message(output: &str) -> String {
@@ -199,6 +286,88 @@ mod tests {
         ] {
             assert!(!chatgpt_plan_granted(output));
         }
+    }
+
+    #[test]
+    fn chatgpt_plan_denial_is_recognised() {
+        assert!(chatgpt_plan_denied(
+            "✓ signed in to ChatGPT as a@b.c, but plan usage was not allowed. Run `graff login chatgpt` again and allow it, or use an API key.\n"
+        ));
+        assert!(!chatgpt_plan_denied(
+            "✓ signed in to ChatGPT as a@b.c; plan usage is on.\n"
+        ));
+        assert!(!chatgpt_plan_denied("✗ ChatGPT sign-in failed: rejected\n"));
+    }
+
+    #[test]
+    fn chatgpt_record_reports_account_registration_and_plan_without_tokens() {
+        // graff's own shape (oauth_chatgpt.zig serializeRecord).
+        let granted = br#"{"email":"a@b.c","issuer":"https://auth.openai.com","subject":"s","client_id":"oaiapp_1","ext_agent_host_id":"urn:uuid:x","id_token":"i","access_token":"t","refresh_token":"r","token_type":"Bearer","expires_at":1,"earliest_refresh_at":0,"scopes":["chatgpt.tokens.use.direct","email","openid"],"saved_at":"now"}"#;
+        assert_eq!(
+            parse_chatgpt_record(granted),
+            Some(ChatgptRecord {
+                account: Some("a@b.c".into()),
+                registered: true,
+                signed_in: true,
+                plan_usage: true,
+            })
+        );
+        let denied = br#"{"email":"a@b.c","client_id":"oaiapp_1","access_token":"t","scopes":["email","openid"]}"#;
+        let denied = parse_chatgpt_record(denied).unwrap();
+        assert!(denied.signed_in && !denied.plan_usage);
+        // `graff logout chatgpt` clears the tokens and scopes, keeps the rest.
+        let signed_out = br#"{"email":"a@b.c","client_id":"oaiapp_1","access_token":"","refresh_token":"","scopes":[]}"#;
+        let signed_out = parse_chatgpt_record(signed_out).unwrap();
+        assert!(signed_out.registered && !signed_out.signed_in && !signed_out.plan_usage);
+        // A token with the plan scope but no access token isn't plan usage.
+        let empty = br#"{"access_token":"","scopes":["chatgpt.tokens.use.direct"]}"#;
+        assert!(!parse_chatgpt_record(empty).unwrap().plan_usage);
+        assert_eq!(parse_chatgpt_record(b"not json"), None);
+    }
+
+    #[test]
+    fn chatgpt_counts_as_signed_in_only_with_plan_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = credential_path(dir.path(), "chatgpt-new").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let row = |home: &Path| list(home).pop().unwrap();
+        assert_eq!(
+            (row(dir.path()).signed_in, row(dir.path()).plan_usage),
+            (false, None)
+        );
+
+        std::fs::write(
+            &path,
+            r#"{"email":"a@b.c","access_token":"t","scopes":["email"]}"#,
+        )
+        .unwrap();
+        let off = row(dir.path());
+        assert_eq!(
+            (off.signed_in, off.plan_usage, off.account.as_deref()),
+            (false, Some(false), Some("a@b.c"))
+        );
+
+        std::fs::write(
+            &path,
+            r#"{"email":"a@b.c","access_token":"t","scopes":["chatgpt.tokens.use.direct"]}"#,
+        )
+        .unwrap();
+        let on = row(dir.path());
+        assert_eq!(
+            (on.signed_in, on.plan_usage, on.account.as_deref()),
+            (true, Some(true), Some("a@b.c"))
+        );
+
+        std::fs::write(
+            &path,
+            r#"{"email":"a@b.c","client_id":"oaiapp_1","access_token":""}"#,
+        )
+        .unwrap();
+        let out = row(dir.path());
+        assert_eq!(
+            (out.signed_in, out.plan_usage, out.account),
+            (false, None, None)
+        );
     }
 
     #[test]
