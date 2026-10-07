@@ -1849,6 +1849,39 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({}))
             }
+            methods::SHOW_IMAGE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct P {
+                    chat_id: String,
+                    id: String,
+                    path: String,
+                    caption: Option<String>,
+                }
+                let p: P = parse_params(params)?;
+                // Local-only (kept out of `forwardable`): only this device's
+                // live run may read its own workspace file. Chat-scoped, never
+                // an arbitrary device selector.
+                let chat = self
+                    .workspace
+                    .chat(&p.chat_id)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?
+                    .ok_or_else(|| RpcError::BadParams("chat not found".into()))?;
+                if chat.device_id != self.doc_host.device_id() {
+                    return Err(RpcError::BadParams("chat belongs to another device".into()));
+                }
+                let image = self
+                    .sessions
+                    .show_image(&p.chat_id, &p.id, &p.path, p.caption)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({
+                    "attached": true,
+                    "id": format!("show-image:{}", p.id),
+                    "name": image.name,
+                    "mimeType": image.mime_type,
+                }))
+            }
             methods::WATCH_DOC_MESSAGES => {
                 // Opt-in: older viewports retain the full-reset contract.
                 let opening_tail = params

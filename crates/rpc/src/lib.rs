@@ -86,6 +86,11 @@ pub mod methods {
     pub const REMOVE_QUEUED_MESSAGE: &str = "RemoveQueuedMessage";
     /// Interrupt whatever is running and send this one. `{ chatId, id }` → `{ sent }`.
     pub const SEND_QUEUED_MESSAGE_NOW: &str = "SendQueuedMessageNow";
+    /// Publish a workspace raster image inline in a chat with a live run.
+    /// Local-only: the run and its workspace live on this device, so this
+    /// method is deliberately NOT in the forwarding allowlist. Params
+    /// `{ chatId, id, path, caption? }` → `{ attached, id, name, mimeType }`.
+    pub const SHOW_IMAGE: &str = "ShowImage";
     /// Steer this row into the live turn without interrupting it.
     /// `{ chatId, id }` → `{ sent }`.
     pub const STEER_QUEUED_MESSAGE_NOW: &str = "SteerQueuedMessageNow";
