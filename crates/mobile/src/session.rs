@@ -388,14 +388,15 @@ impl Session {
         })
     }
 
-    /// Foreground: probe a joined room, or redial a dead one now on fresh backoff.
+    /// Foreground: probe a joined room, or wake a parked one so it redials on fresh backoff.
     pub fn kick(self: &Arc<Self>) {
         self.connect_if_ready();
         if let Some(client) = lock(&self.client).as_ref() {
             if self.connected.load(Ordering::Relaxed) {
                 client.probe();
             } else {
-                client.redial();
+                // Same rule as the registry: wake a parked backoff, never kill a dial in flight.
+                harness_sync::wake::notify_online();
             }
         }
     }

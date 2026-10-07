@@ -265,13 +265,16 @@ impl Workspace {
         }
     }
 
-    /// Foreground: probe a joined room or redial a dead one now.
+    /// Foreground: probe a joined room, or wake a parked one so it redials on fresh backoff.
     pub fn kick(&self) {
         if let Some(client) = lock(&self.client).as_ref() {
             if self.connected.load(Ordering::Relaxed) {
+                // Post-suspend sockets are half-open more often than not: a deadline-checked probe finds out.
                 client.probe();
             } else {
-                client.redial();
+                // A dial may be mid-handshake (the launch dial, on the busiest link): never kill it. A client parked
+                // in its backoff wakes on the online event and redials on fresh backoff.
+                harness_sync::wake::notify_online();
             }
         }
     }
