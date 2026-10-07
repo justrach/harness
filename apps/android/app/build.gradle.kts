@@ -44,6 +44,8 @@ val generateUniffiBindings = tasks.register<Exec>("generateUniffiBindings") {
     dependsOn(cargoBuildHost)
     workingDir = repoRoot
     val out = uniffiBindingsDir.get().asFile
+    // The library is the input: a Rust change rebuilds it, which regenerates the bindings.
+    inputs.file(hostLibDir.resolve(hostLibName))
     outputs.dir(out)
     doFirst { out.deleteRecursively() }
     commandLine(
