@@ -86,4 +86,8 @@ OPEN_ENV=(
 if [[ -n "${HARNESS_OPEN_ROUTE:-}" ]]; then
   OPEN_ENV+=(--env "HARNESS_OPEN_ROUTE=$HARNESS_OPEN_ROUTE")
 fi
+# Preview the graff "updated" card, e.g. HARNESS_DEV_GRAFF_NOTICE=0.0.302.23..0.0.302.25
+if [[ -n "${HARNESS_DEV_GRAFF_NOTICE:-}" ]]; then
+  OPEN_ENV+=(--env "HARNESS_DEV_GRAFF_NOTICE=$HARNESS_DEV_GRAFF_NOTICE")
+fi
 exec open -W "${OPEN_ENV[@]}" "$APP" --args "$@"
