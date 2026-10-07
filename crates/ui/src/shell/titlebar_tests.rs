@@ -191,6 +191,19 @@ fn graff_notice_card_shows_dismisses_and_resurfaces(cx: &mut gpui::TestAppContex
         cx.debug_bounds("graff-notice").is_some(),
         "an Updated notice shows the card"
     );
+    assert!(
+        cx.debug_bounds("graff-notice-highlights").is_none(),
+        "no release lines yet, so no highlights section"
+    );
+    shell.update(cx, |shell, cx| {
+        shell.graff_notice_highlights = vec!["compaction fix".into(), "fewer requests".into()];
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        cx.debug_bounds("graff-notice-highlights").is_some(),
+        "the engine's release lines fill the card"
+    );
 
     let dismiss = cx.debug_bounds("graff-notice-dismiss").unwrap();
     cx.simulate_click(dismiss.center(), Default::default());
