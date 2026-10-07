@@ -71,6 +71,7 @@ pub mod terminal;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;
+mod transcript_paint_check;
 pub mod typography;
 mod workspace_links;
 

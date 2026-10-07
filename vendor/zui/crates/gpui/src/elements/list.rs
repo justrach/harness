@@ -75,6 +75,9 @@ struct StateInner {
     follow_state: FollowState,
     tail_reservation: Option<(usize, Pixels)>,
     tail_extra: Pixels,
+    /// Every item the last prepaint placed, in paint order, with its window
+    /// bounds. A diagnostic: see [`ListState::painted_items`].
+    painted: Vec<(usize, Bounds<Pixels>)>,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -329,6 +332,7 @@ impl ListState {
             follow_state: FollowState::default(),
             tail_reservation: None,
             tail_extra: Pixels::ZERO,
+            painted: Vec::new(),
         })));
         this.splice(0..0, item_count);
         this
@@ -855,6 +859,14 @@ impl ListState {
         let offset = summary.height + logical_scroll_top.offset_in_item;
 
         Point::new(px(0.), -offset)
+    }
+
+    /// The items the last frame placed, in paint order: `(index, window
+    /// bounds)`. Empty before the first layout. Lets a caller check what was
+    /// actually painted (each item once, back to back) rather than what the
+    /// height tree predicts.
+    pub fn painted_items(&self) -> Vec<(usize, Bounds<Pixels>)> {
+        self.0.borrow().painted.clone()
     }
 
     /// Return the bounds of the viewport in pixels.
@@ -1707,6 +1719,15 @@ impl Element for List {
 
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
+        state.painted.clear();
+        let mut origin = bounds.origin + Point::new(px(0.), padding.top);
+        origin.y -= layout.scroll_top.offset_in_item;
+        for item in &layout.item_layouts {
+            state
+                .painted
+                .push((item.index, Bounds::new(origin, item.size)));
+            origin.y += item.size.height;
+        }
         ListPrepaintState { hitbox, layout }
     }
 
