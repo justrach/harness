@@ -6,6 +6,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - '.cargo/**'
       - 'apps/harness/**'
       - 'dist/windows/**'
       - 'crates/**'
@@ -18,6 +19,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - '.cargo/**'
       - 'apps/harness/**'
       - 'dist/windows/**'
       - 'crates/**'
@@ -62,6 +64,11 @@ jobs:
           cache-workspace-crates: true
       - name: Native harness security and integration tests
         run: cargo test --release --locked -p harness-adapters --features native-fixture --lib --test codex_availability --test windows_native
+      - name: Codegraff sign-in finds a home without HOME
+        run: |
+          # A stock Windows session has no HOME; the key file must land in USERPROFILE.
+          Remove-Item Env:HOME -ErrorAction SilentlyContinue
+          cargo test --release --locked -p harness-engine --lib codegraff_auth::tests
       - name: UI tests
         env:
           RUST_BACKTRACE: '1'
@@ -80,7 +87,7 @@ jobs:
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
-        run: cargo test --release --locked -p harness -p harness-update
+        run: cargo test --release --locked -p harness -p harness-update -p harness-observe
       - name: Engine unit tests
         run: cargo test --release --locked -p harness-engine --lib
       - name: Harness catalog and login tests

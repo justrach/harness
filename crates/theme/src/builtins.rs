@@ -154,7 +154,7 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
         terminal: TerminalPalette {
             background: terminal_background,
             foreground: text.ensure_contrast(terminal_background, 4.5),
-            selection: border_tone.with_alpha(if dark { 0.22 } else { 0.16 }),
+            selection: border_tone.with_alpha(if dark { 0.22 } else { 0.28 }),
             ansi: seed.ansi.map(c),
         },
         source: seed.source,

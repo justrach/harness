@@ -149,6 +149,12 @@ pub mod methods {
     pub const CODEGRAFF_JOBS: &str = "CodegraffJobs";
     /// Cancel one PR-agent run (`POST /v1/jobs/:id/cancel`).
     pub const CODEGRAFF_CANCEL_JOB: &str = "CodegraffCancelJob";
+    /// The account's cloud sandboxes (`GET /v1/sandboxes`); `enabled: false` hides the card.
+    pub const CODEGRAFF_SANDBOXES: &str = "CodegraffSandboxes";
+    /// Create the account's Harness cloud sandbox (fleet, `harness: true`).
+    pub const CODEGRAFF_CREATE_SANDBOX: &str = "CodegraffCreateSandbox";
+    /// `{id, action: "start" | "stop" | "delete"}` on one sandbox.
+    pub const CODEGRAFF_SANDBOX_ACTION: &str = "CodegraffSandboxAction";
     /// Agent rooms: one call to the edge's `/rooms…` or `/room/{id}/…` routes
     /// (`{method, path, query?, body?}` → `{status, body}`), made with the
     /// engine's own sign-in. harness-mcp's room tools compose it.

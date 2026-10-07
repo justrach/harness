@@ -152,7 +152,18 @@ final class SessionStore {
 
     /// Demo-mode injection point (also used by previews).
     func setEntries(_ new: [MessageEntry]) {
-        entries = new
+        // Reconcile stamps: callers mutate a copied entry in place, so the
+        // row cache can't trust the stamps it sees. An entry equal to the
+        // one it replaces keeps its stamp; anything else is fresh.
+        var stamped = new
+        for ix in stamped.indices {
+            if ix < entries.count, stamped[ix] == entries[ix] {
+                stamped[ix].stamp = entries[ix].stamp
+            } else {
+                stamped[ix].stamp = MessageEntry.nextStamp()
+            }
+        }
+        entries = stamped
         revision &+= 1
         if viewAttached || keepsParseCacheWarm {
             transcriptCache.prewarm(entries: entries)
@@ -658,7 +669,8 @@ final class SessionStore {
         from doc: LoroDoc, cache: EntryCache? = nil
     ) -> (entries: [MessageEntry], queue: [QueuedMessage])? {
         if let cache {
-            let raw = cache.read(doc, parse: entryFrom)
+            let raw = cache.read(doc, parse: entryFrom, parsePart: partFrom,
+                                 assemble: entryFrom(_:parts:))
             let queue = (doc.getMovableList(id: "queue").getDeepValue().listValue ?? [])
                 .compactMap(queuedFrom)
             return (joinContinuations(raw), queue)
@@ -669,7 +681,22 @@ final class SessionStore {
         return (joinContinuations(raw), queue)
     }
 
-    nonisolated private static func entryFrom(_ value: LoroValue) -> MessageEntry? {
+    /// Same decode as `entryFrom(_:)` but reading the message map's scalar
+    /// fields directly and taking already-decoded parts — EntryCache uses it
+    /// to skip the deep-value walk on messages whose parts are memoized.
+    nonisolated static func entryFrom(_ map: LoroMap, parts: [MessagePart]) -> MessageEntry? {
+        func string(_ key: String) -> String? { map.get(key: key)?.asValue()?.stringValue }
+        guard let id = string("id"),
+              let roleStr = string("role"),
+              let role = MessageRole(rawValue: roleStr) else { return nil }
+        return MessageEntry(id: id, role: role, parts: parts,
+                            createdAt: map.get(key: "createdAt")?.asValue()?.i64Value ?? 0,
+                            deviceId: string("deviceId") ?? "",
+                            status: string("status").flatMap(MessageStatus.init(rawValue:)),
+                            continuationOf: string("continuationOf"))
+    }
+
+    nonisolated static func entryFrom(_ value: LoroValue) -> MessageEntry? {
         guard let m = value.mapValue,
               let id = m["id"]?.stringValue,
               let roleStr = m["role"]?.stringValue,
@@ -730,7 +757,8 @@ final class SessionStore {
             return .input(id: id, requestId: id, questions: questions,
                           resolved: m["resolved"]?.boolValue ?? false)
         case "error":
-            return .error(id: id, message: m["message"]?.stringValue ?? "")
+            return .error(id: id, message: m["message"]?.stringValue ?? "",
+                          reauth: m["reauth"]?.stringValue.flatMap(AgentReauthProvider.init(rawValue:)))
         default:
             return nil
         }
@@ -744,6 +772,9 @@ final class SessionStore {
         for entry in raw {
             if let rootId = entry.continuationOf, let ix = index[rootId] {
                 roots[ix].parts.append(contentsOf: entry.parts)
+                // The merged entry's stamp must change when ANY constituent
+                // does, or the transcript row cache would serve stale rows.
+                roots[ix].stamp &+= entry.stamp
             } else {
                 index[entry.id] = roots.count
                 roots.append(entry)

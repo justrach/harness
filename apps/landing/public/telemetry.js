@@ -1,7 +1,7 @@
 (() => {
   const optedOut = () => navigator.globalPrivacyControl === true || ["1", "yes"].includes(navigator.doNotTrack);
   if (
-    location.origin !== "https://harness.codegraff.com" ||
+    location.origin !== "https://codegraff.com" ||
     !["/", "/index.html"].includes(location.pathname) ||
     optedOut() || typeof fetch !== "function" ||
     typeof crypto === "undefined" || typeof crypto.randomUUID !== "function"

@@ -2010,6 +2010,15 @@ pub(super) enum SpacesMenuRow {
     AddSpace,
 }
 
+/// The project menu lists spaces on a connected device first and those on a device that is not
+/// connected after them, each group keeping the order it had (the search ranking, or the name sort).
+/// A project on an away device is not gone, but it is not where the work is either, and the same
+/// name on two devices (a laptop and a studio Mac) reads as one project when they are interleaved.
+pub(super) fn connected_first<T>(items: Vec<T>, connected: impl Fn(&T) -> bool) -> Vec<T> {
+    let (online, offline): (Vec<T>, Vec<T>) = items.into_iter().partition(|item| connected(item));
+    online.into_iter().chain(offline).collect()
+}
+
 /// New project navigates devices, locations, then folders on a command-palette surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectStep {
@@ -2056,6 +2065,14 @@ pub(super) struct AddSpaceFlow {
     drives_task: Option<Task<()>>,
     submit_task: Option<Task<()>>,
     _search_events: Subscription,
+}
+
+impl AddSpaceFlow {
+    /// Where keyboard focus belongs while the palette is open — the shell's
+    /// blur-recovery prefers this over the composer.
+    pub(super) fn search_focus(&self, cx: &App) -> FocusHandle {
+        self.search.focus_handle(cx)
+    }
 }
 
 /// Segment-aware "is `path` at or under `base`" (`/media/a` is not under
@@ -2958,10 +2975,16 @@ impl Shell {
         if query.trim().is_empty() {
             rows.push(SpacesMenuRow::All);
         }
+        // Ranked by the search, then split: connected devices first, away ones after.
+        let now = Utc::now();
+        let ranked: Vec<_> = popover::filter_indices(&query, &names)
+            .into_iter()
+            .map(|ix| spaces[ix])
+            .collect();
         rows.extend(
-            popover::filter_indices(&query, &names)
+            connected_first(ranked, |space| state.device_online(&space.device_id, now))
                 .into_iter()
-                .map(|ix| SpacesMenuRow::Space(spaces[ix].id.clone())),
+                .map(|space| SpacesMenuRow::Space(space.id.clone())),
         );
         rows
     }
@@ -3893,6 +3916,12 @@ impl Shell {
         // The pinned footer's keyboard-nav index: one past the last
         // scrollable row, its permanent place at the end of the nav order.
         let add_index = details.len();
+        // Where the away-device group starts, so it can say so once. Not when it starts the list: every
+        // row would then carry the glyph and a caption above all of them says nothing.
+        let first_offline = details
+            .iter()
+            .position(|(_, _, _, offline, _)| *offline)
+            .filter(|&ix| ix > 0);
 
         let list = popover::menu_scroll_host("spaces-menu-list-host")
             .on_hover(cx.listener(Self::on_spaces_menu_list_hover))
@@ -3910,7 +3939,7 @@ impl Shell {
                                 _ => None,
                             };
                             let activate = row;
-                            popover::menu_row_nav(
+                            let row_el = popover::menu_row_nav(
                                 theme,
                                 selected,
                                 ix == active,
@@ -3950,9 +3979,31 @@ impl Shell {
                                         .flex_none()
                                         .text_color(theme.warning.opacity(0.8)),
                                 )
-                            })
+                            });
                             // No check glyph — the selected row's wash (menu_row's
                             // active styling) is the selection signal.
+                            if first_offline == Some(ix) {
+                                // The caption lives INSIDE this row's element, so the list still has one
+                                // child per row: keyboard nav and scroll-to-row both index children by row.
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .id("spaces-menu-offline-caption")
+                                            .px(px(8.0))
+                                            .pt(px(8.0))
+                                            .pb(px(2.0))
+                                            .text_size(crate::typography::ui_rems(10.0))
+                                            .text_color(theme.text_muted)
+                                            .child(SharedString::from("Offline")),
+                                    )
+                                    .child(row_el)
+                                    .into_any_element()
+                            } else {
+                                row_el.into_any_element()
+                            }
                         },
                     )),
             )
@@ -5730,8 +5781,12 @@ impl Shell {
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let flow = self.add_space.as_mut()?;
-        if std::mem::take(&mut flow.focus_pending) {
-            window.focus(&flow.search.focus_handle(cx), cx);
+        let search_focus = flow.search.focus_handle(cx);
+        // focus_pending forces focus on flow transitions; clicks inside the
+        // card can blur it meanwhile, so recover whenever the field lost
+        // focus while the palette is open.
+        if std::mem::take(&mut flow.focus_pending) || !search_focus.is_focused(window) {
+            window.focus(&search_focus, cx);
         }
         let step = flow.step;
         let search = flow.search.clone();
@@ -6138,6 +6193,16 @@ impl Shell {
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     this.add_space_key(event, cx)
                 }))
+                // A left click that lands outside the search field would
+                // blur it (the input's own mouse-down-out); refocus right
+                // away without stopping propagation, so row/crumb/footer
+                // clicks still do their work.
+                .on_mouse_down(gpui::MouseButton::Left, {
+                    let search_focus = search_focus.clone();
+                    cx.listener(move |_, _, window, cx| {
+                        window.focus(&search_focus, cx);
+                    })
+                })
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.add_space = None;
                     cx.notify();
@@ -6396,8 +6461,45 @@ impl Shell {
 mod tests {
     use chrono::{TimeZone as _, Utc};
 
-    use super::{compare_sidebar_chats, promote_local_device_group};
+    use super::{compare_sidebar_chats, connected_first, promote_local_device_group};
     use crate::settings::SidebarSort;
+
+    #[test]
+    fn connected_projects_come_first_and_each_group_keeps_its_order() {
+        // (name, device connected): the search ranking / name sort, interleaved.
+        let ranked = vec![
+            ("nanohub", false),
+            ("nanohub2", true),
+            ("rachpradhan", true),
+            ("search", false),
+            ("zigrepper", false),
+            ("zigrepper", true),
+        ];
+        let ordered = connected_first(ranked, |(_, connected)| *connected);
+        assert_eq!(
+            ordered.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            [
+                "nanohub2",
+                "rachpradhan",
+                "zigrepper",
+                "nanohub",
+                "search",
+                "zigrepper"
+            ],
+            "connected first, then away; stable within each"
+        );
+        assert!(ordered[..3].iter().all(|(_, connected)| *connected));
+        assert!(ordered[3..].iter().all(|(_, connected)| !*connected));
+    }
+
+    #[test]
+    fn the_split_changes_nothing_when_every_project_is_on_one_side() {
+        let all_on = vec![("a", true), ("b", true), ("c", true)];
+        assert_eq!(connected_first(all_on.clone(), |(_, c)| *c), all_on);
+        let all_off = vec![("a", false), ("b", false)];
+        assert_eq!(connected_first(all_off.clone(), |(_, c)| *c), all_off);
+        assert!(connected_first(Vec::<(&str, bool)>::new(), |(_, c)| *c).is_empty());
+    }
 
     fn group(device: &str, value: u8) -> (Option<(String, String)>, Vec<u8>) {
         (Some((device.into(), device.into())), vec![value])
@@ -6592,5 +6694,94 @@ mod project_flow_tests {
             search.update(cx, |input, cx| input.set_text("/projects/", cx));
             assert!(!shell.add_space_slash_descend(cx));
         });
+    }
+
+    /// Clicking inside the palette but outside the search field blurs the
+    /// field (the input's mouse-down-out); the palette must take focus back
+    /// so arrows/enter/esc keep working (#178).
+    #[gpui::test]
+    fn palette_recovers_search_focus_after_an_inside_click_blur(cx: &mut gpui::TestAppContext) {
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), data.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.devices = serde_json::from_value(serde_json::json!([
+                    {"id":"local","name":"Studio","platform":"macos","lastSeenAt":null},
+                    {"id":"remote","name":"Server","platform":"linux","lastSeenAt":null}
+                ]))
+                .unwrap();
+                state
+            });
+            let mut shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell
+        });
+        let search_focus = window
+            .update(cx, |shell, _, cx| {
+                shell.open_add_space(cx);
+                shell.add_space.as_ref().unwrap().search.focus_handle(cx)
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |_, window, cx| {
+                assert!(
+                    search_focus.is_focused(window),
+                    "the search field starts focused"
+                );
+            })
+            .unwrap();
+
+        // What a click on a row gap / the footer does: blur the field.
+        window.update(cx, |_, window, _| window.blur()).unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        window
+            .update(cx, |_, window, cx| {
+                assert!(
+                    search_focus.is_focused(window),
+                    "the palette refocuses its search field"
+                );
+            })
+            .unwrap();
+
+        cx.simulate_keystrokes(window.into(), "down");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.add_space.as_ref().unwrap().active,
+                    1,
+                    "↓ still moves the palette highlight after the blur"
+                );
+            })
+            .unwrap();
     }
 }

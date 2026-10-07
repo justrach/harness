@@ -1136,6 +1136,23 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
     }
 
+    /// Remove an offline device from the list. Never this device, and never one that is beating
+    /// presence right now: a running engine only writes its row at boot, so it would stay gone
+    /// until it restarted.
+    pub fn forget_device(&self, device_id: &str) -> Result<bool, EngineError> {
+        if device_id == self.inner.config.device_id {
+            return Err(EngineError::Other(
+                "This computer can't remove itself.".into(),
+            ));
+        }
+        if self.peer_liveness(device_id) == harness_rpc::PeerLiveness::Live {
+            return Err(EngineError::Other(
+                "That device is online. Quit Harness on it first.".into(),
+            ));
+        }
+        Ok(self.mutate(|doc| doc.forget_device(device_id))?)
+    }
+
     // ── git metadata (diff-sync host writes) ────────────────────────────────
 
     /// HEAD-watcher reconciliation: the branch checked out at the chat's cwd.

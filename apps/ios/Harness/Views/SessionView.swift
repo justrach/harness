@@ -7,6 +7,8 @@ import SwiftUI
 struct SessionView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// Open another session beside this one, or close this pane: set only on a Max-class iPhone (SplitScreen).
+    @Environment(\.splitScreen) private var splitScreen
     let chatId: String
 
     /// Width the nav bar's own controls need around a LEADING title — the
@@ -23,7 +25,100 @@ struct SessionView: View {
 
     /// Follow intent belongs to the session, independent of composer focus.
     @State private var scroll = ScrollState()
+    @State private var hostLink: HostLink?
+    @State private var renamingSession = false
+    @State private var renameChatId: String?
+    @State private var renameTitle = ""
 
+
+    /// On a Max (split screen available) every session draws its own compact header strip and the navigation
+    /// bar is hidden. The bar's fixed-width header kept being evicted into the "…" menu in the narrow columns a
+    /// Max uses (a session beside the list, or two panes of about 478pt), and on a landscape Max the bar is also
+    /// a lot of lost height. Everywhere else the bar and its header are exactly as before.
+    private var paneChrome: Bool { splitScreen != nil }
+
+    /// Title, project and the pager hint; one element for accessibility.
+    private func headerTitle(_ chat: Chat) -> some View {
+        Button {
+            renameChatId = chat.id
+            renameTitle = chat.displayTitle
+            renamingSession = true
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 8) {
+                    Text(chat.displayTitle)
+                        .font(Theme.sans(15, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    pagerHint(for: chat)
+                }
+                projectLocation(chat: chat, model: model)
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textMuted.opacity(0.6))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Rename session")
+        .accessibilityIdentifier("session-header")
+    }
+
+    /// A pane's header strip: the list toggle (one pane), title and project, and the split or close button.
+    /// Swipe it to page to a neighbouring session.
+    private func paneHeader(_ chat: Chat, controls: SplitScreenControls) -> some View {
+        HStack(spacing: 8) {
+            if let toggleList = controls.toggleList {
+                Button(action: toggleList) {
+                    Image(systemName: "sidebar.leading")
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.textMuted)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show or hide the session list")
+                .accessibilityIdentifier("split-toggle-list")
+            }
+            headerTitle(chat)
+            Spacer(minLength: 8)
+            splitButtons(controls)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Theme.bg)
+        .pagerSwipe()
+    }
+
+    @ViewBuilder
+    private func splitButtons(_ controls: SplitScreenControls) -> some View {
+        HStack(spacing: 14) {
+            if let openBeside = controls.openBeside {
+                Button(action: openBeside) {
+                    Image(systemName: "rectangle.split.2x1")
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Open another session beside this one")
+                .accessibilityIdentifier("split-open-beside")
+            }
+            if let close = controls.close {
+                Button(action: close) {
+                    Image(systemName: "xmark")
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Close this pane")
+                .accessibilityIdentifier("split-close-pane")
+            }
+        }
+        .font(.system(size: 15, weight: .medium))
+        .foregroundStyle(Theme.textMuted)
+        .buttonStyle(.plain)
+        .labelStyle(.iconOnly)
+    }
 
     private var chat: Chat? { model.chat(id: chatId) }
 
@@ -35,8 +130,23 @@ struct SessionView: View {
     var body: some View {
         Group {
             if let chat, let store = model.sessionStore(for: chat) {
-                content(chat: chat, store: store)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
+                // Max: the header strip sits above everything the content draws (its top fade, rows scrolling
+                // under it), so it is neither dimmed nor overlapped, and the content is clipped to its own
+                // rectangle.
+                VStack(spacing: 0) {
+                    if paneChrome, let splitScreen {
+                        paneHeader(chat, controls: splitScreen)
+                        content(chat: chat, store: store).clipped()
+                    } else {
+                        // Not clipped: the content's background and header cover reach under the status bar.
+                        content(chat: chat, store: store)
+                    }
+                }
+                // The clip above also cuts off the content's own background, which reaches under the side and
+                // bottom safe areas; without this the system's backing showed there (white, or black in dark
+                // mode). Painted outside the clip, to the screen edges.
+                .background { if paneChrome { Theme.bg.ignoresSafeArea() } }
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
             } else {
                 VStack(spacing: 12) {
                     HarnessPulse()
@@ -52,41 +162,38 @@ struct SessionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(removing: .title)  // the leading header owns the bar
         .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar(paneChrome ? .hidden : .automatic, for: .navigationBar)  // a Max draws its own header
         .toolbar {
             if let chat {
-                // Static, left-aligned session header — model/effort changes
+                // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarLeading) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 8) {
-                            Text(chat.displayTitle)
-                                .font(Theme.sans(15, weight: .medium))
-                                .foregroundStyle(Theme.text)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                            pagerHint(for: chat)
-                        }
-                        projectLocation(chat: chat, model: model)
-                            .font(Theme.sans(12))
-                            .foregroundStyle(Theme.textMuted.opacity(0.6))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    // A FIXED width, not a max: iOS 26 proposes leading items
-                    // almost nothing next to the back button, so a flexible
-                    // frame collapses to its minimum ("S…"). Claiming the
-                    // remainder of the bar outright lays the texts out with
-                    // real room and truncates them properly.
-                    .frame(width: max(140, viewWidth - Self.headerChromeInset),
-                           alignment: .leading)
-                    // Swipe the header to page to the neighbouring session.
-                    .pagerSwipe()
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("session-header")
+                    headerTitle(chat)
+                        // A FIXED width, not a max: iOS 26 proposes leading items
+                        // almost nothing next to the back button, so a flexible
+                        // frame collapses to its minimum ("S…"). Claiming the
+                        // remainder of the bar outright lays the texts out with
+                        // real room and truncates them properly.
+                        .frame(width: max(140, viewWidth - Self.headerChromeInset), alignment: .leading)
+                        // Swipe the header to page to the neighbouring session.
+                        .pagerSwipe()
                 }
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
             }
+        }
+        .alert("Rename session", isPresented: $renamingSession) {
+            TextField("Session name", text: $renameTitle)
+                .accessibilityIdentifier("session-rename-title")
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                if let renameChatId {
+                    model.rename(chatId: renameChatId, title: renameTitle)
+                }
+            }
+            .disabled(renameTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("This name is shared across your devices.")
         }
         .onAppear {
             model.attachSessionView(chatId: chatId)
@@ -122,7 +229,13 @@ struct SessionView: View {
         // The composer owns real layout space. The transcript's viewport ends
         // above it, so keyboard and glass morphs cannot cover the last row.
         return VStack(spacing: 0) {
-            TranscriptView(store: store, chatId: chat.id, scroll: scroll)
+            TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
+                           onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
+                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId))
+                .sheet(item: $hostLink) { link in
+                    let host = store.hostDeviceId ?? chat.deviceId
+                    HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
+                }
                 .overlay {
                     if store.entries.isEmpty, store.pendingSends.isEmpty,
                        chat.lastMessageAt != nil {
@@ -206,7 +319,11 @@ struct SessionView: View {
     /// automatically" (degraded path — no fake progress), or the explicit
     /// "Not delivered — tap to retry" (transcript.rs retry_send).
     private func statusStrip(chat: Chat, status: SessionStatus?, store: SessionStore) -> some View {
-        TimelineView(.periodic(from: .now, by: 1)) { _ in
+        // Ticks once a second only while something on the strip is timed: the Working elapsed counter, a
+        // pending send's grace, or the reconnect countdown. An idle open chat repaints nothing.
+        let timed = status == .working || model.sendState(for: chat) != nil
+            || model.connectivity.state != .connected
+        return TimelineView(.animation(minimumInterval: 1, paused: !timed)) { _ in
             HStack(spacing: 6) {
                 switch model.sendState(for: chat) {
                 case .failed?:

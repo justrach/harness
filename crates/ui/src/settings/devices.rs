@@ -1,6 +1,6 @@
 //! Settings → Devices (feature-inventory §1.5): the device registry — name,
 //! platform, last-seen, presence dot, a "This device" badge, click-to-copy id,
-//! and a Rename dialog (Mutate renameDevice).
+//! a Rename dialog (Mutate renameDevice), and Remove for offline devices (Mutate forgetDevice).
 
 use chrono::{DateTime, Utc};
 use gpui::{
@@ -119,6 +119,8 @@ pub struct DevicesPage {
     rename: Option<RenameDialog>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
+    /// Device id whose Remove asks for a second click.
+    confirm_remove: Option<String>,
     error: Option<SharedString>,
     task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
@@ -137,6 +139,7 @@ impl DevicesPage {
             scroll: widgets::PageScroll::default(),
             rename: None,
             copied: None,
+            confirm_remove: None,
             error: None,
             task: None,
             copy_task: None,
@@ -276,6 +279,27 @@ impl DevicesPage {
         cx.notify();
     }
 
+    /// Remove an offline device from the list (a finished cloud sandbox, a computer that is gone).
+    /// It comes back by itself if that device starts Harness again.
+    fn forget_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.confirm_remove = None;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = serde_json::json!({ "op": "forgetDevice", "deviceId": device_id });
+        self.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::MUTATE, params).await;
+            this.update(cx, |page, cx| {
+                if let Err(err) = result {
+                    page.error = Some(format!("Couldn't remove the device: {err}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(device_id.clone()));
         self.copied = Some(device_id);
@@ -384,6 +408,7 @@ impl Render for DevicesPage {
             )
         };
         let copied = self.copied.clone();
+        let confirm_remove = self.confirm_remove.clone();
         let dialog = self.render_rename_dialog(window.viewport_size(), cx);
         let emerald = theme.success; // emerald-400
         let count = devices.len();
@@ -398,6 +423,8 @@ impl Render for DevicesPage {
                 let copy_id = device.id.clone();
                 let rename_id = device.id.clone();
                 let rename_name = device.name.clone();
+                let remove_id = device.id.clone();
+                let confirming_remove = confirm_remove.as_deref() == Some(device.id.as_str());
                 let platform_icon = match device.platform.as_str() {
                     "macos" | "darwin" => crate::icons::LAPTOP,
                     "web" => crate::icons::GLOBAL,
@@ -535,6 +562,34 @@ impl Render for DevicesPage {
                             )
                             .child(SharedString::from("Rename")),
                     )
+                    // Only offline devices, never this one: the engine refuses an online device,
+                    // which would vanish until it restarted.
+                    .when(!online && !is_local, |el| {
+                        el.child(
+                            widgets::ghost_action(&theme)
+                                .id(("device-remove", ix))
+                                .opacity(if confirming_remove { 1.0 } else { 0.7 })
+                                .hover(|s| {
+                                    s.opacity(1.0)
+                                        .bg(crate::theme::ink(0.06))
+                                        .text_color(theme.text)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.confirm_remove.as_deref() == Some(remove_id.as_str()) {
+                                        this.forget_device(remove_id.clone(), cx);
+                                    } else {
+                                        this.confirm_remove = Some(remove_id.clone());
+                                        cx.notify();
+                                    }
+                                }))
+                                .when(confirming_remove, |el| el.text_color(theme.danger))
+                                .child(SharedString::from(if confirming_remove {
+                                    "Remove?"
+                                } else {
+                                    "Remove"
+                                })),
+                        )
+                    })
                     .into_any_element()
             })
             .collect();

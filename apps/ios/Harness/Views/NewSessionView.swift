@@ -124,8 +124,8 @@ struct NewSessionView: View {
             .contentShape(Rectangle())
             .onTapGesture { focused = false }
 
-            if let deviceId, !model.deviceOnline(deviceId), model.demo == nil {
-                offlineNotice(deviceId: deviceId)
+            if let deviceId, let notice = model.hostNotice(for: deviceId) {
+                hostNotice(notice, deviceId: deviceId)
             }
 
             if case .projectless = destination {
@@ -441,8 +441,27 @@ struct NewSessionView: View {
             || !attachments.isEmpty
     }
 
-    private func offlineNotice(deviceId: String) -> some View {
-        Text("\(model.deviceName(deviceId)) is offline — the run will start when it reconnects.")
+    /// Only says what is true: a dead sign-in, a phone that is not connected, or a host that is positively
+    /// gone. A host that is merely unconfirmed gets no warning (see AppModel.hostNotice).
+    @ViewBuilder
+    private func hostNotice(_ notice: AppModel.HostNotice, deviceId: String) -> some View {
+        let name = model.deviceName(deviceId)
+        switch notice {
+        case .signedOut:
+            Button { model.signInAgain() } label: {
+                noticeText("You're signed out — tap to sign in again.")
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("new-session-signed-out")
+        case .reconnecting:
+            noticeText("Reconnecting — \(name)'s status will show once you're connected.")
+        case .offline:
+            noticeText("\(name) is offline — the run will start when it reconnects.")
+        }
+    }
+
+    private func noticeText(_ message: String) -> some View {
+        Text(message)
             .font(Theme.sans(12))
             .foregroundStyle(Theme.warning.opacity(0.9))
             .frame(maxWidth: .infinity, alignment: .leading)

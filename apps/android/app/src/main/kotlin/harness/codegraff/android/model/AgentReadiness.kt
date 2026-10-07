@@ -54,7 +54,7 @@ data class AgentReadiness(val state: OnboardingState, val rows: List<Row>) {
 
     companion object {
         /** The link that gets Harness onto a computer: the landing page picks the right download for the OS it is opened on. */
-        const val DOWNLOAD_URL = "https://harness.codegraff.com/#downloads"
+        const val DOWNLOAD_URL = "https://codegraff.com/"
 
         fun statusOf(agentId: String, agents: List<AgentDescriptor>): AgentStatus {
             val d = agents.firstOrNull { it.id == agentId } ?: return AgentStatus.Missing

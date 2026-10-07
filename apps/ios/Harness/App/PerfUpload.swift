@@ -299,12 +299,13 @@ enum PerfTransport {
     }
 }
 
-/// Whether anonymous batches are sent. On unless the person turns it off in Settings, and only when there is somewhere to send.
+/// Performance batches require an explicit choice in Settings.
 enum PerfSharing {
-    static let key = "share-performance"
+    // A fresh key prevents an older opt-out preference from becoming consent.
+    static let key = "share-performance-consent-v1"
 
     /// Pinned in `apps/parity/vectors/perf-stats.json`.
-    static let defaultEnabled = true
+    static let defaultEnabled = false
 
     /// Where batches go: the stats endpoint the desktop app already uses, which accepts the mobile schema. Pinned in
     /// `apps/parity/vectors/perf-stats.json`. With no endpoint nothing is offered and nothing is sent.

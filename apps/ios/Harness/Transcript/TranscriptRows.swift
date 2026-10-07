@@ -15,7 +15,7 @@ enum RowKind {
     case markdown(block: MDBlock, streaming: Bool)
     case toolGroup(tools: [ToolItem], autoOpen: Bool)
     case inputChip(header: String, resolved: Bool)
-    case errorChip(message: String)
+    case errorChip(message: String, reauth: AgentReauthProvider?)
 }
 
 struct ToolItem: Hashable {
@@ -50,6 +50,11 @@ struct CompletedParse {
 }
 
 enum TranscriptRowBuilder {
+    /// Rows cached for one entry, replayed verbatim while the entry's decode
+    /// `stamp` is unchanged — a doc update that touches one streaming message
+    /// then rebuilds rows for that entry alone, not the whole transcript.
+    typealias EntryRowCache = (stamp: UInt64, rows: [TranscriptRow])
+
     /// Split entries into rows. `parsers` caches one incremental parser per
     /// "{entryId}#{partId}" so the streaming tail re-parses O(delta + tail);
     /// `completed` memoizes settled parts so they parse exactly once.
@@ -57,11 +62,42 @@ enum TranscriptRowBuilder {
                      pendingSends: [PendingSend],
                      parsers: inout [String: IncrementalMarkdownParser],
                      completed: inout [String: CompletedParse]) -> [TranscriptRow] {
+        var scratch: [String: EntryRowCache] = [:]
+        return rows(entries: entries, pendingSends: pendingSends,
+                    parsers: &parsers, completed: &completed, entryRows: &scratch)
+    }
+
+    /// Same split, reusing `entryRows` across calls: an entry whose stamp is
+    /// unchanged contributes its cached rows without re-walking its parts.
+    /// `live` for a cached entry is rebuilt from its rows' partKeys — exactly
+    /// the keys rowsForEntry would have inserted for its nonempty text parts.
+    static func rows(entries: [MessageEntry],
+                     pendingSends: [PendingSend],
+                     parsers: inout [String: IncrementalMarkdownParser],
+                     completed: inout [String: CompletedParse],
+                     entryRows: inout [String: EntryRowCache]) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
         var live = Set<String>()
+        var present = Set<String>()
+        present.reserveCapacity(entries.count)
         for entry in entries {
-            rowsForEntry(entry, into: &rows, parsers: &parsers,
-                         completed: &completed, live: &live)
+            present.insert(entry.id)
+            if let hit = entryRows[entry.id], hit.stamp == entry.stamp {
+                for row in hit.rows {
+                    rows.append(row)
+                    if let key = row.partKey { live.insert(key) }
+                }
+            } else {
+                var fresh: [TranscriptRow] = []
+                rowsForEntry(entry, into: &fresh, parsers: &parsers,
+                             completed: &completed, live: &live)
+                entryRows[entry.id] = (entry.stamp, fresh)
+                rows.append(contentsOf: fresh)
+            }
+        }
+        // Evict memos for entries that left the transcript.
+        if entryRows.count > present.count {
+            entryRows = entryRows.filter { present.contains($0.key) }
         }
         // Optimistic echo: pending sends share their client-minted id, so the
         // host's real entry replaces them without a flicker.
@@ -200,11 +236,12 @@ enum TranscriptRowBuilder {
                                           entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
 
-            case .error(let partId, let message):
+            case .error(let partId, let message, let reauth):
                 flushTools(lastIx: ix - 1)
-                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: fnv1a(message),
+                let version = fnv1a(message + "\0" + (reauth?.rawValue ?? ""))
+                rows.append(TranscriptRow(id: "\(entry.id)#\(partId)", version: version,
                                           turnStart: first,
-                                          kind: .errorChip(message: message),
+                                          kind: .errorChip(message: message, reauth: reauth),
                                           entryId: entry.id, timestamp: nil, partKey: nil))
                 first = false
             }

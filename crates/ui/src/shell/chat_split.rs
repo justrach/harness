@@ -472,6 +472,26 @@ impl Shell {
         }
     }
 
+    /// Close pane `ix`, focused or not (a pane's own close button). Closing an
+    /// unfocused pane focuses it first, so it closes the way ⌘W would.
+    pub(super) fn close_chat_pane(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(split) = self.chat_split.as_ref() else {
+            return false;
+        };
+        if ix >= split.panes.len() {
+            return false;
+        }
+        if split.focus != ix {
+            self.focus_chat_pane(ix, window, cx);
+        }
+        self.close_focused_chat_pane(window, cx)
+    }
+
     /// ⌘W with a split open closes the focused pane (not the window); with
     /// one pane left it closes the tab. Either can archive the closed session
     /// ([`Shell::archive_closed_session`]).
@@ -503,14 +523,12 @@ impl Shell {
         };
         let Some(target) = split.close_focused() else {
             self.chat_split = None;
-            motion::reveal_reset(STRIP_REVEAL_KEY);
             return false;
         };
         let project = split.projects[split.focus].clone();
         let draft = split.drafts[split.focus].take().filter(|_| target.is_none());
         if split.panes.len() == 1 {
             self.chat_split = None;
-            motion::reveal_reset(STRIP_REVEAL_KEY);
         }
         self.chat_split_selected = target.clone();
         self.state.update(cx, |s, cx| s.select_chat(target, cx));
@@ -833,21 +851,58 @@ impl Shell {
                     .flex_none()
                     .px(px(14.0))
                     .pb(px(6.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted)
-                    .child(title),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(title),
+                    )
+                    // Closing the other panes is how you get back to one
+                    // column; ⌘W / Ctrl+Shift+W closes the focused pane.
+                    .child(
+                        div()
+                            .id(("chat-peer-pane-close", ix))
+                            .flex_none()
+                            .size(px(20.0))
+                            .rounded(px(5.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.ink(0.08)))
+                            .role(gpui::Role::Button)
+                            .aria_label("Close this pane")
+                            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                window.prevent_default()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_chat_pane(ix, window, cx);
+                            }))
+                            .child(
+                                crate::icons::icon(crate::icons::CLOSE)
+                                    .size(px(12.0))
+                                    .text_color(theme.text_muted),
+                            ),
+                    ),
             )
             // Ghostty dims unfocused splits.
             .child(div().flex_1().min_h_0().flex().flex_col().opacity(0.8).child(body))
-            // Focus on release, not press: focusing swaps which transcript
-            // draws this chat, so doing it on press threw away a text drag
-            // the moment it started (text in an unfocused pane couldn't be
-            // selected at all).
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| this.release_on_peer_pane(ix, window, cx)),
-            )
+            // Focus on release so text drags retain their transcript. Capture
+            // first so thought-process and other controls cannot swallow the
+            // activation; leave propagation intact for their own interactions.
+            .capture_any_mouse_up(cx.listener(move |this, event: &gpui::MouseUpEvent, window, cx| {
+                if event.button == gpui::MouseButton::Left {
+                    this.release_on_peer_pane(ix, window, cx);
+                }
+            }))
             .into_any_element()
     }
 }
@@ -874,22 +929,19 @@ fn space_label(space: &harness_proto::Space) -> String {
 
 impl Shell {
     /// A strip of mini cards mirroring the split above the session list:
-    /// each shows its pane's session and workspace (project), the focused
-    /// one lit. Click a card to move into that pane. Hovering the strip eases
-    /// open a preview of the hovered card's conversation underneath.
+    /// each shows its pane's session, with the focused one lit.
+    /// Click a card to move into that pane.
     pub(super) fn render_pane_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let split = self
             .chat_split
             .clone()
             .filter(|_| matches!(self.route, Route::Chat))?;
         let len = split.panes.len();
-        let hovered = self.pane_strip_hovered.min(len - 1);
-        let t = motion::reveal_t(STRIP_REVEAL_KEY);
         struct Card {
             title: SharedString,
-            project: SharedString,
+            harness: Option<harness_proto::HarnessId>,
         }
-        let (cards, preview) = {
+        let cards = {
             let state = self.state.read(cx);
             let selected = state.selected_chat.clone();
             let pane_chat = |ix: usize| {
@@ -901,40 +953,37 @@ impl Shell {
             };
             let cards: Vec<Card> = (0..len)
                 .map(|ix| {
-                    // The focused pane's workspace is the live sidebar filter.
-                    let project = if ix == split.focus {
-                        self.settings.space_filter.clone()
+                    let chat = pane_chat(ix).and_then(|id| state.chats.iter().find(|c| c.id == id));
+                    let harness = if let Some(chat) = chat {
+                        chat.config.as_ref().map(|config| config.harness)
+                    } else if ix == split.focus {
+                        self.current_canvas_draft(cx).harness
                     } else {
-                        split.projects.get(ix).cloned().flatten()
+                        split
+                            .drafts
+                            .get(ix)
+                            .and_then(|draft| draft.as_ref())
+                            .and_then(|draft| draft.harness)
                     };
                     Card {
-                        title: pane_chat(ix)
-                            .and_then(|id| state.chats.iter().find(|c| c.id == id))
-                            .map(|c| transcript::single_line(&c.title.clone().unwrap_or_else(|| "Untitled".into())))
+                        harness,
+                        title: chat
+                            .map(|c| {
+                                transcript::single_line(
+                                    &c.title.clone().unwrap_or_else(|| "Untitled".into()),
+                                )
+                            })
                             .unwrap_or_else(|| "New session".into())
-                            .into(),
-                        project: project
-                            .as_deref()
-                            .and_then(|id| state.spaces.iter().find(|s| s.id == id))
-                            .map(space_label)
-                            .unwrap_or_else(|| "All projects".into())
                             .into(),
                     }
                 })
                 .collect();
-            // Only build the preview while it is (becoming) visible.
-            let preview = (t > 0.001).then(|| match pane_chat(hovered) {
-                Some(_) if hovered == split.focus => conversation_preview(&state.transcript),
-                Some(id) => conversation_preview(state.sub_transcript(&id)),
-                None => ConversationPreview::default(),
-            });
-            (cards, preview)
+            cards
         };
 
         let mut row: Vec<AnyElement> = Vec::with_capacity(len);
         for (ix, card) in cards.into_iter().enumerate() {
             let focused = ix == split.focus;
-            let lit = t > 0.001 && ix == hovered;
             row.push(
                 div()
                     .id(("chat-pane-card", ix))
@@ -945,14 +994,9 @@ impl Shell {
                     .rounded(px(10.0))
                     .border_1()
                     .border_color(if focused { theme.accent.opacity(0.55) } else { theme.border })
-                    .bg(if focused || lit { theme.ink(0.05) } else { theme.ink(0.015) })
+                    .bg(if focused { theme.ink(0.05) } else { theme.ink(0.015) })
+                    .hover(|style| style.bg(theme.ink(0.05)))
                     .cursor_pointer()
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.pane_strip_hovered != ix {
-                            this.pane_strip_hovered = ix;
-                            cx.notify();
-                        }
-                    }))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if this.chat_split.as_ref().is_some_and(|s| s.focus == ix) {
                             window.focus(&this.composer.focus_handle(cx), cx);
@@ -966,11 +1010,18 @@ impl Shell {
                             .items_center()
                             .gap(px(5.0))
                             .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(if focused { theme.accent } else { theme.text_muted })
-                                    .child(SharedString::from(pane_glyph(split.axis, ix, len))),
+                                {
+                                    let (path, tint) = card.harness
+                                        .map(crate::pickers::harness_brand_icon)
+                                        .unwrap_or((icons::CHAT_ROUND_LINE, None));
+                                    icon(path)
+                                        .size(px(11.0))
+                                        .text_color(tint.unwrap_or(if focused {
+                                            theme.accent
+                                        } else {
+                                            theme.text_muted
+                                        }))
+                                },
                             )
                             .child(
                                 div()
@@ -983,58 +1034,9 @@ impl Shell {
                                     .child(card.title),
                             ),
                     )
-                    .child(
-                        div()
-                            .mt(px(2.0))
-                            .pl(px(16.0))
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted.opacity(0.75))
-                            .child(card.project),
-                    )
                     .into_any_element(),
             );
         }
-
-        let panel = preview.map(|preview| {
-            let line = |label: &'static str, text: Option<SharedString>, lines: usize| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.0))
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(10.5))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(SharedString::from(label)),
-                    )
-                    .child(
-                        div()
-                            .h(px(17.0 * lines as f32))
-                            .overflow_hidden()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.text)
-                            .child(text.unwrap_or_else(|| "—".into())),
-                    )
-            };
-            div()
-                .h(px(PREVIEW_HEIGHT * t))
-                .opacity(t)
-                .overflow_hidden()
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .p(px(10.0))
-                        .rounded(px(10.0))
-                        .bg(theme.ink(0.035))
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(line("You", preview.prompt, 1))
-                        .child(line(if preview.streaming { "Working…" } else { "Reply" }, preview.reply, 3)),
-                )
-        });
 
         Some(
             div()
@@ -1043,9 +1045,7 @@ impl Shell {
                 .pb(px(8.0))
                 .flex()
                 .flex_col()
-                .on_hover(motion::reveal_listener(STRIP_REVEAL_KEY))
                 .child(div().flex().flex_row().flex_wrap().items_start().gap(px(6.0)).children(row))
-                .children(panel)
                 .into_any_element(),
         )
     }
@@ -1113,101 +1113,9 @@ impl Shell {
     }
 }
 
-pub(super) const STRIP_REVEAL_KEY: &str = "chat-pane-strip";
-/// Revealed height of the hover preview (prompt line + three reply lines).
-const PREVIEW_HEIGHT: f32 = 132.0;
-
-/// Markdown to one line of prose: drop heading/quote/list markers and
-/// emphasis/code fences, collapse whitespace.
-fn plain_text(markdown: &str) -> String {
-    markdown
-        .lines()
-        .map(|line| {
-            let line = line.trim_start();
-            let line = line.trim_start_matches('#').trim_start_matches('>');
-            let line = line
-                .strip_prefix("- ")
-                .or_else(|| line.strip_prefix("* "))
-                .unwrap_or(line);
-            if line.trim_start().starts_with("```") { "" } else { line }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace("**", "")
-        .replace("__", "")
-        .replace('`', "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[derive(Default)]
-struct ConversationPreview {
-    prompt: Option<SharedString>,
-    reply: Option<SharedString>,
-    streaming: bool,
-}
-
-/// The latest prompt and reply text of a transcript, for the hover preview.
-fn conversation_preview(entries: &[harness_doc::SessionMessageEntry]) -> ConversationPreview {
-    // The latest text part (a reply streams its newest words last), with
-    // markdown markers dropped so the preview reads as prose.
-    let text = |entry: &harness_doc::SessionMessageEntry| {
-        entry
-            .parts
-            .iter()
-            .rev()
-            .find_map(|part| match part {
-                harness_doc::MessagePart::Text { text, .. } => Some(plain_text(text)),
-                _ => None,
-            })
-            .filter(|text| !text.is_empty())
-            .map(SharedString::from)
-    };
-    let mut preview = ConversationPreview {
-        streaming: entries
-            .last()
-            .is_some_and(|e| e.status == Some(harness_doc::MessageStatus::Streaming)),
-        ..Default::default()
-    };
-    for entry in entries.iter().rev() {
-        match entry.role {
-            harness_doc::MessageRole::User if preview.prompt.is_none() => preview.prompt = text(entry),
-            harness_doc::MessageRole::Assistant if preview.reply.is_none() && preview.prompt.is_none() => {
-                preview.reply = text(entry)
-            }
-            _ => {}
-        }
-        if preview.prompt.is_some() {
-            break;
-        }
-    }
-    preview
-}
-
 #[cfg(test)]
 mod chat_split_tests {
     use super::*;
-
-    fn entry(role: harness_doc::MessageRole, text: &str) -> harness_doc::SessionMessageEntry {
-        serde_json::from_value(serde_json::json!({
-            "id": text, "role": role, "createdAt": 0, "deviceId": "d",
-            "parts": [{"kind": "text", "id": "p", "text": text}],
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn preview_takes_the_latest_prompt_and_its_reply() {
-        use harness_doc::MessageRole::{Assistant, User};
-        let entries = [entry(User, "old"), entry(Assistant, "old reply"), entry(User, "fix  the\nbuild"), entry(Assistant, "done")];
-        let p = conversation_preview(&entries);
-        assert_eq!(p.prompt.as_deref(), Some("fix the build"));
-        assert_eq!(p.reply.as_deref(), Some("done"));
-        let p = conversation_preview(&entries[..3]);
-        assert_eq!(p.reply, None, "no reply to the latest prompt yet");
-        assert_eq!(plain_text("## Plan\n- **fix** the `build`\n```rust\nlet x;\n```"), "Plan fix the build let x;");
-    }
 
     fn two(selected: &str) -> ChatSplit {
         ChatSplit::split(None, SplitAxis::Horizontal, Some(selected.into()), Some("p".into())).unwrap()

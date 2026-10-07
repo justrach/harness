@@ -397,6 +397,44 @@ pub enum DoneStatus {
     Disconnected,
 }
 
+/// Fixed login routes offered by a provider-typed reauthentication failure.
+/// Wire-provided commands are never executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReauthProvider {
+    #[serde(rename = "chatgpt-new")]
+    ChatgptNew,
+    #[serde(rename = "codex")]
+    Codex,
+}
+
+impl ReauthProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatgptNew => "chatgpt-new",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// Recognize only the complete, allowlisted ACP recovery contract.
+    pub fn from_acp(data: &serde_json::Value) -> Option<Self> {
+        if data.get("kind")?.as_str()? != "reauth_required" {
+            return None;
+        }
+        let (provider, command, args) = match data.get("provider")?.as_str()? {
+            "chatgpt-new" => (
+                Self::ChatgptNew,
+                "graff",
+                serde_json::json!(["login", "chatgpt-new"]),
+            ),
+            "codex" => (Self::Codex, "codex", serde_json::json!(["login"])),
+            _ => return None,
+        };
+        let login = data.get("login")?;
+        (login.get("command")?.as_str()? == command && login.get("args")? == &args)
+            .then_some(provider)
+    }
+}
+
 /// The normalized streaming event every harness emits.
 ///
 /// Mirrors harness's `AgentEvent` tagged enum.
@@ -469,6 +507,12 @@ pub enum AgentEvent {
         id: String,
         view: ToolView,
     },
+    /// Completed delegated-task diagnostics. Counts are bytes, not parent
+    /// context tokens; this event never adds a charge to account totals.
+    DelegationInfo {
+        id: String,
+        info: crate::DelegationInfo,
+    },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.
     #[serde(rename_all = "camelCase")]
@@ -505,6 +549,10 @@ pub enum AgentEvent {
     },
     Error {
         message: String,
+    },
+    /// A provider-typed, user-triggered sign-in recovery. Never carries argv or tokens.
+    ReauthRequired {
+        provider: ReauthProvider,
     },
     #[serde(rename_all = "camelCase")]
     InputRequested {

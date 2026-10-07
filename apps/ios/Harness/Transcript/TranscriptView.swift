@@ -6,6 +6,17 @@ struct TranscriptView: View {
     let store: SessionStore
     let chatId: String
     let scroll: ScrollState
+    /// The chat's folder on its host, for workspace-relative links.
+    var cwd: String? = nil
+    /// A tapped link that only opens on the host computer.
+    var onHostLink: (HostLink) -> Void = { _ in }
+    /// The chat this transcript shows, and whether a turn is running in it: the reconnect row's
+    /// Resume needs the chat's own agent and model, and waits for a running turn.
+    var chat: Chat? = nil
+    var runLive = false
+    /// The name of the computer the chat runs on, for the reconnect row and sheet. Passed in, so
+    /// the transcript needs no app model in its environment.
+    var hostName = "the execution device"
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -13,28 +24,37 @@ struct TranscriptView: View {
     @State private var veils = VeilStore()
     @State var folds = ToolGroupFolds()
     @State private var userExpansionHeights: [String: CGFloat] = [:]
+    @State private var reauthRequest: AgentReauthRequest?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     var body: some View {
-        let rows = store.transcriptCache.rows(revision: store.revision,
+        let allRows = store.transcriptCache.rows(revision: store.revision,
                                               entries: store.entries,
                                               pendingSends: store.pendingSends)
+        let rows = scroll.tailWindow(allRows)
         let runway = store.lastSubmittedMessageId
-        NativeTranscriptTable(rows: rows, scroll: scroll, runwayID: runway,
+        let earlierErrors = Self.earlierReauthRows(rows)
+        NativeTranscriptTable(rows: rows, hiddenRows: allRows.count - rows.count,
+            scroll: scroll, runwayID: runway,
             expansionHeight: runway.flatMap { userExpansionHeights[$0] } ?? 0,
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,
             reduceMotion: reduceMotion,
             configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
                 ^ colorScheme.hashValue) { row in
-                AnyView(rowView(row)
+                AnyView(rowView(row, earlier: earlierErrors.contains(row.id))
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
-                    .environment(\.colorScheme, ThemeStore.shared.colorScheme))
+                    .environment(\.colorScheme, ThemeStore.shared.colorScheme)
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let link = HostLink.classify(url, cwd: cwd) else { return .systemAction }
+                        onHostLink(link)
+                        return .handled
+                    }))
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.bg)
@@ -59,10 +79,70 @@ struct TranscriptView: View {
                 }
             }
             .motionAnimation(Motion.fadeQuick, value: scroll.showJump)
+            .sheet(item: $reauthRequest) { request in
+                AgentReauthenticationSheet(
+                    provider: request.provider, hostName: request.hostName, relay: request.relay,
+                    onSignedIn: { ReauthOutcomes.shared.resolve(request.key) },
+                    resume: canResume ? { resume(request.key) } : nil)
+            }
+    }
+
+    /// Reconnect rows from earlier in the conversation: a user message came after them, so the
+    /// chat has moved on (that is also how a sent Resume stops being offered).
+    static func earlierReauthRows(_ rows: [TranscriptRow]) -> Set<String> {
+        var earlier: Set<String> = []
+        var userSince = false
+        for row in rows.reversed() {
+            switch row.kind {
+            case .user: userSince = true
+            case .errorChip(_, let reauth) where reauth != nil && userSince: earlier.insert(row.id)
+            default: break
+            }
+        }
+        return earlier
+    }
+
+    /// The chat's own agent and model are stored, and no turn is running: resuming never falls
+    /// back to a default model.
+    private var canResume: Bool { chat?.config?.model != nil && !runLive }
+
+    /// Resume conversation: a new turn in this chat with its own agent and model, from its
+    /// existing session. The failed prompt and finished tools are not replayed, and the composer's
+    /// draft and attachments are untouched.
+    private func resume(_ key: String) -> Bool {
+        guard let chat, chat.config?.model != nil, !runLive,
+              ReauthOutcomes.shared.claimResume(key) else { return false }
+        store.sendRun(prompt: ReauthCopy.resumePrompt, chat: chat)
+        return true
     }
 
     @ViewBuilder
-    private func rowView(_ row: TranscriptRow) -> some View {
+    private func reauthControls(_ reauth: AgentReauthProvider, row: TranscriptRow, earlier: Bool) -> some View {
+        let key = ReauthOutcomes.key(chatId: chatId, rowId: row.id)
+        let outcomes = ReauthOutcomes.shared
+        if outcomes.resolved.contains(key) {
+            Label("ChatGPT reconnected on \(hostName)", systemImage: "checkmark.circle")
+                .font(Theme.sans(14, weight: .medium))
+                .foregroundStyle(Theme.textMuted)
+            if !earlier, !outcomes.resumed.contains(key), canResume {
+                Button("Resume conversation") { _ = resume(key) }
+                    .font(Theme.sans(14, weight: .medium))
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("agent-reauth-resume")
+            }
+        } else if !earlier {
+            Button(reauth == .chatGPTNew ? "Continue with ChatGPT" : "Reconnect ChatGPT") {
+                reauthRequest = AgentReauthRequest(provider: reauth, hostName: hostName,
+                                                  relay: store.hostRelayClient(), key: key)
+            }
+            .font(Theme.sans(14, weight: .medium))
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("agent-reauth-sign-in")
+        }
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: TranscriptRow, earlier: Bool) -> some View {
         Group {
             switch row.kind {
             case .user(let text):
@@ -92,8 +172,13 @@ struct TranscriptView: View {
                                 folds: folds, onResize: { scroll.refreshLayout?() })
             case .inputChip(let header, let resolved):
                 InputChipView(header: header, resolved: resolved)
-            case .errorChip(let message):
-                ErrorChipView(message: message)
+            case .errorChip(let message, let reauth):
+                VStack(alignment: .leading, spacing: 8) {
+                    ErrorChipView(message: message)
+                    if let reauth {
+                        reauthControls(reauth, row: row, earlier: earlier)
+                    }
+                }
             }
         }
         .padding(.top, row.topGap)
@@ -101,6 +186,15 @@ struct TranscriptView: View {
         .frame(maxWidth: Self.maxContentWidth)
         .frame(maxWidth: .infinity)
     }
+}
+
+private struct AgentReauthRequest: Identifiable {
+    let id = UUID()
+    let provider: AgentReauthProvider
+    let hostName: String
+    let relay: DeviceRelayClient?
+    /// The row that opened the sheet (`ReauthOutcomes.key`).
+    let key: String
 }
 
 struct TranscriptGeometry: Equatable {
@@ -114,6 +208,12 @@ struct TranscriptGeometry: Equatable {
 final class ScrollState {
     var pinned = true
     var showJump = false
+    /// Tail window: only the newest `rowLimit` rows reach the table, so a long
+    /// transcript never lays out its full history at once. Scrolling near the
+    /// top grows it by `rowLimitStep`; jumping back to the bottom resets it.
+    static let defaultRowLimit = 200
+    static let rowLimitStep = 200
+    var rowLimit = defaultRowLimit
     @ObservationIgnored weak var nativeScrollView: UIScrollView?
     @ObservationIgnored var refreshLayout: (() -> Void)?
     @ObservationIgnored var jumpToLatest: ((Bool) -> Void)?
@@ -152,6 +252,28 @@ final class ScrollState {
         showJump = false
         movedAway = false
     }
+
+    /// The newest `rowLimit` rows — older ones stay unbuilt (no layout, no
+    /// cells) until the user scrolls into them.
+    func tailWindow(_ rows: [TranscriptRow]) -> [TranscriptRow] {
+        rows.count > rowLimit ? Array(rows.suffix(rowLimit)) : rows
+    }
+
+    /// Grow the window toward `total` rows; never below the default, never
+    /// above the transcript's actual row count.
+    func growRowLimit(total: Int) {
+        rowLimit = max(Self.defaultRowLimit, min(total, rowLimit + Self.rowLimitStep))
+    }
+
+    /// Grow the window just enough that transcript row `index` is inside it.
+    func revealRow(atTranscriptIndex index: Int, total: Int) {
+        guard index >= 0 else { return }
+        rowLimit = max(Self.defaultRowLimit, min(total, max(rowLimit, index + 1)))
+    }
+
+    func resetRowLimit() {
+        rowLimit = Self.defaultRowLimit
+    }
 }
 
 /// Row-build cache: one incremental parser per streaming part plus a memo of
@@ -161,6 +283,10 @@ final class ScrollState {
 final class TranscriptBuilderCache {
     private var parsers: [String: IncrementalMarkdownParser] = [:]
     private var completed: [String: CompletedParse] = [:]
+    /// Per-entry row memo: on a doc update only the entries the update
+    /// touched (a new decode `stamp`) re-walk their parts; every other entry
+    /// contributes its rows verbatim.
+    private var entryRows: [String: TranscriptRowBuilder.EntryRowCache] = [:]
     private var cachedRevision: UInt64?
     private var cachedRows: [TranscriptRow] = []
     private var prewarming = false
@@ -173,7 +299,8 @@ final class TranscriptBuilderCache {
         if cachedRevision == revision { return cachedRows }
         cachedRows = Perf.measure(PerfSpan.transcriptRows) {
             TranscriptRowBuilder.rows(entries: entries, pendingSends: pendingSends,
-                                      parsers: &parsers, completed: &completed)
+                                      parsers: &parsers, completed: &completed,
+                                      entryRows: &entryRows)
         }
         cachedRevision = revision
         return cachedRows
@@ -409,6 +536,18 @@ struct MarkdownRowView: View {
 @Observable
 final class ToolGroupFolds {
     var values: [String: Bool] = [:]
+    /// Groups the user expanded past the visible cap ("Show N earlier"),
+    /// keyed by group row id.
+    var revealed: Set<String> = []
+}
+
+/// An open group with more than `cap` tools renders only the tail plus a
+/// "Show N earlier" affordance — a 30-minute turn can produce groups of
+/// hundreds, and every chip is a hosted view inside one self-sizing cell.
+func toolGroupTail(_ tools: [ToolItem], revealAll: Bool,
+                   cap: Int = 20) -> (visible: ArraySlice<ToolItem>, hidden: Int) {
+    guard !revealAll, tools.count > cap else { return (tools[...], 0) }
+    return (tools.suffix(cap), tools.count - cap)
 }
 
 private struct HostedToolGroup: View {
@@ -421,7 +560,13 @@ private struct HostedToolGroup: View {
 
     var body: some View {
         let open = folds.values[id] ?? autoOpen
+        let window = toolGroupTail(tools, revealAll: folds.revealed.contains(id))
         ToolGroupView(tools: tools, open: open, userToggled: folds.values[id] != nil,
+            hiddenEarlier: window.hidden,
+            onShowEarlier: {
+                folds.revealed.insert(id)
+                onResize()
+            },
             toggle: {
                 withAnimation(reduceMotion ? nil : Motion.resize) { folds.values[id] = !open }
             }, onDetailChanged: onResize)
@@ -451,9 +596,17 @@ struct ToolGroupView: View {
     let tools: [ToolItem]
     let open: Bool
     let userToggled: Bool
+    /// Tools older than the visible cap, hidden behind "Show N earlier".
+    var hiddenEarlier: Int = 0
+    var onShowEarlier: () -> Void = {}
     let toggle: () -> Void
     var onDetailChanged: () -> Void = {}
     @State private var retainingDetails = false
+
+    /// The tools actually rendered — the tail after the hidden prefix.
+    private var visibleTools: ArraySlice<ToolItem> {
+        tools.suffix(tools.count - min(hiddenEarlier, tools.count))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -480,8 +633,20 @@ struct ToolGroupView: View {
             ToolRevealLayout(progress: open ? 1 : 0) {
                 if open || retainingDetails {
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(tools.enumerated()), id: \.offset) { index, tool in
-                            ToolChipRow(tool: tool, continues: index < tools.count - 1, onResize: onDetailChanged)
+                        if hiddenEarlier > 0 {
+                            Button(action: onShowEarlier) {
+                                Text("Show \(hiddenEarlier) earlier")
+                                    .font(Theme.sans(13))
+                                    .foregroundStyle(Theme.textMuted)
+                                    .frame(maxWidth: .infinity, minHeight: 36)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("show-earlier-tools")
+                        }
+                        let shown = Array(visibleTools.enumerated())
+                        ForEach(shown, id: \.offset) { index, tool in
+                            ToolChipRow(tool: tool, continues: index < shown.count - 1, onResize: onDetailChanged)
                         }
                     }
                 }

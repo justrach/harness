@@ -226,6 +226,11 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<ToolView>,
     },
+    /// Small task diagnostics only: never the task answer or caller context.
+    Delegation {
+        id: String,
+        info: harness_proto::DelegationInfo,
+    },
     #[serde(rename_all = "camelCase")]
     Input {
         id: String,
@@ -237,6 +242,8 @@ pub enum MessagePart {
     Error {
         id: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reauth: Option<harness_proto::ReauthProvider>,
     },
 }
 
@@ -247,6 +254,7 @@ impl MessagePart {
             | MessagePart::Image { id, .. }
             | MessagePart::Reasoning { id, .. }
             | MessagePart::Tool { id, .. }
+            | MessagePart::Delegation { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. } => id,
         }
@@ -271,6 +279,7 @@ impl MessagePart {
                         .as_ref()
                         .map_or(0, |s| serde_json::to_vec(s).map_or(0, |v| v.len()))
             }
+            MessagePart::Delegation { info, .. } => serde_json::to_vec(info).map_or(0, |v| v.len()),
             MessagePart::Input { questions, .. } => {
                 serde_json::to_vec(questions).map_or(0, |v| v.len())
             }
@@ -393,6 +402,26 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 view: None,
             });
         }
+        AgentEvent::DelegationInfo { id, info } => {
+            // Require the real tool, and upsert by its stable id: replayed
+            // completion metadata must not add a second accounting row.
+            if !out
+                .iter()
+                .any(|p| matches!(p, MessagePart::Tool { id: pid, .. } if pid == id))
+            {
+                return;
+            }
+            let part_id = format!("delegation:{id}");
+            let part = MessagePart::Delegation {
+                id: part_id.clone(),
+                info: info.clone(),
+            };
+            if let Some(existing) = out.iter_mut().find(|p| p.id() == part_id) {
+                *existing = part;
+            } else {
+                out.push(part);
+            }
+        }
         AgentEvent::ToolCall { id, call } => {
             if let Some(existing) = out.iter_mut().find_map(|p| match p {
                 MessagePart::Tool {
@@ -501,6 +530,16 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             out.push(MessagePart::Error {
                 id,
                 message: message.clone(),
+                reauth: None,
+            });
+        }
+        AgentEvent::ReauthRequired { provider } => {
+            let id = format!("e{}", out.len());
+            out.push(MessagePart::Error {
+                id,
+                message: "ChatGPT sign-in expired or was rejected. Sign in again to continue."
+                    .into(),
+                reauth: Some(*provider),
             });
         }
         AgentEvent::Done { error, .. } => {
@@ -509,6 +548,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(MessagePart::Error {
                     id,
                     message: message.clone(),
+                    reauth: None,
                 });
             }
         }

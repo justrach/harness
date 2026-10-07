@@ -60,6 +60,34 @@ final class PerfMonitorTests: XCTestCase {
         XCTAssertEqual(s.slowPercent, 50)
     }
 
+    /// A turn that straddles a suspension measures the time the app was frozen, not what it did. It ends
+    /// after the app resumes but before the foreground notification, so it must be dropped while backgrounded.
+    func testATurnThatEndsWhileBackgroundedIsNotCountedAsAStall() {
+        let perf = Perf()
+        perf.turnEnded(ms: 5)
+        perf.setBackgrounded(true)
+        perf.turnEnded(ms: 240_000)  // the app was frozen mid-turn for minutes
+        perf.setBackgrounded(false)
+        perf.turnEnded(ms: 60)
+
+        let summary = perf.turns.snapshot()
+        XCTAssertEqual(summary.turns, 2, "only the two foreground turns count")
+        XCTAssertEqual(summary.worst, 60)
+        XCTAssertEqual(summary.frozen, 0)
+        let stalls = perf.recorder.stats().first { $0.name == PerfSpan.mainStall }
+        XCTAssertEqual(stalls?.count, 1)
+        XCTAssertEqual(stalls?.max, 60)
+    }
+
+    func testForegroundTurnsAreCountedAsBefore() {
+        let perf = Perf()
+        for ms in [2.0, 5, 24, 800] { perf.turnEnded(ms: ms) }
+        let summary = perf.turns.snapshot()
+        XCTAssertEqual(summary.turns, 4)
+        XCTAssertEqual(summary.frozen, 1)
+        XCTAssertEqual(perf.recorder.stats().first { $0.name == PerfSpan.mainStall }?.count, 1)
+    }
+
     /// Answers every request with a fixed status and remembers what it was sent.
     private final class StubProtocol: URLProtocol {
         nonisolated(unsafe) static var status = 204
@@ -105,12 +133,16 @@ final class PerfMonitorTests: XCTestCase {
         XCTAssertEqual(refused, 0, "plain http to a real host must not be sent")
     }
 
-    func testSharingIsOnUntilThePersonTurnsItOffAndStaysOff() {
+    func testSharingRequiresFreshConsentAndCanBeTurnedOff() {
         let key = PerfSharing.key
         let saved = UserDefaults.standard.object(forKey: key)
+        let oldKey = "share-performance"
+        let oldSaved = UserDefaults.standard.object(forKey: oldKey)
+        defer { if let oldSaved { UserDefaults.standard.set(oldSaved, forKey: oldKey) } else { UserDefaults.standard.removeObject(forKey: oldKey) } }
+        UserDefaults.standard.set(true, forKey: oldKey)
         defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) } }
         UserDefaults.standard.removeObject(forKey: key)
-        XCTAssertTrue(PerfSharing.enabled, "a never-chosen setting reads as on")
+        XCTAssertFalse(PerfSharing.enabled, "a never-chosen setting must not upload")
         UserDefaults.standard.set(false, forKey: key)
         XCTAssertFalse(PerfSharing.enabled, "an explicit off must stay off")
         UserDefaults.standard.set(true, forKey: key)

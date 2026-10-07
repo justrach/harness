@@ -298,6 +298,18 @@ impl InstallKind {
         }
     }
 
+    /// Swap the staged bundle over the installed one without relaunching —
+    /// the process is quitting anyway, so the next launch runs the new
+    /// version. Non-desktop installs are a no-op.
+    pub fn install_on_exit(&self, staged: &Path) -> anyhow::Result<()> {
+        match self {
+            Self::MacApp { bundle } => apply_mac_app(staged, bundle),
+            #[cfg(windows)]
+            Self::WindowsPortable { directory } => windows::apply(staged, directory, false),
+            _ => Ok(()),
+        }
+    }
+
     /// Install and arrange a relaunch. The UI must quit after this succeeds.
     pub fn apply_desktop(&self, staged: &Path) -> anyhow::Result<()> {
         match self {
@@ -669,10 +681,27 @@ impl UpdateStatus {
 }
 
 /// `HARNESS_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
+/// Headless is opt-IN; the desktop app is opt-OUT ([`desktop_auto_update_enabled`]).
 fn auto_update_enabled() -> bool {
     std::env::var("HARNESS_AUTO_UPDATE")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
+}
+
+/// Whether the desktop app stages and installs updates on its own. ON by
+/// default; `HARNESS_AUTO_UPDATE=0|false|no|off` turns it off and restores
+/// the manual click-through flow.
+pub fn desktop_auto_update_enabled() -> bool {
+    desktop_auto_update_from(std::env::var("HARNESS_AUTO_UPDATE").ok().as_deref())
+}
+
+fn desktop_auto_update_from(value: Option<&str>) -> bool {
+    !value.is_some_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 /// "Nothing would be interrupted by a restart right now" — wired by the engine
@@ -915,6 +944,32 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_auto_update_defaults_on_and_honours_off_values() {
+        assert!(desktop_auto_update_from(None));
+        assert!(desktop_auto_update_from(Some("")));
+        assert!(desktop_auto_update_from(Some("1")));
+        assert!(!desktop_auto_update_from(Some("0")));
+        assert!(!desktop_auto_update_from(Some(" OFF ")));
+        assert!(!desktop_auto_update_from(Some("false")));
+        assert!(!desktop_auto_update_from(Some("no")));
+    }
+
+    #[test]
+    fn install_on_exit_is_a_no_op_for_non_desktop_installs() {
+        let staged = tempfile::tempdir().unwrap();
+        assert!(
+            InstallKind::Unmanaged
+                .install_on_exit(staged.path())
+                .is_ok()
+        );
+        assert_eq!(
+            std::fs::read_dir(staged.path()).unwrap().count(),
+            0,
+            "a non-desktop install touches nothing"
+        );
+    }
 
     #[test]
     fn a_success_waits_the_full_interval() {

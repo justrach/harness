@@ -53,6 +53,8 @@ jobs:
           cargo test --locked -p harness-sync --lib
           cargo test --locked -p harness-update --lib
           cargo test --locked -p harness-engine --lib --test session_publication --test restart_resume --test codex_subagents --test local_profiles
+      - name: graff trace observer
+        run: cargo test --locked -p harness-observe
 
   ui-tests:
     runs-on: ubuntu-24.04

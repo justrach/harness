@@ -115,9 +115,6 @@ impl Shell {
     fn load_chat_tab(&mut self, tab: ChatTab, window: &mut Window, cx: &mut Context<Self>) {
         self.chat_split = tab.split;
         self.chat_split_selected = tab.selected.clone();
-        if self.chat_split.is_none() {
-            motion::reveal_reset(chat_split::STRIP_REVEAL_KEY);
-        }
         let draft = tab.draft.filter(|_| tab.selected.is_none());
         self.state.update(cx, |s, cx| s.select_chat(tab.selected, cx));
         // Filter first: the tab's own parked project must have the last word.
@@ -371,9 +368,9 @@ impl Shell {
         true
     }
 
-    /// Tab titles, active tab from the live state: the focused chat's title
-    /// and how many panes the tab holds.
-    fn chat_tab_labels(&self, cx: &App) -> Vec<(SharedString, usize)> {
+    /// Tab titles, active tab from the live state: the focused chat's title.
+    /// The lit tab's pane strip shows its panes, so rows carry titles only.
+    fn chat_tab_labels(&self, cx: &App) -> Vec<SharedString> {
         let state = self.state.read(cx);
         let title = |selected: Option<&str>| -> SharedString {
             selected
@@ -387,15 +384,9 @@ impl Shell {
             .enumerate()
             .map(|(ix, tab)| {
                 if ix == self.chat_tab {
-                    (
-                        title(state.selected_chat.as_deref()),
-                        self.chat_split.as_ref().map_or(1, |s| s.panes.len()),
-                    )
+                    title(state.selected_chat.as_deref())
                 } else {
-                    (
-                        title(tab.selected.as_deref()),
-                        tab.split.as_ref().map_or(1, |s| s.panes.len()),
-                    )
+                    title(tab.selected.as_deref())
                 }
             })
             .collect()
@@ -436,15 +427,9 @@ impl Shell {
                         .justify_between()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted.opacity(0.8))
-                        .child(SharedString::from(format!("Tabs · {}", labels.len())))
-                        // The live binding: the tab-cycling shortcut is rebindable.
-                        .child(
-                            div().text_color(theme.text_muted.opacity(0.6)).child(SharedString::from(
-                                crate::settings::badge_combo(&self.settings.keymap.next_session),
-                            )),
-                        ),
+                        .child(SharedString::from(format!("Tabs · {}", labels.len()))),
                 )
-                .children(labels.into_iter().enumerate().flat_map(|(ix, (title, panes))| {
+                .children(labels.into_iter().enumerate().flat_map(|(ix, title)| {
                     let lit = ix == active;
                     let key: SharedString = format!("chat-tab-{ix}").into();
                     let row = div()
@@ -499,15 +484,6 @@ impl Shell {
                                 .child(SharedString::from(format!("{}", ix + 1))),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(title))
-                        .when(panes > 1, |row| {
-                            row.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted.opacity(0.7))
-                                    .child(SharedString::from(format!("{panes} panes"))),
-                            )
-                        })
                         .into_any_element();
                     let strip = if lit { pane_strip.take() } else { None };
                     std::iter::once(row).chain(strip)
@@ -571,6 +547,40 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         assert_close_archive_dispatch(cx, false);
+    }
+
+    #[gpui::test]
+    fn closing_the_other_pane_goes_back_to_one_column(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["here", "there"].map(archive_test_chat).into();
+                    state.selected_chat = Some("here".into());
+                });
+                shell.route = Route::Chat;
+                shell.chat_split = chat_split::ChatSplit::split(
+                    None,
+                    SplitAxis::Horizontal,
+                    Some("there".into()),
+                    None,
+                );
+                let split = shell.chat_split.as_ref().expect("two panes");
+                assert_eq!(split.panes.len(), 2);
+                let other = 1 - split.focus;
+                assert!(!shell.close_chat_pane(7, window, cx), "no such pane");
+                // The other pane's close button.
+                assert!(shell.close_chat_pane(other, window, cx));
+                assert!(shell.chat_split.is_none(), "back to one column");
+                assert_eq!(
+                    shell.state.read(cx).selected_chat.as_deref(),
+                    Some("here"),
+                    "the chat that was in focus stays open"
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

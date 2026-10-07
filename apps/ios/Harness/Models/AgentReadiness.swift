@@ -77,7 +77,7 @@ struct AgentReadiness: Equatable {
     let rows: [Row]
 
     /// The link that gets Harness onto a computer: the landing page picks the right download for the OS it is opened on.
-    static let downloadURL = "https://harness.codegraff.com/#downloads"
+    static let downloadURL = "https://codegraff.com/"
 
     static func status(of agentId: String, in agents: [AgentDescriptor]) -> AgentStatus {
         guard let d = agents.first(where: { $0.id == agentId }) else { return .missing }

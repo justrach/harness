@@ -116,6 +116,9 @@ final class LiveActivities {
     private var lastUpdate: [String: Date] = [:]
     private static let detailInterval: TimeInterval = 5
 
+    /// A Live Activity is up, so its state may still need to follow the session.
+    var isShowing: Bool { !activities.isEmpty }
+
     init() {
         // Adopt activities from an earlier launch instead of doubling them.
         for activity in Activity<SessionActivityAttributes>.activities

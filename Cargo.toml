@@ -13,13 +13,14 @@ members = [
     "crates/ui",
     "crates/syntax",
     "crates/mcp",
+    "crates/observe",
     "apps/harness",
 ]
 # Vendored forks are their own (trimmed) workspaces.
 exclude = ["vendor/zui", "vendor/gpui-component", "tui"]
 
 [workspace.package]
-version = "0.2.99"
+version = "0.2.109"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
@@ -37,6 +38,7 @@ harness-ui = { path = "crates/ui" }
 harness-syntax = { path = "crates/syntax" }
 harness-theme = { path = "crates/theme" }
 harness-mcp = { path = "crates/mcp" }
+harness-observe = { path = "crates/observe" }
 
 # CRDT
 loro = "1.13"

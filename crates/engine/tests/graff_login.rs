@@ -56,6 +56,17 @@ zai)
   printf '\nTo log in to Z.AI Coding Plan, open this URL (browser should open automatically):\n\n  https://chat.z.ai/cli/authorize?flow=f1\n\nwaiting for authorization…\n'
   exec sleep 30
   ;;
+chatgpt-new)
+  printf 'waiting for the sign-in on the execution device …\n'
+  sleep 1
+  mkdir -p "$HOME/.graff/credentials"
+  printf '{"access_token":"fixture"}' > "$HOME/.graff/credentials/chatgpt-new.json"
+  if [ -f "$HOME/deny-plan" ]; then
+    printf '✓ signed in to ChatGPT as fixture, but plan usage was not allowed.\n'
+  else
+    printf '✓ signed in to ChatGPT as fixture; plan usage is on. Use it with /model chatgpt-new or `graff --model chatgpt-new/gpt-6.1-sol`. Manage usage: https://chatgpt.com/settings/usage\n'
+  fi
+  ;;
 esac
 "#,
     )
@@ -98,7 +109,8 @@ async fn graff_provider_sign_ins_end_to_end() {
         [
             ("xai".into(), false),
             ("kimi".into(), false),
-            ("zai".into(), false)
+            ("zai".into(), false),
+            ("chatgpt-new".into(), false)
         ]
     );
     let names: Vec<_> = accounts
@@ -106,7 +118,7 @@ async fn graff_provider_sign_ins_end_to_end() {
         .into_iter()
         .map(|r| r.name)
         .collect();
-    assert_eq!(names, ["xAI", "Kimi", "Z.AI"]);
+    assert_eq!(names, ["xAI", "Kimi", "Z.AI", "ChatGPT"]);
 
     // xAI: the link and code come back, graff's own opener is muted, and the
     // sign-in finishes once graff has written the credential.
@@ -124,7 +136,8 @@ async fn graff_provider_sign_ins_end_to_end() {
         [
             ("xai".into(), true),
             ("kimi".into(), false),
-            ("zai".into(), false)
+            ("zai".into(), false),
+            ("chatgpt-new".into(), false)
         ]
     );
     let opener =
@@ -150,6 +163,31 @@ async fn graff_provider_sign_ins_end_to_end() {
         Some("the code expired — run `graff login kimi` again")
     );
     assert!(!signed_in(&accounts)[1].1);
+
+    // ChatGPT's real success line includes model and usage guidance after the
+    // plan-granted clause. It must still complete host-browser recovery.
+    let start = accounts
+        .start_graff_login("chatgpt-new")
+        .await
+        .expect("start ChatGPT");
+    assert_eq!(start.mode, AgentLoginMode::HostBrowser);
+    assert!(start.url.is_empty());
+    assert_eq!(start.code, None);
+    let poll = settle(&accounts, &start.login_id).await;
+    assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+    assert!(signed_in(&accounts)[3].1);
+
+    // A credential rewrite and zero exit without plan access remain failures.
+    std::fs::write(home.join("deny-plan"), "denied").unwrap();
+    let start = accounts
+        .start_graff_login("chatgpt-new")
+        .await
+        .expect("start denied ChatGPT");
+    let poll = settle(&accounts, &start.login_id).await;
+    assert_eq!(poll.status, AgentLoginStatus::Error);
+    assert!(poll.message.unwrap().contains("did not grant plan access"));
+    let rows = accounts.sign_out_graff_login("chatgpt-new").unwrap();
+    assert!(!rows[3].signed_in);
 
     // Z.AI prints no code. Cancelling kills graff and leaves the login that
     // was already there exactly as it was.

@@ -51,6 +51,8 @@ struct ComposerShell<Chips: View>: View {
     private var compact: Bool { verticalSizeClass == .compact }
     @State private var focused = false
     @State private var editor = ComposerEditorController()
+    /// Inside a stacked phone split: where this composer reports its keyboard focus (PhoneSplitContainer).
+    @Environment(\.stackedComposerFocus) private var stackedComposerFocus
 
     private var expanded: Bool {
         alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
@@ -86,6 +88,9 @@ struct ComposerShell<Chips: View>: View {
                     focused = true
                 }
             }
+            .onChange(of: focused) { _, focused in stackedComposerFocus?(focused) }
+            // Leaving the session while typing (switching sessions, closing it) lets the split have its rest back.
+            .onDisappear { if focused { stackedComposerFocus?(false) } }
     }
 
     /// The glass surface: collapsed = editor + send in one capsule row;
@@ -208,6 +213,8 @@ struct ComposerShell<Chips: View>: View {
                 editor.commit()
                 onSend()
                 editor.apply(text: draft)
+                // In a stacked split the session took the screen for typing; sending hands it back.
+                if stackedComposerFocus != nil { focused = false }
             }
         } label: {
             Group {
@@ -456,6 +463,7 @@ struct ComposerView: View {
             }
         }
         // A queued row being retyped is not the draft: the draft stays as it was until the edit ends.
+        // DraftStore also carries the text across a foldable opening or closing, which rebuilds the session.
         .onChange(of: text) { _, new in
             if editingQueuedId == nil { DraftStore.save(new, for: DraftStore.chatKey(chat.id)) }
         }

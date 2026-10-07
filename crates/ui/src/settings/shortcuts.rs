@@ -22,6 +22,89 @@ use crate::settings::{
 use crate::state::AppState;
 use crate::theme::Theme;
 
+/// A shortcut the app binds but this page cannot rebind (split panes, chat
+/// tabs, the composer jump). `/help` opens this page, so these are listed too,
+/// with the keys read from the live keymap.
+pub struct FixedShortcut {
+    pub label: &'static str,
+    pub action: Box<dyn gpui::Action>,
+}
+
+/// Where a keystroke is shown: the modifier names differ per platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeysPlatform {
+    Mac,
+    Windows,
+    Linux,
+}
+
+impl KeysPlatform {
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Mac
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+/// One keystroke in this page's style ("Ctrl+Shift+O", "Cmd+D", "Ctrl+Win+]").
+/// Pure.
+pub fn display_keystroke(platform: KeysPlatform, modifiers: &gpui::Modifiers, key: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if modifiers.control {
+        parts.push("Ctrl".into());
+    }
+    if modifiers.alt {
+        parts.push(
+            if platform == KeysPlatform::Mac {
+                "Opt"
+            } else {
+                "Alt"
+            }
+            .into(),
+        );
+    }
+    if modifiers.platform {
+        parts.push(
+            match platform {
+                KeysPlatform::Mac => "Cmd",
+                KeysPlatform::Windows => "Win",
+                KeysPlatform::Linux => "Super",
+            }
+            .into(),
+        );
+    }
+    if modifiers.shift {
+        parts.push("Shift".into());
+    }
+    if modifiers.function {
+        parts.push("Fn".into());
+    }
+    parts.push(match key {
+        "left" => "←".into(),
+        "right" => "→".into(),
+        "up" => "↑".into(),
+        "down" => "↓".into(),
+        "enter" => "Enter".into(),
+        "pageup" => "Page Up".into(),
+        "pagedown" => "Page Down".into(),
+        "escape" => "Esc".into(),
+        "space" => "Space".into(),
+        key if key.chars().count() == 1 => key.to_uppercase(),
+        key => {
+            let mut chars = key.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        }
+    });
+    parts.join("+")
+}
+
 /// Outcome of one keystroke while recording. Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordOutcome {
@@ -82,6 +165,8 @@ pub struct ShortcutsPage {
     state: Entity<AppState>,
     completion_harnesses: popover::Loadable<Vec<harness_engine::registry::HarnessDescriptor>>,
     completion_task: Option<gpui::Task<()>>,
+    /// Fixed (non-rebindable) shortcuts, shown read-only; see [`FixedShortcut`].
+    fixed: Vec<FixedShortcut>,
 }
 
 impl EventEmitter<ShortcutsEvent> for ShortcutsPage {}
@@ -120,7 +205,79 @@ impl ShortcutsPage {
             state,
             completion_harnesses: popover::Loadable::Idle,
             completion_task: None,
+            fixed: Vec::new(),
         }
+    }
+
+    /// The app's fixed shortcuts, listed read-only under the rebindable ones.
+    pub fn set_fixed_shortcuts(&mut self, fixed: Vec<FixedShortcut>) {
+        self.fixed = fixed;
+    }
+
+    fn render_fixed_group(&self, window: &Window, theme: &Theme) -> Option<gpui::AnyElement> {
+        let platform = KeysPlatform::current();
+        let rows: Vec<(&'static str, String)> = self
+            .fixed
+            .iter()
+            .filter_map(|shortcut| {
+                let keys: Vec<String> = window
+                    .bindings_for_action(shortcut.action.as_ref())
+                    .iter()
+                    .filter_map(|binding| {
+                        let strokes = binding.keystrokes();
+                        (!strokes.is_empty()).then(|| {
+                            strokes
+                                .iter()
+                                .map(|k| display_keystroke(platform, k.modifiers(), k.key()))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                    })
+                    .collect();
+                (!keys.is_empty()).then(|| (shortcut.label, keys.join(" or ")))
+            })
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let mut card = widgets::section_card(theme).mt(px(0.0));
+        for (gx, (label, keys)) in rows.into_iter().enumerate() {
+            card = card.child(
+                div()
+                    .min_h(px(48.0))
+                    .px(px(20.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(20.0))
+                    .when(gx > 0, |el| el.border_t_1().border_color(theme.border))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .text_color(theme.text)
+                            .child(SharedString::from(label)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .font_family(theme.font_mono.clone())
+                            .text_color(theme.text_muted)
+                            .child(SharedString::from(keys)),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(widgets::field_label(theme, "Panes, tabs and the composer"))
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     pub fn show_appshots(&mut self, appshots: bool) {
@@ -719,6 +876,10 @@ impl Render for ShortcutsPage {
             );
         }
 
+        if let Some(fixed) = self.render_fixed_group(window, &theme) {
+            groups.push(fixed);
+        }
+
         // Helper line stays in the muted tone even for a rejected conflict —
         // the message names the specific clash (harness settings.shortcuts.tsx).
         let helper: SharedString = if recording.is_some() {
@@ -840,6 +1001,53 @@ impl Render for ShortcutsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_shortcut_keys_read_in_each_platforms_names() {
+        let mods = |control, alt, shift, platform| gpui::Modifiers {
+            control,
+            alt,
+            shift,
+            platform,
+            function: false,
+        };
+        assert_eq!(
+            display_keystroke(KeysPlatform::Windows, &mods(true, false, true, false), "o"),
+            "Ctrl+Shift+O"
+        );
+        assert_eq!(
+            display_keystroke(KeysPlatform::Windows, &mods(true, false, false, true), "]"),
+            "Ctrl+Win+]"
+        );
+        assert_eq!(
+            display_keystroke(KeysPlatform::Linux, &mods(true, false, false, true), "["),
+            "Ctrl+Super+["
+        );
+        assert_eq!(
+            display_keystroke(KeysPlatform::Mac, &mods(false, false, true, true), "d"),
+            "Cmd+Shift+D"
+        );
+        assert_eq!(
+            display_keystroke(
+                KeysPlatform::Windows,
+                &mods(true, true, false, false),
+                "left"
+            ),
+            "Ctrl+Alt+←"
+        );
+        assert_eq!(
+            display_keystroke(
+                KeysPlatform::Windows,
+                &mods(true, false, false, false),
+                "pagedown"
+            ),
+            "Ctrl+Page Down"
+        );
+        assert_eq!(
+            display_keystroke(KeysPlatform::Mac, &mods(false, true, false, true), "enter"),
+            "Opt+Cmd+Enter"
+        );
+    }
 
     #[gpui::test]
     fn appshots_setup_can_be_enabled_and_configured_by_keyboard(cx: &mut gpui::TestAppContext) {

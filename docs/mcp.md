@@ -70,6 +70,7 @@ name (default: the local engine's device).
 | `wait_for_turn`    | `WatchSessions` until the chat settles                    |
 | `interrupt_chat`   | `QueueCommand` Interrupt                                  |
 | `respond_to_input` | `QueueCommand` RespondInput                               |
+| `dismiss_input`    | `QueueCommand` DismissInput (never an answer or approval) |
 | `archive_chat`     | `Mutate setChatArchived`                                  |
 
 Watch streams are the engine's only read surface (there is no one-shot "get
@@ -87,6 +88,38 @@ before the send: it returns on a new `last_completed_turn`, an
 edge. A brand-new chat has no session row until the host picks the run up, so
 the wait keeps waiting in that case rather than reporting the unstarted run as
 done (this was the one bug the first live run found).
+
+External clients may wait up to 3600 s. When the server speaks for a chat
+(`HARNESS_CHAT_ID` set), waits instead return one status snapshot immediately:
+recipient work never parks the caller's conversation behind a silent tool call.
+A still-running or not-yet-started recipient returns `timedOut` with a `note`
+telling the caller to end its turn; the recipient's reply arrives asynchronously.
+Explicit `wait_for_turn` snapshots return only the newest assistant message,
+not the entire historical transcript.
+
+`dismiss_input` requires a host supporting `dismiss-input-v1`. It cancels the
+turn that still owns the specified question and pauses automatic queue delivery.
+A stale request cannot stop a newer turn; an orphaned question is resolved
+without starting a replacement turn. Dismissal never supplies answer labels.
+
+## Graff delegated-context diagnostics
+
+Graff's `run_task` accepts explicit reference `context`; Harness does not inherit
+or replay the parent transcript, rewrite that argument, or select another
+provider/account. The configured agent owns the MCP tool schema and execution.
+
+When graff forwards `_meta["codegraff/runTask"]` on a completed ACP tool update,
+Harness shows supplied/used **UTF-8 bytes** and whether the reference was
+summarized. These are not token counts or the parent conversation's occupancy.
+Only bounded diagnostic fields are synchronized, never the caller context or
+task answer. Repeated completion metadata updates the same diagnostic row.
+
+The print-mode runner currently exposes no per-task usage or settled charge.
+Harness displays that unavailability and its reason, not a zero-dollar charge
+or a list-rate estimate. Diagnostics never add to account totals; the selected
+provider's account usage remains authoritative. Older graff versions that do
+not forward the metadata simply omit the diagnostic row. This change does not
+fix graff's shell-wait behavior.
 
 ## Smoke recipe
 

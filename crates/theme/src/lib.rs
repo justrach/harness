@@ -382,7 +382,7 @@ impl AccentRoles {
             strong,
             wash: primary.with_alpha(if appearance.is_dark() { 0.22 } else { 0.12 }),
             on,
-            selection: primary.with_alpha(if appearance.is_dark() { 0.35 } else { 0.24 }),
+            selection: primary.with_alpha(if appearance.is_dark() { 0.35 } else { 0.50 }),
             caret: primary,
             activity: primary,
             glyph: [light, primary, deep],

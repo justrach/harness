@@ -20,6 +20,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod sandboxes;
+pub use sandboxes::{CodegraffSandbox, CodegraffSandboxes, cloud_sandboxes_enabled};
+
 pub const GATEWAY: &str = "https://gateway.codegraff.com";
 /// The graff CLI's credential file, relative to the home directory.
 pub const KEY_FILE: &str = ".simple-harness-codegraff.json";
@@ -39,8 +42,23 @@ fn gateway() -> String {
 }
 
 fn default_key_file() -> Option<PathBuf> {
-    std::env::var_os("HOME")
+    default_key_file_with(&|key| std::env::var_os(key), cfg!(windows))
+}
+
+fn default_key_file_with(
+    env: &impl Fn(&str) -> Option<std::ffi::OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    env("HOME")
         .filter(|home| !home.is_empty())
+        .or_else(|| {
+            // Match executable discovery: preserve HOME overrides, but stock
+            // Windows provides USERPROFILE instead. Never use the working dir
+            // when neither is set: this file contains credentials.
+            windows
+                .then(|| env("USERPROFILE").filter(|home| !home.is_empty()))
+                .flatten()
+        })
         .map(|home| PathBuf::from(home).join(KEY_FILE))
 }
 
@@ -444,6 +462,25 @@ impl CodegraffAuth {
         }
     }
 
+    /// graff has a key on this machine (its credential file, or
+    /// `CODEGRAFF_API_KEY`).
+    pub fn has_key(&self) -> bool {
+        self.current_key().is_some()
+    }
+
+    /// Adopt the graff key a Harness sign-in minted for this device, so one
+    /// sign-in covers the app and `graff` in the terminal. A key graff
+    /// already has is never replaced.
+    pub async fn adopt_sign_in_key(&self, key: &str, email: String) -> Result<(), String> {
+        if !key.starts_with("cg_sk_") {
+            return Err("not a Codegraff key".into());
+        }
+        if self.has_key() {
+            return Ok(());
+        }
+        self.finish(key, Some(email), None).await
+    }
+
     async fn finish(
         &self,
         key: &str,
@@ -577,6 +614,87 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn windows_key_file_uses_userprofile_when_home_is_missing_or_empty() {
+        let profile = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let path = profile.path().join(KEY_FILE);
+        std::fs::write(&path, r#"{"api_key":"cg_sk_profile"}"#).unwrap();
+        for home in [None, Some(std::ffi::OsString::new())] {
+            let env = |key: &str| match key {
+                "HOME" => home.clone(),
+                "USERPROFILE" => Some(profile.path().as_os_str().to_owned()),
+                _ => panic!("unexpected environment lookup: {key}"),
+            };
+            let resolved = default_key_file_with(&env, true);
+            assert_eq!(resolved.as_ref(), Some(&path));
+            let auth = CodegraffAuth::new(data.path(), resolved, GATEWAY.into());
+            assert_eq!(auth.current_key().as_deref(), Some("cg_sk_profile"));
+        }
+    }
+
+    #[test]
+    fn key_file_preserves_home_priority_on_unix_and_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(KEY_FILE), r#"{"api_key":"cg_sk_home"}"#).unwrap();
+        std::fs::write(
+            profile.path().join(KEY_FILE),
+            r#"{"api_key":"cg_sk_profile"}"#,
+        )
+        .unwrap();
+        let env = |key: &str| match key {
+            "HOME" => Some(home.path().as_os_str().to_owned()),
+            "USERPROFILE" => Some(profile.path().as_os_str().to_owned()),
+            _ => panic!("unexpected environment lookup: {key}"),
+        };
+        for windows in [false, true] {
+            let resolved = default_key_file_with(&env, windows);
+            assert_eq!(resolved, Some(home.path().join(KEY_FILE)));
+            let auth = CodegraffAuth::new(data.path(), resolved, GATEWAY.into());
+            assert_eq!(auth.current_key().as_deref(), Some("cg_sk_home"));
+        }
+    }
+
+    #[test]
+    fn key_file_requires_a_nonempty_platform_home() {
+        for windows in [false, true] {
+            for home in [None, Some(std::ffi::OsString::new())] {
+                for profile in [
+                    None,
+                    Some(std::ffi::OsString::new()),
+                    Some("profile".into()),
+                ] {
+                    let env = |key: &str| match key {
+                        "HOME" => home.clone(),
+                        "USERPROFILE" => profile.clone(),
+                        _ => panic!("unexpected environment lookup: {key}"),
+                    };
+                    let expected = if windows && profile.as_ref().is_some_and(|p| !p.is_empty()) {
+                        Some(PathBuf::from("profile").join(KEY_FILE))
+                    } else {
+                        None
+                    };
+                    assert_eq!(default_key_file_with(&env, windows), expected);
+                }
+            }
+        }
+    }
+
+    /// The real process environment on Windows. CI runs this with HOME
+    /// cleared, as a stock Windows session has it, where sign-in used to fail
+    /// with "no home directory to store the Codegraff key in".
+    #[cfg(windows)]
+    #[test]
+    fn windows_real_environment_has_a_key_file() {
+        let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+        let profile = std::env::var_os("USERPROFILE").filter(|p| !p.is_empty());
+        let expected = home.or(profile).map(|h| PathBuf::from(h).join(KEY_FILE));
+        assert!(expected.is_some(), "a Windows session has USERPROFILE");
+        assert_eq!(default_key_file(), expected);
+    }
 
     #[test]
     fn jobs_parse_wrapped_bare_and_with_unknown_fields() {

@@ -95,6 +95,16 @@ fn prepare_quit(cx: &mut App) {
         }
     }
     if ready {
+        // Every window agreed: install staged updates now, not inside each
+        // prepare_quit — a window that installs before another window vetoes
+        // the quit would leave the running app on a replaced bundle.
+        for window in cx.windows() {
+            if let Some(window) = window.downcast::<shell::Shell>() {
+                let _ = window.update(cx, |shell, _, _| {
+                    shell.install_staged_update_on_quit();
+                });
+            }
+        }
         quit_after_save(cx);
     }
 }
@@ -183,6 +193,12 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("cmd-shift-w", CloseWindow, None),
         ]);
+    } else {
+        // Ghostty's GTK key for closing a split, beside its Ctrl+Shift+O/E
+        // split keys. Without it nothing closed a pane off macOS: there is no
+        // native menu bar there to offer Close Tab. Alt+F4 still closes the
+        // window, and inside the terminal its own Ctrl+Shift+W wins.
+        bindings.push(KeyBinding::new("ctrl-shift-w", CloseTab, None));
     }
     bindings
 }
@@ -389,6 +405,8 @@ mod tests {
             Some(combo("ctrl-,"))
         );
         assert_eq!(find(&other, Quit.name()), None);
+        // Off macOS the same close-the-innermost-thing action needs a key too.
+        assert_eq!(find(&other, CloseTab.name()), Some(combo("ctrl-shift-w")));
     }
 }
 

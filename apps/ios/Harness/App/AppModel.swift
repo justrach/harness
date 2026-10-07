@@ -540,6 +540,36 @@ final class AppModel {
     }
 
     /// Every active session as its Live Activity would show it.
+    /// Whether the lock-screen state can change without any session row changing: an activity is up (its
+    /// detail and elapsed state follow the transcript) or a session is running or waiting. With neither, the
+    /// only thing that can matter is a session starting, which `untilSessionsChange` waits for.
+    var liveActivitiesNeedSampling: Bool {
+        if liveActivities.isShowing { return true }
+        return overviewChats.contains { chat in
+            let phase = LiveActivityPlan.phase(for: indicator(for: chat))
+            return phase == .working || phase == .waiting
+        }
+    }
+
+    /// Suspends until the session rows change (a run starting or finishing arrives as one), then returns.
+    /// No timer: nothing wakes while every session is quiet.
+    func untilSessionsChange() async {
+        let gate = ResumeOnce()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                gate.install(continuation)
+                withObservationTracking {
+                    _ = workspace?.sessions
+                    _ = demo?.sessions
+                } onChange: {
+                    gate.fire()
+                }
+            }
+        } onCancel: {
+            gate.fire()
+        }
+    }
+
     var liveActivitySnapshots: [LiveActivitySnapshot] {
         overviewChats.map { chat in
             let row = demo?.sessions[chat.id] ?? workspace?.sessions[chat.id]
@@ -599,12 +629,51 @@ final class AppModel {
         (demo?.devices ?? workspace?.devices)?.first { $0.id == deviceId }?.name ?? deviceId
     }
 
-    func deviceOnline(_ deviceId: String) -> Bool {
+    /// What a screen may claim about a device: online on a recent beat, offline only on positive evidence
+    /// of absence (a joined room and five quiet minutes), otherwise unknown — see PresenceRule.
+    func hostStatus(_ deviceId: String) -> HostStatus {
         if let demo {
-            guard let seen = demo.devices.first(where: { $0.id == deviceId })?.lastSeenAt else { return false }
-            return nowMs() - seen < presenceFreshMs
+            guard let seen = demo.devices.first(where: { $0.id == deviceId })?.lastSeenAt else { return .offline }
+            return nowMs() - seen < presenceFreshMs ? .online : .offline
         }
-        return workspace?.deviceOnline(deviceId) ?? false
+        return workspace?.hostStatus(deviceId) ?? .unknown
+    }
+
+    func deviceOnline(_ deviceId: String) -> Bool {
+        hostStatus(deviceId) == .online
+    }
+
+    /// The one line the new-session screen may show above the composer, in order of what is actually
+    /// wrong: the sign-in is dead, the phone is not connected, or the host is positively gone. A host that
+    /// is merely unconfirmed (just launched, a beat not yet in) gets no warning at all.
+    enum HostNotice: Equatable {
+        case signedOut
+        case reconnecting
+        case offline
+    }
+
+    func hostNotice(for deviceId: String) -> HostNotice? {
+        guard demo == nil, let workspace else { return nil }
+        if sessionExpired { return .signedOut }
+        let status = workspace.hostStatus(deviceId)
+        if status == .online { return nil }
+        if !workspace.connected { return .reconnecting }
+        return status == .offline ? .offline : nil
+    }
+
+    /// A snapshot for Settings → Connection. Reading it sends nothing and starts no timer.
+    func connectionReport() -> ConnectionReport {
+        ConnectionReport(
+            auth: config?.authDiagnostics(),
+            registryConnected: workspace?.connected ?? false,
+            registrySynced: workspace?.synced ?? false,
+            retryInSeconds: workspace?.retryAt.map { max(0, Int($0.timeIntervalSinceNow.rounded(.up))) },
+            devices: (workspace?.devices ?? []).map { device in
+                ConnectionReport.Device(name: device.name,
+                                        isThisPhone: device.id == config?.deviceId,
+                                        status: workspace?.hostStatus(device.id) ?? .unknown,
+                                        beatAgeSeconds: workspace?.beatAgeMs(device.id).map { Int($0 / 1_000) })
+            })
     }
 
     /// Live harness catalog from the selected execution device (Settings → Agents
@@ -771,6 +840,20 @@ final class AppModel {
     /// Browse folders on a remote device (the desktop add-space palette's data
     /// path). Demo mode serves a canned tree; live mode asks the device over
     /// the relay.
+    /// Usage as one computer's engine reports it (Settings → Usage). Demo
+    /// mode has no CodeGraff account or agent logins behind it.
+    func codegraffUsage(deviceId: String) async throws -> CodegraffUsage? {
+        if demo != nil { return nil }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.codegraffUsage(deviceId: deviceId)
+    }
+
+    func agentAccounts(deviceId: String, forceUsage: Bool) async throws -> AgentAccountsSnapshot {
+        if demo != nil { return AgentAccountsSnapshot(accounts: []) }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.agentAccounts(deviceId: deviceId, forceUsage: forceUsage)
+    }
+
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {
         if let demo {
             try? await Task.sleep(nanoseconds: 120_000_000)  // feel like a network hop
@@ -819,6 +902,18 @@ final class AppModel {
 
     func archive(chatId: String) { setArchived(chatId: chatId, archived: true) }
     func unarchive(chatId: String) { setArchived(chatId: chatId, archived: false) }
+
+    func rename(chatId: String, title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let chat = chat(id: chatId), chat.title != trimmed else { return }
+        if let demo {
+            if let ix = demo.chats.firstIndex(where: { $0.id == chatId }) {
+                demo.chats[ix].title = trimmed
+            }
+            return
+        }
+        workspace?.rename(chatId: chatId, title: trimmed)
+    }
 
     var pinsReady: Bool {
         if demo != nil { return true }
@@ -911,9 +1006,16 @@ final class AppModel {
     /// online event on success, so every PARKED backoff (not just the rooms
     /// the kick reaches) lands a redial in ~1 RTT.
     func foregrounded() {
+        workspace?.setActive(true)
         refreshSignInIfDue()
         kickAllRooms()
         probeEdgeHealth()
+    }
+
+    /// Background hook: stop scheduling status wake-ups; iOS suspends the app anyway, and `foregrounded()`
+    /// catches up on whatever aged out.
+    func backgrounded() {
+        workspace?.setActive(false)
     }
 
     /// Spend the refresh while the app is in front (and may finish it), not on whichever socket redials
@@ -1112,7 +1214,7 @@ final class AppModel {
         } else if connectivity.state != .connected {
             return true
         }
-        if !deviceOnline(chat.deviceId) { return true }
+        if hostStatus(chat.deviceId) == .offline { return true }
         return false
     }
 

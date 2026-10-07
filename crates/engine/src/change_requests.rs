@@ -12,7 +12,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use harness_proto::CheckoutChangeRequestStatus;
+use harness_proto::{ChangeRequestState, CheckoutChangeRequestStatus};
 
 use crate::repos::{CheckoutIdentity, Repos};
 use crate::source_control::{
@@ -20,11 +20,16 @@ use crate::source_control::{
     CheckoutSourceContext, parse_git_remote,
 };
 
-const WITH_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(2 * 60);
-const WITHOUT_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(45);
-const FAILURE_INITIAL_BACKOFF: Duration = Duration::from_secs(20);
+// Every watched chat used to inspect its checkout (several `git` spawns) every
+// 15s and query `gh` every 45s on its own, so process churn grew with the chat
+// count and never stopped. Inspection is now shared per checkout path, and all
+// subprocess work goes through one gate.
+const WITH_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(3 * 60);
+const TERMINAL_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(15 * 60);
+const WITHOUT_CHANGE_REQUEST_TTL: Duration = Duration::from_secs(5 * 60);
+const FAILURE_INITIAL_BACKOFF: Duration = Duration::from_secs(30);
 const FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
-const CONTEXT_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const CONTEXT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChangeRequestCacheKey {
@@ -37,6 +42,7 @@ pub struct ChangeRequestCacheKey {
 #[derive(Debug, Clone, Copy)]
 struct Timing {
     with_change_request_ttl: Duration,
+    terminal_change_request_ttl: Duration,
     without_change_request_ttl: Duration,
     failure_initial_backoff: Duration,
     failure_max_backoff: Duration,
@@ -47,6 +53,7 @@ impl Default for Timing {
     fn default() -> Self {
         Self {
             with_change_request_ttl: WITH_CHANGE_REQUEST_TTL,
+            terminal_change_request_ttl: TERMINAL_CHANGE_REQUEST_TTL,
             without_change_request_ttl: WITHOUT_CHANGE_REQUEST_TTL,
             failure_initial_backoff: FAILURE_INITIAL_BACKOFF,
             failure_max_backoff: FAILURE_MAX_BACKOFF,
@@ -67,11 +74,19 @@ struct CacheState {
     last_error: Option<ChangeRequestError>,
 }
 
+type Inspection = (Instant, Result<CheckoutSourceContext, ChangeRequestError>);
+
 struct Inner {
     repos: Repos,
     device_id: String,
     lookup: Arc<dyn CheckoutChangeRequestLookup>,
     entries: Mutex<HashMap<ChangeRequestCacheKey, Arc<CacheEntry>>>,
+    /// Checkout inspections shared by every watch on the same path, so many
+    /// chats in one repository cost one inspection per poll interval.
+    inspections: Mutex<HashMap<PathBuf, Inspection>>,
+    /// Serializes this service's `git`/`gh` subprocesses: however many chats
+    /// are watched, at most one poller process runs at a time.
+    process_gate: AsyncMutex<()>,
     timing: Timing,
     shutdown: CancellationToken,
 }
@@ -108,6 +123,8 @@ impl CheckoutChangeRequests {
                 device_id: device_id.to_owned(),
                 lookup,
                 entries: Mutex::new(HashMap::new()),
+                inspections: Mutex::new(HashMap::new()),
+                process_gate: AsyncMutex::new(()),
                 timing,
                 shutdown: CancellationToken::new(),
             }),
@@ -166,13 +183,7 @@ impl CheckoutChangeRequests {
                 if state.service.inner.shutdown.is_cancelled() {
                     return None;
                 }
-                let mut source = match state
-                    .service
-                    .inner
-                    .lookup
-                    .inspect_checkout(&state.cwd)
-                    .await
-                {
+                let mut source = match state.service.inspect(&state.cwd).await {
                     Ok(source) => source,
                     Err(error) => {
                         tracing::debug!(%error, "change request checkout inspection unavailable");
@@ -216,6 +227,41 @@ impl CheckoutChangeRequests {
             }
         })
         .boxed()
+    }
+
+    fn cached_inspection(
+        &self,
+        cwd: &Path,
+    ) -> Option<Result<CheckoutSourceContext, ChangeRequestError>> {
+        let inspections = self
+            .inner
+            .inspections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (inspected_at, result) = inspections.get(cwd)?;
+        (inspected_at.elapsed() < self.inner.timing.context_poll_interval).then(|| result.clone())
+    }
+
+    async fn inspect(&self, cwd: &Path) -> Result<CheckoutSourceContext, ChangeRequestError> {
+        if let Some(result) = self.cached_inspection(cwd) {
+            return result;
+        }
+        let _gate = self.inner.process_gate.lock().await;
+        // Another watch on this path may have inspected while this one waited.
+        if let Some(result) = self.cached_inspection(cwd) {
+            return result;
+        }
+        let result = self.inner.lookup.inspect_checkout(cwd).await;
+        let now = Instant::now();
+        let retain_for = self.inner.timing.context_poll_interval.saturating_mul(4);
+        let mut inspections = self
+            .inner
+            .inspections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        inspections.retain(|_, (inspected_at, _)| now.duration_since(*inspected_at) < retain_for);
+        inspections.insert(cwd.to_owned(), (now, result.clone()));
+        result
     }
 
     fn acquire(&self, key: ChangeRequestCacheKey) -> DemandLease {
@@ -271,12 +317,18 @@ impl CheckoutChangeRequests {
             return (state.last_success.clone(), state.next_refresh);
         }
 
-        match self.inner.lookup.resolve_github_source(source).await {
+        let resolved = {
+            let _gate = self.inner.process_gate.lock().await;
+            self.inner.lookup.resolve_github_source(source).await
+        };
+        match resolved {
             Ok(change_request) => {
-                let ttl = if change_request.is_some() {
-                    self.inner.timing.with_change_request_ttl
-                } else {
-                    self.inner.timing.without_change_request_ttl
+                let ttl = match change_request.as_ref().map(|summary| summary.state) {
+                    Some(ChangeRequestState::Open) => self.inner.timing.with_change_request_ttl,
+                    Some(ChangeRequestState::Merged | ChangeRequestState::Closed) => {
+                        self.inner.timing.terminal_change_request_ttl
+                    }
+                    None => self.inner.timing.without_change_request_ttl,
                 };
                 let snapshot = CheckoutChangeRequestStatus {
                     checkout_id: key.checkout_id.clone(),
@@ -412,7 +464,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::StreamExt;
-    use harness_proto::{ChangeRequestState, ChangeRequestSummary};
+    use harness_proto::ChangeRequestSummary;
 
     use super::*;
     use crate::source_control::BranchHeadContext;
@@ -421,6 +473,7 @@ mod tests {
         source: Mutex<CheckoutSourceContext>,
         results: Mutex<VecDeque<Result<Option<ChangeRequestSummary>, ChangeRequestError>>>,
         resolves: AtomicUsize,
+        inspects: AtomicUsize,
     }
 
     impl FakeLookup {
@@ -432,6 +485,7 @@ mod tests {
                 source: Mutex::new(source),
                 results: Mutex::new(results.into_iter().collect()),
                 resolves: AtomicUsize::new(0),
+                inspects: AtomicUsize::new(0),
             })
         }
 
@@ -450,6 +504,7 @@ mod tests {
             &self,
             _cwd: &Path,
         ) -> Result<CheckoutSourceContext, ChangeRequestError> {
+            self.inspects.fetch_add(1, Ordering::AcqRel);
             Ok(self.source.lock().unwrap().clone())
         }
 
@@ -512,6 +567,7 @@ mod tests {
     fn fast_timing() -> Timing {
         Timing {
             with_change_request_ttl: Duration::from_millis(15),
+            terminal_change_request_ttl: Duration::from_millis(15),
             without_change_request_ttl: Duration::from_millis(10),
             failure_initial_backoff: Duration::from_secs(1),
             failure_max_backoff: Duration::from_secs(2),
@@ -543,6 +599,25 @@ mod tests {
 
         assert_eq!(first.unwrap().change_request.unwrap().number, 90);
         assert_eq!(second.unwrap().change_request.unwrap().number, 90);
+        assert_eq!(lookup.resolve_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn watches_on_one_checkout_share_a_single_inspection() {
+        let lookup = FakeLookup::new(source("feature/status"), [Ok(Some(pull_request(90)))]);
+        let service = service(lookup.clone(), Timing::default());
+        let mut streams: Vec<_> = (0..8)
+            .map(|_| service.watch_checkout(PathBuf::from("/checkout"), identity()))
+            .collect();
+
+        for stream in &mut streams {
+            assert_eq!(
+                stream.next().await.unwrap().change_request.unwrap().number,
+                90
+            );
+        }
+
+        assert_eq!(lookup.inspects.load(Ordering::Acquire), 1);
         assert_eq!(lookup.resolve_count(), 1);
     }
 
@@ -651,6 +726,7 @@ mod tests {
         );
         let timing = Timing {
             with_change_request_ttl: Duration::from_millis(1),
+            terminal_change_request_ttl: Duration::from_millis(1),
             without_change_request_ttl: Duration::from_millis(1),
             failure_initial_backoff: Duration::from_millis(1),
             failure_max_backoff: Duration::from_millis(1),

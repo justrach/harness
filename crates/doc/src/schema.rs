@@ -10,7 +10,7 @@
 //! - `queue`:    LoroMovableList of LoroMap {
 //!   id, text, attachments?, issuedBy, issuedAt, editedAt? }        (any device writes)
 //!
-//! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error"|"image", text?: LoroText,
+//! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error"|"image"|"delegation", text?: LoroText,
 //! reasoning?: LoroText, call?: json, isError?, questions?: json, resolved?, message? }.
 //! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
 //! 125x for whole-value rewrites).
@@ -92,6 +92,8 @@ struct DocPartJson {
     resolved: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reauth: Option<String>,
     /// Tool output summary (additive — absent on old rows and old writers;
     /// pre-strip writers stored up to 4KB of capped output here).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,6 +125,9 @@ struct DocPartJson {
     /// A page the tool saved on the host: `{kind, id}` (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     view: Option<serde_json::Value>,
+    /// Bounded delegated-task diagnostics; old readers ignore this kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delegation: Option<harness_proto::DelegationInfo>,
 }
 
 /// App parts → doc part json (mirror of `toDocParts`).
@@ -196,6 +201,12 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             view: view.as_ref().map(serde_json::to_value).transpose()?,
             ..Default::default()
         },
+        MessagePart::Delegation { id, info } => DocPartJson {
+            id: id.clone(),
+            kind: "delegation".into(),
+            delegation: Some(info.clone()),
+            ..Default::default()
+        },
         MessagePart::Input {
             id: _,
             request_id,
@@ -208,10 +219,15 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             resolved: Some(*resolved),
             ..Default::default()
         },
-        MessagePart::Error { id, message } => DocPartJson {
+        MessagePart::Error {
+            id,
+            message,
+            reauth,
+        } => DocPartJson {
             id: id.clone(),
             kind: "error".into(),
             message: Some(message.clone()),
+            reauth: reauth.map(|provider| provider.as_str().to_owned()),
             ..Default::default()
         },
     })
@@ -254,6 +270,13 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 text: String::new(),
             },
         },
+        "delegation" => match p.delegation {
+            Some(info) => MessagePart::Delegation { id: p.id, info },
+            None => MessagePart::Text {
+                id: p.id,
+                text: String::new(),
+            },
+        },
         "input" => MessagePart::Input {
             id: p.id.clone(),
             request_id: p.id,
@@ -266,6 +289,9 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
         "error" => MessagePart::Error {
             id: p.id,
             message: p.message.unwrap_or_default(),
+            reauth: p
+                .reauth
+                .and_then(|provider| serde_json::from_value(serde_json::json!(provider)).ok()),
         },
         "reasoning" => MessagePart::Reasoning {
             id: p.id,
@@ -303,6 +329,7 @@ fn image_part(
         _ => MessagePart::Error {
             id,
             message: "Generated image unavailable".into(),
+            reauth: None,
         },
     }
 }
@@ -684,6 +711,7 @@ impl SessionDoc {
                 &MessagePart::Error {
                     id: part_id.to_string(),
                     message: message.to_string(),
+                    reauth: None,
                 },
             )?;
             self.doc.commit();
@@ -886,6 +914,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
+    if let Some(reauth) = &doc_part.reauth {
+        map.insert("reauth", reauth.as_str())?;
+    }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
     }
@@ -915,6 +946,12 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(view) = &doc_part.view {
         map.insert("view", loro_value_from_json(view))?;
+    }
+    if let Some(info) = &doc_part.delegation {
+        map.insert(
+            "delegation",
+            loro_value_from_json(&serde_json::to_value(info)?),
+        )?;
     }
     Ok(())
 }
@@ -1103,6 +1140,9 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
         return Some(MessagePart::Error {
             id,
             message: message.to_owned(),
+            reauth: obj
+                .get("reauth")
+                .and_then(|value| serde_json::from_value(value.clone()).ok()),
         });
     }
     None
@@ -1356,6 +1396,9 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     if let Some(message) = &doc_part.message {
         map.insert("message", message.as_str())?;
     }
+    if let Some(reauth) = &doc_part.reauth {
+        map.insert("reauth", reauth.as_str())?;
+    }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
     }
@@ -1385,6 +1428,12 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(view) = &doc_part.view {
         map.insert("view", loro_value_from_json(view))?;
+    }
+    if let Some(info) = &doc_part.delegation {
+        map.insert(
+            "delegation",
+            loro_value_from_json(&serde_json::to_value(info)?),
+        )?;
     }
     if let Some(text) = &doc_part.text {
         // Defensive path only — the fold never rewrites earlier text.
@@ -1447,6 +1496,109 @@ mod tests {
     use super::*;
     use crate::parts::fold_event_into_parts;
     use harness_proto::{AgentEvent, ToolCall};
+
+    #[test]
+    fn delegation_metadata_survives_sync_without_duplicate_accounting_rows() {
+        let mut parts = Vec::new();
+        let diagnostic = AgentEvent::DelegationInfo {
+            id: "task-1".into(),
+            info: harness_proto::DelegationInfo {
+                context_bytes: 32768,
+                used_bytes: 4096,
+                summarized: true,
+                usage_reported: false,
+                usage_unavailable_reason: Some("No settled charge reported.".into()),
+            },
+        };
+        fold_event_into_parts(&mut parts, &diagnostic);
+        assert!(parts.is_empty(), "orphan metadata cannot invent a tool");
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "task-1".into(),
+                call: ToolCall::Unknown {
+                    name: "run_task".into(),
+                    input: None,
+                },
+            },
+        );
+        fold_event_into_parts(&mut parts, &diagnostic);
+        fold_event_into_parts(&mut parts, &diagnostic);
+        assert_eq!(parts.len(), 2);
+        let doc = SessionDoc::init("host").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "assistant", "host", 1).unwrap();
+        writer.sync(&parts).unwrap();
+        writer.sync(&parts).unwrap();
+        let peer = SessionDoc::init("viewer").unwrap();
+        peer.doc().import(&doc.export_snapshot().unwrap()).unwrap();
+        assert_eq!(peer.read_entries().unwrap()[0].parts, parts);
+        let MessagePart::Delegation { id, info } = &parts[1] else {
+            panic!("missing diagnostics")
+        };
+        let raw = serde_json::to_value(to_doc_part(&parts[1]).unwrap()).unwrap();
+        assert!(
+            raw.get("text").is_none(),
+            "old readers must not treat diagnostics as an answer"
+        );
+        let mut changed = info.clone();
+        changed.used_bytes = 2048;
+        parts[1] = MessagePart::Delegation {
+            id: id.clone(),
+            info: changed,
+        };
+        writer.sync(&parts).unwrap();
+        assert_eq!(doc.read_entries().unwrap()[0].parts, parts);
+    }
+
+    #[test]
+    fn reauth_survives_event_fold_document_sync_and_plain_errors() {
+        for provider in [
+            harness_proto::ReauthProvider::ChatgptNew,
+            harness_proto::ReauthProvider::Codex,
+        ] {
+            let mut parts = Vec::new();
+            fold_event_into_parts(&mut parts, &AgentEvent::ReauthRequired { provider });
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::Done {
+                    status: harness_proto::DoneStatus::Errored,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            );
+            assert_eq!(parts.len(), 1);
+            let doc = SessionDoc::init("host").unwrap();
+            doc.push_message(&SessionMessageEntry {
+                id: "auth-error".into(),
+                role: MessageRole::Assistant,
+                parts: parts.clone(),
+                created_at: 1,
+                device_id: "host".into(),
+                status: Some(MessageStatus::Complete),
+                continuation_of: None,
+                duration_ms: None,
+            })
+            .unwrap();
+            let peer = SessionDoc::init("viewer").unwrap();
+            peer.doc().import(&doc.export_snapshot().unwrap()).unwrap();
+            assert_eq!(peer.read_entries().unwrap()[0].parts, parts);
+        }
+        let plain = from_doc_part(
+            serde_json::from_value(serde_json::json!({
+                "kind":"error","id":"old","message":"HTTP 429"
+            }))
+            .unwrap(),
+        );
+        assert!(matches!(plain, MessagePart::Error { reauth: None, .. }));
+        let unknown = from_doc_part(
+            serde_json::from_value(serde_json::json!({
+                "kind":"error","id":"unknown","message":"rejected","reauth":"arbitrary-command"
+            }))
+            .unwrap(),
+        );
+        assert!(matches!(unknown, MessagePart::Error { reauth: None, .. }));
+    }
 
     #[test]
     fn opening_tail_bounds_parts_and_preserves_continuation_ids() {

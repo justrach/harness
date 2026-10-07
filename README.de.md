@@ -77,3 +77,23 @@ Erlaubnis ohne Copyleft gibt es nur, wenn alle drei sie gemeinsam schriftlich
 erteilen; sie ist widerrufbar. Frühere und fremde Beiträge behalten ihre
 jeweiligen Hinweise und Lizenzen. Siehe
 [Hinweise zu Drittanbietern](THIRD_PARTY_NOTICES.md).
+
+**Unternehmen brauchen eine kommerzielle Lizenz.** Jede Version nach v0.2.108
+enthält eine zusätzliche Bedingung. Ihre Organisation braucht, zusammen mit den Organisationen gerechnet, die sie
+beherrschen, von ihr beherrscht werden oder mit ihr unter gemeinsamer
+Beherrschung stehen, eine kommerzielle Lizenz für jede
+Nutzung von Harness (auch auf eigenen Rechnern, in der Cloud, in CI und im
+eigenen Netzwerk), wenn sie **eine** dieser Bedingungen erfüllt:
+
+- sie hat insgesamt mehr als **500.000 US-Dollar** von Investoren oder
+  Kreditgebern aufgenommen;
+- ihr Reinvermögen oder ihre letzte Bewertung liegt über **500.000 US-Dollar**;
+- ihre Bruttoeinnahmen lagen im letzten Geschäftsjahr oder in einem beliebigen
+  Zeitraum von 12 Monaten über **100.000 US-Dollar**.
+
+Ein Unternehmen, das eine dieser Grenzen überschreitet, muss sich innerhalb von
+5 Arbeitstagen bei uns melden. Privatpersonen nutzen Harness immer unter der
+AGPL, unabhängig von ihrem Einkommen, ebenso Organisationen, die keine dieser
+Bedingungen erfüllen. Versionen bis v0.2.108 behalten die Lizenz, mit der sie
+veröffentlicht wurden. Unsicher? Behandeln Sie sich als erfasst und schreiben Sie an
+[rach@standardharness.com](mailto:rach@standardharness.com).

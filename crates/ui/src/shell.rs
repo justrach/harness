@@ -70,10 +70,13 @@ mod codegraff_account;
 mod command_palette;
 mod files_panel;
 mod project_icon;
+mod reauth;
 mod sidebar_pins;
 mod sidebar_sections;
 mod spaces;
 mod tabs;
+#[cfg(test)]
+mod titlebar_tests;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
@@ -119,6 +122,43 @@ actions!(
         StartAppUpdate
     ]
 );
+
+/// The shortcuts `/help` lists beside the rebindable ones (Settings →
+/// Shortcuts), in reading order. Keys come from the live keymap, so each
+/// platform shows its own (Ghostty's macOS keys, its GTK keys elsewhere).
+fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
+    use crate::settings::shortcuts::FixedShortcut;
+    let row = |label: &'static str, action: Box<dyn gpui::Action>| FixedShortcut { label, action };
+    vec![
+        row("Split the chat to the right", Box::new(SplitChatRight)),
+        row("Split the chat down", Box::new(SplitChatDown)),
+        row(
+            "Close the pane (back to one column)",
+            Box::new(crate::app_menus::CloseTab),
+        ),
+        row("Next pane", Box::new(FocusNextChatPane)),
+        row("Previous pane", Box::new(FocusPrevChatPane)),
+        row("Move to the pane on the left", Box::new(FocusChatPaneLeft)),
+        row(
+            "Move to the pane on the right",
+            Box::new(FocusChatPaneRight),
+        ),
+        row("Move to the pane above", Box::new(FocusChatPaneUp)),
+        row("Move to the pane below", Box::new(FocusChatPaneDown)),
+        row("Grow the pane to the left", Box::new(ResizeChatPaneLeft)),
+        row("Grow the pane to the right", Box::new(ResizeChatPaneRight)),
+        row("Grow the pane up", Box::new(ResizeChatPaneUp)),
+        row("Grow the pane down", Box::new(ResizeChatPaneDown)),
+        row("Make all panes the same size", Box::new(EqualizeChatPanes)),
+        row("Zoom the pane (and back)", Box::new(ToggleChatPaneZoom)),
+        row("New chat tab", Box::new(NewChatTab)),
+        row("Next chat tab", Box::new(NextChatTab)),
+        row("Previous chat tab", Box::new(PrevChatTab)),
+        row("Jump to the message box", Box::new(FocusComposer)),
+        row("Command palette", Box::new(ToggleCommandPalette)),
+        row("Settings", Box::new(OpenSettings)),
+    ]
+}
 
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
@@ -1286,6 +1326,24 @@ enum UpdateFlow {
     Failed(SharedString),
 }
 
+/// Whether a fresh `UpdateStatus` should kick off a background download:
+/// desktop install, enabled, not already in flight or staged, and not a
+/// version whose download already failed — a `Failed` flow for an older
+/// version retries a newer one on its own; a click still retries the same.
+fn should_auto_download(
+    status: &harness_update::UpdateStatus,
+    flow: &UpdateFlow,
+    desktop_update: bool,
+    enabled: bool,
+    failed: Option<&str>,
+) -> bool {
+    status.update_available
+        && desktop_update
+        && enabled
+        && !matches!(flow, UpdateFlow::Downloading | UpdateFlow::Ready(_))
+        && !failed.is_some_and(|v| status.latest_version.as_deref() == Some(v))
+}
+
 /// Account lifecycle owned by this process. Sign-in on a local workspace
 /// flows through the in-place switch wizard (offer → switch → import → done);
 /// `RestartPending` survives only as the fallback when the in-place swap
@@ -1717,8 +1775,6 @@ pub struct Shell {
     chat_tab: usize,
     /// Live read-only transcripts for unfocused panes, keyed by chat id.
     peer_chat_views: std::collections::HashMap<String, chat_split::PeerChatView>,
-    /// Which pane card the sidebar strip last had under the pointer.
-    pane_strip_hovered: usize,
     /// A split divider being dragged, and the split root's measured bounds.
     chat_split_drag: Option<chat_split::DividerDrag>,
     /// Launch restored (or deliberately skipped) the previous chat + layout;
@@ -1727,6 +1783,8 @@ pub struct Shell {
     /// "Sign in with Codegraff" state (`shell/codegraff_account.rs`).
     codegraff: Option<codegraff_account::CodegraffStatus>,
     codegraff_flow: Option<Task<()>>,
+    /// In-chat ChatGPT reconnects in flight, one per host and route (`shell/reauth.rs`).
+    reauth_tasks: std::collections::HashMap<crate::reauth_recovery::ReauthKey, Task<()>>,
     codegraff_status_task: Option<Task<()>>,
     chat_split_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     browsers: std::collections::HashMap<u64, Entity<crate::browser::BrowserSurface>>,
@@ -1832,6 +1890,18 @@ pub struct Shell {
     /// download/stage of it has come in this process.
     update_flow: UpdateFlow,
     update_task: Option<Task<()>>,
+    /// The version whose automatic download already failed in this process —
+    /// blocks a retry loop; a newer version is attempted afresh.
+    auto_download_failed: Option<String>,
+    /// Latest graff engine lifecycle notice from the background updater's
+    /// watch channel — rendered as a bottom-right card until dismissed.
+    graff_notice: Option<harness_adapters::graff_bundle::GraffNotice>,
+    /// "Update" on the card — an InstallHarness call is in flight.
+    graff_notice_updating: bool,
+    /// InstallHarness error shown inline on the card.
+    graff_notice_error: Option<SharedString>,
+    _graff_notice_task: Option<Task<()>>,
+    graff_update_task: Option<Task<()>>,
     /// Version whose update strip the user dismissed (advisory installs only —
     /// a newer release shows the strip again).
     update_dismissed: Option<String>,
@@ -2118,6 +2188,30 @@ impl Shell {
         let transcript_invalidation = cx.observe_self(|shell, cx| {
             shell.transcript.update(cx, |_, cx| cx.notify());
         });
+        // The background graff updater publishes lifecycle notices on a
+        // process-wide watch channel; each value lands on `graff_notice`.
+        // Skipped under cfg(test): the shared channel would let a publish in
+        // one test wake local tasks owned by another test's scheduler.
+        #[cfg(not(test))]
+        let graff_notice_task = Some(cx.spawn(async move |this, cx| {
+            let mut notices = harness_adapters::graff_bundle::notices();
+            loop {
+                let notice = notices.borrow().clone();
+                this.update(cx, |shell: &mut Shell, cx| {
+                    if shell.graff_notice != notice {
+                        shell.graff_notice = notice;
+                        shell.graff_notice_error = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+                if notices.changed().await.is_err() {
+                    return;
+                }
+            }
+        }));
+        #[cfg(test)]
+        let graff_notice_task: Option<Task<()>> = None;
         let shell = cx.entity();
         let sidebar_pane = cx.new(|cx| SidebarPane {
             shell: shell.downgrade(),
@@ -2164,11 +2258,11 @@ impl Shell {
             chat_tabs: Vec::new(),
             chat_tab: 0,
             peer_chat_views: std::collections::HashMap::new(),
-            pane_strip_hovered: 0,
             chat_split_drag: None,
             boot_restored: false,
             codegraff: None,
             codegraff_flow: None,
+            reauth_tasks: std::collections::HashMap::new(),
             codegraff_status_task: None,
             chat_split_bounds: Default::default(),
             browsers: std::collections::HashMap::new(),
@@ -2236,6 +2330,12 @@ impl Shell {
             sidebar_notice: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
+            auto_download_failed: None,
+            graff_notice: None,
+            graff_notice_updating: false,
+            graff_notice_error: None,
+            _graff_notice_task: graff_notice_task,
+            graff_update_task: None,
             update_dismissed: None,
             install: harness_update::detect_install(),
             org: None,
@@ -2361,6 +2461,7 @@ impl Shell {
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
         self.prune_file_explorers(cx);
         self.chat_split_on_state_changed(cx);
+        self.maybe_auto_download_update(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
@@ -3628,6 +3729,16 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::Reauthenticate {
+                chat_id,
+                row_id,
+                provider,
+                action,
+            } => {
+                // The emitting transcript's chat, never the selected chat or device: split panes
+                // may show another host.
+                self.on_reauth_action(chat_id, row_id, *provider, *action, cx);
+            }
             TranscriptEvent::NewChatWithModel { model } => {
                 self.new_chat_with_model(model.clone(), cx);
             }
@@ -3920,6 +4031,22 @@ impl Shell {
 
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::Quit, cx)
+    }
+
+    /// Swap a staged update over the install on the way out — no relaunch,
+    /// the next launch runs the new version. Runs only once every window
+    /// agreed to quit (a per-window call could install before another
+    /// window's unsaved files cancel the quit). Take the flow so it can't
+    /// run twice, and never let a failed swap block the quit.
+    pub(crate) fn install_staged_update_on_quit(&mut self) {
+        if harness_update::desktop_auto_update_enabled()
+            && let UpdateFlow::Ready(staged) =
+                std::mem::replace(&mut self.update_flow, UpdateFlow::Idle)
+        {
+            if let Err(err) = self.install.install_on_exit(&staged) {
+                tracing::error!(error = %err, "install on quit failed");
+            }
+        }
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
@@ -4606,7 +4733,7 @@ impl Shell {
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
                     let appshot_destination = self.settings.appshot_destination;
                     let page = cx.new(|cx| {
-                        ShortcutsPage::new(
+                        let mut page = ShortcutsPage::new(
                             state,
                             keymap,
                             escape_stops_active_agent,
@@ -4615,7 +4742,9 @@ impl Shell {
                             appshot_sound_enabled,
                             appshot_destination,
                             cx,
-                        )
+                        );
+                        page.set_fixed_shortcuts(fixed_shortcuts());
+                        page
                     });
                     // Persist + re-apply shortcut preferences whenever the page changes them.
                     self.shortcuts_sub = Some(cx.subscribe(
@@ -5880,10 +6009,8 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let can_back = self.nav.can_back();
         let can_forward = self.nav.can_forward();
-        // The titlebar is the single owner of the new-session action in both
-        // sidebar states. Hide it on the new-session canvas: opening another
-        // blank canvas from an already blank canvas has no effect and used to
-        // leave two competing + placements across the responsive variants.
+        // The titlebar + shares Cmd+T's new-tab behavior in both sidebar states.
+        // Keep its existing visibility: show it only for an established session.
         let plus_alpha = self.titlebar_plus_alpha(cx);
         let show_plus = plus_alpha > 0.01;
         let island_target = if matches!(self.route, Route::Chat)
@@ -5987,13 +6114,13 @@ impl Shell {
                         "titlebar-new-session",
                         icons::PLUS,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.open_new_session(cx)),
+                        cx.listener(|this, _, window, cx| this.new_chat_tab(None, window, cx)),
                     ))
             }))
             .into_any_element()
     }
 
-    /// The titlebar owns new-session creation regardless of sidebar state. It
+    /// The titlebar opens a new tab regardless of sidebar state. It
     /// is useful only while an existing session is selected.
     pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
         titlebar_new_session_alpha(
@@ -6005,17 +6132,19 @@ impl Shell {
     /// Native Windows caption controls integrated into Harness's unified
     /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
     /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
-    /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
+    /// Snap Layouts). The glyphs are Harness's own caption icons, not the
+    /// Segoe Fluent Icons font: that font ships only with Windows 11, and
+    /// without it every button drew as an empty box.
     fn render_windows_caption_controls(&self, window: &Window, cx: &App) -> Option<AnyElement> {
         if !cfg!(target_os = "windows") {
             return None;
         }
 
         let theme = Theme::of(cx);
-        let (maximize_id, maximize_glyph) = if window.is_maximized() {
-            ("window-restore", "\u{e923}")
+        let (maximize_id, maximize_icon) = if window.is_maximized() {
+            ("window-restore", crate::icons::WINDOW_RESTORE)
         } else {
-            ("window-maximize", "\u{e922}")
+            ("window-maximize", crate::icons::WINDOW_MAXIMIZE)
         };
         Some(
             div()
@@ -6026,24 +6155,23 @@ impl Shell {
                 .h(px(Theme::TITLEBAR_HEIGHT))
                 .flex()
                 .flex_row()
-                .font_family("Segoe Fluent Icons")
                 .child(windows_caption_button(
                     "window-minimize",
-                    "\u{e921}",
+                    crate::icons::WINDOW_MINIMIZE,
                     WindowControlArea::Min,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     maximize_id,
-                    maximize_glyph,
+                    maximize_icon,
                     WindowControlArea::Max,
                     theme,
                     false,
                 ))
                 .child(windows_caption_button(
                     "window-close",
-                    "\u{e8bb}",
+                    crate::icons::CLOSE,
                     WindowControlArea::Close,
                     theme,
                     true,
@@ -7691,7 +7819,16 @@ impl Shell {
             match &self.update_flow {
                 UpdateFlow::Idle => (format!("Update available — v{latest}").into(), true),
                 UpdateFlow::Downloading => (format!("Downloading v{latest}…").into(), false),
-                UpdateFlow::Ready(_) => ("Update ready — restart to apply".into(), true),
+                UpdateFlow::Ready(_) => {
+                    if harness_update::desktop_auto_update_enabled() {
+                        (
+                            "Update ready — restart now or it installs on quit".into(),
+                            true,
+                        )
+                    } else {
+                        ("Update ready — restart to apply".into(), true)
+                    }
+                }
                 UpdateFlow::Failed(message) => (format!("Update failed: {message}").into(), true),
             }
         } else {
@@ -7735,6 +7872,201 @@ impl Shell {
         Some(strip.into_any_element())
     }
 
+    /// The graff engine card: bottom-right, floating over the content, until
+    /// the user dismisses that version (persisted on UiSettings — a newer
+    /// stable re-raises it). "Updated" reports a swap the background updater
+    /// already made; "Available" (auto-update off) offers the install inline.
+    fn render_graff_notice(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use harness_adapters::graff_bundle::GraffNotice;
+        let notice = self.graff_notice.clone()?;
+        let (title, body, version, can_update): (SharedString, SharedString, String, bool) =
+            match &notice {
+                GraffNotice::Updated { from, to } => (
+                    "Codegraff engine updated".into(),
+                    match from {
+                        Some(from) => format!(
+                            "v{from} → v{to}. New chats use it; open chats keep their current session."
+                        ),
+                        None => format!("Now on v{to}."),
+                    }
+                    .into(),
+                    to.clone(),
+                    false,
+                ),
+                GraffNotice::Available { current, latest } => (
+                    "Codegraff engine update available".into(),
+                    format!(
+                        "{} → v{latest}",
+                        current
+                            .as_deref()
+                            .map(|v| format!("v{v}"))
+                            .unwrap_or_else(|| "Not installed".into())
+                    )
+                    .into(),
+                    latest.clone(),
+                    true,
+                ),
+            };
+        if self.settings.graff_notice_dismissed.as_deref() == Some(version.as_str()) {
+            return None;
+        }
+        let button = |id: &'static str, selector: &'static str, label: SharedString| {
+            div()
+                .id(id)
+                .debug_selector(move || selector.into())
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(crate::typography::ui_rems(11.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.ink(0.06)))
+                .child(label)
+        };
+        let release_url = format!("https://github.com/justrach/codegraff/releases/tag/v{version}");
+        let mut buttons = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_end()
+            .gap(px(6.0));
+        if can_update {
+            buttons = buttons.child(
+                button(
+                    "graff-notice-update",
+                    "graff-notice-update",
+                    if self.graff_notice_updating {
+                        "Updating…".into()
+                    } else {
+                        "Update".into()
+                    },
+                )
+                .text_color(theme.accent)
+                .when(!self.graff_notice_updating, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| this.graff_notice_update(cx)))
+                }),
+            );
+        }
+        buttons = buttons
+            .child(
+                button(
+                    "graff-notice-whats-new",
+                    "graff-notice-whats-new",
+                    "What's new".into(),
+                )
+                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&release_url))),
+            )
+            .child(
+                button(
+                    "graff-notice-dismiss",
+                    "graff-notice-dismiss",
+                    "Dismiss".into(),
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.dismiss_graff_notice(cx))),
+            );
+
+        Some(
+            popover::popover_card(theme)
+                .debug_selector(|| "graff-notice".into())
+                .occlude()
+                .absolute()
+                .right(px(16.0))
+                .bottom(px(16.0))
+                .w(px(300.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .text_color(theme.text_muted)
+                        .line_height(px(17.0))
+                        .child(body),
+                )
+                .when_some(self.graff_notice_error.clone(), |el, error| {
+                    el.child(
+                        div()
+                            .text_size(crate::typography::ui_rems(11.5))
+                            .text_color(theme.danger)
+                            .child(error),
+                    )
+                })
+                .child(buttons)
+                .into_any_element(),
+        )
+    }
+
+    /// Dismiss the card for this version — persisted so it stays gone across
+    /// launches; a newer stable re-raises it.
+    fn dismiss_graff_notice(&mut self, cx: &mut Context<Self>) {
+        use harness_adapters::graff_bundle::GraffNotice;
+        let version = match &self.graff_notice {
+            Some(GraffNotice::Updated { to, .. }) => to.clone(),
+            Some(GraffNotice::Available { latest, .. }) => latest.clone(),
+            None => return,
+        };
+        self.settings.graff_notice_dismissed = Some(version.clone());
+        settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+            settings.graff_notice_dismissed = Some(version);
+        });
+        cx.notify();
+    }
+
+    /// "Update" on the card: the same InstallHarness call the Harnesses
+    /// settings page makes for a stable graff install, run on this engine.
+    fn graff_notice_update(&mut self, cx: &mut Context<Self>) {
+        use harness_adapters::graff_bundle::GraffNotice;
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if self.graff_notice_updating {
+            return;
+        }
+        let params = crate::settings::harnesses::install_params(
+            harness_proto::HarnessId::Graff,
+            &None,
+            false,
+        );
+        self.graff_notice_updating = true;
+        self.graff_notice_error = None;
+        self.graff_update_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine.client().call(methods::INSTALL_HARNESS, params).await;
+            this.update(cx, |shell: &mut Shell, cx| {
+                shell.graff_notice_updating = false;
+                match result {
+                    // The managed graff did update — keep the channel and the
+                    // card in step with what the updater would report.
+                    Ok(_) => {
+                        if let Some(GraffNotice::Available { current, latest }) =
+                            shell.graff_notice.clone()
+                        {
+                            let notice = GraffNotice::Updated {
+                                from: current,
+                                to: latest,
+                            };
+                            shell.graff_notice = Some(notice.clone());
+                            harness_adapters::graff_bundle::publish_notice(notice);
+                        }
+                    }
+                    Err(error) => shell.graff_notice_error = Some(error.to_string().into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
     /// Idle → download; Ready → swap + relaunch; Failed → retry; advisory
     /// installs → dismiss for this version.
     fn on_update_strip_click(&mut self, cx: &mut Context<Self>) {
@@ -7752,6 +8084,22 @@ impl Shell {
             UpdateFlow::Idle | UpdateFlow::Failed(_) => self.begin_update_download(cx),
             UpdateFlow::Downloading => self.update_flow = UpdateFlow::Downloading,
             UpdateFlow::Ready(staged) => self.apply_staged_update(staged, cx),
+        }
+    }
+
+    /// Auto-download once an update is reported: staging is idempotent, so a
+    /// failed attempt is remembered by version and never retried on its own.
+    fn maybe_auto_download_update(&mut self, cx: &mut Context<Self>) {
+        let status = self.state.read(cx).update.clone();
+        let Some(status) = status else { return };
+        if should_auto_download(
+            &status,
+            &self.update_flow,
+            self.install.supports_desktop_update(),
+            harness_update::desktop_auto_update_enabled(),
+            self.auto_download_failed.as_deref(),
+        ) {
+            self.begin_update_download(cx);
         }
     }
 
@@ -7777,6 +8125,14 @@ impl Shell {
                     Ok(staged) => UpdateFlow::Ready(staged),
                     Err(message) => {
                         tracing::warn!(%message, "update download failed");
+                        // Remember the version so the auto-download doesn't
+                        // retry in a loop; a newer version starts over.
+                        shell.auto_download_failed = shell
+                            .state
+                            .read(cx)
+                            .update
+                            .as_ref()
+                            .and_then(|status| status.latest_version.clone());
                         UpdateFlow::Failed(message.into())
                     }
                 };
@@ -8885,6 +9241,9 @@ impl Shell {
 
         if let Some(sync) = self.render_sync_overlay(viewport, cx) {
             overlays.push(sync);
+        }
+        if let Some(card) = self.render_graff_notice(&theme, cx) {
+            overlays.push(card);
         }
 
         overlays
@@ -10977,6 +11336,7 @@ fn window_control_button(
     let fade_key = format!("window-control-{id}");
     div()
         .id(id)
+        .debug_selector(move || id.into())
         .size(px(24.0))
         .flex_none()
         .flex()
@@ -11013,6 +11373,8 @@ fn window_control_button(
 }
 
 const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
+/// Close to the 10px Segoe caption glyphs these icons stand in for.
+const WINDOWS_CAPTION_ICON_SIZE: f32 = 12.0;
 const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
 
 /// Right padding for titlebar content: past the native Windows caption
@@ -11028,46 +11390,49 @@ fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f
     }
 }
 
-/// A Windows-owned caption target using the same system glyphs and native
-/// non-client hit-test areas as GPUI/Zed's platform titlebar.
+/// A Windows-owned caption target with the native non-client hit-test areas
+/// of GPUI/Zed's platform titlebar, drawn with Harness's caption icons.
 fn windows_caption_button(
     id: &'static str,
-    glyph: &'static str,
+    icon_path: &'static str,
     area: WindowControlArea,
     theme: &Theme,
     close: bool,
 ) -> impl IntoElement {
-    let (hover_bg, hover_fg, active_bg, active_fg) = if close {
+    // A pressed button is also hovered, so the hover colour covers the icon
+    // while pressed too.
+    let (hover_bg, hover_fg, active_bg) = if close {
         let red: gpui::Hsla = gpui::rgb(0xe81123).into();
-        (
-            red,
-            gpui::white(),
-            red.opacity(0.8),
-            gpui::white().opacity(0.8),
-        )
+        (red, gpui::white(), red.opacity(0.8))
     } else {
         (
             theme.glass_hover(),
             theme.text,
             theme.glass_hover().opacity(0.7),
-            theme.text,
         )
     };
+    let group: SharedString = format!("windows-caption-{id}").into();
     div()
         .id(id)
+        // gpui svgs don't inherit the div's text color: recolor the icon on
+        // hover through the group, as the Linux buttons do.
+        .group(group.clone())
         .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
         .h_full()
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text)
-        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
-        .active(move |style| style.bg(active_bg).text_color(active_fg))
+        .hover(move |style| style.bg(hover_bg))
+        .active(move |style| style.bg(active_bg))
         .occlude()
         .window_control_area(area)
-        .child(glyph)
+        .child(
+            icon(icon_path)
+                .size(px(WINDOWS_CAPTION_ICON_SIZE))
+                .text_color(theme.text)
+                .group_hover(group, move |style| style.text_color(hover_fg)),
+        )
 }
 
 /// A Linux caption button in harness's own cluster style (24px, rounded-6,
@@ -11200,6 +11565,7 @@ impl Render for Shell {
                     let section = self.remembered_settings_section();
                     self.open_settings(section, cx)
                 }
+                WorkspaceCommand::Help => self.open_settings(SettingsSection::Shortcuts, cx),
                 WorkspaceCommand::Diff if !self.active_chat.is_empty() => self.add_diff_surface(cx),
                 WorkspaceCommand::Files if !self.active_chat.is_empty() => {
                     self.add_files_surface(window, cx)
@@ -11380,7 +11746,13 @@ impl Render for Shell {
             self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
                 let root = this.shortcut_focus.clone();
                 let unfocused = this.unfocused.clone();
-                let preferred = this.composer.focus_handle(cx);
+                // While the add-space palette owns the keyboard, blur belongs
+                // to its search field, not the composer.
+                let preferred = this
+                    .add_space
+                    .as_ref()
+                    .map(|flow| flow.search_focus(cx))
+                    .unwrap_or_else(|| this.composer.focus_handle(cx));
                 window.on_next_frame(move |window, cx| {
                     restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
                 });
@@ -11389,7 +11761,11 @@ impl Render for Shell {
         }
         let shortcut_focus = self.shortcut_focus.clone();
         let unfocused = self.unfocused.clone();
-        let preferred_focus = self.composer.focus_handle(cx);
+        let preferred_focus = self
+            .add_space
+            .as_ref()
+            .map(|flow| flow.search_focus(cx))
+            .unwrap_or_else(|| self.composer.focus_handle(cx));
         window.defer(cx, move |window, cx| {
             restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
         });
@@ -11989,6 +12365,89 @@ impl Render for Shell {
 mod tests {
     use super::*;
 
+    #[test]
+    fn auto_download_only_starts_when_idle_enabled_and_not_previously_failed() {
+        let status = |latest: Option<&str>| harness_update::UpdateStatus {
+            current_version: "1.0.0".into(),
+            latest_version: latest.map(str::to_owned),
+            update_available: true,
+            checked_at: None,
+            error: None,
+        };
+        let available = status(Some("1.1.0"));
+        assert!(should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            None
+        ));
+
+        // Nothing to fetch.
+        let mut quiet = available.clone();
+        quiet.update_available = false;
+        assert!(!should_auto_download(
+            &quiet,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            None
+        ));
+        // Report-only install, and the off switch.
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            false,
+            true,
+            None
+        ));
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            true,
+            false,
+            None
+        ));
+        // In flight or staged — the strip owns the flow now.
+        for flow in [
+            UpdateFlow::Downloading,
+            UpdateFlow::Ready(PathBuf::from("/tmp/staged")),
+        ] {
+            assert!(!should_auto_download(&available, &flow, true, true, None));
+        }
+        // A Failed flow for the same version still doesn't retry on its own.
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Failed("boom".into()),
+            true,
+            true,
+            Some("1.1.0")
+        ));
+        assert!(!should_auto_download(
+            &available,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            Some("1.1.0")
+        ));
+        // …but a newer version retries, from Idle or from Failed.
+        let newer = status(Some("1.2.0"));
+        assert!(should_auto_download(
+            &newer,
+            &UpdateFlow::Idle,
+            true,
+            true,
+            Some("1.1.0")
+        ));
+        assert!(should_auto_download(
+            &newer,
+            &UpdateFlow::Failed("boom".into()),
+            true,
+            true,
+            Some("1.1.0")
+        ));
+    }
+
     fn chat_with_path(cwd: Option<&str>, source: Option<(&str, &str)>) -> harness_proto::Chat {
         harness_proto::Chat {
             id: "chat".into(),
@@ -12361,14 +12820,6 @@ mod tests {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
         assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
         assert_eq!(TERMINAL_RESIZE_HITBOX_HEIGHT, 10.0);
-    }
-
-    #[test]
-    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-        assert_eq!(titlebar_new_session_alpha(true, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(true, false), 0.0);
-        assert_eq!(titlebar_new_session_alpha(false, true), 0.0);
-        assert_eq!(titlebar_new_session_alpha(false, false), 0.0);
     }
 
     #[test]
@@ -13475,6 +13926,12 @@ mod exit_regressions {
                 shell.pending_workspace_command = Some(WorkspaceCommand::Settings);
                 let _ = shell.render(window, cx);
                 assert!(matches!(shell.route, Route::Settings(_)));
+                shell.pending_workspace_command = Some(WorkspaceCommand::Help);
+                let _ = shell.render(window, cx);
+                assert!(matches!(
+                    shell.route,
+                    Route::Settings(SettingsSection::Shortcuts)
+                ));
                 shell.pending_workspace_command = Some(WorkspaceCommand::New);
                 let _ = shell.render(window, cx);
                 assert!(matches!(shell.route, Route::Chat));
@@ -14336,6 +14793,167 @@ mod exit_regressions {
     }
 
     #[gpui::test]
+    fn reauth_action_targets_emitting_chat_host_without_replaying(cx: &mut TestAppContext) {
+        use harness_proto::HarnessId;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    let chat = |id, host| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": host, "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap()
+                    };
+                    state.chats = vec![
+                        chat("viewer-chat", "viewer-host"),
+                        chat("remote-chat", "remote-host"),
+                        chat("other-chat", "other-host"),
+                    ];
+                    state.selected_chat = Some("viewer-chat".into());
+                    state.selected_device = Some("viewer-host".into());
+                    state.local_device_id = Some("viewer-host".into());
+                });
+                shell.composer.update(cx, |composer, cx| {
+                    composer.prefill("unsent draft".into(), cx)
+                });
+                use crate::reauth_recovery::{ReauthAction, ReauthKey, RecoveryPhase};
+                let act = |shell: &mut Shell,
+                           chat_id: &str,
+                           provider,
+                           action,
+                           cx: &mut Context<Shell>| {
+                    shell.on_transcript_event(
+                        shell.transcript.clone(),
+                        &TranscriptEvent::Reauthenticate {
+                            chat_id: chat_id.into(),
+                            row_id: format!("{chat_id}-error"),
+                            provider,
+                            action,
+                        },
+                        cx,
+                    );
+                };
+                for (chat_id, host, provider) in [
+                    (
+                        "remote-chat",
+                        "remote-host",
+                        harness_proto::ReauthProvider::ChatgptNew,
+                    ),
+                    (
+                        "other-chat",
+                        "other-host",
+                        harness_proto::ReauthProvider::Codex,
+                    ),
+                ] {
+                    act(shell, chat_id, provider, ReauthAction::Reconnect, cx);
+                    // The recovery belongs to the emitting chat's host, and the chat stays put.
+                    let key = ReauthKey {
+                        host: host.into(),
+                        provider,
+                    };
+                    let state = shell.state.read(cx);
+                    assert!(state.reauth.phase(&key).is_some(), "recovery for {host}");
+                    assert!(
+                        state.reauth.requesters[&key]
+                            .iter()
+                            .any(|row| row.chat_id == chat_id)
+                    );
+                    assert!(matches!(shell.route, Route::Chat), "no trip to Settings");
+                    assert_eq!(state.selected_chat.as_deref(), Some("viewer-chat"));
+                    assert_eq!(state.selected_device.as_deref(), Some("viewer-host"));
+                    assert_eq!(
+                        shell.composer.read(cx).input.read(cx).text(),
+                        "unsent draft"
+                    );
+                }
+                // No engine in this rig: the start fails visibly instead of hanging.
+                let key = ReauthKey {
+                    host: "remote-host".into(),
+                    provider: harness_proto::ReauthProvider::ChatgptNew,
+                };
+                assert!(matches!(
+                    shell.state.read(cx).reauth.phase(&key),
+                    Some(RecoveryPhase::Failed(_))
+                ));
+                // Cancel returns the cards to their first step.
+                act(
+                    shell,
+                    "remote-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Cancel,
+                    cx,
+                );
+                assert!(shell.state.read(cx).reauth.phase(&key).is_none());
+                // Resume before a verified sign-in sends nothing.
+                act(
+                    shell,
+                    "remote-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Resume,
+                    cx,
+                );
+                assert!(shell.state.read(cx).reauth.resumed.is_empty());
+                // A missing owner must not silently route login to the viewer.
+                act(
+                    shell,
+                    "missing-chat",
+                    harness_proto::ReauthProvider::ChatgptNew,
+                    ReauthAction::Reconnect,
+                    cx,
+                );
+                assert!(
+                    !shell
+                        .state
+                        .read(cx)
+                        .reauth
+                        .phases
+                        .keys()
+                        .any(|key| key.host == "viewer-host")
+                );
+                assert!(
+                    shell
+                        .sidebar_notice
+                        .as_ref()
+                        .unwrap()
+                        .contains("host unavailable")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn model_mismatch_card_actions_carry_the_prompt_without_sending(cx: &mut TestAppContext) {
         use harness_proto::{HarnessId, ReasoningLevel};
         let dir = tempfile::tempdir().unwrap();
@@ -14425,6 +15043,7 @@ mod exit_regressions {
                             message: "harness protocol error: graff restored a different model \
                                       (codex/gpt-6-sol); kimi/k3 requires a new session"
                                 .into(),
+                            reauth: None,
                         },
                     ),
                 ];
@@ -15445,6 +16064,12 @@ impl Shell {
         } else {
             self.close_settings(cx);
         }
+    }
+    /// `/help` QA (`examples/help-fixture.rs`): issue the workspace command
+    /// the way the composer does.
+    pub fn fixture_help(&mut self, cx: &mut Context<Self>) {
+        self.pending_workspace_command = Some(crate::composer::WorkspaceCommand::Help);
+        cx.notify();
     }
     /// Onboarding QA (`examples/onboarding-fixture.rs`): click a starter.
     pub fn fixture_onboarding_starter(&mut self, id: &str, cx: &mut Context<Self>) {

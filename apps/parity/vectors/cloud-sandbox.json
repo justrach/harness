@@ -1,0 +1,361 @@
+{
+  "about": "The cloud sandbox contract the desktop engine, the iOS app and the Android app share. The phones talk to the Codegraff gateway directly with a gateway key; this file pins what they send, how they read what comes back, and the words they show. Desktop is the reference: change a rule there and this file must change with it.",
+  "gateway": "https://gateway.codegraff.com",
+  "signIn": {
+    "start": {
+      "method": "POST",
+      "path": "/v1/device/start",
+      "body": {
+        "device_label": "{deviceLabel}"
+      },
+      "deviceLabels": {
+        "desktop": "harness-desktop",
+        "ios": "harness-ios",
+        "android": "harness-android"
+      }
+    },
+    "poll": {
+      "method": "POST",
+      "path": "/v1/device/poll",
+      "body": {
+        "device_code": "{deviceCode}"
+      }
+    },
+    "pollMessages": {
+      "denied": "Sign-in was denied in the browser.",
+      "expired": "The sign-in link expired. Try again.",
+      "consumed": "This sign-in was already used. Try again.",
+      "not_found": "Codegraff lost this sign-in. Try again."
+    }
+  },
+  "stateWords": {
+    "started": "running",
+    "running": "running",
+    "starting": "starting",
+    "paused": "paused",
+    "stopping": "stopping",
+    "error": "error",
+    "unknown": "unknown",
+    "destroyed": "terminated",
+    "terminated": "terminated"
+  },
+  "hiddenStates": [
+    "terminated"
+  ],
+  "deviceNames": [
+    {
+      "id": "cnd_ab12cd34ef56",
+      "name": "Harness cloud ab12"
+    },
+    {
+      "id": "cnd_ff00cd34ef56",
+      "name": "Harness cloud ff00"
+    },
+    {
+      "id": "odd id!!",
+      "name": "Harness cloud oddi"
+    },
+    {
+      "id": "",
+      "name": "Harness cloud"
+    }
+  ],
+  "plans": {
+    "create": [
+      {
+        "method": "POST",
+        "path": "/v1/sandboxes",
+        "body": {
+          "provider": "fleet",
+          "persistent": true,
+          "name": "Harness cloud",
+          "autoStopMinutes": 30
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/v1/sandboxes/{id}/harness",
+        "body": {
+          "deviceName": "{deviceName}"
+        }
+      }
+    ],
+    "startWhenPaused": [
+      {
+        "method": "GET",
+        "path": "/v1/sandboxes/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/v1/sandboxes/{id}/start"
+      },
+      {
+        "method": "POST",
+        "path": "/v1/sandboxes/{id}/harness",
+        "body": {
+          "deviceName": "{deviceName}"
+        }
+      }
+    ],
+    "startWhenRunning": [
+      {
+        "method": "GET",
+        "path": "/v1/sandboxes/{id}"
+      },
+      {
+        "method": "POST",
+        "path": "/v1/sandboxes/{id}/harness",
+        "body": {
+          "deviceName": "{deviceName}"
+        }
+      }
+    ],
+    "stop": [
+      {
+        "method": "POST",
+        "path": "/v1/sandboxes/{id}/stop"
+      }
+    ],
+    "delete": [
+      {
+        "method": "DELETE",
+        "path": "/v1/sandboxes/{id}"
+      }
+    ],
+    "retry": "A /harness call that fails with error type harness_start_failed is repeated once; nothing else is retried.",
+    "neverCalled": [
+      "/codegraff"
+    ]
+  },
+  "now": 1790856000,
+  "rows": [
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "running",
+        "harness": true,
+        "deviceName": "Harness cloud ab12",
+        "expiresAt": "2026-10-01T12:24:00Z"
+      },
+      "title": "Harness cloud ab12",
+      "detail": "Running · Harness ready · pauses in 24 min",
+      "canStart": false,
+      "canStop": true,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "running",
+        "harness": false,
+        "expiresAt": "2026-10-01T14:05:00Z"
+      },
+      "title": "Cloud sandbox",
+      "detail": "Running · Harness not set up · pauses in 2h 5m",
+      "canStart": true,
+      "canStop": true,
+      "startLabel": "Set up Harness"
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "running",
+        "harness": true,
+        "expiresAt": 1790856600
+      },
+      "title": "Cloud sandbox",
+      "detail": "Running · Harness ready · pauses in 10 min",
+      "canStart": false,
+      "canStop": true,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "running",
+        "harness": true,
+        "expiresAt": 1790856030
+      },
+      "title": "Cloud sandbox",
+      "detail": "Running · Harness ready · pauses in under a minute",
+      "canStart": false,
+      "canStop": true,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "running",
+        "harness": true,
+        "expiresAt": "2026-10-01T11:00:00Z"
+      },
+      "title": "Cloud sandbox",
+      "detail": "Running · Harness ready · lease ended",
+      "canStart": false,
+      "canStop": true,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "running",
+        "harness": true,
+        "expiresAt": "soon"
+      },
+      "title": "Cloud sandbox",
+      "detail": "Running · Harness ready",
+      "canStart": false,
+      "canStop": true,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "paused",
+        "harness": true,
+        "deviceName": "Harness cloud ab12",
+        "expiresAt": "2026-10-01T12:24:00Z"
+      },
+      "title": "Harness cloud ab12",
+      "detail": "Paused",
+      "canStart": true,
+      "canStop": false,
+      "startLabel": "Start"
+    },
+    {
+      "sandbox": {
+        "id": "sb_1",
+        "provider": "daytona",
+        "state": "paused",
+        "name": "Scratch"
+      },
+      "title": "Scratch",
+      "detail": "Paused",
+      "canStart": false,
+      "canStop": false,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "starting"
+      },
+      "title": "Cloud sandbox",
+      "detail": "Starting…",
+      "canStart": false,
+      "canStop": false,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "stopping"
+      },
+      "title": "Cloud sandbox",
+      "detail": "Stopping…",
+      "canStart": false,
+      "canStop": false,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "error"
+      },
+      "title": "Cloud sandbox",
+      "detail": "Error",
+      "canStart": false,
+      "canStop": false,
+      "startLabel": null
+    },
+    {
+      "sandbox": {
+        "id": "cnd_ab12cd34ef56",
+        "provider": "fleet",
+        "state": "",
+        "name": "  "
+      },
+      "title": "Cloud sandbox",
+      "detail": "Unknown state",
+      "canStart": false,
+      "canStop": false,
+      "startLabel": null
+    }
+  ],
+  "errors": [
+    {
+      "status": 402,
+      "type": "insufficient_credits",
+      "message": "x",
+      "fallback": "f",
+      "sentence": "Your Codegraff credit is used up. Add credit and try again."
+    },
+    {
+      "status": 409,
+      "type": "sandbox_not_running",
+      "message": "x",
+      "fallback": "f",
+      "sentence": "The sandbox isn't running. Start it first."
+    },
+    {
+      "status": 403,
+      "type": "insufficient_scope",
+      "message": "x",
+      "fallback": "f",
+      "sentence": "This Codegraff sign-in can't manage sandboxes. Sign in again."
+    },
+    {
+      "status": 503,
+      "type": "harness_cloud_unavailable",
+      "message": "x",
+      "fallback": "f",
+      "sentence": "Harness cloud isn't available yet. Try again later."
+    },
+    {
+      "status": 429,
+      "type": "fleet_limit",
+      "message": "the fleet sandbox limit is reached",
+      "fallback": "f",
+      "sentence": "The fleet sandbox limit is reached."
+    },
+    {
+      "status": 502,
+      "type": "harness_start_failed",
+      "message": "Harness could not be installed/started in the sandbox.",
+      "fallback": "f",
+      "sentence": "Harness could not be installed/started in the sandbox."
+    },
+    {
+      "status": 500,
+      "type": null,
+      "message": null,
+      "fallback": "CodeGraff couldn't stop the sandbox",
+      "sentence": "CodeGraff couldn't stop the sandbox (500)."
+    },
+    {
+      "status": 0,
+      "type": null,
+      "message": "couldn't reach CodeGraff: timed out",
+      "fallback": "f",
+      "sentence": "Couldn't reach CodeGraff: timed out."
+    },
+    {
+      "status": 0,
+      "type": null,
+      "message": null,
+      "fallback": "CodeGraff couldn't create the sandbox",
+      "sentence": "CodeGraff couldn't create the sandbox."
+    }
+  ],
+  "rowsNote": "startLabel is pinned only for rows that can be started; it is null where there is no start button."
+}

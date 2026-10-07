@@ -420,6 +420,18 @@ impl Composer {
                 this.begin_queue_edit(edit_id.clone(), cx);
             }),
         );
+        let attach_id = item.id.clone();
+        let attach = self.queue_action(
+            &key,
+            "attach",
+            "Add images",
+            icons::PAPERCLIP,
+            !being_removed && self.can_edit_queue_in_composer(),
+            theme,
+            cx.listener(move |this, _, _, cx| {
+                this.begin_queue_edit_with_picker(attach_id.clone(), true, cx);
+            }),
+        );
         let drop_id = item.id.clone();
         let discard = self.queue_action(
             &key,
@@ -640,6 +652,7 @@ impl Composer {
                         .gap(px(3.0))
                         .child(discard)
                         .child(edit)
+                        .child(attach)
                         .child(primary),
                 )
             });
@@ -1269,6 +1282,15 @@ impl Composer {
 
     /// Borrow the composer while the leased row reserves its queue position.
     pub(crate) fn begin_queue_edit(&mut self, id: String, cx: &mut Context<Self>) {
+        self.begin_queue_edit_with_picker(id, false, cx);
+    }
+
+    fn begin_queue_edit_with_picker(
+        &mut self,
+        id: String,
+        attach_images: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.queue_edit_pending_id.is_some()
             || self.queue_edit_finishing
             || self.editing_queued.is_some()
@@ -1442,8 +1464,12 @@ impl Composer {
                         composer.attachments.insert(composer.current_key.clone(), loaded_attachments);
                         composer.appshots.insert(composer.current_key.clone(), loaded_appshots);
                         composer.focus_pending = true;
+                        composer.prepare_queue_edit_input(cx);
                         composer.input.update(cx, |input, cx| input.set_text(text, cx));
                         composer.start_queue_edit_renewal(engine.clone(), cx);
+                        if attach_images {
+                            composer.open_file_picker(cx);
+                        }
                     }
                     Ok(reply)
                         if reply.get("outcome").and_then(|v| v.as_str()) == Some("locked") =>
@@ -1520,6 +1546,7 @@ impl Composer {
             self.attachments
                 .insert(self.current_key.clone(), attachments);
         }
+        self.restore_question_input(cx);
         self.focus_pending = true;
         cx.notify();
     }

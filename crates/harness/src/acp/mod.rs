@@ -2206,6 +2206,9 @@ impl Harness for AcpHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let mut launch_args = if self.id() == HarnessId::Graff {
+            // Session start is the natural moment for a graff update check;
+            // it never blocks and this session keeps the resolved binary.
+            crate::graff_bundle::maybe_check_soon();
             request.model = request
                 .model
                 .take()
@@ -3171,6 +3174,7 @@ async fn new_session(
     signs_in_from_settings: bool,
 ) -> Result<Value, HarnessError> {
     match request_draining(client, incoming, "session/new", params).await {
+        Err(error @ HarnessError::ReauthRequired { .. }) => Err(error),
         Err(error) if signs_in_from_settings && is_auth_required(&error) => {
             Err(HarnessError::Protocol(format!(
                 "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
@@ -3604,17 +3608,20 @@ async fn run_session(session: Session) {
                 request_draining(&client, &mut incoming, "graff/models", json!({})).await?;
             graff_models::verify_resumed_model(&catalog, model)?;
         }
+        let mut devin_selection = None;
         if harness == HarnessId::Devin
             && let Some(model) = request.model.as_deref()
         {
-            devin_models::wait_for_model(
-                &client,
-                &mut incoming,
-                &session_id,
-                &mut session_response,
-                model,
-            )
-            .await?;
+            devin_selection = Some(
+                devin_models::wait_for_model(
+                    &client,
+                    &mut incoming,
+                    &session_id,
+                    &mut session_response,
+                    model,
+                )
+                .await?,
+            );
         }
         // ACP has had two model-selection surfaces. Newer config-option agents
         // use category=model below; Grok Build currently advertises only the
@@ -3622,13 +3629,32 @@ async fn run_session(session: Session) {
         // ACP clients follow the same split. Unlike the best-effort auxiliary options,
         // an explicit model switch is strict: prompting with a different
         // model than the picker shows is worse than surfacing the RPC error.
-        let requested_model: Option<String> = match request.model.as_deref() {
-            Some(model) if effort_in_model_id => Some(effort_variant_id(
-                &session_response,
-                model,
-                request.reasoning,
-            )),
-            model => model.map(str::to_owned),
+        let devin_configured = if harness == HarnessId::Devin
+            && let (Some(selection), Some(requested)) = (&devin_selection, request.model.as_deref())
+        {
+            devin_models::configure_model(
+                &client,
+                &mut incoming,
+                &session_id,
+                &mut session_response,
+                requested,
+                selection,
+            )
+            .await?
+        } else {
+            false
+        };
+        let requested_model: Option<String> = if devin_configured {
+            None
+        } else {
+            match request.model.as_deref() {
+                Some(model) if effort_in_model_id => Some(effort_variant_id(
+                    &session_response,
+                    model,
+                    request.reasoning,
+                )),
+                model => model.map(str::to_owned),
+            }
         };
         if harness == HarnessId::Antigravity {
             validate_config_model_selection(
@@ -3661,7 +3687,15 @@ async fn run_session(session: Session) {
         if harness == HarnessId::Graff {
             graff_models::validate_effort(&session_response, request.reasoning)?;
         }
-        let efforts = effort_values(request.reasoning, request.model.as_deref());
+        let efforts = if devin_configured
+            && devin_selection
+                .as_ref()
+                .is_some_and(|selection| selection.thought_level.is_some())
+        {
+            Vec::new()
+        } else {
+            effort_values(request.reasoning, request.model.as_deref())
+        };
         let session_commands = scan_available_commands(&session_response);
         let init_commands = if session_commands.is_empty() {
             init_commands
@@ -3677,6 +3711,14 @@ async fn run_session(session: Session) {
             &efforts,
             &request.model_options,
         ) {
+            if devin_configured
+                && config_id == "speed"
+                && devin_selection
+                    .as_ref()
+                    .is_some_and(|selection| selection.speed.is_some())
+            {
+                continue;
+            }
             let mut params = serde_json::Map::new();
             params.insert("sessionId".into(), session_id.clone().into());
             params.insert("configId".into(), config_id.clone().into());
@@ -3759,6 +3801,17 @@ async fn run_session(session: Session) {
             match res {
                 Ok(v) => v,
                 Err(e) => {
+                    if let HarnessError::ReauthRequired { provider } = &e {
+                        let _ = send(&event_tx, AgentEvent::ReauthRequired { provider: *provider }).await;
+                        let _ = send(&event_tx, AgentEvent::Done {
+                            status: DoneStatus::Errored,
+                            result: None,
+                            error: None,
+                            session_id: None,
+                        }).await;
+                        child.shutdown(kill_grace).await;
+                        return;
+                    }
                     // A child that dies before the handshake used to surface only
                     // the RPC-side symptom ("transport closed") — its exit status
                     // and stderr, both already in hand, were dropped, leaving
@@ -3962,7 +4015,13 @@ async fn run_session(session: Session) {
 
             res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
                 turn = None;
-                if res.is_err() && client.is_closed() {
+                // A request failed by the reader's EOF cleanup is a crash. A
+                // reauth error is the agent's own answer, and the agent may
+                // exit right after sending it, so it still ends the turn below.
+                if res.is_err()
+                    && !matches!(&res, Err(HarnessError::ReauthRequired { .. }))
+                    && client.is_closed()
+                {
                     break 'main;
                 }
                 starve_deadline = None;
@@ -4106,8 +4165,15 @@ async fn run_session(session: Session) {
                     break 'main;
                 }
                 let (status, mut error) = stop_outcome(&res, interrupted);
-                if !interrupted && auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
-                    error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
+                if !interrupted {
+                    if let Err(HarnessError::ReauthRequired { provider }) = &res {
+                        if !send(&event_tx, AgentEvent::ReauthRequired { provider: *provider }).await {
+                            break 'main;
+                        }
+                        error = None;
+                    } else if auth_method.is_some() && res.as_ref().is_err_and(is_auth_required) {
+                        error = Some(format!("{agent_name} isn't signed in. Use Settings → Agents → Sign in."));
+                    }
                 }
                 trackers.effort.finish_turn();
                 done_current = true;
@@ -4274,8 +4340,9 @@ async fn run_session(session: Session) {
                     // failed by the reader's EOF cleanup falls through to the
                     // crash-message bookkeeping below (stderr tail intact).
                     if let Some(mut fut) = turn.take()
-                        && let Ok(res @ Ok(_)) =
+                        && let Ok(res) =
                             tokio::time::timeout(Duration::from_millis(50), &mut fut).await
+                        && (res.is_ok() || matches!(&res, Err(HarnessError::ReauthRequired { .. })))
                     {
                         let (prev, _next) = rotate(&mut assistant_message_id);
                         let _ = send(
@@ -4286,7 +4353,11 @@ async fn run_session(session: Session) {
                         if let Some(usage) = usage_from_response(&res) {
                             let _ = send(&event_tx, usage).await;
                         }
-                        let (status, error) = stop_outcome(&res, interrupted);
+                        let (status, mut error) = stop_outcome(&res, interrupted);
+                        if !interrupted && let Err(HarnessError::ReauthRequired { provider }) = &res {
+                            let _ = send(&event_tx, AgentEvent::ReauthRequired { provider: *provider }).await;
+                            error = None;
+                        }
                         trackers.effort.finish_turn();
                         done_current = true;
                         if interrupted {

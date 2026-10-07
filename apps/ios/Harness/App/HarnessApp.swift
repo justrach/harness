@@ -23,6 +23,7 @@ struct HarnessApp: App {
                 // stays paint for status/markdown, never chrome.
                 .tint(Theme.text)
                 .background(Theme.bg)
+                .hingeRecede()
                 .onAppear {
                     Perf.shared.markFirstFrame()
                     if let scene = UIApplication.shared.connectedScenes
@@ -32,6 +33,7 @@ struct HarnessApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .background {
+                        model.backgrounded()
                         model.flushDocs()
                         PerfSharing.flush()
                     } else if phase == .active {
@@ -64,10 +66,17 @@ struct RootView: View {
                         // Sampled, not observed: the snapshots read live
                         // transcripts, so observing them re-rendered the root
                         // on every streamed token. A lock-screen status only
-                        // needs a couple of seconds' resolution.
+                        // needs a couple of seconds' resolution — and only
+                        // while something is running or showing. With every
+                        // session quiet there is nothing to sample: wait for
+                        // a session row to change instead of waking every 2s.
                         while !Task.isCancelled {
                             model.liveActivities.sync(model.liveActivitySnapshots)
-                            try? await Task.sleep(for: .seconds(2))
+                            if model.liveActivitiesNeedSampling {
+                                try? await Task.sleep(for: .seconds(2), tolerance: .milliseconds(500))
+                            } else {
+                                await model.untilSessionsChange()
+                            }
                         }
                     }
             }

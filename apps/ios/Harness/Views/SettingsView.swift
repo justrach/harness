@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDeleteAccount = false
+    @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
 
     /// "Codegraff · System", or the two variant names when light and dark
     /// come from different families.
@@ -39,6 +40,12 @@ struct SettingsView: View {
                     } else if model.canDeleteAccount {
                         LabeledContent("Signed in with", value: "CodeGraff")
                     }
+                    NavigationLink {
+                        UsageView()
+                    } label: {
+                        Text("Usage")
+                    }
+                    .accessibilityIdentifier("settings-usage")
                     Button("Sign out", role: .destructive) {
                         dismiss()
                         model.signOut()
@@ -54,7 +61,29 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings-appearance")
                 }
 
+                // iPad already shows the list beside the open session; a phone can too, when there is room.
+                if UIDevice.current.userInterfaceIdiom == .phone {
+                    Section {
+                        Picker("Split view", selection: $phoneSplitRaw) {
+                            ForEach(PhoneSplit.allCases) { mode in
+                                Text(mode.label).tag(mode.rawValue)
+                            }
+                        }
+                        .accessibilityIdentifier("settings-phone-split")
+                    } header: {
+                        Text("Layout")
+                    } footer: {
+                        Text("Shows the session list and the open session together when there is room. Auto does it side by side whenever the screen is wide enough, such as in landscape. Side by side and Stacked pick a shape. Off keeps the single screen.")
+                    }
+                }
+
                 Section("Diagnostics") {
+                    NavigationLink {
+                        ConnectionView()
+                    } label: {
+                        LabeledContent("Connection", value: model.connectionReport().registry)
+                    }
+                    .accessibilityIdentifier("settings-connection")
                     NavigationLink {
                         PerformanceView()
                     } label: {
@@ -65,6 +94,9 @@ struct SettingsView: View {
 
                 Section("About") {
                     LabeledContent("Version", value: version)
+                    Link("Privacy policy", destination: Endpoints.privacyURL)
+                    Link("Help and feedback", destination: Endpoints.supportURL)
+                    Link("Email support", destination: Endpoints.supportEmailURL)
                 }
 
                 if model.canDeleteAccount {

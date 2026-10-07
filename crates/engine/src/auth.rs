@@ -832,11 +832,24 @@ impl Auth {
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
+        struct GraffKey {
+            api_key: String,
+            email: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Exchange {
             user: WireUser,
             access_token: String,
             refresh_token: String,
+            /// The graff CLI key the edge minted in this sign-in, when asked.
+            #[serde(default)]
+            graff_key: Option<GraffKey>,
         }
+        // One sign-in covers the app and `graff` in the terminal: a device
+        // whose graff has no key asks for one in this exchange.
+        let graff = crate::codegraff_auth::CodegraffAuth::shared(&self.inner.config.data_dir);
+        let want_graff_key = !graff.has_key();
         let url = format!(
             "{}/auth/exchange",
             self.inner.config.edge_url.trim_end_matches('/')
@@ -849,7 +862,9 @@ impl Auth {
                 "code": code,
                 "codeVerifier": pending.verifier,
                 "redirectUri": pending.redirect_uri,
-                "nonce": nonce
+                "nonce": nonce,
+                "graffKey": want_graff_key,
+                "deviceLabel": gethostname::gethostname().to_string_lossy(),
             }))
             .send()
             .await
@@ -871,6 +886,11 @@ impl Auth {
                 describe_http_error(e)
             ))
         })?;
+        if let Some(key) = body.graff_key
+            && let Err(err) = graff.adopt_sign_in_key(&key.api_key, key.email).await
+        {
+            tracing::warn!(error = %err, "couldn't save the graff key from sign-in");
+        }
         let name = [body.user.first_name, body.user.last_name]
             .into_iter()
             .flatten()

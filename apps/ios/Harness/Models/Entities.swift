@@ -293,16 +293,30 @@ struct GeneratedImageReference: Hashable {
     }
 }
 
+/// Only host-classified auth failures can offer agent sign-in. Never infer a
+/// route from an error's prose or execute commands supplied by the transcript.
+enum AgentReauthProvider: String, Hashable, Sendable {
+    case chatGPTNew = "chatgpt-new"
+    case codex
+
+    var startParameters: [String: Any] {
+        switch self {
+        case .chatGPTNew: return ["harness": "graff", "provider": "chatgpt-new", "reauthenticate": true]
+        case .codex: return ["harness": "codex", "reauthenticate": true, "deviceAuth": true]
+        }
+    }
+}
+
 enum MessagePart: Hashable, Identifiable {
     case image(id: String, reference: GeneratedImageReference)
     case text(id: String, text: String)
     case tool(id: String, call: RenderToolCall, isError: Bool, resolved: Bool)
     case input(id: String, requestId: String, questions: [UserInputQuestion], resolved: Bool)
-    case error(id: String, message: String)
+    case error(id: String, message: String, reauth: AgentReauthProvider? = nil)
 
     var id: String {
         switch self {
-        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _):
+        case .text(let id, _), .image(let id, _), .tool(let id, _, _, _), .input(let id, _, _, _), .error(let id, _, _):
             return id
         }
     }
@@ -316,6 +330,48 @@ struct MessageEntry: Identifiable, Hashable {
     var deviceId: String
     var status: MessageStatus?
     var continuationOf: String?
+    /// Decode-generation marker, NOT content: a fresh value every time the
+    /// entry is (re)built lets the transcript row cache rebuild only the
+    /// entries a doc update actually touched. Excluded from ==/hash so a
+    /// cached projection still compares equal to a whole-doc decode.
+    var stamp: UInt64
+
+    init(id: String, role: MessageRole, parts: [MessagePart], createdAt: Int64,
+         deviceId: String, status: MessageStatus? = nil, continuationOf: String? = nil) {
+        self.id = id
+        self.role = role
+        self.parts = parts
+        self.createdAt = createdAt
+        self.deviceId = deviceId
+        self.status = status
+        self.continuationOf = continuationOf
+        self.stamp = Self.nextStamp()
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id && lhs.role == rhs.role && lhs.parts == rhs.parts
+            && lhs.createdAt == rhs.createdAt && lhs.deviceId == rhs.deviceId
+            && lhs.status == rhs.status && lhs.continuationOf == rhs.continuationOf
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(role)
+        hasher.combine(parts)
+        hasher.combine(createdAt)
+        hasher.combine(deviceId)
+        hasher.combine(status)
+        hasher.combine(continuationOf)
+    }
+
+    private static let stampLock = NSLock()
+    nonisolated(unsafe) private static var stampCounter: UInt64 = 0
+    static func nextStamp() -> UInt64 {
+        stampLock.lock()
+        defer { stampLock.unlock() }
+        stampCounter &+= 1
+        return stampCounter
+    }
 }
 
 // MARK: - Folder browsing (add-space palette data)

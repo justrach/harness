@@ -444,6 +444,12 @@ struct AgentAccountParams {
 #[serde(rename_all = "camelCase")]
 struct StartAgentLoginParams {
     harness: HarnessId,
+    /// Explicit recovery may replace the expired live login after approval.
+    #[serde(default)]
+    reauthenticate: bool,
+    /// Host-owned device authorization can be approved from a phone.
+    #[serde(default)]
+    device_auth: bool,
     /// Which sign-in, for harnesses that have several (graff: `xai`, `kimi`, `zai`).
     #[serde(default)]
     provider: Option<String>,
@@ -599,6 +605,9 @@ enum MutateParams {
     DeleteChat { chat_id: String },
     #[serde(rename_all = "camelCase")]
     RenameDevice { device_id: String, name: String },
+    /// Tombstone an offline device's row (Settings → Devices → Remove).
+    #[serde(rename_all = "camelCase")]
+    ForgetDevice { device_id: String },
     /// Synced seen marker (LWW + monotonic guard): clears the "completed"
     /// badge on every device. `at` is epoch ms; default = now.
     #[serde(rename_all = "camelCase")]
@@ -1087,6 +1096,11 @@ impl EngineRpc {
             MutateParams::RenameDevice { device_id, name } => self
                 .workspace
                 .rename_device(&device_id, &name)
+                .map_err(failed)
+                .map(drop),
+            MutateParams::ForgetDevice { device_id } => self
+                .workspace
+                .forget_device(&device_id)
                 .map_err(failed)
                 .map(drop),
             MutateParams::MarkChatSeen { chat_id, at } => {
@@ -1628,6 +1642,35 @@ impl RpcService for EngineRpc {
                     .cancel_job(id)
                     .await
                     .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::CODEGRAFF_SANDBOXES => {
+                let sandboxes = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .sandboxes()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&sandboxes)
+            }
+            methods::CODEGRAFF_CREATE_SANDBOX => {
+                let sandbox = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
+                    .create_sandbox()
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&sandbox)
+            }
+            methods::CODEGRAFF_SANDBOX_ACTION => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RpcError::Failed("missing sandbox id".into()))?;
+                let auth = crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir());
+                match params.get("action").and_then(|v| v.as_str()) {
+                    Some("start") => auth.start_sandbox(id).await,
+                    Some("stop") => auth.stop_sandbox(id).await,
+                    Some("delete") => auth.delete_sandbox(id).await,
+                    _ => Err("unknown sandbox action".into()),
+                }
+                .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::ROOM_REQUEST => {
@@ -3161,12 +3204,28 @@ impl RpcService for EngineRpc {
             }
             methods::START_AGENT_LOGIN => {
                 let p: StartAgentLoginParams = parse_params(params)?;
+                if p.device_auth && (!p.reauthenticate || p.harness != HarnessId::Codex) {
+                    return Err(RpcError::Failed(
+                        "Device authorization is supported only for explicit Codex recovery."
+                            .into(),
+                    ));
+                }
                 let start = match (p.harness, p.provider.as_deref()) {
+                    // Recovery attaches to a sign-in already waiting on this host.
+                    (HarnessId::Graff, Some(provider)) if p.reauthenticate => {
+                        self.agent_accounts.start_graff_reauth(provider).await
+                    }
                     (HarnessId::Graff, Some(provider)) => {
                         self.agent_accounts.start_graff_login(provider).await
                     }
                     (HarnessId::Graff, None) => Err(crate::EngineError::Other(
                         "Say which graff provider to sign in to.".into(),
+                    )),
+                    (HarnessId::Codex, _) if p.reauthenticate => {
+                        self.agent_accounts.start_codex_reauth(p.device_auth).await
+                    }
+                    (_, _) if p.device_auth => Err(crate::EngineError::Other(
+                        "Device sign-in is not supported for this provider.".into(),
                     )),
                     (harness, _) => self.agent_accounts.start_login(harness).await,
                 }

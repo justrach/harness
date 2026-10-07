@@ -21,6 +21,7 @@ pub mod change_requests;
 pub mod chat2_host;
 pub mod codegraff_auth;
 mod chat_persistence;
+mod device_login;
 pub mod diff_sync;
 pub mod doc_host;
 pub mod external_history;
