@@ -4868,6 +4868,12 @@ impl DocHost {
         chat_id: &str,
         request: &harness_proto::RunRequest,
     ) -> HarnessId {
+        // Imported Claude Code / Codex chats always continue in graff —
+        // the source agent is never re-launched, whatever the row or the
+        // request asks for.
+        if crate::external_history::continues_in_graff(chat_id) {
+            return HarnessId::Graff;
+        }
         request.harness.unwrap_or_else(|| self.harness_for(chat_id))
     }
 

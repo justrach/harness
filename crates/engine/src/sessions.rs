@@ -485,6 +485,11 @@ impl SessionsEngine {
 
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
+        // An imported chat's first graff turn carries the earlier transcript
+        // as read-only context; read the doc before the new user row lands.
+        let seed_entries = crate::external_history::continues_in_graff(chat_id)
+            .then(|| handle.doc().read_entries())
+            .and_then(Result::ok);
         let user_id = message_id.unwrap_or_else(new_id);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
 
@@ -499,6 +504,16 @@ impl SessionsEngine {
         if request.resume.is_none() {
             request.resume = self.inner.resume_for(chat_id, &request.cwd);
             resume_injected = request.resume.is_some();
+        }
+        // Fresh graff session for an imported chat (no recorded graff session
+        // to resume): seed the prompt with the earlier conversation. The
+        // stored user message keeps the raw prompt.
+        if request.resume.is_none()
+            && let Some(entries) = seed_entries
+            && !entries.is_empty()
+        {
+            request.prompt =
+                crate::external_history::seed_prompt(chat_id, &entries, &request.prompt);
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
@@ -1284,6 +1299,13 @@ impl Inner {
     /// never rides `--resume`. An empty stored id is the explicit tombstone —
     /// no resume, no falling through to staler sources.
     fn resume_for(&self, chat_id: &str, cwd: &str) -> Option<String> {
+        // An imported chat continues in graff: the stored native id belongs
+        // to the source agent and is never a graff resume handle.
+        self.resume_candidates(chat_id, cwd)
+            .and_then(|id| crate::external_history::resume_id(chat_id, id))
+    }
+
+    fn resume_candidates(&self, chat_id: &str, cwd: &str) -> Option<String> {
         let cwd_ok = |session_cwd: &str| session_cwd.is_empty() || session_cwd == cwd;
         if let Some(known) = lock(&self.harness_sessions).get(chat_id).cloned() {
             return (!known.session_id.is_empty() && cwd_ok(&known.cwd))

@@ -60,14 +60,6 @@ impl Source {
         }
     }
 
-    fn harness_id(self) -> HarnessId {
-        match self {
-            Self::Claude => HarnessId::ClaudeCode,
-            Self::Codex => HarnessId::Codex,
-            Self::Graff => HarnessId::Graff,
-        }
-    }
-
     fn slug(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -401,6 +393,105 @@ impl Known {
     }
 }
 
+/// Chats imported from another agent that continue in graff
+/// (`ext-claude-…` / `ext-codex-…`). Used to force graff resolution and to
+/// keep the source agent's native session id out of `--resume`.
+pub fn continues_in_graff(chat_id: &str) -> bool {
+    native_id(chat_id).is_some()
+}
+
+/// The source agent's native session id embedded in an imported chat id
+/// (`ext-<slug>-<native>`), for the sources that continue in graff.
+pub fn native_id(chat_id: &str) -> Option<&str> {
+    for slug in ["claude", "codex"] {
+        let prefix = format!("ext-{slug}-");
+        if let Some(id) = chat_id.strip_prefix(&prefix) {
+            return (!id.is_empty()).then_some(id);
+        }
+    }
+    None
+}
+
+/// A stored harness session id, unless it is the imported chat's own native
+/// id — the source agent's handle is never a graff resume, so imported rows
+/// from older builds (which recorded `claude --resume=<native>` data) drop it.
+pub fn resume_id(chat_id: &str, session_id: String) -> Option<String> {
+    match native_id(chat_id) {
+        Some(native) if native == session_id => None,
+        _ => Some(session_id),
+    }
+}
+
+/// Display label for the imported chat's source, derived from its id prefix.
+fn source_label(chat_id: &str) -> &'static str {
+    if chat_id.starts_with("ext-claude-") {
+        "Claude Code"
+    } else {
+        "Codex"
+    }
+}
+
+/// Cap on the seeded earlier-conversation block; oldest lines drop first.
+const SEED_CONVERSATION_CHARS: usize = 60_000;
+
+/// The prompt sent to graff for the first turn of an imported chat: the user
+/// message stays raw in the doc, but the agent gets the earlier conversation
+/// as read-only context so it continues rather than restarts.
+pub fn seed_prompt(chat_id: &str, entries: &[SessionMessageEntry], prompt: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for entry in entries {
+        let role = match entry.role {
+            MessageRole::User => "User",
+            MessageRole::Assistant => "Assistant",
+            _ => continue,
+        };
+        for part in &entry.parts {
+            match part {
+                MessagePart::Text { text, .. } if !text.trim().is_empty() => {
+                    lines.push(format!("{role}: {}", text.trim()));
+                }
+                MessagePart::Tool { call, output, .. } => {
+                    let kind = serde_json::to_value(call)
+                        .ok()
+                        .and_then(|v| v.get("kind").and_then(|k| k.as_str().map(str::to_owned)))
+                        .unwrap_or_else(|| "call".to_string());
+                    let result = output
+                        .as_deref()
+                        .map(|o| one_line(o, 120))
+                        .filter(|o| !o.is_empty())
+                        .unwrap_or_else(|| "…".to_string());
+                    lines.push(format!("Tool: {kind} — {result}"));
+                }
+                // Reasoning, images and system parts stay out of the seed.
+                _ => {}
+            }
+        }
+    }
+    // Keep the NEWEST lines within the bound; count what fell off.
+    let mut kept: Vec<String> = Vec::new();
+    let mut size = 0usize;
+    for line in lines.iter().rev() {
+        if size + line.len() > SEED_CONVERSATION_CHARS {
+            break;
+        }
+        size += line.len();
+        kept.push(line.clone());
+    }
+    kept.reverse();
+    let omitted = lines.len() - kept.len();
+    let mut block = String::new();
+    if omitted > 0 {
+        block.push_str(&format!("[{omitted} earlier messages omitted]\n"));
+    }
+    block.push_str(&kept.join("\n"));
+    format!(
+        "This conversation started in {} and continues here in graff. The earlier conversation is below as read-only context; don't redo work it shows as finished.\n\n<earlier-conversation>\n{}\n</earlier-conversation>\n\n{}",
+        source_label(chat_id),
+        block,
+        prompt
+    )
+}
+
 fn chat_row(session: &ExternalSession, chat_id: &str, msgs: &[Msg], device_id: &str) -> Chat {
     let at = |ms: i64| {
         Utc.timestamp_millis_opt(ms)
@@ -426,10 +517,13 @@ fn chat_row(session: &ExternalSession, chat_id: &str, msgs: &[Msg], device_id: &
         branch: None,
         checkout_id: None,
         source_context: None,
-        // The agent that wrote the session continues it: its native id is the
-        // resume handle, scoped to the folder it ran in.
+        // Imported conversations continue in graff, on graff's configured
+        // provider: Claude/Codex sessions keep no native resume id (the
+        // source agent is never re-launched); the first graff turn is seeded
+        // with the earlier transcript. A graff import does resume its own
+        // recorded session, scoped to the folder it ran in.
         config: Some(ChatConfig {
-            harness: session.source.harness_id(),
+            harness: HarnessId::Graff,
             model: None,
             reasoning: None,
             model_options: Default::default(),
@@ -438,7 +532,7 @@ fn chat_row(session: &ExternalSession, chat_id: &str, msgs: &[Msg], device_id: &
         last_message_preview: last_reply,
         last_message_at: Some(at(last_at)),
         created_at: at(session.started_at),
-        harness_session_id: Some(session.id.clone()),
+        harness_session_id: (session.source == Source::Graff).then(|| session.id.clone()),
         harness_session_cwd: session.cwd.clone(),
         space_id: None,
         last_seen_at: Some(at(last_at)),
@@ -573,11 +667,14 @@ mod tests {
         assert_eq!(chat.title.as_deref(), Some("fix the login bug"));
         assert_eq!(chat.cwd.as_deref(), Some("/w/app"));
         assert_eq!(chat.last_message_preview.as_deref(), Some("Fixed it."));
-        assert_eq!(chat.harness_session_id.as_deref(), Some("s1"));
+        // Imported chats continue in graff: no native resume id is kept, so
+        // `claude --resume` can never launch (#168).
+        assert_eq!(chat.harness_session_id, None);
         assert_eq!(
             chat.config.as_ref().map(|c| c.harness),
-            Some(HarnessId::ClaudeCode)
+            Some(HarnessId::Graff)
         );
+        assert_eq!(chat.harness_session_cwd.as_deref(), Some("/w/app"));
 
         let bytes = fx
             .store
@@ -625,5 +722,144 @@ mod tests {
             .history
             .import(Some(&[(Source::Claude, "s1".into())]), None);
         assert_eq!(one.imported, 1);
+    }
+    #[test]
+    fn continues_in_graff_covers_claude_and_codex_imports() {
+        assert!(continues_in_graff("ext-claude-s1"));
+        assert!(continues_in_graff("ext-codex-9f2a"));
+        assert!(!continues_in_graff("ext-graff-s1"), "graff resumes itself");
+        assert!(!continues_in_graff("c-native"));
+        assert!(!continues_in_graff("ext-claude-"), "no native id");
+        assert_eq!(native_id("ext-codex-9f2a"), Some("9f2a"));
+    }
+
+    #[test]
+    fn resume_id_drops_only_the_stored_native_id() {
+        // Rows imported by older builds still carry the source agent's id.
+        assert_eq!(resume_id("ext-claude-s1", "s1".to_string()), None);
+        assert_eq!(resume_id("ext-codex-x", "x".to_string()), None);
+        // A graff-recorded session id resumes normally.
+        assert_eq!(
+            resume_id("ext-claude-s1", "graff-7".to_string()),
+            Some("graff-7".to_string())
+        );
+        assert_eq!(
+            resume_id("c-native", "anything".to_string()),
+            Some("anything".to_string())
+        );
+    }
+
+    fn seed_entry(role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: "e".into(),
+            role,
+            parts,
+            created_at: 0,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn seed_prompt_wraps_the_earlier_conversation() {
+        let entries = vec![
+            seed_entry(
+                MessageRole::User,
+                vec![MessagePart::Text {
+                    id: "p1".into(),
+                    text: "fix the login bug".into(),
+                }],
+            ),
+            seed_entry(
+                MessageRole::Assistant,
+                vec![
+                    MessagePart::Reasoning {
+                        id: "r".into(),
+                        text: "hidden thinking".into(),
+                    },
+                    MessagePart::Text {
+                        id: "p2".into(),
+                        text: "Fixed it.".into(),
+                    },
+                    MessagePart::Tool {
+                        id: "t".into(),
+                        call: ToolCall::Exec {
+                            command: "cargo test".into(),
+                        },
+                        is_error: false,
+                        resolved: true,
+                        output: Some("ok\nok\nok".into()),
+                        diff: None,
+                        output_ref: None,
+                        output_bytes: None,
+                        diff_ref: None,
+                        diff_stats: None,
+                        subagent_ref: None,
+                        subagent_status: None,
+                        subagent_tail: None,
+                        view: None,
+                    },
+                ],
+            ),
+        ];
+        let out = seed_prompt("ext-claude-s1", &entries, "continue please");
+        assert!(
+            out.starts_with(
+                "This conversation started in Claude Code and continues here in graff."
+            )
+        );
+        let block = out
+            .split("<earlier-conversation>")
+            .nth(1)
+            .unwrap()
+            .split("</earlier-conversation>")
+            .next()
+            .unwrap();
+        assert!(block.contains("User: fix the login bug"));
+        assert!(block.contains("Assistant: Fixed it."));
+        assert!(block.contains("Tool: exec — ok ok ok"));
+        assert!(!block.contains("hidden thinking"), "reasoning is dropped");
+        assert!(out.ends_with("</earlier-conversation>\n\ncontinue please"));
+        assert!(
+            seed_prompt("ext-codex-1", &entries, "p")
+                .starts_with("This conversation started in Codex and continues here in graff.")
+        );
+    }
+
+    #[test]
+    fn seed_prompt_truncates_oldest_first_with_an_omitted_line() {
+        let mut entries: Vec<SessionMessageEntry> = Vec::new();
+        for i in 0..300 {
+            entries.push(seed_entry(
+                MessageRole::User,
+                vec![MessagePart::Text {
+                    id: format!("p{i}"),
+                    text: format!("message {i} {}", "x".repeat(400)),
+                }],
+            ));
+        }
+        let out = seed_prompt("ext-codex-9", &entries, "next");
+        let block = out
+            .split("<earlier-conversation>")
+            .nth(1)
+            .unwrap()
+            .split("</earlier-conversation>")
+            .next()
+            .unwrap();
+        assert!(block.len() <= 61_000);
+        let omitted: usize = block
+            .trim_start()
+            .strip_prefix('[')
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(omitted > 0);
+        assert!(block.contains("message 299"), "newest lines are kept");
+        assert!(!block.contains("message 0 "), "oldest lines dropped");
     }
 }
