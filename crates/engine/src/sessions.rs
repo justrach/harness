@@ -2052,7 +2052,13 @@ async fn drive_run(
     // routes into a live run) starts the next turn with zero respawn/resume
     // latency. `Some(when)` = idle since then; the 30-min reaper below ends
     // a session nobody comes back to (harness SESSION_IDLE_MS).
-    const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    // `HARNESS_SESSION_IDLE_MS` overrides the window (tests shorten it).
+    let session_idle = std::env::var("HARNESS_SESSION_IDLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(30 * 60));
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
     // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
@@ -2117,6 +2123,17 @@ async fn drive_run(
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
+    // Subagents still RUNNING, by spawn id: tagged traffic seen and no tagged
+    // Done since. A background subagent outlives the turn that spawned it,
+    // so the idle reaper holds off while any is live (reaping cancels the
+    // agent process under it, and its chip ends failed, unresumable). A
+    // spawn whose own ToolResult arrives after its traffic was a foreground
+    // child that finished with the call — some drivers send no tagged Done
+    // for those — so the result clears it; later tagged traffic (a
+    // background child) re-adds it. `last_subagent_activity` restarts the
+    // idle window once they all settle.
+    let mut live_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_subagent_activity: Option<tokio::time::Instant> = None;
 
     let mut final_completed_turn = None;
     let final_status = loop {
@@ -2148,9 +2165,13 @@ async fn drive_run(
                 // Idle reaper (harness SESSION_IDLE_MS): a parked persistent session
                 // nobody returned to in 30 minutes releases its child. The turn
                 // was finalized at Done, so this end is clean — no aborted stamp.
+                // Disarmed while a subagent runs; the window counts from the
+                // park or the last subagent activity, whichever is later.
                 _ = tokio::time::sleep_until(
-                    idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
-                ), if idle_since.is_some() => {
+                    idle_since
+                        .map(|at| last_subagent_activity.map_or(at, |a| a.max(at)) + session_idle)
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if idle_since.is_some() && live_subagents.is_empty() => {
                     tracing::info!(chat = %chat_id, "reaping idle persistent session");
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -2407,6 +2428,12 @@ async fn drive_run(
                 // pre-viz behavior), never a reopened doc.
                 continue;
             }
+            last_subagent_activity = Some(tokio::time::Instant::now());
+            if matches!(sub_event.as_ref(), AgentEvent::Done { .. }) {
+                live_subagents.remove(parent_tool_use_id);
+            } else {
+                live_subagents.insert(parent_tool_use_id.clone());
+            }
             let sub_id = subagent_doc_id(&chat_id, parent_tool_use_id);
             let chip_streaming = folded
                 .iter()
@@ -2539,6 +2566,11 @@ async fn drive_run(
                 }
             }
             continue;
+        }
+        // A spawn call returning settles a foreground child (see
+        // `live_subagents`). Before the parked gate, which drops late results.
+        if let AgentEvent::ToolResult { id, .. } = &event {
+            live_subagents.remove(id);
         }
 
         // Any stream activity proves the run is alive — keep the session's
