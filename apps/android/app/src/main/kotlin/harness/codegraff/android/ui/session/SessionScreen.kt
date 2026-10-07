@@ -110,6 +110,11 @@ fun SessionScreen(
     }
     LaunchedEffect(chatId) { model.markSeen(chatId) }
     DisposableEffect(chatId) { onDispose { model.markSeen(chatId) } }
+    // Live sync: hydrate the session doc and join its room while the screen is up.
+    DisposableEffect(chatId) {
+        model.attachSession(chatId)
+        onDispose { model.detachSession(chatId) }
+    }
 
     val status = state.liveStatus(chat)
     // This session's transcript is its own flow: a streamed token recomposes this screen, not Home.

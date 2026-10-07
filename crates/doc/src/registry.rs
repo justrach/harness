@@ -587,12 +587,28 @@ impl RegistryDoc {
         Utc::now().timestamp_millis()
     }
 
-    fn next_hlc(&mut self) -> String {
+    /// A fresh clock from this device's monotonic HLC source.
+    pub fn next_hlc(&mut self) -> String {
         let device = self.device_id.clone();
         self.clock.next(Self::now_ms(), &device)
     }
 
-    fn enqueue_ops(&mut self, mut ops: Vec<RowOp>) {
+    /// Advance the clock past a clock observed on a row, so the next local
+    /// write is causally after it even when the writer's wall clock ran ahead.
+    pub fn observe_hlc(&mut self, hlc: &str) {
+        let mut parts = hlc.splitn(3, '-');
+        if let (Some(ms), Some(counter)) = (
+            parts.next().and_then(|v| v.parse::<i64>().ok()),
+            parts.next().and_then(|v| v.parse::<u32>().ok()),
+        ) && (ms, counter) > (self.clock.last_ms, self.clock.counter)
+        {
+            self.clock.last_ms = ms;
+            self.clock.counter = counter;
+        }
+    }
+
+    /// Queue local ops as pending batches (chunked under the room's op cap).
+    pub fn enqueue_ops(&mut self, mut ops: Vec<RowOp>) {
         if ops.is_empty() {
             return;
         }
@@ -624,7 +640,10 @@ impl RegistryDoc {
         }
     }
 
-    fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
+    /// One field-level write as its own batch. The typed API below is built on
+    /// it; a viewer device (crates/mobile) uses it directly for the exact field
+    /// sets its writes carry.
+    pub fn write(&mut self, kind: &str, id: &str, op: OpKind, set: BTreeMap<String, Value>) {
         let hlc = self.next_hlc();
         self.enqueue_ops(vec![RowOp {
             kind: kind.to_string(),
@@ -636,7 +655,8 @@ impl RegistryDoc {
         }]);
     }
 
-    fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
+    /// Tombstone rows in ONE batch under one clock.
+    pub fn delete_row_ops(&mut self, keys: &[(&str, &str)]) {
         let hlc = self.next_hlc();
         let ops = keys
             .iter()
@@ -655,7 +675,7 @@ impl RegistryDoc {
     // ── overlay reads ───────────────────────────────────────────────────────
 
     /// The row as this device should display it: authoritative + pending ops.
-    fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
+    pub fn overlay_row(&self, kind: &str, id: &str) -> Option<RegistryRow> {
         let mut row = self
             .authoritative
             .get(kind)
@@ -675,7 +695,7 @@ impl RegistryDoc {
     }
 
     /// All live rows of `kind`, overlay applied.
-    fn overlay_rows(&self, kind: &str) -> Vec<RegistryRow> {
+    pub fn overlay_rows(&self, kind: &str) -> Vec<RegistryRow> {
         let mut ids: Vec<String> = self
             .authoritative
             .get(kind)
@@ -707,7 +727,7 @@ impl RegistryDoc {
         out
     }
 
-    fn row_exists(&self, kind: &str, id: &str) -> bool {
+    pub fn row_exists(&self, kind: &str, id: &str) -> bool {
         self.overlay_row(kind, id).is_some()
     }
 

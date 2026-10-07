@@ -529,4 +529,80 @@ class ParityTest {
             assertTrue("${strings.getString(key)} is missing from the Compose app", source.contains("\"${strings.getString(key)}\""))
         }
     }
+
+    // MARK: Live sync: registry projection and transcript decoding. Android runs these in the native core
+    // (crates/mobile), so the checks go through the generated bindings into the host build of it.
+
+    @Test
+    fun registryRowsProjectTheSameWay() {
+        val vector = load("vectors/registry-projection.json")
+        val got = harness.codegraff.android.core.projectRegistryRows(vector.getJSONArray("rows").toString())
+        val expect = vector.getJSONObject("expect")
+        assertEquals(expect.list("devices"), got.devices.map { it.id })
+        assertEquals(expect.list("deviceNames"), got.devices.map { it.name })
+        assertEquals(expect.getJSONArray("deviceCapabilities").let { a -> (0 until a.length()).map { a.getJSONArray(it).strings() } }, got.devices.map { it.capabilities })
+        assertEquals(expect.list("spaces"), got.spaces.map { it.id })
+        assertEquals(
+            expect.list("chats"),
+            got.chats.sortedBy { it.id }.map { c ->
+                listOf(c.id, c.title ?: "-", c.archived, c.config?.harness ?: "-", c.config?.model ?: "-", c.roomGen ?: "-", c.spaceId ?: "-", c.createdAt).joinToString("|")
+            },
+        )
+        val sessions = expect.getJSONObject("sessions")
+        assertEquals(sessions.keys().asSequence().associateWith { sessions.getString(it) }, got.sessions.associate { it.chatId to iosStatus(it.status) })
+        assertEquals(expect.list("pinned"), got.pinnedSessionIds)
+    }
+
+    private fun iosStatus(status: harness.codegraff.android.core.SessionStatusRecord) = when (status) {
+        harness.codegraff.android.core.SessionStatusRecord.IDLE -> "idle"
+        harness.codegraff.android.core.SessionStatusRecord.WORKING -> "working"
+        harness.codegraff.android.core.SessionStatusRecord.AWAITING_INPUT -> "awaitingInput"
+        harness.codegraff.android.core.SessionStatusRecord.ERRORED -> "errored"
+    }
+
+    private fun field(value: harness.codegraff.android.core.ToolFieldRecord): String = when (value) {
+        is harness.codegraff.android.core.ToolFieldRecord.Text -> "s:${value.value}"
+        is harness.codegraff.android.core.ToolFieldRecord.Flag -> "b:${value.value}"
+        is harness.codegraff.android.core.ToolFieldRecord.Number -> "n:${value.value}"
+        is harness.codegraff.android.core.ToolFieldRecord.Tasks -> "tasks:" + value.items.joinToString(",") { it.text + if (it.done) "+" else "-" }
+        is harness.codegraff.android.core.ToolFieldRecord.Items -> "list:${value.items.size}"
+    }
+
+    private fun part(p: harness.codegraff.android.core.MessagePartRecord): String = when (p) {
+        is harness.codegraff.android.core.MessagePartRecord.Text -> "text ${p.id} ${p.text}"
+        is harness.codegraff.android.core.MessagePartRecord.Image -> "image ${p.id} ${p.path} ${p.name} ${p.mimeType}"
+        is harness.codegraff.android.core.MessagePartRecord.Tool ->
+            "tool ${p.id} ${p.tag} resolved=${p.resolved} error=${p.isError} fields=" +
+                p.fields.entries.sortedBy { it.key }.joinToString(",") { "${it.key}=${field(it.value)}" }
+        is harness.codegraff.android.core.MessagePartRecord.Input -> "input ${p.id} request=${p.requestId} questions=${p.questions.size} resolved=${p.resolved}"
+        is harness.codegraff.android.core.MessagePartRecord.Error -> "error ${p.id} ${p.message} reauth=${p.reauth ?: "-"}"
+    }
+
+    private fun gate(g: harness.codegraff.android.core.QueueDeliveryGateRecord?): String = when (g) {
+        is harness.codegraff.android.core.QueueDeliveryGateRecord.Editing -> "editing ${g.ownerDeviceId} ${g.expiresAtMs}"
+        is harness.codegraff.android.core.QueueDeliveryGateRecord.ReviewRequired -> "review ${g.ownerDeviceId}"
+        null -> "-"
+    }
+
+    @Test
+    fun sessionDocsDecodeTheSameWay() {
+        for (c in load("vectors/transcript-decode.json").rows("cases")) {
+            val got = harness.codegraff.android.core.decodeSessionDoc(c.getJSONArray("messages").toString(), c.getJSONArray("queue").toString())
+            val name = c.getString("name")
+            val expected = c.rows("entries")
+            assertEquals(name, expected.map { it.getString("entry") }, got.entries.map { e ->
+                val status = when (e.status) {
+                    harness.codegraff.android.core.MessageStatusRecord.STREAMING -> "streaming"
+                    harness.codegraff.android.core.MessageStatusRecord.COMPLETE -> "complete"
+                    harness.codegraff.android.core.MessageStatusRecord.ABORTED -> "aborted"
+                    null -> "-"
+                }
+                "${e.id}|${e.role.name.lowercase()}|$status|${e.deviceId}|${e.createdAt}"
+            })
+            assertEquals(name, expected.map { it.list("parts") }, got.entries.map { e -> e.parts.map(::part) })
+            assertEquals(name, c.list("rows"), got.queue.map { q ->
+                listOf(q.id, q.text, q.holdForTurnEnd, gate(q.deliveryGate), q.issuedBy, q.issuedAt, q.attachments.size).joinToString("|")
+            })
+        }
+    }
 }

@@ -122,6 +122,7 @@ private fun TranscriptRowView(row: TranscriptRow, veils: VeilStore, reduceMotion
         is RowKind.ToolGroup -> ToolGroupView(row.id, kind.tools, kind.autoOpen)
         is RowKind.InputChip -> InputChipView(kind.header, kind.resolved)
         is RowKind.ErrorChip -> ErrorChipView(kind.message)
+        is RowKind.GeneratedImage -> GeneratedImageChipView(kind.name)
     }
 }
 
@@ -278,6 +279,29 @@ private fun ErrorChipView(message: String) {
         }
         Text("Error", style = sans(12f, FontWeight.Medium), color = p.text)
         Text(message, style = sans(12f), color = p.text.opacity(0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+    }
+}
+
+/**
+ * A generated image, by name. The bytes live on the host that produced them and are not fetched on Android yet, so
+ * this stands in for iOS's GeneratedImageView.
+ */
+@Composable
+private fun GeneratedImageChipView(name: String) {
+    val p = Theme.palette
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        Modifier.fillMaxWidth().height(34.dp).background(p.ink(0.045f), shape)
+            .border(1.dp, p.hairline(0.08f), shape).padding(horizontal = 8.dp)
+            .semantics(mergeDescendants = true) { contentDescription = "Generated image, $name" },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(Modifier.size(20.dp).background(p.ink(0.09f), RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
+            GlyphView(Glyph.Photo, 12.dp, p.textMuted, strokeWidth = 2f)
+        }
+        Text("Image", style = sans(12f, FontWeight.Medium), color = p.text)
+        Text(name, style = sans(12f), color = p.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
     }
 }
 
