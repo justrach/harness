@@ -240,3 +240,124 @@ fn graff_notice_card_shows_dismisses_and_resurfaces(cx: &mut gpui::TestAppContex
     assert!(cx.debug_bounds("graff-notice-update").is_some());
     assert!(cx.debug_bounds("graff-notice-whats-new").is_some());
 }
+
+/// #219: the titlebar arrows walk OPEN tabs, not NavHistory — the enabled
+/// state and the click both come from `chat_tabs`/`chat_tab`, gated by the
+/// Chat route.
+#[gpui::test]
+fn titlebar_arrows_walk_open_tabs_not_route_history(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        crate::history::init(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+    });
+    let (host, cx) = cx.add_window_view(|_, cx| {
+        ToolbarHost(cx.new(|cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.chats = ["alpha", "bravo", "charlie", "ghost"]
+                    .into_iter()
+                    .map(|id| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state
+            });
+            let mut shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            // Three tabs: two chats + an open new-session canvas, first lit.
+            shell.chat_tabs = vec![
+                chat_tabs::ChatTab {
+                    selected: Some("alpha".into()),
+                    ..Default::default()
+                },
+                chat_tabs::ChatTab {
+                    selected: Some("bravo".into()),
+                    ..Default::default()
+                },
+                chat_tabs::ChatTab::default(),
+            ];
+            shell.chat_tab = 0;
+            shell
+                .state
+                .update(cx, |state, cx| state.select_chat(Some("alpha".into()), cx));
+            // Route history pointing at an unopened chat must not feed the
+            // arrows.
+            shell.nav.push(NavEntry::Chat("ghost".into()));
+            shell
+        }))
+    });
+    let shell = host.read_with(cx, |host, _| host.0.clone());
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        cx.debug_bounds("nav-back").is_none(),
+        "first tab: no back arrow"
+    );
+    let forward = cx.debug_bounds("nav-forward").expect("next tab exists");
+    cx.simulate_click(forward.center(), Default::default());
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.chat_tab, 1);
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("bravo"));
+    });
+
+    cx.update(|window, cx| window.draw(cx).clear());
+    // Tab 2 is an open new-session canvas — still a real tab.
+    let forward = cx.debug_bounds("nav-forward").unwrap();
+    cx.simulate_click(forward.center(), Default::default());
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.chat_tab, 2);
+        assert!(shell.state.read(cx).selected_chat.is_none());
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(
+        cx.debug_bounds("nav-forward").is_none(),
+        "last tab: no forward arrow"
+    );
+    let back = cx.debug_bounds("nav-back").unwrap();
+    cx.simulate_click(back.center(), Default::default());
+    shell.read_with(cx, |shell, _| assert_eq!(shell.chat_tab, 1));
+
+    // Settings hides the open tabs entirely — the arrows go with them.
+    shell.update(cx, |shell, cx| {
+        shell.route = Route::Settings(SettingsSection::Devices);
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(cx.debug_bounds("nav-back").is_none() && cx.debug_bounds("nav-forward").is_none());
+    shell.update(cx, |shell, cx| {
+        shell.route = Route::Chat;
+        // One tab: both disabled.
+        shell.chat_tabs.truncate(1);
+        shell.chat_tab = 0;
+        shell
+            .state
+            .update(cx, |state, cx| state.select_chat(Some("alpha".into()), cx));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    assert!(cx.debug_bounds("nav-back").is_none() && cx.debug_bounds("nav-forward").is_none());
+}

@@ -6007,8 +6007,11 @@ impl Shell {
     /// through to the titlebar drag strips below.
     fn render_titlebar_cluster(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let can_back = self.nav.can_back();
-        let can_forward = self.nav.can_forward();
+        // The arrows walk OPEN tabs, not route history: no archived chats,
+        // no dead new-session canvases, and nothing while Settings shows.
+        let tab_arrows = matches!(self.route, Route::Chat);
+        let can_back = tab_arrows && self.chat_tab > 0;
+        let can_forward = tab_arrows && self.chat_tab + 1 < self.chat_tabs.len();
         // The titlebar + shares Cmd+T's new-tab behavior in both sidebar states.
         // Keep its existing visibility: show it only for an established session.
         let plus_alpha = self.titlebar_plus_alpha(cx);
@@ -6095,14 +6098,18 @@ impl Shell {
                         icons::ARROW_LEFT,
                         can_back,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_back(cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.switch_chat_tab(this.chat_tab - 1, window, cx)
+                        }),
                     ))
                     .child(nav_history_button(
                         "nav-forward",
                         icons::ARROW_RIGHT,
                         can_forward,
                         &theme,
-                        cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.switch_chat_tab(this.chat_tab + 1, window, cx)
+                        }),
                     )),
             )
             .children(show_plus.then(|| {
