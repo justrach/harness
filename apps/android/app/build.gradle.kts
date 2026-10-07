@@ -46,6 +46,7 @@ val generateUniffiBindings = tasks.register<Exec>("generateUniffiBindings") {
     val out = uniffiBindingsDir.get().asFile
     // The library is the input: a Rust change rebuilds it, which regenerates the bindings.
     inputs.file(hostLibDir.resolve(hostLibName))
+    inputs.file(repoRoot.resolve("crates/mobile/uniffi.toml"))
     outputs.dir(out)
     doFirst { out.deleteRecursively() }
     commandLine(
