@@ -98,9 +98,10 @@ fn entry(role: MessageRole, text: &str, id: &str) -> SessionMessageEntry {
 fn run_request(prompt: &str) -> RunRequest {
     RunRequest {
         prompt: prompt.into(),
-        // Even a request pinned to the source harness must not reach it.
+        // Even a request pinned to the source harness must not reach it —
+        // and its source-agent model pick must not reach graff.
         harness: Some(HarnessId::ClaudeCode),
-        model: None,
+        model: Some("claude-sonnet".into()),
         reasoning: None,
         model_options: Default::default(),
         cwd: "/w/app".into(),
@@ -191,6 +192,20 @@ async fn imported_claude_chat_continues_in_graff_seeded_and_never_resumed() {
         .expect("the earlier transcript rides the first prompt");
     assert!(block.contains("User: make the build faster"));
     assert!(block.contains("Assistant: Cached the deps."));
+    assert_eq!(first.model, None, "the Claude model id never reaches graff");
+    assert_eq!(first.reasoning, None);
+    assert!(first.model_options.is_empty());
+    // The legacy row was repaired: graff config, native session tombstoned.
+    let row = core.workspace.chat(CHAT).unwrap().expect("chat row");
+    assert_eq!(
+        row.config.as_ref().map(|c| c.harness),
+        Some(HarnessId::Graff)
+    );
+    assert_eq!(row.config.as_ref().and_then(|c| c.model.clone()), None);
+    // The stored native id was tombstoned at dispatch (so resume was never
+    // attempted — see `first.resume` above) and the finished run then
+    // recorded graff's own session id.
+    assert_eq!(row.harness_session_id.as_deref(), Some("graff-live-1"));
     assert!(
         first
             .prompt

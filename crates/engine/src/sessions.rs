@@ -30,8 +30,8 @@ use harness_doc::{
     SessionMessageEntry, fold_event_into_parts, sanitize_tool_call,
 };
 use harness_proto::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, Session, SessionStatus,
-    UserInputAnswer, UserInputQuestion,
+    AgentEvent, ChatConfig, DoneStatus, HarnessId, ReasoningLevel, RunRequest, Session,
+    SessionStatus, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -391,6 +391,29 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        // Imported Claude Code / Codex chats always run in graff — callers
+        // that bypass the doc host (MCP send_message, crash recovery) reach
+        // dispatch with the source harness still named.
+        let mut harness_id = harness_id;
+        if crate::external_history::continues_in_graff(chat_id) {
+            // The source harness can be named by the caller, the request, or
+            // the (pre-repair) chat row — any of them means the request's
+            // model/reasoning picks are source-agent ids that mean nothing
+            // to graff, which runs its configured default.
+            let row_named_source = self.inner.fix_imported_chat_row(chat_id);
+            if harness_id != HarnessId::Graff
+                || matches!(
+                    request.harness,
+                    Some(HarnessId::ClaudeCode | HarnessId::Codex)
+                )
+                || row_named_source
+            {
+                request.model = None;
+                request.reasoning = None;
+                request.model_options = Default::default();
+            }
+            harness_id = HarnessId::Graff;
+        }
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
         request.cwd = crate::repos::expand_home(&request.cwd);
@@ -1321,6 +1344,51 @@ impl Inner {
         // Cache the journal hit (memory + row) so later dispatches skip the scan.
         self.remember_harness_session(chat_id, &session_id, &session_cwd);
         cwd_ok(&session_cwd).then_some(session_id)
+    }
+
+    /// Legacy imported rows still name the source harness in the workspace:
+    /// move the row to graff and drop a stored native session id so the UI
+    /// and resume agree with the dispatch path. Returns true when the row
+    /// named a source harness (ClaudeCode/Codex) before the repair.
+    fn fix_imported_chat_row(&self, chat_id: &str) -> bool {
+        let Some(ws) = self.workspace() else {
+            return false;
+        };
+        let Ok(Some(row)) = ws.chat(chat_id) else {
+            return false;
+        };
+        let named_source = matches!(
+            row.config.as_ref().map(|c| c.harness),
+            Some(HarnessId::ClaudeCode | HarnessId::Codex)
+        );
+        if let Some(config) = row.config
+            && config.harness != HarnessId::Graff
+        {
+            let config = ChatConfig {
+                harness: HarnessId::Graff,
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                sandbox: config.sandbox,
+            };
+            if let Err(err) = ws.set_chat_config(chat_id, &config) {
+                tracing::warn!(chat = %chat_id, error = %err, "imported chat graff config write failed");
+            }
+        }
+        if let (Some(stored), Some(native)) = (
+            row.harness_session_id.as_deref(),
+            crate::external_history::native_id(chat_id),
+        ) && stored == native
+        {
+            // The empty-string tombstone is the codebase's explicit
+            // "no resume" marker.
+            ws.set_chat_harness_session(
+                chat_id,
+                "",
+                row.harness_session_cwd.as_deref().unwrap_or(""),
+            );
+        }
+        named_source
     }
 
     /// The last harness session id named anywhere in the chat's journal, with
