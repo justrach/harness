@@ -10,6 +10,15 @@ on:
       # The shared parity vectors and the bundled theme catalog the Android tests read.
       - "apps/parity/**"
       - "apps/ios/Harness/Theme/themes.json"
+      # The native core and the crates it is built from.
+      - "crates/mobile/**"
+      - "crates/doc/**"
+      - "crates/sync/**"
+      - "crates/proto/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/actions/android-native/**"
       - ".github/workflows/android.yml"
   push:
     branches: [main]
@@ -17,6 +26,14 @@ on:
       - "apps/android/**"
       - "apps/parity/**"
       - "apps/ios/Harness/Theme/themes.json"
+      - "crates/mobile/**"
+      - "crates/doc/**"
+      - "crates/sync/**"
+      - "crates/proto/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/actions/android-native/**"
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
@@ -45,8 +62,10 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           # The action's default `tools` package no longer exists in the SDK repository, which made
-          # sdkmanager exit 1. Gradle fetches the platform it needs once licenses are accepted.
-          packages: ""
+          # sdkmanager exit 1. Gradle fetches the platform it needs once licenses are accepted; the NDK links the
+          # native core and must match `ndkVersion` in app/build.gradle.kts.
+          packages: "ndk;27.1.12297006"
+      - uses: ./.github/actions/android-native
       - uses: gradle/actions/setup-gradle@v4
       # The unit tests include the parity tests: the shared vectors, the UX contract and the bundled theme catalog.
       - name: Unit tests, lint and debug build
@@ -80,7 +99,8 @@ jobs:
           java-version: 17
       - uses: android-actions/setup-android@v3
         with:
-          packages: ""
+          packages: "ndk;27.1.12297006"
+      - uses: ./.github/actions/android-native
       - uses: gradle/actions/setup-gradle@v4
       # Minified with R8, like a store build. `perf` is the same code signed with the debug key so it installs.
       - name: Perf APK and release bundle
@@ -107,7 +127,8 @@ jobs:
           java-version: 17
       - uses: android-actions/setup-android@v3
         with:
-          packages: ""
+          packages: "ndk;27.1.12297006"
+      - uses: ./.github/actions/android-native
       - uses: gradle/actions/setup-gradle@v4
       - name: Enable KVM for the emulator
         working-directory: .
@@ -132,7 +153,8 @@ jobs:
           heap-size: 512M
           disable-animations: true
           working-directory: apps/android
-          script: ./gradlew --no-daemon :app:connectedDebugAndroidTest
+          # The emulator is x86_64, so only that ABI of the native core is built.
+          script: ./gradlew --no-daemon -Pharness.abis=x86_64 :app:connectedDebugAndroidTest
       - name: Instrumented tests (one retry on a fresh emulator)
         if: steps.first.outcome == 'failure'
         uses: reactivecircus/android-emulator-runner@v2
@@ -147,7 +169,8 @@ jobs:
           heap-size: 512M
           disable-animations: true
           working-directory: apps/android
-          script: ./gradlew --no-daemon :app:connectedDebugAndroidTest
+          # The emulator is x86_64, so only that ABI of the native core is built.
+          script: ./gradlew --no-daemon -Pharness.abis=x86_64 :app:connectedDebugAndroidTest
       - name: Keep the reports
         if: always()
         uses: actions/upload-artifact@v4
