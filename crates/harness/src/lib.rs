@@ -414,6 +414,7 @@ pub use acp::graff_worktree::{
 };
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
+pub use codex::dictation::{Dictation, DictationControls, DictationEvent, DictationRuntime};
 pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
 
