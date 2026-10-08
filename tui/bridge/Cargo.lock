@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "harness-adapters"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "harness-doc"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "chrono",
  "harness-proto",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1319,8 +1319,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-mcp"
+version = "0.2.110"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "harness-doc",
+ "harness-proto",
+ "harness-rpc",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "harness-preview"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1346,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "harness-proto"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -1357,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "harness-rpc"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1375,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "harness-sync"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "block2",
  "futures",
@@ -1397,11 +1415,15 @@ name = "harness-tui-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "diffy",
  "futures",
  "harness-adapters",
+ "harness-doc",
  "harness-engine",
+ "harness-mcp",
  "harness-proto",
+ "harness-rpc",
  "libc",
  "serde",
  "serde_json",
@@ -1416,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "harness-update"
-version = "0.2.99"
+version = "0.2.110"
 dependencies = [
  "anyhow",
  "futures",
