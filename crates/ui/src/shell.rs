@@ -1671,9 +1671,18 @@ struct SidebarPane {
     _observation: Subscription,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Sidebar renders on this thread, for tests that check what a change
+    /// re-renders (a gpui test renders on its own thread).
+    pub(crate) static SIDEBAR_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Render for SidebarPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::transcript::record_view_frame("sidebar");
+        #[cfg(test)]
+        SIDEBAR_RENDERS.with(|n| n.set(n.get() + 1));
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
@@ -1843,9 +1852,12 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     command_palette: Option<command_palette::CommandPalette>,
     /// Conversations from other tools on this device (Claude Code, Codex, graff) that
-    /// `/resume` can import; refreshed each time the palette opens.
+    /// `/resume` can import; listed again when the palette opens and the last
+    /// list is over a minute old.
     external_sessions: Vec<command_palette::ExternalSession>,
     external_task: Option<Task<()>>,
+    /// When `external_sessions` was last listed; the palette reuses it for a while.
+    external_loaded_at: Option<std::time::Instant>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
@@ -2334,6 +2346,7 @@ impl Shell {
             command_palette: None,
             external_sessions: Vec::new(),
             external_task: None,
+            external_loaded_at: None,
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),

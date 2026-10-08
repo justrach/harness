@@ -3,6 +3,9 @@ use super::*;
 use crate::appearance::AppearanceMode;
 
 const HISTORY_RESULT_LIMIT: usize = 30;
+/// Other tools' conversations are listed again when the palette opens only
+/// after this long; until then the last list shows at once.
+const EXTERNAL_REFRESH_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 const RESULTS_FADE_BAND: f32 = 18.0;
 
 pub(super) struct CommandPalette {
@@ -15,6 +18,10 @@ pub(super) struct CommandPalette {
     // while this input is still absent from the dispatch tree.
     focus_pending: bool,
     scroll: gpui::ScrollHandle,
+    /// The results as last rendered, and the query they answer; keys act on
+    /// exactly what is on screen.
+    entries: Vec<Entry>,
+    entries_query: String,
     _search_events: Subscription,
 }
 
@@ -153,17 +160,26 @@ impl Shell {
             "Search commands and chats…"
         };
         let search = cx.new(|cx| ComposerInput::with_context(placeholder, "PaletteSearch", cx));
-        let events = cx.subscribe(&search, |this, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
-                if let Some(palette) = this.command_palette.as_mut() {
-                    palette.active = 0;
-                    palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-                }
-                cx.notify();
+        // Typing and arrowing change only the palette, so they never notify
+        // Shell: the cached sidebar observes Shell and would re-render every
+        // conversation row per key. The search input notifies itself on each
+        // edit, which redraws its ancestors (Shell, this palette) and leaves
+        // sibling caches alone; `window.refresh()` would drop every cache.
+        let events = cx.subscribe(&search, |this, _, event, _| {
+            if matches!(event, ComposerInputEvent::Edited)
+                && let Some(palette) = this.command_palette.as_mut()
+            {
+                palette.active = 0;
+                palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
             }
         });
         let previous_focus = window.focused(cx);
-        self.load_external_sessions(cx);
+        let stale = self
+            .external_loaded_at
+            .is_none_or(|at| at.elapsed() >= EXTERNAL_REFRESH_AFTER);
+        if stale {
+            self.load_external_sessions(cx);
+        }
         self.command_palette = Some(CommandPalette {
             search,
             focus: cx.focus_handle(),
@@ -172,6 +188,8 @@ impl Shell {
             enter_press: EnterPress::default(),
             focus_pending: true,
             scroll: gpui::ScrollHandle::new(),
+            entries: Vec::new(),
+            entries_query: String::new(),
             _search_events: events,
         });
         cx.notify();
@@ -290,6 +308,7 @@ impl Shell {
                     .and_then(|v| serde_json::from_value::<Vec<ExternalSession>>(v).ok())
                 {
                     shell.external_sessions = rows;
+                    shell.external_loaded_at = Some(std::time::Instant::now());
                     cx.notify();
                 }
             })
@@ -430,6 +449,8 @@ impl Shell {
     ) -> Option<AnyElement> {
         let entries = self.command_entries(cx);
         let palette = self.command_palette.as_mut()?;
+        palette.entries = entries.clone();
+        palette.entries_query = palette.search.read(cx).text().to_string();
         if std::mem::take(&mut palette.focus_pending) {
             window.focus(&palette.search.focus_handle(cx), cx);
         }
@@ -718,17 +739,18 @@ impl Shell {
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     match event.keystroke.key.as_str() {
                         "up" | "down" => {
-                            let count = this.command_entries(cx).len();
-                            if count > 0
-                                && let Some(palette) = this.command_palette.as_mut()
+                            if let Some(palette) = this.command_palette.as_mut()
+                                && !palette.entries.is_empty()
                             {
+                                let count = palette.entries.len();
                                 palette.active = if event.keystroke.key == "down" {
                                     (palette.active + 1) % count
                                 } else {
                                     (palette.active + count - 1) % count
                                 };
                                 palette.scroll.scroll_to_item(palette.active);
-                                cx.notify();
+                                // Redraw through the input, not Shell (see toggle_command_palette).
+                                palette.search.update(cx, |_, cx| cx.notify());
                             }
                         }
                         "enter" => {
@@ -740,11 +762,21 @@ impl Shell {
                                 cx.stop_propagation();
                                 return;
                             }
-                            let entries = this.command_entries(cx);
+                            // Typed and entered within one frame: answer the new query.
+                            let stale = this
+                                .command_palette
+                                .as_ref()
+                                .is_some_and(|p| p.entries_query != p.search.read(cx).text());
+                            if stale {
+                                let entries = this.command_entries(cx);
+                                if let Some(palette) = this.command_palette.as_mut() {
+                                    palette.entries = entries;
+                                }
+                            }
                             if let Some(entry) = this
                                 .command_palette
                                 .as_ref()
-                                .and_then(|p| entries.get(p.active))
+                                .and_then(|p| p.entries.get(p.active))
                                 .cloned()
                             {
                                 this.activate_command(entry, window, cx);
@@ -965,6 +997,102 @@ mod tests {
         .unwrap();
         assert_eq!(row.source_label(), "Codex");
         assert_eq!(row.folder(), "app");
+    }
+
+    #[gpui::test]
+    fn typing_in_the_palette_leaves_the_sidebar_cached(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let data_dir = dir.path().to_path_buf();
+        let (shell, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir,
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update_in(cx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats_synced = true;
+                state.chats = (0..200)
+                    .map(|i| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": format!("chat-{i}"), "title": format!("Chat number {i}"),
+                            "deviceId": "local", "archived": false,
+                            "createdAt": "2026-09-20T00:00:00Z"
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+            });
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.toggle_command_palette(window, cx);
+        });
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        // Let the sidebar's open animation settle: a moving width re-renders it.
+        for _ in 0..3 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_secs(2));
+            cx.run_until_parked();
+        }
+        let before = crate::shell::SIDEBAR_RENDERS.with(|n| n.get());
+        assert!(before > 0, "the window drew the sidebar");
+        for query in ["c", "ch", "chat 1", "chat 19"] {
+            shell.update(cx, |shell, cx| {
+                let search = shell.command_palette.as_ref().unwrap().search.clone();
+                search.update(cx, |input, cx| input.set_text(query, cx));
+            });
+            cx.run_until_parked();
+        }
+        let (query, entries) = shell.read_with(cx, |shell, _| {
+            let palette = shell.command_palette.as_ref().unwrap();
+            (palette.entries_query.clone(), palette.entries.clone())
+        });
+        assert_eq!(query, "chat 19", "the palette redrew for the last query");
+        assert!(entries.contains(&Entry::Chat("chat-19".into())));
+        assert_eq!(
+            crate::shell::SIDEBAR_RENDERS.with(|n| n.get()),
+            before,
+            "typing in the palette re-rendered the sidebar"
+        );
+
+        // The window's first key event settles focus once; count from after it.
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        let before = crate::shell::SIDEBAR_RENDERS.with(|n| n.get());
+        cx.simulate_keystrokes("down down up");
+        cx.run_until_parked();
+        let active = shell.read_with(cx, |shell, _| {
+            shell.command_palette.as_ref().unwrap().active
+        });
+        assert_eq!(active, 2, "arrows moved the selection");
+        assert_eq!(
+            crate::shell::SIDEBAR_RENDERS.with(|n| n.get()),
+            before,
+            "arrowing through results re-rendered the sidebar"
+        );
     }
 
     #[test]
