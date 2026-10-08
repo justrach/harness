@@ -93,6 +93,17 @@ private class FakeCore : MobileCoreInterface {
         return listOf(ModelInfoRecord("m-live", "Live model", null, listOf("low"), emptyList()))
     }
     override suspend fun listRefs(deviceId: String, repoPath: String) = listOf(RepoRefRecord("main", true, null))
+    var compactAt: UByte? = null
+    override suspend fun graffCompactAt(deviceId: String): UByte? {
+        if (!reachable) throw RelayException.Timeout()
+        return compactAt
+    }
+    override suspend fun setGraffCompactAt(deviceId: String, pct: UByte?): UByte? {
+        if (!reachable) throw RelayException.Timeout()
+        calls += "compact-at $deviceId $pct"
+        compactAt = pct
+        return compactAt
+    }
     override fun setNetwork(online: Boolean, key: String) {}
     override suspend fun switchRef(deviceId: String, repoPath: String, refName: String) {}
     override fun deleteChat(chatId: String) {}
@@ -265,6 +276,18 @@ class LiveSyncTest {
         assertEquals("the last answer is kept", listOf("pi"), model.listHarnesses("mac").map { it.id })
         assertEquals("never reached: the static catalog", HarnessCatalog.harnesses, model.listHarnesses("other"))
         assertEquals(HarnessCatalog.models("codex"), model.listModels("other", "codex"))
+    }
+
+    @Test
+    fun graffCompactionIsReadAndWrittenOnTheChosenComputer() = runTest(dispatcher) {
+        val (model, core, _) = live()
+        assertEquals("unset is graff's default", null, model.graffCompactAt("mac"))
+        assertEquals(70, model.setGraffCompactAt("mac", 70))
+        assertEquals(70, model.graffCompactAt("mac"))
+        assertEquals("null restores the default", null, model.setGraffCompactAt("mac", null))
+        assertEquals(listOf("compact-at mac 70", "compact-at mac null"), core.calls.filter { it.startsWith("compact-at") })
+        core.reachable = false
+        assertTrue(runCatching { model.graffCompactAt("mac") }.isFailure)
     }
 
     @Test

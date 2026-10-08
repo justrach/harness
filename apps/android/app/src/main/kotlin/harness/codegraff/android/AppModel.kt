@@ -673,6 +673,17 @@ class AppModel(
         return harnessCache[deviceId] ?: HarnessCatalog.harnesses
     }
 
+    /** Where graff compacts on one computer (Settings > Graff compaction); null is graff's default. The demo keeps it. */
+    suspend fun graffCompactAt(deviceId: String): Int? {
+        val live = live ?: return null
+        return live.core.graffCompactAt(deviceId)?.toInt()
+    }
+
+    suspend fun setGraffCompactAt(deviceId: String, pct: Int?): Int? {
+        val live = live ?: return pct
+        return live.core.setGraffCompactAt(deviceId, pct?.toUByte())?.toInt()
+    }
+
     /** The models an agent offers on the computer that runs the session, with the same fallbacks. */
     suspend fun listModels(deviceId: String, harness: String): List<ModelInfo> {
         val live = live ?: return HarnessCatalog.models(harness)

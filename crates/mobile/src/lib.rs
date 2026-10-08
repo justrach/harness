@@ -431,6 +431,26 @@ impl MobileCore {
             .await
     }
 
+    /// Where the device's graff chats compact, as a percent of the context window; `None` is graff's default.
+    pub async fn graff_compact_at(
+        &self,
+        device_id: String,
+    ) -> Result<Option<u8>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.graff_compact_at(&device_id).await })
+            .await
+    }
+
+    pub async fn set_graff_compact_at(
+        &self,
+        device_id: String,
+        pct: Option<u8>,
+    ) -> Result<Option<u8>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.set_graff_compact_at(&device_id, pct).await })
+            .await
+    }
+
     pub async fn list_refs(
         &self,
         device_id: String,

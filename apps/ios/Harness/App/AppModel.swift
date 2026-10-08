@@ -854,6 +854,20 @@ final class AppModel {
         return try await workspace.agentAccounts(deviceId: deviceId, forceUsage: forceUsage)
     }
 
+    /// Where graff compacts on one computer (Settings → Graff compaction);
+    /// nil is graff's default. Demo mode keeps the default.
+    func graffCompactAt(deviceId: String) async throws -> Int? {
+        if demo != nil { return nil }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.graffCompactAt(deviceId: deviceId)
+    }
+
+    func setGraffCompactAt(deviceId: String, pct: Int?) async throws -> Int? {
+        if demo != nil { return pct }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.setGraffCompactAt(deviceId: deviceId, pct: pct)
+    }
+
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {
         if let demo {
             try? await Task.sleep(nanoseconds: 120_000_000)  // feel like a network hop

@@ -328,6 +328,28 @@ impl Relay {
         .await
     }
 
+    /// `GetGraffCompactAt`: the percent of the context window where the device's graff chats compact; `None` is
+    /// graff's default.
+    pub async fn graff_compact_at(&self, device_id: &str) -> Result<Option<u8>, RelayError> {
+        self.call_as(device_id, "GetGraffCompactAt", json!({}), CALL_TIMEOUT)
+            .await
+    }
+
+    /// `SetGraffCompactAt`: `None` restores the default. Answers with the value the device kept.
+    pub async fn set_graff_compact_at(
+        &self,
+        device_id: &str,
+        pct: Option<u8>,
+    ) -> Result<Option<u8>, RelayError> {
+        self.call_as(
+            device_id,
+            "SetGraffCompactAt",
+            json!({ "pct": pct }),
+            CALL_TIMEOUT,
+        )
+        .await
+    }
+
     pub async fn list_refs(
         &self,
         device_id: &str,
