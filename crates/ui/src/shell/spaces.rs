@@ -2372,6 +2372,7 @@ impl Shell {
         self.chat_status_hover = None;
         self.cancel_pinned_session_drag(cx);
         self.sidebar_session_return = None;
+        self.split_drop_session = Some(payload.chat_id.clone());
         self.pinned_session_drag_generation = self.pinned_session_drag_generation.wrapping_add(1);
         let top = f32::from(
             window.mouse_position().y - cursor_offset.y - self.sidebar_scroll.bounds().top(),

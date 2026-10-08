@@ -1868,6 +1868,10 @@ pub struct Shell {
     pinned_session_drag_generation: u64,
     sidebar_session_transfer: Option<SidebarSessionTransfer>,
     sidebar_session_return: Option<SidebarSessionReturn>,
+    /// The sidebar session being dragged, for the split drop zones. It lasts
+    /// the whole gesture: a pins or chats frame that cancels the sidebar's
+    /// reorder preview mid-drag must not take the drop zones with it.
+    split_drop_session: Option<String>,
     /// Pending pin intents are scoped to the active profile and engine attachment.
     sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
     sidebar_pin_write_generation: u64,
@@ -2347,6 +2351,7 @@ impl Shell {
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
             sidebar_session_return: None,
+            split_drop_session: None,
             sidebar_pin_write: None,
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
@@ -8994,8 +8999,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.keystroke.key == "escape" && self.sidebar_session_transfer.is_some() {
+        if event.keystroke.key == "escape"
+            && (self.sidebar_session_transfer.is_some() || self.split_drop_session.is_some())
+        {
             cx.stop_active_drag(window);
+            self.split_drop_session = None;
             self.cancel_sidebar_session_transfer(cx);
             cx.stop_propagation();
             return;
