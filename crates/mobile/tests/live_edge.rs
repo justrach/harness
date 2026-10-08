@@ -30,6 +30,7 @@ impl TokenSource for Bearer {
 struct Seen {
     workspace: Mutex<Option<WorkspaceSnapshot>>,
     session: Mutex<Option<SessionSnapshot>>,
+    connectivity: Mutex<Option<harness_mobile::ConnectivitySnapshot>>,
 }
 impl CoreListener for Seen {
     fn workspace_changed(&self, snapshot: WorkspaceSnapshot) {
@@ -37,6 +38,50 @@ impl CoreListener for Seen {
     }
     fn session_changed(&self, snapshot: SessionSnapshot) {
         *self.session.lock().unwrap() = Some(snapshot);
+    }
+    fn connectivity_changed(&self, snapshot: harness_mobile::ConnectivitySnapshot) {
+        *self.connectivity.lock().unwrap() = Some(snapshot);
+    }
+}
+
+/// The host's engine, as far as the phone asks it anything.
+struct FakeHost;
+
+#[async_trait::async_trait]
+impl harness_rpc::RpcService for FakeHost {
+    async fn handle(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<harness_rpc::RpcReply, harness_rpc::RpcError> {
+        Ok(match method {
+            "ListHarnesses" => harness_rpc::RpcReply::Value(json!([
+                {"id": "graff", "name": "Graff"},
+                {"id": "codex", "name": "Codex", "installed": false},
+                {"id": "mock", "name": "Mock", "enabled": true}
+            ])),
+            "ListFolders" => harness_rpc::RpcReply::Value(json!({
+                "path": params.get("path").and_then(|p| p.as_str()).unwrap_or("/Users/me"),
+                "entries": [{"name": "harness", "isDir": true, "isRepo": true}],
+                "truncated": false
+            })),
+            "ListRefs" => harness_rpc::RpcReply::Value(
+                json!([{"name": "main", "current": true}, {"name": "dev"}]),
+            ),
+            "WatchCheckoutChangeRequest" => {
+                let cwd = params["cwd"].as_str().unwrap_or_default().to_owned();
+                let item = json!({
+                    "checkoutId": "", "deviceId": "mac-host", "cwd": cwd, "branch": "dev", "updatedAt": "now",
+                    "changeRequest": {"provider": "github", "number": 42, "title": "Port the sync client",
+                        "url": "https://example.invalid/pull/42", "state": "open", "baseRef": "main", "headRef": "dev"}
+                });
+                harness_rpc::RpcReply::Stream(Box::pin(futures::StreamExt::chain(
+                    futures::stream::iter(vec![item]),
+                    futures::stream::pending(),
+                )))
+            }
+            other => return Err(harness_rpc::RpcError::UnknownMethod(other.into())),
+        })
     }
 }
 
@@ -115,7 +160,7 @@ async fn the_phone_mirrors_a_host_and_writes_back_as_a_viewer() {
         })));
         doc.write("chats", &chat_id, OpKind::Upsert, set(json!({
             "id": chat_id, "deviceId": "mac-host", "spaceId": "space-1", "title": "Port the sync client",
-            "archived": false, "cwd": "/Users/me/harness", "createdAt": 2, "roomGen": 2,
+            "archived": false, "cwd": "/Users/me/harness", "branch": "dev", "createdAt": 2, "roomGen": 2,
             "config": {"harness": "graff", "model": "m1", "modelOptions": {}}
         })));
         doc.write(
@@ -137,6 +182,16 @@ async fn the_phone_mirrors_a_host_and_writes_back_as_a_viewer() {
     .await
     .expect("host joins the registry");
     host.nudge();
+    host.set_presence(1_700_000_000_000);
+    let _relay = harness_rpc::HostRelay::spawn(
+        harness_rpc::HostRelayConfig::new(
+            edge.clone(),
+            "mac-host",
+            Arc::new(harness_rpc::StaticToken(bearer.clone())),
+        ),
+        Arc::new(FakeHost),
+        Arc::new(|_| true),
+    );
 
     let session = SessionDoc::init(&chat_id).unwrap();
     session
@@ -245,6 +300,55 @@ async fn the_phone_mirrors_a_host_and_writes_back_as_a_viewer() {
             .filter(|s| s.entries.len() == 3)
     })
     .await;
+
+    // ── the host is online, the relay answers, and the PR badge resolves ───────────────────────────────────────
+    eventually("the host to read online", || {
+        let w = seen.workspace.lock().unwrap().clone()?;
+        (w.host_statuses.get("mac-host") == Some(&harness_mobile::presence::HostStatus::Online))
+            .then_some(())
+    })
+    .await;
+    let folders = core
+        .list_folders("mac-host".into(), None)
+        .await
+        .expect("folders over the relay");
+    assert_eq!(folders.entries[0].name, "harness");
+    let agents = core
+        .list_harnesses("mac-host".into())
+        .await
+        .expect("agents over the relay");
+    assert_eq!(
+        agents.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        ["graff"]
+    );
+    let refs = core
+        .list_refs("mac-host".into(), "/Users/me/harness".into())
+        .await
+        .unwrap();
+    assert!(refs[0].current);
+    let unknown = core
+        .switch_ref("mac-host".into(), "/x".into(), "dev".into())
+        .await
+        .unwrap_err();
+    assert!(
+        unknown.to_string().starts_with("unknown method"),
+        "{unknown}"
+    );
+    eventually("the PR badge", || {
+        let w = seen.workspace.lock().unwrap().clone()?;
+        (w.change_requests.get(&chat_id)?.number == 42).then_some(())
+    })
+    .await;
+    let connectivity = seen
+        .connectivity
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a connectivity snapshot");
+    assert_eq!(
+        connectivity.state,
+        harness_mobile::ConnectivityState::Connected
+    );
 
     // ── the phone writes back as a viewer; the host's replica converges ─────────────────────────────────────────
     assert!(core.rename(chat_id.clone(), "Renamed on the phone".into()));

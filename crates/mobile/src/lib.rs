@@ -11,11 +11,15 @@
 
 uniffi::setup_scaffolding!();
 
+mod change_requests;
+mod connectivity;
 mod decode;
 mod edge;
 mod logging;
+pub mod presence;
 mod projection;
 pub mod records;
+mod relay;
 mod session;
 mod workspace;
 mod writes;
@@ -23,6 +27,7 @@ mod writes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+pub use connectivity::{ConnectivitySnapshot, ConnectivityState};
 pub use edge::TokenSource;
 pub use logging::{LogSink, install_log_sink};
 use records::{SessionSnapshot, WorkspaceSnapshot};
@@ -92,8 +97,11 @@ pub fn project_registry_rows(rows_json: String) -> Result<WorkspaceSnapshot, Cor
         pins_initialized: projection::pins_initialized(&doc),
         desktop_appearance: projection::desktop_appearance(&doc),
         presence: HashMap::new(),
+        change_requests: HashMap::new(),
+        host_statuses: HashMap::new(),
         connected: false,
         synced: true,
+        retry_at_ms: None,
     })
 }
 
@@ -116,6 +124,8 @@ pub fn decode_session_doc(
 pub trait CoreListener: Send + Sync {
     fn workspace_changed(&self, snapshot: WorkspaceSnapshot);
     fn session_changed(&self, snapshot: SessionSnapshot);
+    /// The graced connectivity state changed (see `connectivity.rs`).
+    fn connectivity_changed(&self, snapshot: connectivity::ConnectivitySnapshot);
 }
 
 /// `AppModel.warmStoreCap` on iOS: sessions kept warm (hydrated and joined) without a view.
@@ -136,6 +146,11 @@ pub struct MobileCore {
     listener: Arc<dyn CoreListener>,
     workspace: Arc<Workspace>,
     sessions: Arc<Mutex<Sessions>>,
+    relay: Arc<relay::Relay>,
+    /// The OS says there is no network path (Android's network callback).
+    path_offline: Arc<std::sync::atomic::AtomicBool>,
+    /// Which network the last callback reported; a change to a working one kicks every room.
+    network_key: Mutex<Option<String>>,
 }
 
 #[uniffi::export]
@@ -188,6 +203,19 @@ impl MobileCore {
                 }),
             )
         };
+        let relay = {
+            let _guard = runtime.enter();
+            let weak = Arc::downgrade(&workspace);
+            Arc::new(relay::Relay::new(
+                &edge,
+                Arc::new(move |device: &str| {
+                    weak.upgrade()
+                        .map(|w| w.liveness(device))
+                        .unwrap_or(presence::PeerLivenessRecord::Unknown)
+                }),
+            ))
+        };
+        workspace.set_relay(relay.clone());
         Ok(Arc::new(Self {
             runtime,
             edge,
@@ -195,13 +223,40 @@ impl MobileCore {
             listener,
             workspace,
             sessions,
+            relay,
+            path_offline: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            network_key: Mutex::new(None),
         }))
     }
 
-    /// Publish the cached workspace, then join the registry room.
+    /// Publish the cached workspace, then join the registry room and start watching connectivity.
     pub fn start(&self) {
         let _guard = self.runtime.enter();
         self.workspace.start();
+        self.runtime.spawn(connectivity_loop(
+            self.workspace.clone(),
+            self.sessions.clone(),
+            self.path_offline.clone(),
+            self.listener.clone(),
+        ));
+    }
+
+    /// Android's network callback. `online` is false only when the OS reports no usable network; `key` names the
+    /// network, so a switch from wifi to cellular (which silently kills open sockets) counts as a change.
+    pub fn set_network(&self, online: bool, key: String) {
+        let _guard = self.runtime.enter();
+        self.path_offline
+            .store(!online, std::sync::atomic::Ordering::Relaxed);
+        harness_sync::wake::set_path_online(online);
+        if online {
+            harness_sync::wake::notify_online();
+        }
+        let previous = lock(&self.network_key).replace(key.clone());
+        // The first callback reports the starting state: nothing to revive.
+        if online && previous.is_some_and(|p| p != key) {
+            tracing::info!("network path changed; kicking rooms");
+            self.kick_rooms();
+        }
     }
 
     pub fn workspace(&self) -> WorkspaceSnapshot {
@@ -290,18 +345,6 @@ impl MobileCore {
         chat_id
     }
 
-    /// Add a project folder on a computer; an existing (device, path) pair returns its id.
-    pub fn create_space(&self, device_id: String, path: String, git_detected: bool) -> String {
-        let _guard = self.runtime.enter();
-        let fresh = uuid::Uuid::new_v4().to_string().to_lowercase();
-        let mut id = fresh.clone();
-        self.workspace.write(|doc, _| {
-            id = writes::create_space(doc, &fresh, &device_id, &path, git_detected, now_ms());
-            id == fresh
-        });
-        id
-    }
-
     pub fn delete_chat(&self, chat_id: String) {
         let _guard = self.runtime.enter();
         self.workspace.write(|doc, _| {
@@ -320,14 +363,142 @@ impl MobileCore {
 
     // ── lifecycle ───────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// The app came to the front: revive the registry room, and the open rooms after it.
+    /// The app came to the front: revive the registry room and the open rooms, and probe the edge so every parked
+    /// backoff redials within a round trip when it answers.
     pub fn foregrounded(&self) {
         let _guard = self.runtime.enter();
-        self.workspace.kick();
-        let open: Vec<Arc<Session>> = lock(&self.sessions).open.values().cloned().collect();
-        for session in open {
-            session.kick();
+        self.workspace.set_active(true);
+        self.kick_rooms();
+        let url = format!("{}/health", self.edge.base().trim_end_matches('/'));
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let answered = client
+                .get(url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+                .is_ok_and(|res| res.status().is_success());
+            if answered {
+                harness_sync::wake::notify_online();
+            }
+        });
+    }
+
+    /// The app went to the background: no status wake-ups until it returns.
+    pub fn backgrounded(&self) {
+        self.workspace.set_active(false);
+    }
+
+    // ── requests to a computer, over its device room ───────────────────────────────────────────────────────────
+
+    pub async fn list_folders(
+        &self,
+        device_id: String,
+        path: Option<String>,
+    ) -> Result<relay::FolderListingRecord, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.list_folders(&device_id, path).await })
+            .await
+    }
+
+    /// The agents the device's composer may offer (installed and enabled there).
+    pub async fn list_harnesses(
+        &self,
+        device_id: String,
+    ) -> Result<Vec<relay::HarnessInfoRecord>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.list_harnesses(&device_id).await })
+            .await
+    }
+
+    /// Every agent the device reports, for onboarding.
+    pub async fn agent_descriptors(
+        &self,
+        device_id: String,
+    ) -> Result<Vec<relay::AgentDescriptorRecord>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.agent_descriptors(&device_id).await })
+            .await
+    }
+
+    pub async fn list_models(
+        &self,
+        device_id: String,
+        harness: String,
+    ) -> Result<Vec<relay::ModelInfoRecord>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.list_models(&device_id, &harness).await })
+            .await
+    }
+
+    pub async fn list_refs(
+        &self,
+        device_id: String,
+        repo_path: String,
+    ) -> Result<Vec<relay::RepoRefRecord>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.list_refs(&device_id, &repo_path).await })
+            .await
+    }
+
+    pub async fn switch_ref(
+        &self,
+        device_id: String,
+        repo_path: String,
+        ref_name: String,
+    ) -> Result<(), relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.switch_ref(&device_id, &repo_path, &ref_name).await })
+            .await
+    }
+
+    pub async fn create_worktree(
+        &self,
+        device_id: String,
+        space_id: String,
+        repo_path: String,
+        branch: String,
+    ) -> Result<String, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move {
+            relay
+                .create_worktree(&device_id, &space_id, &repo_path, &branch)
+                .await
+        })
+        .await
+    }
+
+    /// Add a project folder on a computer (`WorkspaceStore.createSpace`): an existing (device, path) pair returns its
+    /// id; otherwise the owning host creates the row over the relay, and only when it cannot be reached does the
+    /// phone write the row itself.
+    pub async fn add_space(&self, device_id: String, path: String, git_detected: bool) -> String {
+        if let Some(existing) = self
+            .workspace
+            .snapshot()
+            .spaces
+            .into_iter()
+            .find(|s| s.device_id == device_id && s.path == path)
+        {
+            return existing.id;
         }
+        let space_id = uuid::Uuid::new_v4().to_string().to_lowercase();
+        let relay = self.relay.clone();
+        let (device, id, folder) = (device_id.clone(), space_id.clone(), path.clone());
+        let via_host = self
+            .on_runtime(async move {
+                relay
+                    .create_space_on_host(&device, &id, &folder, git_detected)
+                    .await
+            })
+            .await;
+        let _guard = self.runtime.enter();
+        self.workspace.write(|doc, _| {
+            if via_host.is_err() {
+                writes::create_space(doc, &space_id, &device_id, &path, git_detected, now_ms());
+            }
+            true
+        });
+        space_id
     }
 
     /// Persist everything now (the app is going to the background).
@@ -358,6 +529,26 @@ impl MobileCore {
 }
 
 impl MobileCore {
+    /// Run on the core's runtime and await from the caller's executor (Kotlin's coroutines poll this).
+    async fn on_runtime<T: Send + 'static>(
+        &self,
+        work: impl std::future::Future<Output = Result<T, relay::RelayError>> + Send + 'static,
+    ) -> Result<T, relay::RelayError> {
+        self.runtime
+            .spawn(work)
+            .await
+            .unwrap_or(Err(relay::RelayError::NotConnected))
+    }
+
+    /// Registry first and at once; chat rooms after it (each probes if joined, redials if not).
+    fn kick_rooms(&self) {
+        self.workspace.kick();
+        let open: Vec<Arc<Session>> = lock(&self.sessions).open.values().cloned().collect();
+        for session in open {
+            session.kick();
+        }
+    }
+
     fn session(&self, chat_id: &str) -> Arc<Session> {
         let mut sessions = lock(&self.sessions);
         sessions.order.retain(|id| id != chat_id);
@@ -410,5 +601,44 @@ impl MobileCore {
         for session in evicted {
             self.runtime.spawn(async move { session.stop().await });
         }
+    }
+}
+
+/// The graced connectivity stream: samples every second while anything is degraded or graced, every five otherwise,
+/// and publishes only when the answer changes.
+async fn connectivity_loop(
+    workspace: Arc<Workspace>,
+    sessions: Arc<Mutex<Sessions>>,
+    path_offline: Arc<std::sync::atomic::AtomicBool>,
+    listener: Arc<dyn CoreListener>,
+) {
+    let mut grace = connectivity::Connectivity::default();
+    let mut last: Option<connectivity::ConnectivitySnapshot> = None;
+    loop {
+        let rooms = lock(&sessions)
+            .open
+            .values()
+            .filter(|s| s.room_active())
+            .map(|s| (s.chat_id.clone(), s.is_connected(), None))
+            .collect();
+        let sample = connectivity::Sample {
+            now: now_ms(),
+            path_offline: path_offline.load(std::sync::atomic::Ordering::Relaxed),
+            registry_connected: workspace.is_connected(),
+            registry_retry_at: workspace.retry_at(),
+            rooms,
+            pending_sends: false,
+        };
+        let (snapshot, busy) = grace.recompute(&sample);
+        if last.as_ref() != Some(&snapshot) {
+            listener.connectivity_changed(snapshot.clone());
+            last = Some(snapshot);
+        }
+        let tick = if busy {
+            connectivity::BUSY_TICK_MS
+        } else {
+            connectivity::IDLE_TICK_MS
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(tick)).await;
     }
 }

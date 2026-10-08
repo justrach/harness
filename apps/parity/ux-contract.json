@@ -78,6 +78,17 @@
       "Send the link to your computer",
       "Copy link",
       "Get Harness for your computer"
+    ],
+    "connectivity": [
+      "Offline — sends are saved",
+      "Reconnecting…",
+      "Connecting",
+      "Online",
+      "Not confirmed — sends are saved",
+      "Offline — messages will send when you're back online.",
+      "Messages will send once the connection recovers.",
+      "No folders here",
+      "Listing truncated — this folder has more entries."
     ]
   },
   "queuePanelLayout": {

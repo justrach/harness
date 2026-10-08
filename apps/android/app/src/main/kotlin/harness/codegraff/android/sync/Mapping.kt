@@ -1,6 +1,28 @@
 package harness.codegraff.android.sync
 
+import harness.codegraff.android.core.AgentDescriptorRecord
+import harness.codegraff.android.core.ChangeRequestRecord
 import harness.codegraff.android.core.ChatConfigRecord
+import harness.codegraff.android.core.ConnectivitySnapshot
+import harness.codegraff.android.core.ConnectivityState
+import harness.codegraff.android.core.FolderListingRecord
+import harness.codegraff.android.core.HarnessInfoRecord
+import harness.codegraff.android.core.HostStatus as HostStatusRecord
+import harness.codegraff.android.core.ModelInfoRecord
+import harness.codegraff.android.core.RepoRefRecord
+import harness.codegraff.android.demo.FolderEntry
+import harness.codegraff.android.demo.FolderListing
+import harness.codegraff.android.model.AgentDescriptor
+import harness.codegraff.android.model.ChangeRequestState
+import harness.codegraff.android.model.ChangeRequestSummary
+import harness.codegraff.android.model.Connection
+import harness.codegraff.android.model.ConnectivityUi
+import harness.codegraff.android.model.HarnessInfo
+import harness.codegraff.android.model.HostStatus
+import harness.codegraff.android.model.ModelInfo
+import harness.codegraff.android.model.ModelOptionChoiceInfo
+import harness.codegraff.android.model.ModelOptionInfo
+import harness.codegraff.android.model.RepoRef
 import harness.codegraff.android.core.ChatRecord
 import harness.codegraff.android.core.DeviceRecord
 import harness.codegraff.android.core.MessageEntryRecord
@@ -67,7 +89,25 @@ data class LiveWorkspace(
     val presence: Map<String, Long>,
     val connected: Boolean,
     val synced: Boolean,
+    val hostStatuses: Map<String, HostStatus>,
+    val changeRequests: Map<String, ChangeRequestSummary>,
 )
+
+fun HostStatusRecord.toModel() = when (this) {
+    HostStatusRecord.ONLINE -> HostStatus.Online
+    HostStatusRecord.UNKNOWN -> HostStatus.Unknown
+    HostStatusRecord.OFFLINE -> HostStatus.Offline
+}
+
+fun ChangeRequestRecord.toModel(): ChangeRequestSummary? {
+    val state = when (state) {
+        "open" -> ChangeRequestState.Open
+        "closed" -> ChangeRequestState.Closed
+        "merged" -> ChangeRequestState.Merged
+        else -> return null
+    }
+    return ChangeRequestSummary(provider, number.toLong(), title, url, state, baseRef, headRef)
+}
 
 fun WorkspaceSnapshot.toModel() = LiveWorkspace(
     devices = devices.map { it.toModel() },
@@ -78,6 +118,41 @@ fun WorkspaceSnapshot.toModel() = LiveWorkspace(
     presence = presence,
     connected = connected,
     synced = synced,
+    hostStatuses = hostStatuses.mapValues { it.value.toModel() },
+    changeRequests = changeRequests.mapNotNull { (id, pr) -> pr.toModel()?.let { id to it } }.toMap(),
+)
+
+fun ConnectivitySnapshot.toModel() = ConnectivityUi(
+    state = when (state) {
+        ConnectivityState.OFFLINE -> Connection.Offline
+        ConnectivityState.RECONNECTING -> Connection.Reconnecting
+        ConnectivityState.CONNECTED -> Connection.Connected
+    },
+    degradedChats = degradedChats.toSet(),
+    retryAtMs = retryAtMs,
+)
+
+fun FolderListingRecord.toModel() = FolderListing(
+    path = path,
+    parent = if (!path.contains('/') || path == "/") null else path.substringBeforeLast('/').ifEmpty { "/" },
+    entries = entries.map { FolderEntry(it.name, it.isDir, it.isRepo) },
+    truncated = truncated,
+)
+
+fun RepoRefRecord.toModel() = RepoRef(name, current, worktreePath)
+
+fun HarnessInfoRecord.toModel() = HarnessInfo(id, label)
+
+fun AgentDescriptorRecord.toModel() = AgentDescriptor(id, installed, canInstall, enabled)
+
+fun ModelInfoRecord.toModel() = ModelInfo(
+    id = id,
+    label = label,
+    description = description,
+    reasoningLevels = reasoningLevels,
+    options = options.map { option ->
+        ModelOptionInfo(option.id, option.label, option.choices.map { ModelOptionChoiceInfo(it.id, it.label) }, option.defaultChoice)
+    },
 )
 
 private fun ToolFieldRecord.scalar(): String? = when (this) {

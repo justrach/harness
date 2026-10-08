@@ -249,6 +249,7 @@ impl Session {
             connected: self.connected.load(Ordering::Relaxed),
             retry_at_ms: None,
             waiting_for_migration: self.room_gen.load(Ordering::Relaxed) < 2,
+            room_active: self.dialing.load(Ordering::Relaxed),
         }
     }
 
@@ -320,6 +321,7 @@ impl Session {
         if self.dialing.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.project.notify_one();
         let task = tokio::spawn(self.clone().run());
         lock(&self.tasks).push(task);
     }
@@ -362,6 +364,15 @@ impl Session {
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
         }
+    }
+
+    /// The room has dialed (a room that never dialed is not "degraded").
+    pub fn room_active(&self) -> bool {
+        self.dialing.load(Ordering::Relaxed)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// The screen is showing this chat: decode at frame rate, and dial now.

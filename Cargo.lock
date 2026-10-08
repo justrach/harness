@@ -3936,12 +3936,15 @@ dependencies = [
 name = "harness-mobile"
 version = "0.2.109"
 dependencies = [
+ "async-trait",
  "futures",
  "harness-doc",
  "harness-proto",
+ "harness-rpc",
  "harness-sync",
  "loro",
  "reqwest",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",

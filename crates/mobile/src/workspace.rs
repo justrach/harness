@@ -3,6 +3,7 @@
 //! `harness_sync::RegistryClient` over the socket or plain HTTPS, projected for the screens, and written only with the
 //! viewer writes in [`crate::writes`].
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -12,9 +13,14 @@ use harness_sync::{DocsStore, RegistryClient, RegistryEvent, RegistryTransport, 
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::change_requests::{self, CheckoutStatus, WatchKey};
 use crate::edge::Edge;
+use crate::presence::{
+    PeerLivenessRecord, PresenceInput, presence_liveness, presence_next_change, presence_status,
+};
 use crate::projection;
 use crate::records::{ChatRecord, WorkspaceSnapshot};
+use crate::relay::Relay;
 
 /// The iOS client beats every 15 s while joined, and once on every join.
 const PRESENCE_INTERVAL: Duration = Duration::from_secs(15);
@@ -49,6 +55,21 @@ pub(crate) struct Workspace {
     stopped: AtomicBool,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     last: Mutex<Option<WorkspaceSnapshot>>,
+    /// Device id to (the beat's own stamp, when this session received it). Freshness is timed from receipt.
+    beats: Mutex<HashMap<String, (i64, i64)>>,
+    /// When the registry room (re)joined: the dial gate's warm-up clock restarts on every rejoin.
+    joined_at: Mutex<Option<i64>>,
+    /// The next instant a device's status can change by the clock alone (one wake-up, never a ticking timer).
+    status_wake: Mutex<Option<i64>>,
+    /// False while the app is in the background: no status wake-ups are scheduled.
+    active: AtomicBool,
+    /// Requests to other devices; set once the core has built it (it needs this store's dial gate).
+    relay: std::sync::OnceLock<Arc<Relay>>,
+    me: std::sync::OnceLock<std::sync::Weak<Workspace>>,
+    /// Pull-request watches: the latest resolution per checkout, the running watches, and devices too old for them.
+    change_requests: Mutex<HashMap<WatchKey, CheckoutStatus>>,
+    watches: Mutex<HashMap<WatchKey, JoinHandle<()>>>,
+    unsupported: Mutex<HashSet<String>>,
 }
 
 impl Workspace {
@@ -74,16 +95,195 @@ impl Workspace {
             stopped: AtomicBool::new(false),
             tasks: Mutex::new(Vec::new()),
             last: Mutex::new(None),
+            beats: Mutex::new(HashMap::new()),
+            joined_at: Mutex::new(None),
+            status_wake: Mutex::new(None),
+            active: AtomicBool::new(true),
+            relay: std::sync::OnceLock::new(),
+            me: std::sync::OnceLock::new(),
+            change_requests: Mutex::new(HashMap::new()),
+            watches: Mutex::new(HashMap::new()),
+            unsupported: Mutex::new(HashSet::new()),
         })
+    }
+
+    fn presence_input(
+        &self,
+        device_id: &str,
+        now: i64,
+        row_last_seen: Option<i64>,
+    ) -> PresenceInput {
+        PresenceInput {
+            now,
+            received: lock(&self.beats)
+                .get(device_id)
+                .map(|(_, received)| *received),
+            connected: self.connected.load(Ordering::Relaxed),
+            joined_at: *lock(&self.joined_at),
+            row_last_seen,
+        }
+    }
+
+    /// The dial gate for the device relay (`WorkspaceStore.peerLiveness`).
+    pub fn liveness(&self, device_id: &str) -> PeerLivenessRecord {
+        let row = projection::devices(&lock(&self.doc))
+            .into_iter()
+            .find(|d| d.id == device_id)
+            .and_then(|d| d.last_seen_at);
+        presence_liveness(self.presence_input(device_id, now_ms(), row))
+    }
+
+    /// Record beats the client has heard: a beat whose stamp changed was received now.
+    fn note_beats(&self) {
+        let heard = lock(&self.client)
+            .as_ref()
+            .map(RegistryClient::presence)
+            .unwrap_or_default();
+        let now = now_ms();
+        let mut fresh = Vec::new();
+        {
+            let mut beats = lock(&self.beats);
+            for (device, at) in heard {
+                if beats.get(&device).is_none_or(|(seen, _)| *seen != at) {
+                    beats.insert(device.clone(), (at, now));
+                    fresh.push(device);
+                }
+            }
+        }
+        // A beat is the evidence a device is back: a relay dial it was cooling down from may go now.
+        if let Some(relay) = self.relay.get() {
+            for device in fresh {
+                relay.peer_alive(&device);
+            }
+        }
+    }
+
+    pub fn set_relay(&self, relay: Arc<Relay>) {
+        let _ = self.relay.set(relay);
+    }
+
+    // ── pull-request badges ─────────────────────────────────────────────────────────────────────────────────────
+
+    fn reconcile_watches(&self, chats: &[ChatRecord], spaces: &[crate::records::SpaceRecord]) {
+        let (Some(relay), Some(me)) = (self.relay.get(), self.me.get()) else {
+            return;
+        };
+        let targets = change_requests::desired_targets(chats, spaces, &lock(&self.unsupported));
+        let mut watches = lock(&self.watches);
+        watches.retain(|key, task| {
+            let keep = targets.contains(key);
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        lock(&self.change_requests).retain(|key, _| targets.contains(key));
+        for key in targets {
+            if watches.contains_key(&key) {
+                continue;
+            }
+            let task = tokio::spawn(Self::watch(me.clone(), relay.clone(), key.clone()));
+            watches.insert(key, task);
+        }
+    }
+
+    /// One checkout's watch: snapshots while the stream lives, retried with backoff (the last snapshot stands
+    /// through transport gaps). A host that does not know the method is too old for badges: stop asking it.
+    async fn watch(me: std::sync::Weak<Self>, relay: Arc<Relay>, key: WatchKey) {
+        let mut retry = Duration::from_millis(500);
+        loop {
+            match relay
+                .stream(
+                    &key.device_id,
+                    "WatchCheckoutChangeRequest",
+                    serde_json::json!({ "cwd": key.cwd }),
+                )
+                .await
+            {
+                Ok(mut subscription) => {
+                    while let Some(item) = subscription.recv().await {
+                        let Ok(status) = serde_json::from_value::<CheckoutStatus>(item) else {
+                            continue;
+                        };
+                        // Never show a misrouted frame under another host or path.
+                        if status.device_id != key.device_id || status.cwd != key.cwd {
+                            continue;
+                        }
+                        let Some(this) = me.upgrade() else { return };
+                        lock(&this.change_requests).insert(key.clone(), status);
+                        this.emit.notify_one();
+                        retry = Duration::from_millis(500);
+                    }
+                }
+                Err(err) if err.is_unknown_method() => {
+                    let Some(this) = me.upgrade() else { return };
+                    lock(&this.unsupported).insert(key.device_id.clone());
+                    lock(&this.change_requests).retain(|k, _| k.device_id != key.device_id);
+                    this.emit.notify_one();
+                    return;
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(retry).await;
+            retry = (retry * 2).min(Duration::from_secs(5));
+        }
+    }
+
+    /// Reconnect or foreground: every watch starts over, and devices marked too old are asked again.
+    fn restart_watches(&self) {
+        for (_, task) in lock(&self.watches).drain() {
+            task.abort();
+        }
+        lock(&self.unsupported).clear();
+        self.emit.notify_one();
     }
 
     pub fn snapshot(&self) -> WorkspaceSnapshot {
         let doc = lock(&self.doc);
         let client = lock(&self.client);
+        let devices = projection::devices(&doc);
+        let now = now_ms();
+        let mut ids: Vec<String> = devices.iter().map(|d| d.id.clone()).collect();
+        ids.extend(lock(&self.beats).keys().cloned());
+        ids.sort();
+        ids.dedup();
+        let mut host_statuses = HashMap::new();
+        let mut wake: Option<i64> = None;
+        for id in ids {
+            let row = devices
+                .iter()
+                .find(|d| d.id == id)
+                .and_then(|d| d.last_seen_at);
+            let input = self.presence_input(&id, now, row);
+            host_statuses.insert(id, presence_status(input));
+            if let Some(at) = presence_next_change(input) {
+                wake = Some(wake.map_or(at, |w| w.min(at)));
+            }
+        }
+        *lock(&self.status_wake) = wake;
+        let chats = projection::chats(&doc);
+        let spaces = projection::spaces(&doc);
+        let badges = lock(&self.change_requests);
+        let change_requests = chats
+            .iter()
+            .filter_map(|chat| {
+                Some((
+                    chat.id.clone(),
+                    change_requests::resolve(chat, &spaces, &badges)?,
+                ))
+            })
+            .collect();
+        drop(badges);
         WorkspaceSnapshot {
-            devices: projection::devices(&doc),
-            spaces: projection::spaces(&doc),
-            chats: projection::chats(&doc),
+            change_requests,
+            host_statuses,
+            retry_at_ms: client
+                .as_ref()
+                .map(|c| c.reconnect_state().retry_at_ms)
+                .filter(|&at| at > 0 && !self.connected.load(Ordering::Relaxed)),
+            devices,
+            spaces,
+            chats,
             sessions: projection::sessions(&doc),
             pinned_session_ids: projection::pinned_session_ids(&doc),
             pins_initialized: projection::pins_initialized(&doc),
@@ -103,6 +303,21 @@ impl Workspace {
         client.is_some_and(|c| c.stats().synced)
     }
 
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    /// The registry's next redial while it is down.
+    pub fn retry_at(&self) -> Option<i64> {
+        if self.is_connected() {
+            return None;
+        }
+        lock(&self.client)
+            .as_ref()
+            .map(|c| c.reconnect_state().retry_at_ms)
+            .filter(|&at| at > 0)
+    }
+
     pub fn synced(&self) -> bool {
         self.synced_with(lock(&self.client).as_ref())
     }
@@ -115,6 +330,7 @@ impl Workspace {
     /// in about one round trip and a network that strips socket upgrades still syncs). The tasks hold the store until
     /// `stop` aborts them.
     pub fn start(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
         self.publish();
         let mut tasks = lock(&self.tasks);
         tasks.push(tokio::spawn(self.clone().emitter()));
@@ -152,16 +368,28 @@ impl Workspace {
             tokio::select! {
                 event = events.recv() => match event {
                     Ok(RegistryEvent::Connected) => {
-                        self.connected.store(true, Ordering::Relaxed);
+                        let reconnected = !self.connected.swap(true, Ordering::Relaxed);
+                        if reconnected {
+                            self.restart_watches();
+                        }
+                        *lock(&self.joined_at) = Some(now_ms());
+                        self.note_beats();
                         self.beat();
                         self.after_state();
                     }
                     Ok(RegistryEvent::Disconnected) => {
                         self.connected.store(false, Ordering::Relaxed);
+                        *lock(&self.joined_at) = None;
                         self.emit.notify_one();
                     }
-                    Ok(RegistryEvent::Applied) => self.after_state(),
-                    Ok(RegistryEvent::Presence) => self.emit.notify_one(),
+                    Ok(RegistryEvent::Applied) => {
+                        self.note_beats();
+                        self.after_state();
+                    }
+                    Ok(RegistryEvent::Presence) => {
+                        self.note_beats();
+                        self.emit.notify_one();
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => self.after_state(),
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
@@ -227,6 +455,7 @@ impl Workspace {
 
     fn publish(&self) {
         let snapshot = self.snapshot();
+        self.reconcile_watches(&snapshot.chats, &snapshot.spaces);
         let mut last = lock(&self.last);
         if last.as_ref() == Some(&snapshot) {
             return;
@@ -236,12 +465,32 @@ impl Workspace {
         (self.on_projected)(&snapshot);
     }
 
+    /// Publishes on demand, and once more at the next instant a device's status can change by the clock alone (a
+    /// beat aging out), while the app is in front.
     async fn emitter(self: Arc<Self>) {
         loop {
-            self.emit.notified().await;
-            tokio::time::sleep(EMIT_COALESCE).await;
+            let wake = (*lock(&self.status_wake)).filter(|_| self.active.load(Ordering::Relaxed));
+            match wake {
+                Some(at) => {
+                    let delay = Duration::from_millis((at - now_ms() + 250).max(500) as u64);
+                    tokio::select! {
+                        _ = self.emit.notified() => tokio::time::sleep(EMIT_COALESCE).await,
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
+                None => {
+                    self.emit.notified().await;
+                    tokio::time::sleep(EMIT_COALESCE).await;
+                }
+            }
             self.publish();
         }
+    }
+
+    /// Foreground and background: no status wake-ups in the background; on return, catch up on what aged out.
+    pub fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
+        self.emit.notify_one();
     }
 
     async fn saver(self: Arc<Self>) {
@@ -265,8 +514,10 @@ impl Workspace {
         }
     }
 
-    /// Foreground: probe a joined room, or wake a parked one so it redials on fresh backoff.
+    /// Foreground: probe a joined room, or wake a parked one so it redials on fresh backoff, and start the badge
+    /// watches over.
     pub fn kick(&self) {
+        self.restart_watches();
         if let Some(client) = lock(&self.client).as_ref() {
             if self.connected.load(Ordering::Relaxed) {
                 // Post-suspend sockets are half-open more often than not: a deadline-checked probe finds out.
@@ -284,6 +535,12 @@ impl Workspace {
         self.flush();
         for task in lock(&self.tasks).drain(..) {
             task.abort();
+        }
+        for (_, task) in lock(&self.watches).drain() {
+            task.abort();
+        }
+        if let Some(relay) = self.relay.get() {
+            relay.disconnect_all();
         }
         let client = lock(&self.client).take();
         if let Some(client) = client {

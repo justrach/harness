@@ -54,6 +54,10 @@ impl Edge {
         }
     }
 
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     /// The bearer, read off the networking threads.
     pub async fn bearer(&self) -> Result<String, SyncError> {
         let tokens = self.tokens.clone();

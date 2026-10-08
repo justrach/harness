@@ -2,6 +2,7 @@ package harness.codegraff.android.sync
 
 import android.content.Context
 import android.util.Log
+import harness.codegraff.android.core.ConnectivitySnapshot
 import harness.codegraff.android.core.CoreConfig
 import harness.codegraff.android.core.CoreListener
 import harness.codegraff.android.core.LogSink
@@ -43,6 +44,7 @@ data class LiveConnection(
 class LiveFeed : CoreListener {
     private val _workspace = MutableStateFlow<WorkspaceSnapshot?>(null)
     private val _sessions = MutableStateFlow<Map<String, SessionSnapshot>>(emptyMap())
+    private val _connectivity = MutableStateFlow<ConnectivitySnapshot?>(null)
 
     val workspace: StateFlow<WorkspaceSnapshot?> get() = _workspace
 
@@ -55,6 +57,13 @@ class LiveFeed : CoreListener {
 
     override fun sessionChanged(snapshot: SessionSnapshot) {
         _sessions.update { it + (snapshot.chatId to snapshot) }
+    }
+
+    /** The graced connectivity state, published only when it changes. */
+    val connectivity: StateFlow<ConnectivitySnapshot?> get() = _connectivity
+
+    override fun connectivityChanged(snapshot: ConnectivitySnapshot) {
+        _connectivity.value = snapshot
     }
 }
 
@@ -86,6 +95,7 @@ class LiveSync(val core: MobileCoreInterface, val feed: LiveFeed) {
                 },
                 feed,
             )
+            NetworkMonitor.start(context, core)
             return LiveSync(core, feed)
         }
 

@@ -1,5 +1,8 @@
 package harness.codegraff.android.ui.home
 
+import harness.codegraff.android.model.HostStatus
+import harness.codegraff.android.ui.components.ConnectionIndicator
+
 import androidx.compose.animation.core.animateFloatAsState
 import harness.codegraff.android.model.OnboardingState
 import androidx.compose.ui.platform.testTag
@@ -40,6 +43,7 @@ import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -210,7 +214,9 @@ fun HomeScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             SpaceDropdown(state, selectedSpace?.displayName, spaceFilter.value, { spaceFilter.set(it) }, onShowNewSpace)
-            Spacer(Modifier.weight(1f))
+            // In the bar, not the list: as a row it would appear and vanish with the connection and shove the list.
+            val connectivity by model.connectivity.collectAsState()
+            Box(Modifier.weight(1f)) { ConnectionIndicator(connectivity.state, state.synced) }
             // One glass capsule holds both trailing controls, like the native toolbar group.
             Row(Modifier.height(44.dp).glass(CircleShape, elevated = true), verticalAlignment = Alignment.CenterVertically) {
                 NewButton(state, selectedSpace?.id, onOpen, onShowHostPicker, onShowNewSpace)
@@ -272,8 +278,9 @@ private fun SpaceDropdown(state: WorkspaceState, title: String?, selectedId: Str
     }
 }
 
+/** Only positive evidence of absence reads "offline"; a computer not heard from yet is just named. */
 private fun deviceTag(state: WorkspaceState, deviceId: String): String =
-    if (state.deviceOnline(deviceId)) "@ ${state.deviceName(deviceId)}" else "@ ${state.deviceName(deviceId)} · offline"
+    if (state.hostStatus(deviceId) == HostStatus.Offline) "@ ${state.deviceName(deviceId)} · offline" else "@ ${state.deviceName(deviceId)}"
 
 @Composable
 private fun NewButton(
