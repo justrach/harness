@@ -1,6 +1,6 @@
 --- a/codex-rs/tui/src/slash_command.rs
 +++ b/codex-rs/tui/src/slash_command.rs
-@@ -299,9 +299,63 @@
+@@ -299,9 +299,62 @@
              SlashCommand::Agents | SlashCommand::MultiAgents => true,
              SlashCommand::Theme | SlashCommand::Pets => false,
          }
@@ -31,7 +31,6 @@
 +                | Compact
 +                | Recap
 +                | Plan
-+                | Voice
 +                | Goal
 +                | Agents
 +                | Side

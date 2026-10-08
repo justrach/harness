@@ -1,0 +1,128 @@
+diff --git a/codex-rs/realtime-webrtc/src/session.rs b/codex-rs/realtime-webrtc/src/session.rs
+index badbf41e38..afdaebd4ee 100644
+--- a/codex-rs/realtime-webrtc/src/session.rs
++++ b/codex-rs/realtime-webrtc/src/session.rs
+@@ -87,10 +87,8 @@ impl RealtimeWebrtcSession {
+             target_os = "macos",
+             target_os = "linux",
+             all(windows, target_env = "msvc")
+-        )) && codex_install_context::InstallContext::current()
+-            .package_layout
+-            .as_ref()
+-            .is_some_and(|package| package_has_runtime(package.package_dir.as_path()))
++        )) && voice_package()
++            .is_some_and(|(package, _)| package_has_runtime(package.package_dir.as_path()))
+     }
+ 
+     /// Called off the UI thread. Cancellation also owns startup before a handle is returned.
+@@ -98,11 +96,8 @@ impl RealtimeWebrtcSession {
+         abort: AbortRegistration,
+         selection: AudioDeviceSelection,
+     ) -> Result<StartedRealtimeWebrtcSession> {
+-        let package = codex_install_context::InstallContext::current()
+-            .package_layout
+-            .clone()
+-            .ok_or_else(|| anyhow::anyhow!("voice package unavailable"))?;
+-        let build_commit = codex_build_info::BuildInfo::get().build_commit().to_owned();
++        let (package, build_commit) =
++            voice_package().ok_or_else(|| anyhow::anyhow!("voice package unavailable"))?;
+         let (sender, receiver) = mpsc::channel(/*buffer*/ 8);
+         let (offer, result) = blocking::sync_channel(/*bound*/ 1);
+         let (stop, stopped) = AbortHandle::new_pair();
+@@ -174,6 +169,96 @@ impl RealtimeWebrtcSession {
+     }
+ }
+ 
++/// The voice runtime to use and the build commit its helper answers to.
++///
++/// Harness: `graff tui` ships without Codex's voice runtime, so when this
++/// binary's own package has none, use the installed Codex CLI's package (the
++/// `codex` on PATH, or `HARNESS_TUI_VOICE_CODEX`), talking to its helper with
++/// the helper's own build commit rather than this build's.
++fn voice_package() -> Option<(codex_install_context::CodexPackageLayout, String)> {
++    let own = codex_install_context::InstallContext::current()
++        .package_layout
++        .clone()
++        .map(|package| {
++            (
++                package,
++                codex_build_info::BuildInfo::get().build_commit().to_owned(),
++            )
++        });
++    // A package that ships a helper is used as before; only a build without
++    // one (graff-tui) borrows the installed Codex CLI's.
++    if own
++        .as_ref()
++        .is_some_and(|(package, _)| voice_helper(package.package_dir.as_path()).is_file())
++    {
++        return own;
++    }
++    installed_voice_package().or(own)
++}
++
++fn voice_helper(package: &std::path::Path) -> std::path::PathBuf {
++    package
++        .join("codex-resources/voice/bin")
++        .join(if cfg!(windows) {
++            "codex-voice-host.exe"
++        } else {
++            "codex-voice-host"
++        })
++}
++
++/// The installed Codex CLI's package, when it carries the voice runtime, and
++/// its helper's build commit.
++fn installed_voice_package() -> Option<(codex_install_context::CodexPackageLayout, String)> {
++    let codex = installed_codex()?;
++    let package = codex_install_context::InstallContext::from_exe(
++        cfg!(target_os = "macos"),
++        Some(&codex),
++        /*method_override*/ None,
++    )
++    .package_layout?;
++    if !package_has_runtime(package.package_dir.as_path()) {
++        return None;
++    }
++    let helper = voice_helper(package.package_dir.as_path());
++    let output = std::process::Command::new(&helper)
++        .arg("--build-commit")
++        .stdin(std::process::Stdio::null())
++        .stderr(std::process::Stdio::null())
++        .output()
++        .ok()?;
++    let commit = String::from_utf8(output.stdout).ok()?.trim().to_owned();
++    (output.status.success() && !commit.is_empty() && commit.len() <= 128)
++        .then_some((package, commit))
++}
++
++/// The installed Codex CLI's native binary: an explicit override, or `codex`
++/// on PATH. npm's `codex` is a script; its platform package holds the binary.
++fn installed_codex() -> Option<std::path::PathBuf> {
++    let name = if cfg!(windows) { "codex.exe" } else { "codex" };
++    let found = std::env::var_os("HARNESS_TUI_VOICE_CODEX")
++        .map(std::path::PathBuf::from)
++        .or_else(|| {
++            std::env::split_paths(&std::env::var_os("PATH")?)
++                .map(|dir| dir.join(name))
++                .find(|path| path.is_file())
++        })?
++        .canonicalize()
++        .ok()?;
++    if found.extension().is_none_or(|ext| ext != "js") {
++        return Some(found);
++    }
++    let scoped = found.parent()?.parent()?.join("node_modules/@openai");
++    std::fs::read_dir(scoped)
++        .ok()?
++        .flatten()
++        .filter(|entry| entry.file_name().to_string_lossy().starts_with("codex-"))
++        .filter_map(|entry| std::fs::read_dir(entry.path().join("vendor")).ok())
++        .flatten()
++        .flatten()
++        .map(|target| target.path().join("bin").join(name))
++        .find(|path| path.is_file())
++}
++
+ // Availability is not proof of runtime integrity, device access, or session connectivity.
+ fn package_has_runtime(package: &std::path::Path) -> bool {
+     let voice = package.join("codex-resources/voice");
