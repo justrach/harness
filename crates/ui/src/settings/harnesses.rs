@@ -449,12 +449,11 @@ impl HarnessesPage {
             _ => None,
         };
         let busy = current.is_none() || self.graff_compact_at_saving;
-        let mut choices = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(6.0))
-            .child(div().text_color(theme.text_muted).child("Compact context at"));
+        let mut choices = div().flex().flex_wrap().items_center().gap(px(6.0)).child(
+            div()
+                .text_color(theme.text_muted)
+                .child("Compact context at"),
+        );
         for (index, (value, label)) in CHOICES.into_iter().enumerate() {
             let selected = current == Some(value);
             let pill = if selected {
