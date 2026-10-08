@@ -4405,6 +4405,8 @@ impl Shell {
             }
             target.skills_in_slash_menu = current.skills_in_slash_menu;
             target.archive_sessions_on_close = current.archive_sessions_on_close;
+            target.reduce_motion = current.reduce_motion;
+            target.pause_animations_in_background = current.pause_animations_in_background;
         });
     }
 
@@ -11921,6 +11923,7 @@ impl Render for Shell {
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
+                    motion::window_activation_changed(window.is_window_active(), cx);
                     if !window.is_window_active() {
                         this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
@@ -13777,6 +13780,56 @@ mod tests {
 mod exit_regressions {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn shell_saves_keep_motion_settings_chosen_in_appearance(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                // The Appearance page writes these straight to the store,
+                // outside the shell's working copy.
+                settings::update(SavePolicy::Immediate, cx, |settings| {
+                    settings.reduce_motion = crate::motion::ReduceMotion::On;
+                    settings.pause_animations_in_background = true;
+                });
+                // Any shell-owned change (sidebar width, panels) republishes
+                // the working copy; it must not revert the motion choices.
+                shell.schedule_save(cx);
+                let saved = settings::current(cx);
+                assert_eq!(saved.reduce_motion, crate::motion::ReduceMotion::On);
+                assert!(saved.pause_animations_in_background);
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn appshot_destinations_retain_last_session_and_use_new_canvas_defaults(

@@ -20,6 +20,7 @@ use harness_theme::{
 use crate::appearance::{self, AppearanceMode};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
+use crate::motion::ReduceMotion;
 use crate::popover::{self, Popup};
 use crate::settings::widgets;
 use crate::theme::{Appearance, Theme};
@@ -1239,16 +1240,40 @@ fn frosted_helper(frosted: bool) -> &'static str {
     }
 }
 
+fn reduce_motion_helper(preference: ReduceMotion, system: bool) -> &'static str {
+    match (preference, system) {
+        (ReduceMotion::System, true) => "Following the system, which currently reduces motion.",
+        (ReduceMotion::System, false) => "Following the system, which currently allows motion.",
+        (ReduceMotion::On, _) => "Animations skip straight to their final state.",
+        (ReduceMotion::Off, _) => "Animations play even if the system asks for less motion.",
+    }
+}
+
 fn background_effect_choice(
     theme: &Theme,
     effect: crate::settings::NewThreadBackgroundEffect,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
+    choice_chip(
+        theme,
+        format!(
             "new-thread-background-effect-{}",
             effect.label().to_lowercase()
-        )))
+        ),
+        effect.label(),
+        selected,
+    )
+}
+
+/// One option in a row of mutually exclusive chips.
+fn choice_chip(
+    theme: &Theme,
+    id: String,
+    label: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
         .h(px(28.0))
         .px(px(9.0))
         .rounded(px(7.0))
@@ -1276,7 +1301,7 @@ fn background_effect_choice(
         .when(!selected, |control| {
             control.hover(|style| style.bg(theme.surface_raised_hover))
         })
-        .child(effect.label())
+        .child(label)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3235,6 +3260,85 @@ impl Render for AppearancePage {
                         .cursor_pointer()
                         .on_click(cx.listener(move |_, _, _, cx| {
                             crate::settings::set_transcript_compact_mode(!compact_mode, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
+        let current_reduce_motion = crate::motion::preference(cx);
+        let reduce_motion_controls = ReduceMotion::ALL
+            .into_iter()
+            .map(|preference| {
+                choice_chip(
+                    &theme,
+                    format!("reduce-motion-{}", preference.label().to_lowercase()),
+                    preference.label(),
+                    preference == current_reduce_motion,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::motion::set_preference(preference, cx);
+                    cx.notify();
+                }))
+            })
+            .collect::<Vec<_>>();
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::MAGIC_STICK_3))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Reduce motion"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(reduce_motion_helper(
+                                        current_reduce_motion,
+                                        crate::motion::system_reduces_motion(cx),
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(reduce_motion_controls),
+                )
+                .into_any_element(),
+        );
+        let pause_in_background = crate::motion::pause_in_background(cx);
+        settings_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::ACTION_PLAY))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Pause animations in background"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(
+                                        "Hold animations still while Harness isn't the focused window. Saves CPU and battery.",
+                                    )
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, pause_in_background)
+                        .id("pause-animations-in-background-toggle")
+                        .ml(px(10.0))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::motion::set_pause_in_background(!pause_in_background, cx);
                             cx.notify();
                         })),
                 )
