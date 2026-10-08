@@ -24,6 +24,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod search;
 pub mod shortcuts;
 pub mod widgets;
 
@@ -881,6 +882,10 @@ pub struct UiSettings {
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// Snap animations to rest. Defaults to following the OS.
+    pub reduce_motion: crate::motion::ReduceMotion,
+    /// Also snap animations while the main window is not focused.
+    pub pause_animations_in_background: bool,
     /// The graff engine update card's dismissed version — re-raised only when
     /// a newer stable exists.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -965,6 +970,8 @@ impl Default for UiSettings {
             surface: harness_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            reduce_motion: crate::motion::ReduceMotion::System,
+            pause_animations_in_background: false,
             graff_notice_dismissed: None,
             legacy_accent_color: None,
         }
@@ -1865,6 +1872,8 @@ mod tests {
             loaded.new_thread_background_effect,
             NewThreadBackgroundEffect::None
         );
+        assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
+        assert!(!loaded.pause_animations_in_background);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
         for sound in [
@@ -2451,6 +2460,8 @@ mod tests {
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            reduce_motion: crate::motion::ReduceMotion::On,
+            pause_animations_in_background: true,
             graff_notice_dismissed: Some("0.0.9".into()),
             legacy_accent_color: None,
         };
@@ -2461,6 +2472,8 @@ mod tests {
         assert!(json.contains(r#""codeFencesFitContent": true"#));
         assert!(json.contains(r#""openWebLinksInHarness": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
+        assert!(json.contains(r#""reduceMotion": "on""#));
+        assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));

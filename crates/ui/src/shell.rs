@@ -564,17 +564,37 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
+    /// Sidebar order: grouped under [`Self::group`] headings.
     pub const ALL: [SettingsSection; 9] = [
-        SettingsSection::Devices,
-        SettingsSection::Harnesses,
-        SettingsSection::Agents,
         SettingsSection::Appearance,
-        SettingsSection::Files,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
+        SettingsSection::Files,
+        SettingsSection::Harnesses,
+        SettingsSection::Agents,
+        SettingsSection::Devices,
         SettingsSection::Appshots,
         SettingsSection::Archived,
     ];
+
+    /// The sidebar heading this section sits under.
+    pub fn group(self) -> &'static str {
+        match self {
+            SettingsSection::Appearance
+            | SettingsSection::Notifications
+            | SettingsSection::Shortcuts
+            | SettingsSection::Files => "General",
+            SettingsSection::Harnesses | SettingsSection::Agents => "Agents",
+            SettingsSection::Devices | SettingsSection::Appshots | SettingsSection::Archived => {
+                "Devices and data"
+            }
+        }
+    }
+
+    /// Whether this platform shows the section at all.
+    pub fn is_shown(self) -> bool {
+        self != SettingsSection::Appshots || crate::appshots::is_desktop()
+    }
 
     /// The section saved in `ui-settings.json` as `settingsSection`.
     pub fn key(self) -> &'static str {
@@ -1663,6 +1683,15 @@ struct SubagentTab {
     _events: Subscription,
 }
 
+/// The Settings sidebar filter and its highlighted result.
+struct SettingsSearch {
+    input: Entity<ComposerInput>,
+    selected: usize,
+    /// Take focus on the next render (Settings just opened).
+    focus_pending: bool,
+    _events: Subscription,
+}
+
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
 /// invalidate the sidebar, including selection, menus, theme and navigation.
@@ -1671,16 +1700,25 @@ struct SidebarPane {
     _observation: Subscription,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Sidebar renders on this thread, for tests that check what a change
+    /// re-renders (a gpui test renders on its own thread).
+    pub(crate) static SIDEBAR_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl Render for SidebarPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::transcript::record_view_frame("sidebar");
+        #[cfg(test)]
+        SIDEBAR_RENDERS.with(|n| n.set(n.get() + 1));
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
         let inner = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
             match shell.route {
-                Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
+                Route::Settings(section) => shell.render_settings_nav(section, &theme, window, cx),
                 Route::Chat => shell.render_chat_sidebar(&theme, cx),
             }
         });
@@ -1812,6 +1850,8 @@ pub struct Shell {
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
+    /// The filter at the top of the Settings sidebar, made on first visit.
+    settings_search: Option<SettingsSearch>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
@@ -1843,9 +1883,12 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     command_palette: Option<command_palette::CommandPalette>,
     /// Conversations from other tools on this device (Claude Code, Codex, graff) that
-    /// `/resume` can import; refreshed each time the palette opens.
+    /// `/resume` can import; listed again when the palette opens and the last
+    /// list is over a minute old.
     external_sessions: Vec<command_palette::ExternalSession>,
     external_task: Option<Task<()>>,
+    /// When `external_sessions` was last listed; the palette reuses it for a while.
+    external_loaded_at: Option<std::time::Instant>,
     pending_workspace_command: Option<crate::composer::WorkspaceCommand>,
     /// The sidebar's space-filter dropdown.
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
@@ -2314,6 +2357,7 @@ impl Shell {
             files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
+            settings_search: None,
             accounts_page: None,
             harnesses_page: None,
             shortcuts_sub: None,
@@ -2338,6 +2382,7 @@ impl Shell {
             command_palette: None,
             external_sessions: Vec::new(),
             external_task: None,
+            external_loaded_at: None,
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
@@ -4410,6 +4455,8 @@ impl Shell {
             }
             target.skills_in_slash_menu = current.skills_in_slash_menu;
             target.archive_sessions_on_close = current.archive_sessions_on_close;
+            target.reduce_motion = current.reduce_motion;
+            target.pause_animations_in_background = current.pause_animations_in_background;
         });
     }
 
@@ -4513,6 +4560,10 @@ impl Shell {
 
     fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         self.command_palette = None;
+        if matches!(self.route, Route::Chat) {
+            // Arriving from a chat: typing goes straight into the filter.
+            self.ensure_settings_search(cx).focus_pending = true;
+        }
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
         if section == SettingsSection::Harnesses {
@@ -4546,10 +4597,85 @@ impl Shell {
             .settings_section
             .as_deref()
             .and_then(SettingsSection::from_key)
-            .filter(|section| {
-                *section != SettingsSection::Appshots || crate::appshots::is_desktop()
-            })
+            .filter(|section| section.is_shown())
             .unwrap_or(SettingsSection::Devices)
+    }
+
+    fn ensure_settings_search(&mut self, cx: &mut Context<Self>) -> &mut SettingsSearch {
+        self.settings_search.get_or_insert_with(|| {
+            // `PaletteSearch` binds text editing only: arrows, Enter and
+            // Escape bubble to the sidebar's key handler.
+            let input =
+                cx.new(|cx| ComposerInput::with_context("Search settings", "PaletteSearch", cx));
+            let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
+                if matches!(event, ComposerInputEvent::Edited) {
+                    if let Some(search) = this.settings_search.as_mut() {
+                        search.selected = 0;
+                    }
+                    cx.notify();
+                }
+            });
+            SettingsSearch {
+                input,
+                selected: 0,
+                focus_pending: false,
+                _events: events,
+            }
+        })
+    }
+
+    /// Settings matching the sidebar filter, best first; empty when blank.
+    fn settings_search_results(&self, cx: &App) -> Vec<crate::settings::search::SettingsEntry> {
+        self.settings_search
+            .as_ref()
+            .map(|search| {
+                crate::settings::search::search(
+                    search.input.read(cx).text(),
+                    SettingsSection::is_shown,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn open_settings_search_result(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        if let Some(search) = self.settings_search.as_mut() {
+            search.selected = 0;
+            let input = search.input.clone();
+            input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        self.open_settings(section, cx);
+    }
+
+    /// Arrows move through the results, Enter opens one, Escape clears the
+    /// filter. Returns whether the key was used.
+    fn on_settings_search_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let results = self.settings_search_results(cx);
+        let Some(search) = self.settings_search.as_mut() else {
+            return false;
+        };
+        if results.is_empty() && search.input.read(cx).text().is_empty() {
+            return false;
+        }
+        match key {
+            "down" => {
+                search.selected = (search.selected + 1).min(results.len().saturating_sub(1));
+            }
+            "up" => search.selected = search.selected.saturating_sub(1),
+            "enter" => {
+                if let Some(entry) = results.get(search.selected) {
+                    self.open_settings_search_result(entry.section, cx);
+                }
+                return true;
+            }
+            "escape" => {
+                search.selected = 0;
+                let input = search.input.clone();
+                input.update(cx, |input, cx| input.set_text("", cx));
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -6530,13 +6656,16 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Settings-mode sidebar (harness settings-sidebar.tsx): window-control
-    /// strip, "Settings" heading, icon section rows styled like session rows,
-    /// and a Back row pinned to the bottom.
+    /// Settings-mode sidebar (harness settings-sidebar.tsx): "Settings"
+    /// heading, a search filter, icon section rows grouped under small
+    /// headings and styled like session rows, and a Back row pinned to the
+    /// bottom. While the filter has text, matching settings replace the
+    /// section list.
     fn render_settings_nav(
         &mut self,
         section: SettingsSection,
         theme: &Theme,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
@@ -6550,6 +6679,121 @@ impl Shell {
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         };
+        let search = self.ensure_settings_search(cx);
+        let search_input = search.input.clone();
+        let selected_result = search.selected;
+        if std::mem::take(&mut search.focus_pending) {
+            window.focus(&search_input.focus_handle(cx), cx);
+        }
+        let searching = !search_input.read(cx).text().trim().is_empty();
+        let results = self.settings_search_results(cx);
+        let nav_row = |id: SharedString, selected: bool| {
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .rounded(px(8.0))
+                .px(px(Theme::SPACE_SM))
+                .py(px(6.0))
+                .text_size(crate::typography::ui_rems(13.0))
+                .when(selected, |el| {
+                    // Same tokens as the main sidebar's session rows — the
+                    // two sidebars must feel alike.
+                    el.bg(crate::theme::glass_selected_bg())
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                })
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
+        };
+        let group_heading = |label: &'static str| {
+            div()
+                .px(px(Theme::SPACE_SM))
+                .pt(px(12.0))
+                .pb(px(4.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text_muted.opacity(0.6))
+                .child(SharedString::from(label))
+        };
+        let mut list = div().flex().flex_col().gap(px(2.0));
+        if searching {
+            if results.is_empty() {
+                list = list.child(
+                    div()
+                        .px(px(Theme::SPACE_SM))
+                        .py(px(6.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child("No matching settings"),
+                );
+            }
+            for (ix, entry) in results.into_iter().enumerate() {
+                let target = entry.section;
+                list = list.child(
+                    nav_row(
+                        SharedString::from(format!("settings-search-result-{ix}")),
+                        ix == selected_result,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_settings_search_result(target, cx)
+                    }))
+                    .child(
+                        icon(section_icon(target))
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().child(SharedString::from(entry.title)))
+                            .when(entry.title != target.label(), |el| {
+                                el.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted.opacity(0.7))
+                                        .child(SharedString::from(target.label())),
+                                )
+                            }),
+                    ),
+                );
+            }
+        } else {
+            let mut group = None;
+            for item in SettingsSection::ALL
+                .into_iter()
+                .filter(|item| item.is_shown())
+            {
+                if group != Some(item.group()) {
+                    group = Some(item.group());
+                    list = list.child(group_heading(item.group()));
+                }
+                list = list.child(
+                    nav_row(
+                        SharedString::from(format!("settings-nav-{}", item.label())),
+                        item == section,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_settings(item, cx)))
+                    .child(
+                        icon(section_icon(item))
+                            .size(px(16.0))
+                            .text_color(theme.text_muted),
+                    )
+                    .child(SharedString::from(item.label())),
+                );
+            }
+        }
         // Match the user's dragged sidebar width — the pane container clips to
         // it, so a hardcoded default here left hover washes stopping short of
         // the sidebar's right edge (user-reported). Device identity lives on
@@ -6559,9 +6803,17 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if this.on_settings_search_key(&event.keystroke.key, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
+                    .id("settings-nav")
                     .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
                     .px(px(Theme::SPACE_SM))
                     .flex()
                     .flex_col()
@@ -6569,60 +6821,33 @@ impl Shell {
                         div()
                             .px(px(Theme::SPACE_SM))
                             .pt(px(12.0))
-                            .pb(px(4.0))
+                            .pb(px(8.0))
                             .text_size(crate::typography::ui_rems(11.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text_muted.opacity(0.6))
                             .child(SharedString::from("Settings")),
                     )
                     .child(
-                        div().flex().flex_col().gap(px(2.0)).children(
-                            SettingsSection::ALL
-                                .into_iter()
-                                .filter(|item| {
-                                    *item != SettingsSection::Appshots
-                                        || crate::appshots::is_desktop()
-                                })
-                                .map(|item| {
-                                    let selected = item == section;
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "settings-nav-{}",
-                                            item.label()
-                                        )))
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .rounded(px(8.0))
-                                        .px(px(Theme::SPACE_SM))
-                                        .py(px(6.0))
-                                        .text_size(crate::typography::ui_rems(13.0))
-                                        .when(selected, |el| {
-                                            // Same tokens as the main sidebar's session
-                                            // rows — the two sidebars must feel alike.
-                                            el.bg(crate::theme::glass_selected_bg())
-                                                .font_weight(gpui::FontWeight::MEDIUM)
-                                        })
-                                        .text_color(if selected {
-                                            theme.text
-                                        } else {
-                                            theme.text_muted
-                                        })
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.open_settings(item, cx)
-                                        }))
-                                        .child(
-                                            icon(section_icon(item))
-                                                .size(px(16.0))
-                                                .text_color(theme.text_muted),
-                                        )
-                                        .child(SharedString::from(item.label()))
-                                }),
-                        ),
-                    ),
+                        div()
+                            .id("settings-search")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(Theme::SPACE_SM))
+                            .py(px(5.0))
+                            .rounded(px(8.0))
+                            .bg(crate::theme::ink(0.04))
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .child(
+                                icon(icons::MAGNIFER)
+                                    .size(px(14.0))
+                                    .flex_none()
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(div().flex_1().min_w_0().child(search_input)),
+                    )
+                    .child(list),
             )
             // Back pinned to the bottom (harness settings-sidebar.tsx).
             .child(
@@ -11929,6 +12154,7 @@ impl Render for Shell {
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
+                    motion::window_activation_changed(window.is_window_active(), cx);
                     if !window.is_window_active() {
                         this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
@@ -13785,6 +14011,136 @@ mod tests {
 mod exit_regressions {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn settings_search_opens_the_matching_section_and_clears(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_settings(SettingsSection::Devices, cx);
+                let search = shell.ensure_settings_search(cx);
+                assert!(
+                    search.focus_pending,
+                    "opening Settings from a chat focuses search"
+                );
+                // A blank filter leaves the keys to the page.
+                assert!(!shell.on_settings_search_key("enter", cx));
+                assert!(!shell.on_settings_search_key("escape", cx));
+
+                let input = shell.settings_search.as_ref().unwrap().input.clone();
+                input.update(cx, |input, cx| input.set_text("keybindings", cx));
+                let results = shell.settings_search_results(cx);
+                assert_eq!(results[0].section, SettingsSection::Shortcuts);
+                // Arrows stay inside the results.
+                assert!(shell.on_settings_search_key("up", cx));
+                assert_eq!(shell.settings_search.as_ref().unwrap().selected, 0);
+                for _ in 0..results.len() + 2 {
+                    shell.on_settings_search_key("down", cx);
+                }
+                assert_eq!(
+                    shell.settings_search.as_ref().unwrap().selected,
+                    results.len() - 1
+                );
+                shell.on_settings_search_key("up", cx);
+                while shell.settings_search.as_ref().unwrap().selected > 0 {
+                    shell.on_settings_search_key("up", cx);
+                }
+                assert!(shell.on_settings_search_key("enter", cx));
+                assert_eq!(shell.route, Route::Settings(SettingsSection::Shortcuts));
+                assert_eq!(input.read(cx).text(), "");
+
+                // Escape clears a filter without leaving the page.
+                input.update(cx, |input, cx| input.set_text("motion", cx));
+                assert!(shell.on_settings_search_key("escape", cx));
+                assert_eq!(input.read(cx).text(), "");
+                assert_eq!(shell.route, Route::Settings(SettingsSection::Shortcuts));
+
+                // Switching sections inside Settings does not steal focus.
+                shell.ensure_settings_search(cx).focus_pending = false;
+                shell.open_settings(SettingsSection::Files, cx);
+                assert!(!shell.settings_search.as_ref().unwrap().focus_pending);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn shell_saves_keep_motion_settings_chosen_in_appearance(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                // The Appearance page writes these straight to the store,
+                // outside the shell's working copy.
+                settings::update(SavePolicy::Immediate, cx, |settings| {
+                    settings.reduce_motion = crate::motion::ReduceMotion::On;
+                    settings.pause_animations_in_background = true;
+                });
+                // Any shell-owned change (sidebar width, panels) republishes
+                // the working copy; it must not revert the motion choices.
+                shell.schedule_save(cx);
+                let saved = settings::current(cx);
+                assert_eq!(saved.reduce_motion, crate::motion::ReduceMotion::On);
+                assert!(saved.pause_animations_in_background);
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn appshot_destinations_retain_last_session_and_use_new_canvas_defaults(
