@@ -37,6 +37,49 @@ git log origin/main..HEAD --format=%B | grep -iE "co-authored-by|generated with"
 If a pushed commit already has a trailer, reword it and force-push the branch
 before it is merged. Once it's on `main`, removing it means rewriting `main`.
 
+## Issue format: every report states its versions
+
+This repository is public. Every issue, whether a person or an agent files
+it, opens with this header. A report without versions can't be told apart
+from a bug that a newer release already fixed.
+
+```markdown
+**Harness:** 0.2.109 (latest: 0.2.109)
+**graff:** 0.0.302.25, the engine Harness runs
+**App:** desktop | iOS 0.2.109 | Android 0.2.109
+**Platform:** macOS arm64 | Windows x64 | Linux x64 | iOS 27 | Android 16 | ...
+
+## Symptom
+What went wrong, in generic terms, with the app's own error text verbatim.
+
+## Repro
+The smallest sequence of steps that shows it.
+
+## Root cause
+In code terms (`crate::module::function`), naming the tag or commit the
+line numbers come from. Leave this section out if the cause isn't known.
+
+## Fix
+The expected behavior, or the proposed change.
+```
+
+- **Harness:** About Harness on macOS, or Settings → Devices. From a shell on
+  macOS, run
+  `plutil -extract CFBundleShortVersionString raw /Applications/Harness.app/Contents/Info.plist`.
+  For the latest release, run `gh release view --repo justrach/harness --json tagName`.
+- **graff:** Harness runs its managed copy, not the `graff` on `PATH`:
+  `~/.harness/bin/graff --version` (macOS and Linux).
+- **Engine bugs go to `justrach/codegraff`.** That covers tools, compaction,
+  sessions, and model replies, and its issues use the same header.
+- **If either version is older than the latest release**, check whether the
+  release notes or a closed issue already cover the bug. Reproduce it on the
+  latest release before filing, or say plainly in the header that it wasn't
+  rechecked.
+- **Search before filing.** Search open and closed issues by the error text.
+  Comment on an existing issue only when you have a new repro or diagnostic.
+- **What the header must not contain:** account details, private repository
+  names, local paths, session ids, or transcript excerpts.
+
 ## Heavy builds
 
 One compile at a time; watch `ps -o rss=` on long builds and stop anything
