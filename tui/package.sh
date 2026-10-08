@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build the TUI and bridge and pack them as a tarball: tui/dist/harness-tui-<version>-<os>-<arch>.tar.gz
+# Build the TUI and bridge and pack them as a tarball: tui/dist/harness-tui-<version>-<os>-<arch>.tar.gz,
+# with its SHA-256 beside it (<tarball>.sha256).
 #
 #   tui/package.sh            # release build (slow: one heavy build at a time)
 #   PROFILE=debug tui/package.sh   # pack the debug binaries, for checking the layout
@@ -39,4 +40,7 @@ cp "$here/bridge/target/$profile/harness-tui-bridge" "$here/launcher/target/$pro
 cp "$here/../LICENSE"* "$stage/" 2>/dev/null || true
 tar -C "$here/dist" -czf "$here/dist/$name.tar.gz" "$name"
 rm -rf "$stage"
+# `graff tui` installs this tarball on first use and refuses one whose digest does not match
+# this file (GNU sha256sum format: "<hex>  <file>").
+(cd "$here/dist" && { sha256sum "$name.tar.gz" 2>/dev/null || shasum -a 256 "$name.tar.gz"; } >"$name.tar.gz.sha256")
 echo "$here/dist/$name.tar.gz"
