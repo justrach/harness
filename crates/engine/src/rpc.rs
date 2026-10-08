@@ -116,6 +116,12 @@ struct SetGraffDraftSubagentsParams {
     enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct SetGraffCompactAtParams {
+    /// Percent of the context window; `null` restores graff's default.
+    pct: Option<u8>,
+}
+
 async fn update_harness_enabled(
     registry: &HarnessRegistry,
     harness: HarnessId,
@@ -1242,6 +1248,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_TITLE_SETTINGS
             | methods::GET_GRAFF_DRAFT_SUBAGENTS
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
+            | methods::GET_GRAFF_COMPACT_AT
+            | methods::SET_GRAFF_COMPACT_AT
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1716,6 +1724,14 @@ impl RpcService for EngineRpc {
                 let p: SetGraffDraftSubagentsParams = parse_params(params)?;
                 self.registry.set_graff_draft_subagents(p.enabled);
                 RpcReply::value(&self.registry.graff_draft_subagents())
+            }
+            methods::GET_GRAFF_COMPACT_AT => RpcReply::value(&self.registry.graff_compact_at()),
+            methods::SET_GRAFF_COMPACT_AT => {
+                let p: SetGraffCompactAtParams = parse_params(params)?;
+                self.registry
+                    .set_graff_compact_at(p.pct)
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&self.registry.graff_compact_at())
             }
             methods::SET_TITLE_SETTINGS => {
                 let p: crate::registry::TitleSettings = parse_params(params)?;
