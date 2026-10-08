@@ -3893,6 +3893,7 @@ dependencies = [
  "harness-sync",
  "harness-update",
  "ignore",
+ "indexmap",
  "libc",
  "loro",
  "notify",
@@ -3934,7 +3935,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mobile"
-version = "0.2.109"
+version = "0.2.110"
 dependencies = [
  "async-trait",
  "futures",
