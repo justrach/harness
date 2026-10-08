@@ -1,5 +1,6 @@
 package harness.codegraff.android.ui.session
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -89,34 +91,40 @@ fun QuestionPanel(
                 )
             }
         }
-        Text(question.question, style = sans(15f, FontWeight.Medium), color = p.text)
-        if (question.multiSelect == true) Text("Select one or more options.", style = sans(12f), color = p.textMuted)
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            question.options.forEachIndexed { ix, option ->
-                val isPicked = typed[question.id].isNullOrEmpty() && option in picked[question.id].orEmpty()
-                val rowShape = RoundedCornerShape(12.dp)
-                Row(
-                    Modifier.fillMaxWidth().clip(rowShape)
-                        .background(if (isPicked) p.ink(0.09f) else p.ink(0.025f), rowShape)
-                        .border(1.dp, if (isPicked) p.ink(0.16f) else androidx.compose.ui.graphics.Color.Transparent, rowShape)
-                        .clickable(role = Role.Button) {
-                            typed.remove(question.id)
-                            if (question.multiSelect == true) {
-                                val set = picked[question.id].orEmpty()
-                                picked[question.id] = if (option in set) set - option else set + option
-                            } else {
-                                picked[question.id] = setOf(option)
-                                autoAdvance = (autoAdvance ?: 0) + 1
+        // Long questions and options scroll here, never truncate, while the answer field and buttons stay in view.
+        Column(
+            Modifier.weight(1f, fill = false).verticalScroll(remember(page) { ScrollState(0) }),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(question.question, style = sans(15f, FontWeight.Medium), color = p.text)
+            if (question.multiSelect == true) Text("Select one or more options.", style = sans(12f), color = p.textMuted)
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                question.options.forEachIndexed { ix, option ->
+                    val isPicked = typed[question.id].isNullOrEmpty() && option in picked[question.id].orEmpty()
+                    val rowShape = RoundedCornerShape(12.dp)
+                    Row(
+                        Modifier.fillMaxWidth().clip(rowShape)
+                            .background(if (isPicked) p.ink(0.09f) else p.ink(0.025f), rowShape)
+                            .border(1.dp, if (isPicked) p.ink(0.16f) else androidx.compose.ui.graphics.Color.Transparent, rowShape)
+                            .clickable(role = Role.Button) {
+                                typed.remove(question.id)
+                                if (question.multiSelect == true) {
+                                    val set = picked[question.id].orEmpty()
+                                    picked[question.id] = if (option in set) set - option else set + option
+                                } else {
+                                    picked[question.id] = setOf(option)
+                                    autoAdvance = (autoAdvance ?: 0) + 1
+                                }
                             }
-                        }
-                        .padding(horizontal = 14.dp, vertical = 10.dp).heightIn(min = 28.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Text(option, style = sans(13.5f, FontWeight.Medium), color = p.text, modifier = Modifier.weight(1f))
-                    if (ix < 9) {
-                        Box(Modifier.size(22.dp).background(p.ink(0.06f), RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
-                            Text("${ix + 1}", style = sans(11f), color = p.textMuted)
+                            .padding(horizontal = 14.dp, vertical = 10.dp).heightIn(min = 28.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(option, style = sans(13.5f, FontWeight.Medium), color = p.text, modifier = Modifier.weight(1f))
+                        if (ix < 9) {
+                            Box(Modifier.size(22.dp).background(p.ink(0.06f), RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
+                                Text("${ix + 1}", style = sans(11f), color = p.textMuted)
+                            }
                         }
                     }
                 }

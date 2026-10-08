@@ -785,6 +785,7 @@ struct QuestionPanel: View {
                     .font(Theme.sans(10.5, weight: .medium))
                     .kerning(1)
                     .foregroundStyle(Theme.textMuted.opacity(0.6))
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 if questions.count > 1 {
                     Text("\(page + 1)/\(questions.count)")
@@ -796,21 +797,16 @@ struct QuestionPanel: View {
                 }
             }
 
-            Text(question.question)
-                .font(Theme.sans(15, weight: .medium))
-                .foregroundStyle(Theme.text)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if question.multiSelect == true {
-                Text("Select one or more options.")
-                    .font(Theme.sans(12))
-                    .foregroundStyle(Theme.textMuted)
-            }
-
-            VStack(spacing: 4) {
-                ForEach(Array(question.options.enumerated()), id: \.offset) { ix, option in
-                    optionRow(question: question, ix: ix, option: option)
+            // The panel shares the screen with the transcript, which would
+            // otherwise squeeze long options into one-line ellipses. Let the
+            // question and options size naturally, scrolling only when they
+            // can't fit, while the answer field and buttons stay put.
+            ViewThatFits(in: .vertical) {
+                questionBody(question)
+                ScrollView {
+                    questionBody(question)
                 }
+                .scrollBounceBehavior(.basedOnSize)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -852,6 +848,27 @@ struct QuestionPanel: View {
         .transition(.opacity)
     }
 
+    private func questionBody(_ question: UserInputQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(question.question)
+                .font(Theme.sans(15, weight: .medium))
+                .foregroundStyle(Theme.text)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if question.multiSelect == true {
+                Text("Select one or more options.")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textMuted)
+            }
+
+            VStack(spacing: 4) {
+                ForEach(Array(question.options.enumerated()), id: \.offset) { ix, option in
+                    optionRow(question: question, ix: ix, option: option)
+                }
+            }
+        }
+    }
+
     private func optionRow(question: UserInputQuestion, ix: Int, option: String) -> some View {
         let isPicked = (typed[question.id] ?? "").isEmpty
             && picked[question.id, default: []].contains(option)
@@ -864,6 +881,7 @@ struct QuestionPanel: View {
                         .font(Theme.sans(13.5, weight: .medium))
                         .foregroundStyle(Theme.text)
                         .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
                 if ix < 9 {

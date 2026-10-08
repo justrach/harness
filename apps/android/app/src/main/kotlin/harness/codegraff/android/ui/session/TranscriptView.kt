@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.Composable
@@ -263,21 +264,25 @@ private fun Modifier.combinedClickableCompat(onClick: () -> Unit, onLongClick: (
 
 // MARK: chips (transcript.rs ErrorChip / InputChip)
 
+/** Restacked like the desktop chip: the message wraps below the header instead of truncating. */
 @Composable
 private fun ErrorChipView(message: String) {
     val p = Theme.palette
     val shape = RoundedCornerShape(10.dp)
-    Row(
-        Modifier.fillMaxWidth().height(34.dp).background(p.danger.opacity(0.05f), shape)
-            .border(1.dp, p.danger.opacity(0.16f), shape).padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    Column(
+        Modifier.fillMaxWidth().heightIn(min = 34.dp).background(p.danger.opacity(0.05f), shape)
+            .border(1.dp, p.danger.opacity(0.16f), shape).padding(horizontal = 8.dp, vertical = 7.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Box(Modifier.size(20.dp).background(p.danger.opacity(0.12f), RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
-            GlyphView(Glyph.Warning, 12.dp, p.dangerSoft.opacity(0.8f), strokeWidth = 2f)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.size(20.dp).background(p.danger.opacity(0.12f), RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
+                GlyphView(Glyph.Warning, 12.dp, p.dangerSoft.opacity(0.8f), strokeWidth = 2f)
+            }
+            Text("Error", style = sans(12f, FontWeight.Medium), color = p.text)
         }
-        Text("Error", style = sans(12f, FontWeight.Medium), color = p.text)
-        Text(message, style = sans(12f), color = p.text.opacity(0.8f), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        SelectionContainer {
+            Text(message, style = sans(12f), color = p.text.opacity(0.8f), modifier = Modifier.padding(start = 28.dp))
+        }
     }
 }
 

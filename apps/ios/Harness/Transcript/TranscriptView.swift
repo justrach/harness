@@ -658,27 +658,36 @@ struct ToolChipRow: View {
 
 // MARK: - Chips (transcript.rs ErrorChip / InputChip)
 
+/// Restacked like the desktop chip: the message wraps below the header
+/// instead of truncating, since the useful part of a provider or adapter
+/// error is rarely in its first few words.
 struct ErrorChipView: View {
     let message: String
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.dangerSoft.opacity(0.8))
-                .frame(width: 20, height: 20)
-                .background(Theme.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
-            Text("Error")
-                .font(Theme.sans(12, weight: .medium))
-                .foregroundStyle(Theme.text)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.dangerSoft.opacity(0.8))
+                    .frame(width: 20, height: 20)
+                    .background(Theme.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                Text("Error")
+                    .font(Theme.sans(12, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                Spacer(minLength: 0)
+            }
             Text(message)
                 .font(Theme.sans(12))
                 .foregroundStyle(Theme.text.opacity(0.8))
-                .lineLimit(1)
-            Spacer(minLength: 0)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .padding(.leading, 28)
         }
         .padding(.horizontal, 8)
-        .frame(height: 34)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
         .background(Theme.danger.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.danger.opacity(0.16), lineWidth: 1))
     }
