@@ -14,7 +14,7 @@ use harness_engine::HarnessRegistry;
 use harness_proto::HarnessId;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -92,24 +92,100 @@ pub struct ThreadState {
     /// for an agent that doesn't), steers are refused as not steerable and
     /// the TUI sends them as the next turn instead.
     pub steerable: bool,
+    /// Engine mode: message ids this TUI minted for the chat → the TUI's
+    /// `clientUserMessageId`, so its own messages are recognized when the
+    /// chat echoes them.
+    pub client_ids: HashMap<String, String>,
+    /// Engine mode: the TUI asked to interrupt the running turn.
+    pub interrupted: bool,
+}
+
+impl ThreadState {
+    pub fn new(cwd: String, harness: HarnessId, model: Option<String>) -> Self {
+        Self {
+            cwd,
+            harness,
+            model,
+            resume: None,
+            interrupt: None,
+            turn_id: None,
+            steer: None,
+            steers: Default::default(),
+            steerable: false,
+            client_ids: HashMap::new(),
+            interrupted: false,
+        }
+    }
 }
 
 pub struct Conn {
     out: mpsc::UnboundedSender<Value>,
     pub registry: Arc<HarnessRegistry>,
     pub threads: Mutex<HashMap<String, ThreadState>>,
+    /// The Harness engine this TUI shares chats with, when one is running.
+    /// `None` runs agents in this process (standalone mode).
+    pub engine: Option<Arc<crate::engine::Engine>>,
+    /// Engine-mode chat mirrors, one per thread the TUI has open.
+    pub mirrors: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Server-to-client requests awaiting the TUI's answer.
+    pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, Value>>>>,
+    next_request: std::sync::atomic::AtomicU64,
 }
 
 impl Conn {
-    #[cfg(test)]
-    pub fn for_test(registry: Arc<HarnessRegistry>) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
-        let (out, rx) = mpsc::unbounded_channel();
-        let conn = Arc::new(Self {
+    fn new(
+        out: mpsc::UnboundedSender<Value>,
+        registry: Arc<HarnessRegistry>,
+        engine: Option<Arc<crate::engine::Engine>>,
+    ) -> Self {
+        Self {
             out,
             registry,
             threads: Mutex::new(HashMap::new()),
-        });
-        (conn, rx)
+            engine,
+            mirrors: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+            next_request: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn for_test(registry: Arc<HarnessRegistry>) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
+        let (out, rx) = mpsc::unbounded_channel();
+        (Arc::new(Self::new(out, registry, None)), rx)
+    }
+
+    /// Ask the TUI something (a question for the user) and wait for its
+    /// answer. `Err` carries the TUI's JSON-RPC error, or `null` when the
+    /// connection closed first.
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value, Value> {
+        let n = self
+            .next_request
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = format!("harness-bridge-{n}");
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .insert(id.clone(), tx);
+        let _ = self
+            .out
+            .send(json!({ "id": id, "method": method, "params": params }));
+        rx.await.unwrap_or(Err(Value::Null))
+    }
+
+    fn answer(&self, message: &Value) {
+        let Some(id) = message.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(tx) = self.pending.lock().expect("pending lock").remove(id) else {
+            return;
+        };
+        let reply = match message.get("error") {
+            Some(error) => Err(error.clone()),
+            None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+        };
+        let _ = tx.send(reply);
     }
 
     pub fn notify(&self, method: &str, params: Value) {
@@ -130,15 +206,15 @@ impl Conn {
     }
 }
 
-pub async fn serve(stream: TcpStream, registry: Arc<HarnessRegistry>) -> Result<()> {
+pub async fn serve(
+    stream: TcpStream,
+    registry: Arc<HarnessRegistry>,
+    engine: Option<Arc<crate::engine::Engine>>,
+) -> Result<()> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut sink, mut source) = ws.split();
     let (out, mut outgoing) = mpsc::unbounded_channel::<Value>();
-    let conn = Arc::new(Conn {
-        out,
-        registry,
-        threads: Mutex::new(HashMap::new()),
-    });
+    let conn = Arc::new(Conn::new(out, registry, engine));
 
     let writer = tokio::spawn(async move {
         while let Some(value) = outgoing.recv().await {
@@ -176,17 +252,24 @@ pub async fn serve(stream: TcpStream, registry: Arc<HarnessRegistry>) -> Result<
                 });
             }
             (Some(method), None) => tracing::debug!(%method, "client notification"),
-            // A response to a server request (approvals, elicitation); none are issued yet.
-            (None, _) => tracing::debug!("client response ignored"),
+            // The TUI's answer to a request this bridge sent (a question).
+            (None, Some(_)) => conn.answer(&message),
+            (None, None) => tracing::debug!("frame without method or id ignored"),
         }
     }
 
-    // Stop any turn still running for this connection.
+    // Stop any turn still running for this connection. Engine-mode turns
+    // belong to the chat, not the TUI: they keep running, like a chat left
+    // open in the desktop app; only the mirrors stop.
     for thread in conn.threads.lock().expect("threads lock").values() {
         if let Some(token) = &thread.interrupt {
             token.cancel();
         }
     }
+    for (_, mirror) in conn.mirrors.lock().expect("mirrors lock").drain() {
+        mirror.abort();
+    }
+    conn.pending.lock().expect("pending lock").clear();
     writer.abort();
     Ok(())
 }
