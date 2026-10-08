@@ -90,8 +90,23 @@ does not declare `screenSize`. Tested on a Pixel Fold emulator (closed and open)
 
 ## Build, run, test
 
-Requires JDK 17+ (Android Studio's bundled JDK works) and the Android SDK (platform 35). Point Gradle at
-the SDK with `local.properties` (`sdk.dir=/path/to/Android/sdk`) or `ANDROID_HOME`.
+Requires JDK 17+ (Android Studio's bundled JDK works) and the Android SDK (platform 35) with NDK
+27.1.12297006. Point Gradle at the SDK with `local.properties` (`sdk.dir=/path/to/Android/sdk`) or
+`ANDROID_HOME`.
+
+The sync protocol is Rust, shared with the desktop: `crates/mobile` wraps `crates/doc` and `crates/sync`
+for the phone and is exposed to Kotlin with [UniFFI](https://mozilla.github.io/uniffi-rs/) over JNA. Gradle
+builds it, so you also need the Rust toolchain from `rust-toolchain.toml` with the Android targets:
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+```
+
+- `cargoBuildHost` builds the core for your machine; the JVM unit tests load it, and
+  `generateUniffiBindings` reads the Kotlin bindings out of it (into `app/build/generated/uniffi`).
+- `cargoBuildArm64V8a` and `cargoBuildX8664` build it per ABI in the `mobile` cargo profile, linked with the
+  NDK's clang, into the APK's `jniLibs`. Only packaging runs them, so a unit-test run never cross-compiles.
+  `-Pharness.abis=x86_64` limits the ABIs; the APK ships only the ones built (no 32-bit).
 
 ```sh
 cd apps/android
@@ -117,6 +132,7 @@ Foldable emulator: create an AVD from the `pixel_fold` profile, then
 | `model/` | Entities, indicators and ordering, transcript rows, markdown reader, harness and model catalogs, Home filter and grouping |
 | `demo/` | The offline dataset and the scripted streaming reply |
 | `AppModel.kt` | `AppState` driven by the dataset; the sync client will sit behind the same state |
+| `../../crates/mobile` | The native core (Rust); its Kotlin bindings are generated into `harness.codegraff.android.core` |
 | `theme/` | Theme catalog and store, palette and tokens, fonts, brand marks, line icons and glyphs, motion |
 | `ui/components/` | Glass, loaders, status indicators, sheet chrome, PR badge |
 | `ui/home/`, `ui/session/`, `ui/newsession/`, `ui/settings/`, `ui/sheets/`, `ui/signin/` | The screens |

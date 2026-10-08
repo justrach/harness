@@ -1,0 +1,25 @@
+[package]
+name = "harness-mobile"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description = "The Android app's native core: the viewer side of the sync protocol, exposed with UniFFI."
+
+[lib]
+name = "harness_mobile"
+# cdylib for the app and the JVM unit tests; lib for Rust tests.
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# Generates the Kotlin bindings from the built library (apps/android runs it).
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+harness-doc.workspace = true
+uniffi = "0.31"

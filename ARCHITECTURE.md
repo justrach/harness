@@ -13,6 +13,8 @@ Harness is a native desktop workspace for coding agents. The Rust binary in `app
 
 The GUI and engine communicate through local IPC when they run separately. Local mode requires no account or cloud service. The current profile is chosen at engine start; stop and restart the daemon after `harness login` or `harness logout` to change between local and synced profiles.
 
+The Android app in `apps/android` reaches the same sync protocol through `crates/mobile`, a UniFFI library over `crates/doc` and `crates/sync` that Gradle builds for each Android ABI. The iOS app keeps its Swift port of the protocol in `apps/ios/Harness/Sync`; `apps/parity` pins the rules both phones share.
+
 ## Sync service
 
 The TypeScript Worker at `edge/` implements the Harness sync protocol. It deploys from this directory to `https://edge.codegraff.com`. The worker validates Harness tokens before forwarding requests into Durable Objects. Session, chat, registry, preview, and device rooms use WebSockets for live updates; R2 stores attachments and release artifacts. The CLI and iOS app use the same endpoint. Agent rooms add one live Durable Object per room over PostgreSQL. See `docs/chat2-sync.md`, `docs/registry-sync.md` and `docs/agent-rooms.md` for wire details.

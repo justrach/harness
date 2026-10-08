@@ -14,6 +14,7 @@ members = [
     "crates/syntax",
     "crates/mcp",
     "crates/observe",
+    "crates/mobile",
     "apps/harness",
 ]
 # Vendored forks are their own (trimmed) workspaces.
@@ -38,6 +39,7 @@ harness-ui = { path = "crates/ui" }
 harness-syntax = { path = "crates/syntax" }
 harness-theme = { path = "crates/theme" }
 harness-mcp = { path = "crates/mcp" }
+harness-mobile = { path = "crates/mobile" }
 harness-observe = { path = "crates/observe" }
 
 # CRDT
@@ -150,6 +152,12 @@ nucleo-matcher = "0.3"
 # LTO's size/speed win at a fraction of the link time; strip debug symbols.
 lto = "thin"
 strip = "symbols"
+
+[profile.mobile]
+# The Android app's native library (apps/android builds it per ABI). Release
+# code, smaller than speed-first: it ships inside every APK.
+inherits = "release"
+opt-level = "s"
 
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
