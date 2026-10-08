@@ -6,6 +6,8 @@ import SwiftUI
 
 @main
 struct HarnessApp: App {
+    /// APNs registration and notification taps (PushNotifications).
+    @UIApplicationDelegateAdaptor(HarnessAppDelegate.self) private var appDelegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
