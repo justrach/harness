@@ -37,6 +37,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod sessions;
+pub mod simulators;
 pub mod source_control;
 pub mod spaces;
 pub mod terminals;
@@ -150,6 +151,8 @@ pub struct EngineCore {
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
+    /// iOS Simulators on this computer, watched and driven from other devices.
+    pub simulators: simulators::Simulators,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -271,6 +274,7 @@ impl EngineCore {
         let workspace_files =
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
+        let simulators = simulators::Simulators::new(data_dir.join("tools"));
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = harness_preview::PreviewService::new(
@@ -350,6 +354,7 @@ impl EngineCore {
             spaces_sync,
             uploads,
             agent_accounts,
+            simulators,
             device_id,
             local_import,
             external_history,
@@ -499,7 +504,8 @@ impl EngineCore {
             self.workspace_scope,
         )
         .with_auth(self.auth())
-        .with_previews(self.previews.clone());
+        .with_previews(self.previews.clone())
+        .with_simulators(self.simulators.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -536,6 +542,7 @@ impl EngineCore {
         self.doc_host.pause_all_queues();
         self.sessions.shutdown().await;
         self.terminals.shutdown();
+        self.simulators.shutdown().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a

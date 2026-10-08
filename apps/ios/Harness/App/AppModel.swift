@@ -854,6 +854,13 @@ final class AppModel {
         return try await workspace.agentAccounts(deviceId: deviceId, forceUsage: forceUsage)
     }
 
+    /// Where the Simulators screens send their relay calls. Demo mode has no
+    /// computer to ask.
+    func simulatorHost() throws -> WorkspaceStore {
+        guard demo == nil, let workspace else { throw RelayError.notConnected }
+        return workspace
+    }
+
     func listFolders(deviceId: String, path: String?) async -> FolderListing? {
         if let demo {
             try? await Task.sleep(nanoseconds: 120_000_000)  // feel like a network hop
