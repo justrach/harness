@@ -139,6 +139,10 @@ display EXCLUDED. File paths refer to the reference repo.
 - UploadChunk/UploadCommit; ReadAttachment(stream)/ReadAttachmentChunk
 - OpenTerminal{chatId,cols,rows}->TerminalSession; SubscribeTerminal{id,afterSeq?}->stream
   (Data{seq,data}|Exit{seq,code,signal?}); WriteTerminal; ResizeTerminal; CloseTerminal
+- ListSimulators->{supported,reason?,setUp,devices[{id,name,runtime,booted}]}; SetUpSimulators
+  (installs the streaming helper; consent step); BootSimulator/ShutdownSimulator{simulatorId};
+  WatchSimulatorScreen{simulatorId}->stream {seq,jpeg(base64)}, latest frame wins;
+  SimulatorInput{simulatorId,input:{kind:touch,phase,x,y}|{kind:button,button}|{kind:text,text}|{kind:key,key}}
 - ListAgentAccounts{forceUsage?}; ActivateAgentAccount; ForgetAgentAccount; StartAgentLogin ->
   {loginId,url,mode:paste-code|browser}; CompleteAgentLogin{code}; PollAgentLogin; CancelAgentLogin
 ### DataRpc (IPC-only)

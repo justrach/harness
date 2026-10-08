@@ -684,6 +684,44 @@ final class WorkspaceStore {
                                             timeoutSeconds: 45)
     }
 
+    // MARK: Simulators (the computer's iOS Simulators, watched and driven from here)
+
+    func listSimulators(deviceId: String) async throws -> SimulatorList {
+        try await relay(for: deviceId).call(method: "ListSimulators", params: [:], timeoutSeconds: 25)
+    }
+
+    /// Installs the streaming helper on the computer (npm; up to a few minutes).
+    func setUpSimulators(deviceId: String) async throws -> SimulatorList {
+        try await relay(for: deviceId).call(method: "SetUpSimulators", params: [:], timeoutSeconds: 900)
+    }
+
+    func bootSimulator(deviceId: String, simulatorId: String) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "BootSimulator",
+                                                        params: ["simulatorId": simulatorId],
+                                                        timeoutSeconds: 150)
+    }
+
+    func shutdownSimulator(deviceId: String, simulatorId: String) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "ShutdownSimulator",
+                                                        params: ["simulatorId": simulatorId],
+                                                        timeoutSeconds: 30)
+    }
+
+    func simulatorScreen(deviceId: String, simulatorId: String) async throws
+        -> AsyncThrowingStream<SimulatorFrame, Error> {
+        try await relay(for: deviceId).stream(method: "WatchSimulatorScreen",
+                                              params: ["simulatorId": simulatorId])
+    }
+
+    func simulatorInput(deviceId: String, simulatorId: String, input: SimulatorInput) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "SimulatorInput",
+                                                        params: ["simulatorId": simulatorId,
+                                                                 "input": input.params])
+    }
+
     /// ListRefs on the target device — branches with current/worktree markers
     /// (default branch first, per the engine's ordering).
     func listRefs(deviceId: String, repoPath: String) async -> [RepoRef]? {

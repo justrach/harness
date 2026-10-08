@@ -61,6 +61,15 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings-appearance")
                 }
 
+                Section("Devices") {
+                    NavigationLink {
+                        SimulatorsView()
+                    } label: {
+                        Text("Simulators")
+                    }
+                    .accessibilityIdentifier("settings-simulators")
+                }
+
                 // iPad already shows the list beside the open session; a phone can too, when there is room.
                 if UIDevice.current.userInterfaceIdiom == .phone {
                     Section {
