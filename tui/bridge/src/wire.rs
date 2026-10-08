@@ -22,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    /// Structured detail the TUI parses (e.g. a `TurnError`).
+    pub data: Option<Value>,
 }
 
 impl RpcError {
@@ -29,6 +31,7 @@ impl RpcError {
         Self {
             code: -32601,
             message: format!("harness-tui-bridge does not implement `{method}`"),
+            data: None,
         }
     }
 
@@ -36,6 +39,7 @@ impl RpcError {
         Self {
             code: -32603,
             message: message.into(),
+            data: None,
         }
     }
 
@@ -43,6 +47,22 @@ impl RpcError {
         Self {
             code: -32602,
             message: message.into(),
+            data: None,
+        }
+    }
+
+    /// The active turn cannot take same-turn input; the TUI queues the
+    /// message and sends it as the next turn instead.
+    pub fn not_steerable(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            code: -32602,
+            data: Some(json!({
+                "message": message,
+                "codexErrorInfo": { "activeTurnNotSteerable": { "turnKind": "review" } },
+                "additionalDetails": null,
+            })),
+            message,
         }
     }
 
@@ -60,6 +80,18 @@ pub struct ThreadState {
     pub resume: Option<String>,
     /// Cancels the turn currently running on this thread.
     pub interrupt: Option<CancellationToken>,
+    /// The Codex turn running on this thread, which `turn/steer` must name.
+    pub turn_id: Option<String>,
+    /// The running turn's steering mailbox. Closed when the agent's turn
+    /// ends, so a parked session finishes instead of waiting for more input.
+    pub steer: Option<mpsc::Sender<harness_adapters::SteerMessage>>,
+    /// Accepted steers not yet picked up by the agent, as the `userMessage`
+    /// items to show when it reports `Steered`, oldest first.
+    pub steers: std::collections::VecDeque<Value>,
+    /// The running agent reads its steering mailbox. Until it is known (or
+    /// for an agent that doesn't), steers are refused as not steerable and
+    /// the TUI sends them as the next turn instead.
+    pub steerable: bool,
 }
 
 pub struct Conn {
@@ -69,6 +101,17 @@ pub struct Conn {
 }
 
 impl Conn {
+    #[cfg(test)]
+    pub fn for_test(registry: Arc<HarnessRegistry>) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
+        let (out, rx) = mpsc::unbounded_channel();
+        let conn = Arc::new(Self {
+            out,
+            registry,
+            threads: Mutex::new(HashMap::new()),
+        });
+        (conn, rx)
+    }
+
     pub fn notify(&self, method: &str, params: Value) {
         let _ = self.out.send(json!({ "method": method, "params": params }));
     }
@@ -76,7 +119,12 @@ impl Conn {
     fn respond(&self, id: Value, result: Result<Value, RpcError>) {
         let message = match result {
             Ok(result) => json!({ "id": id, "result": result }),
-            Err(err) => json!({ "id": id, "error": { "code": err.code, "message": err.message } }),
+            Err(err) => match err.data {
+                Some(data) => {
+                    json!({ "id": id, "error": { "code": err.code, "message": err.message, "data": data } })
+                }
+                None => json!({ "id": id, "error": { "code": err.code, "message": err.message } }),
+            },
         };
         let _ = self.out.send(message);
     }
