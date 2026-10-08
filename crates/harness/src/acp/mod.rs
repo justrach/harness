@@ -2914,6 +2914,20 @@ impl EffortTracker {
 
 /// Per-turn token usage from a settled `session/prompt` response, when the
 /// adapter attaches it (tolerant of both field spellings; absent → nothing).
+/// The save a turn's session now lives in, when graff reports one that is not
+/// the connection's session id: `/resume` moves the live session onto another
+/// save while the connection keeps routing by its original id. The engine
+/// resumes from `Done.session_id`, so a restart loads the save the
+/// conversation continued in rather than the one handed out at session/new.
+fn durable_session_id(res: &Result<Value, HarnessError>, session_id: &str) -> String {
+    res.as_ref()
+        .ok()
+        .and_then(|resp| resp.get("_meta")?.get("graff/durableSessionId")?.as_str())
+        .filter(|id| !id.is_empty())
+        .unwrap_or(session_id)
+        .to_owned()
+}
+
 fn usage_from_response(res: &Result<Value, HarnessError>) -> Option<AgentEvent> {
     let resp = res.as_ref().ok()?;
     // Grok settles usage on the response `_meta` (inputTokens/outputTokens —
@@ -4207,7 +4221,7 @@ async fn run_session(session: Session) {
                         status,
                         result: None,
                         error,
-                        session_id: Some(session_id.clone()),
+                        session_id: Some(durable_session_id(&res, &session_id)),
                     },
                 )
                 .await
@@ -4390,7 +4404,7 @@ async fn run_session(session: Session) {
                                 status,
                                 result: None,
                                 error,
-                                session_id: Some(session_id.clone()),
+                                session_id: Some(durable_session_id(&res, &session_id)),
                             },
                         )
                         .await;
@@ -4901,6 +4915,22 @@ async fn run_session(session: Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resumed_graff_session_resumes_from_the_save_it_reported() {
+        let moved: Result<Value, HarnessError> = Ok(json!({
+            "stopReason": "end_turn",
+            "_meta": {"graff/durableSessionId": "baseline"}
+        }));
+        assert_eq!(durable_session_id(&moved, "acp-1-1"), "baseline");
+        let plain: Result<Value, HarnessError> = Ok(json!({"stopReason": "end_turn"}));
+        assert_eq!(durable_session_id(&plain, "acp-1-1"), "acp-1-1");
+        let empty: Result<Value, HarnessError> =
+            Ok(json!({"_meta": {"graff/durableSessionId": ""}}));
+        assert_eq!(durable_session_id(&empty, "acp-1-1"), "acp-1-1");
+        let failed: Result<Value, HarnessError> = Err(HarnessError::Protocol("x".into()));
+        assert_eq!(durable_session_id(&failed, "acp-1-1"), "acp-1-1");
+    }
 
     #[test]
     fn graff_child_keeps_the_selected_acp_workspace() {
