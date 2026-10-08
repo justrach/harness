@@ -1,0 +1,370 @@
+{
+  "about": "Registry rows to what the screens read (WorkspaceStore.project on iOS, crates/mobile projection.rs on Android). Chats are compared sorted by id as id|title|archived|harness|model|roomGen|spaceId|createdAt, with - for absent.",
+  "rows": [
+    {
+      "kind": "devices",
+      "id": "d2",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "d2",
+        "name": "Beta",
+        "platform": "linux",
+        "lastSeenAt": 1700000000500
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "name": "0001700000000-000000-desk",
+        "platform": "0001700000000-000000-desk",
+        "lastSeenAt": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "devices",
+      "id": "d1",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "d1",
+        "name": "Alpha",
+        "version": "0.2.109",
+        "capabilities": [
+          "message-queue-v1",
+          7
+        ]
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "name": "0001700000000-000000-desk",
+        "version": "0001700000000-000000-desk",
+        "capabilities": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "devices",
+      "id": "d3",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "platform": "macos"
+      },
+      "clocks": {
+        "platform": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "spaces",
+      "id": "s2",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "s2",
+        "deviceId": "d1",
+        "path": "/b",
+        "createdAt": 1700000000005
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk",
+        "path": "0001700000000-000000-desk",
+        "createdAt": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "spaces",
+      "id": "s1",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "s1",
+        "deviceId": "d1",
+        "path": "/a",
+        "name": "Named",
+        "createdAt": 1700000000005
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk",
+        "path": "0001700000000-000000-desk",
+        "name": "0001700000000-000000-desk",
+        "createdAt": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "spaces",
+      "id": "s0",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "s0",
+        "deviceId": "d2",
+        "path": "/z"
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk",
+        "path": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "spaces",
+      "id": "s3",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "s3",
+        "deviceId": "d1"
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "chats",
+      "id": "c1",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "c1",
+        "deviceId": "d1",
+        "title": "Port it",
+        "archived": false,
+        "cwd": "/a",
+        "spaceId": "s1",
+        "createdAt": 1700000000010,
+        "roomGen": 2,
+        "lastMessageAt": 1700000000020,
+        "config": {
+          "harness": "graff",
+          "model": "m1",
+          "modelOptions": {
+            "tier": "a"
+          }
+        }
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk",
+        "title": "0001700000000-000000-desk",
+        "archived": "0001700000000-000000-desk",
+        "cwd": "0001700000000-000000-desk",
+        "spaceId": "0001700000000-000000-desk",
+        "createdAt": "0001700000000-000000-desk",
+        "roomGen": "0001700000000-000000-desk",
+        "lastMessageAt": "0001700000000-000000-desk",
+        "config": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "chats",
+      "id": "c2",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "c2",
+        "title": "No device"
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "title": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "chats",
+      "id": "c3",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "id": "c3",
+        "deviceId": "d2",
+        "archived": true,
+        "config": {
+          "model": "x"
+        }
+      },
+      "clocks": {
+        "id": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk",
+        "archived": "0001700000000-000000-desk",
+        "config": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "chats",
+      "id": "c4",
+      "seq": 3,
+      "deleted": true,
+      "fields": {},
+      "clocks": {}
+    },
+    {
+      "kind": "chats",
+      "id": "c5",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "deviceId": "d2",
+        "createdAt": 1700000000003.7
+      },
+      "clocks": {
+        "deviceId": "0001700000000-000000-desk",
+        "createdAt": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "sessions",
+      "id": "c1",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "chatId": "c1",
+        "deviceId": "d1",
+        "status": "working",
+        "updatedAt": 1700000000030
+      },
+      "clocks": {
+        "chatId": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk",
+        "status": "0001700000000-000000-desk",
+        "updatedAt": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "sessions",
+      "id": "c3",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "chatId": "c3",
+        "deviceId": "d2",
+        "status": "bogus",
+        "updatedAt": 1700000000030
+      },
+      "clocks": {
+        "chatId": "0001700000000-000000-desk",
+        "deviceId": "0001700000000-000000-desk",
+        "status": "0001700000000-000000-desk",
+        "updatedAt": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "sessions",
+      "id": "c5",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "chatId": "c5",
+        "status": "idle"
+      },
+      "clocks": {
+        "chatId": "0001700000000-000000-desk",
+        "status": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "preferences",
+      "id": "sidebarPins",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "initialized": true
+      },
+      "clocks": {
+        "initialized": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "sidebarPins",
+      "id": "c1",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "pinned": true,
+        "orderKey": "8"
+      },
+      "clocks": {
+        "pinned": "0001700000000-000000-desk",
+        "orderKey": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "sidebarPins",
+      "id": "c3",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "pinned": true,
+        "orderKey": "4"
+      },
+      "clocks": {
+        "pinned": "0001700000000-000000-desk",
+        "orderKey": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "sidebarPins",
+      "id": "c9",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "pinned": false,
+        "orderKey": "6"
+      },
+      "clocks": {
+        "pinned": "0001700000000-000000-desk",
+        "orderKey": "0001700000000-000000-desk"
+      }
+    },
+    {
+      "kind": "sidebarPins",
+      "id": "c5",
+      "seq": 3,
+      "deleted": false,
+      "fields": {
+        "pinned": true,
+        "orderKey": "80"
+      },
+      "clocks": {
+        "pinned": "0001700000000-000000-desk",
+        "orderKey": "0001700000000-000000-desk"
+      }
+    }
+  ],
+  "expect": {
+    "devices": [
+      "d1",
+      "d2",
+      "d3"
+    ],
+    "deviceNames": [
+      "Alpha",
+      "Beta",
+      "d3"
+    ],
+    "deviceCapabilities": [
+      [
+        "message-queue-v1"
+      ],
+      [],
+      []
+    ],
+    "spaces": [
+      "s0",
+      "s1",
+      "s2"
+    ],
+    "chats": [
+      "c1|Port it|false|graff|m1|2|s1|1700000000010",
+      "c3|-|true|claude-code|x|-|-|0",
+      "c5|-|false|-|-|-|-|1700000000003"
+    ],
+    "sessions": {
+      "c1": "working"
+    },
+    "pinned": [
+      "c3",
+      "c1"
+    ]
+  }
+}

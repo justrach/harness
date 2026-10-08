@@ -22,4 +22,19 @@ bindgen = ["uniffi/cli"]
 
 [dependencies]
 harness-doc.workspace = true
+harness-proto.workspace = true
+harness-sync.workspace = true
+loro.workspace = true
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 uniffi = "0.31"
+
+[dev-dependencies]
+harness-sync = { workspace = true, features = ["mock-server"] }
+tempfile.workspace = true

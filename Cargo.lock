@@ -3936,8 +3936,20 @@ dependencies = [
 name = "harness-mobile"
 version = "0.2.109"
 dependencies = [
+ "futures",
  "harness-doc",
+ "harness-proto",
+ "harness-sync",
+ "loro",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uniffi",
+ "uuid",
 ]
 
 [[package]]

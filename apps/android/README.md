@@ -6,8 +6,10 @@ handset. Agents run on your desktop hosts and the phone renders their sessions a
 
 ## Status
 
-The UI is a port of the SwiftUI app, screen for screen, running on the offline **demo dataset** (the
-same fixtures as the iOS `-demo` mode). Live sync is not wired yet.
+The UI is a port of the SwiftUI app, screen for screen. It runs either on the offline **demo dataset** (the
+same fixtures as the iOS `-demo` mode) or on **live sync** with an edge through the native core (see
+[Live sync](#live-sync)). Signing in with CodeGraff is not wired yet, so live sync is reached through a
+debug launch rig against a dev edge.
 
 | Screen | What is ported |
 | --- | --- |
@@ -24,11 +26,11 @@ desktop's exact SVG path data, generated into `theme/BrandMarkPaths.kt`. Themes 
 
 Not built yet, in the order they are needed for a real connection:
 
-1. Loro CRDT client (the engine uses loro 1.13; the iOS app uses `loro-swift`, an UniFFI binding of
-   `loro-ffi`, which can also generate Kotlin bindings).
-2. Registry and chat-room sockets to the edge, mirroring `apps/ios/Harness/Sync`.
-3. CodeGraff sign-in (PKCE, `harness://callback`) and the durable command queue.
-4. Real attachment upload, the queued-message panel, notifications, launcher icon, Live Activity analogue.
+1. Connectivity states on screen (offline, reconnecting), presence by iOS's rule, and the device relay
+   (folders, agents, models, refs, change requests).
+2. CodeGraff sign-in (PKCE, `harness://callback`) and the durable command queue (sending, steering,
+   stopping, answering questions).
+3. Real attachment upload, the queued-message panel, notifications, launcher icon, Live Activity analogue.
 
 ## Staying in step with iOS
 
@@ -37,6 +39,38 @@ Not built yet, in the order they are needed for a real connection:
 contract. CI (`.github/workflows/android.yml`) runs those with lint and the debug build, builds the minified release
 bundle and the perf APK, and runs the instrumented tests on an emulator. `android-release.yml` builds a bundle to
 download from a run; nothing publishes to the Play Store.
+
+## Live sync
+
+The sync protocol is the desktop's own Rust code (`crates/doc`, `crates/sync`), wrapped for the phone by
+`crates/mobile` and called through generated UniFFI bindings. The core:
+
+- mirrors the **workspace registry**: the on-device copy loads before anything dials, then
+  `harness_sync::RegistryClient` keeps it converged over the socket, with plain HTTPS beside it (a first
+  pull in one round trip, and sync on networks that strip socket upgrades). The rows are projected the
+  way the iOS `WorkspaceStore` projects them, and the phone writes only what iOS writes (chat creates,
+  archive, rename, seen marks, chat config, pins, project folders);
+- mirrors each open **session doc** (Loro): hydrated from disk, joined to its chat2 room once the registry
+  says the chat is on room generation 2, saved together with its room cursor, and decoded into the
+  transcript and queue the way `SessionStore` decodes them;
+- publishes snapshots to `sync/LiveSync.kt`, which maps them onto the same `AppState` flows the demo
+  drives, so the screens do not know which one they are showing.
+
+`apps/parity/vectors/registry-projection.json` and `transcript-decode.json` pin the projection and the
+decoding against iOS.
+
+To try it, run the edge in dev auth mode, publish a stand-in host, and launch a debug build at it:
+
+```sh
+(cd edge && npm run dev)                                    # AUTH_MODE=dev edge on :27640
+cargo run -p harness-mobile --example dev_host -- http://127.0.0.1:27640 u1 org1
+adb shell am start -n harness.codegraff.android/.MainActivity \
+    --es edge http://10.0.2.2:27640 --es user u1 --es org org1
+```
+
+The extras are read only by debuggable builds (the iOS counterparts are the `-setedge`, `-setmode dev`,
+`-setuser` and `-setorg` launch arguments). `HARNESS_TEST_EDGE=http://127.0.0.1:27640 cargo test -p
+harness-mobile --test live_edge -- --ignored` runs the same round trip without a device.
 
 ## Responsiveness
 
@@ -131,7 +165,8 @@ Foldable emulator: create an AVD from the `pixel_fold` profile, then
 | --- | --- |
 | `model/` | Entities, indicators and ordering, transcript rows, markdown reader, harness and model catalogs, Home filter and grouping |
 | `demo/` | The offline dataset and the scripted streaming reply |
-| `AppModel.kt` | `AppState` driven by the dataset; the sync client will sit behind the same state |
+| `AppModel.kt` | `AppState`, driven by the demo dataset or by live sync behind the same flows |
+| `sync/` | The live sync wrapper around the native core, and the mapping onto the model types |
 | `../../crates/mobile` | The native core (Rust); its Kotlin bindings are generated into `harness.codegraff.android.core` |
 | `theme/` | Theme catalog and store, palette and tokens, fonts, brand marks, line icons and glyphs, motion |
 | `ui/components/` | Glass, loaders, status indicators, sheet chrome, PR badge |
