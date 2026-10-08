@@ -39,7 +39,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      # Package install overlaps the toolchain and cache restore; the job
+      # waits for it before the first compile.
       - name: gpui system deps
+        id: system-deps
+        background: true
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -50,6 +54,7 @@ jobs:
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - wait: system-deps
       - name: package
         run: scripts/package-linux.sh
       - uses: actions/upload-artifact@v4
