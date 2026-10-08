@@ -51,7 +51,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Duration;
 
@@ -1098,6 +1098,8 @@ enum Launch {
 pub struct AcpHarness {
     spec: AcpAgentSpec,
     graff_draft_subagents: Option<Arc<AtomicBool>>,
+    /// Settings → graff's compaction point (percent; 0 = graff's default).
+    graff_compact_at: Option<Arc<AtomicU8>>,
     executable: Option<PathBuf>,
     /// Override of the agent's on-disk sessions root (grok's
     /// `~/.grok/sessions`), where subagent transcripts are tailed from.
@@ -1126,6 +1128,7 @@ impl AcpHarness {
         Self {
             spec,
             graff_draft_subagents: None,
+            graff_compact_at: None,
             executable: None,
             sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
@@ -1165,6 +1168,21 @@ impl AcpHarness {
     pub fn with_graff_draft_subagents(mut self, enabled: Arc<AtomicBool>) -> Self {
         self.graff_draft_subagents = Some(enabled);
         self
+    }
+
+    pub fn with_graff_compact_at(mut self, pct: Arc<AtomicU8>) -> Self {
+        self.graff_compact_at = Some(pct);
+        self
+    }
+
+    /// The compaction point to pass graff, unless the user's own
+    /// `GRAFF_COMPACT_PCT` is set (an explicit environment setting wins).
+    fn graff_compact_at_env(&self) -> Option<u8> {
+        if self.spec.id != HarnessId::Graff || std::env::var_os("GRAFF_COMPACT_PCT").is_some() {
+            return None;
+        }
+        let pct = self.graff_compact_at.as_ref()?.load(Ordering::Relaxed);
+        (pct != 0).then_some(pct)
     }
 
     fn draft_subagents_enabled(&self) -> bool {
@@ -1529,6 +1547,9 @@ impl AcpHarness {
             }
             if self.draft_subagents_enabled() {
                 cmd.env("GRAFF_ACP_DRAFT_SUBAGENTS", "1");
+            }
+            if let Some(pct) = self.graff_compact_at_env() {
+                cmd.env("GRAFF_COMPACT_PCT", pct.to_string());
             }
         }
         if self.spec.id == HarnessId::Antigravity
@@ -4912,6 +4933,35 @@ mod tests {
         let mut grok = Command::new("grok");
         AcpHarness::grok().configure_adapter_environment(&mut grok, Path::new("grok"));
         assert!(!grok.as_std_mut().get_envs().any(|(key, _)| key == "GRAFF_CODEX_WS"));
+    }
+
+    #[test]
+    fn graff_compact_at_setting_reaches_the_graff_child() {
+        let env_of = |cmd: &mut Command| {
+            cmd.as_std_mut()
+                .get_envs()
+                .find(|(key, _)| *key == "GRAFF_COMPACT_PCT")
+                .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let pct = Arc::new(AtomicU8::new(0));
+        let harness = AcpHarness::graff().with_graff_compact_at(pct.clone());
+        // A user-set GRAFF_COMPACT_PCT wins, so the setting stays out of the way.
+        let user_set = std::env::var_os("GRAFF_COMPACT_PCT").is_some();
+
+        let mut default = Command::new("graff");
+        harness.configure_adapter_environment(&mut default, Path::new("graff"));
+        assert_eq!(env_of(&mut default), None);
+
+        pct.store(70, Ordering::Relaxed);
+        let mut set = Command::new("graff");
+        harness.configure_adapter_environment(&mut set, Path::new("graff"));
+        assert_eq!(env_of(&mut set), (!user_set).then(|| "70".to_string()));
+
+        let mut grok = Command::new("grok");
+        AcpHarness::grok()
+            .with_graff_compact_at(pct.clone())
+            .configure_adapter_environment(&mut grok, Path::new("grok"));
+        assert_eq!(env_of(&mut grok), None);
     }
 
     #[test]
