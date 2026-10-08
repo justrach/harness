@@ -18,6 +18,7 @@ use harness_proto::{
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
+use crate::turn_replies::{REPLIES_TRUNCATED_NOTE, turn_replies};
 
 mod rooms;
 use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
@@ -158,7 +159,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "wait_for_turn",
-            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the newest assistant message. From a chat, returns a status snapshot immediately; replies arrive asynchronously.",
+            description: "Block until a chat is no longer working: returns completed, awaitingInput (answer with respond_to_input), errored, or timedOut, with the current turn's assistant replies (long ones trimmed to their end; get_chat has the rest). From a chat, returns a status snapshot immediately; replies arrive asynchronously.",
             input_schema: chat_key_schema(json!({
                 "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 600 }
             })),
@@ -1049,8 +1050,8 @@ impl Tools {
         }))
     }
 
-    /// Wait, then report the outcome with the assistant messages that
-    /// landed since `since_millis`.
+    /// Wait, then report the outcome with the assistant replies of the turn
+    /// being waited on (see [`turn_replies`]).
     async fn await_turn(
         &self,
         chat: &Chat,
@@ -1065,21 +1066,7 @@ impl Tools {
             .await?;
         let entries = self.harness.transcript(&chat.id).await.unwrap_or_default();
         let rendered = render_entries(&entries, RenderOptions::default());
-        let replies: Vec<&RenderedMessage> = rendered
-            .iter()
-            .filter(|m| m.role == harness_doc::MessageRole::Assistant)
-            .filter(|m| m.created_at >= since_millis.saturating_sub(2_000))
-            .collect();
-        let replies: Vec<&RenderedMessage> = if since_millis == 0 || replies.is_empty() {
-            rendered
-                .iter()
-                .rev()
-                .find(|m| m.role == harness_doc::MessageRole::Assistant)
-                .into_iter()
-                .collect()
-        } else {
-            replies
-        };
+        let (replies, replies_truncated) = turn_replies(&entries, since_millis);
         let (status, _) = status_of(session.as_ref());
         let timed_out = outcome == TurnOutcome::TimedOut;
         let mut turn = json!({
@@ -1089,6 +1076,10 @@ impl Tools {
             "pendingInput": last_pending_input(&rendered),
             "replies": replies,
         });
+        if replies_truncated {
+            turn["repliesTruncated"] = json!(true);
+            turn["repliesNote"] = json!(REPLIES_TRUNCATED_NOTE);
+        }
         if timed_out && self.from_chat() {
             turn["note"] = json!(CHAT_WAIT_NOTE);
         }
@@ -1161,6 +1152,7 @@ fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::harness::Origin;
     use async_trait::async_trait;
     use futures::StreamExt;

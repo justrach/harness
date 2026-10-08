@@ -19,6 +19,7 @@
 mod jsonrpc;
 mod tools;
 mod transcript;
+mod turn_replies;
 mod harness;
 
 pub use jsonrpc::serve_stdio;
