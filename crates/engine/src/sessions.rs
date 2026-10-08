@@ -578,12 +578,25 @@ impl SessionsEngine {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
-                let (tx, rx) = oneshot::channel();
+                let (mut tx, rx) = oneshot::channel();
+                let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), tx);
+                lock(&pending).insert(request_id.clone(), answer_tx);
                 let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
+                    request_id: request_id.clone(),
                     questions,
+                });
+                let pending = pending.clone();
+                let engine_tx = engine_tx.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        // A dropped resolver stays an error for the harness, as before.
+                        answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+                        _ = tx.closed() => {
+                            lock(&pending).remove(&request_id);
+                            let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                        }
+                    }
                 });
                 rx
             })

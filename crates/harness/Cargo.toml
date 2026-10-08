@@ -16,6 +16,11 @@ name = "harness-native-fixture"
 path = "tests/fixtures/native_agent.rs"
 required-features = ["native-fixture"]
 
+[[bin]]
+name = "harness-pi-fixture"
+path = "tests/fixtures/pi_rpc.rs"
+required-features = ["native-fixture"]
+
 [dependencies]
 harness-proto.workspace = true
 base64 = "0.22"
