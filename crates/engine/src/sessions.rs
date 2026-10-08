@@ -1589,6 +1589,15 @@ pub(crate) fn subagent_doc_id(chat_id: &str, tool_use_id: &str) -> String {
     format!("{chat_id}--sub--{hex}")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of `drive_run`'s coalesced commit ticks, so a test can
+    /// tell one commit per window from one per event. Thread-local: a
+    /// current-thread test runtime runs its spawned `drive_run` on the test's
+    /// own thread, and parallel tests can't bleed into the count.
+    static FLUSH_TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A live subagent transcript sink: its own doc (opened by id — the room
 /// `chat2/{docId}/ws` dials automatically, so viewers sync it like a chat),
 /// one streaming assistant entry folded from the tagged events. The held
@@ -2293,6 +2302,8 @@ async fn drive_run(
                     },
                 },
                 _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
+                    #[cfg(test)]
+                    FLUSH_TICKS.with(|t| t.set(t.get() + 1));
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
                     // (parent + any dirty subagent docs).
                     if dirty {
@@ -2516,8 +2527,17 @@ async fn drive_run(
                     sink.push_user(&device_id, text);
                     continue;
                 }
+                let was_clean = !sink.dirty;
                 harness_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
+                // `flush_at` is otherwise only rescheduled when the parent
+                // turns dirty. A child streaming under an idle parent would
+                // find the deadline already past and commit its doc on every
+                // event instead of once per STREAM_COMMIT_MS window.
+                if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
+                    flush_at = tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                }
                 if !chip_streaming && done {
                     // In-place chip refresh on lifecycle transitions only —
                     // content never rewrites the parent doc.
@@ -3451,5 +3471,114 @@ mod tests {
             subagent_doc_id("chat", "a:b"),
             subagent_doc_id("chat", "a:c")
         );
+    }
+
+    /// Hand-fed harness: the test pushes wire events and decides when the
+    /// stream ends.
+    struct FeedHarness {
+        feed: std::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedReceiver<harness_proto::AgentEvent>>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl harness_adapters::Harness for FeedHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Feed"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> harness_proto::SteeringMode {
+            harness_proto::SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[harness_proto::ReasoningLevel] {
+            &[]
+        }
+        async fn models(
+            &self,
+        ) -> Result<Vec<harness_proto::Model>, harness_adapters::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            _controls: harness_adapters::RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<harness_proto::AgentEvent, harness_adapters::HarnessError>,
+            >,
+            harness_adapters::HarnessError,
+        > {
+            use futures::StreamExt as _;
+            let mut feed = self.feed.lock().unwrap().take().expect("one run per test");
+            Ok(futures::stream::poll_fn(move |cx| feed.poll_recv(cx).map(|e| e.map(Ok))).boxed())
+        }
+    }
+
+    // A child streaming under an idle parent found the commit deadline
+    // already past, so every event fired the commit branch and wrote the
+    // child doc, instead of once per STREAM_COMMIT_MS window.
+    #[tokio::test]
+    async fn subagent_streaming_under_idle_parent_commits_once_per_window() {
+        use super::{AgentEvent, DoneStatus, FLUSH_TICKS, STREAM_COMMIT_MS, SessionStatus};
+        use std::time::Duration;
+
+        let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::registry::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(FeedHarness {
+            feed: std::sync::Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(registry),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let chat = "chat-sub-window";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        let child = |text: &str| AgentEvent::Subagent {
+            parent_tool_use_id: "spawn-1".into(),
+            event: Box::new(AgentEvent::TextDelta { text: text.into() }),
+        };
+        // Open the child's sink and let the parent's own window settle, so
+        // the parent is clean and the deadline is in the past.
+        feed.send(child("start ")).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        FLUSH_TICKS.with(|t| t.set(0));
+        let started = std::time::Instant::now();
+        for i in 0..60 {
+            feed.send(child(&format!("chunk {i} "))).unwrap();
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let windows = started.elapsed().as_millis() as usize / STREAM_COMMIT_MS as usize;
+        let ticks = FLUSH_TICKS.with(|t| t.get());
+        assert!(
+            ticks <= windows + 2,
+            "60 child events in ~{windows} commit windows fired {ticks} commits"
+        );
+        assert_eq!(
+            core.sessions.session_status(chat).map(|s| s.status),
+            Some(SessionStatus::Working),
+        );
+        feed.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        })
+        .unwrap();
+        core.shutdown().await;
     }
 }
