@@ -20,6 +20,7 @@ use harness_theme::{
 use crate::appearance::{self, AppearanceMode};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons;
+use crate::motion::ReduceMotion;
 use crate::popover::{self, Popup};
 use crate::settings::widgets;
 use crate::theme::{Appearance, Theme};
@@ -1239,16 +1240,51 @@ fn frosted_helper(frosted: bool) -> &'static str {
     }
 }
 
+fn reduce_motion_helper(preference: ReduceMotion, system: bool) -> &'static str {
+    match (preference, system) {
+        (ReduceMotion::System, true) => "Following the system, which currently reduces motion.",
+        (ReduceMotion::System, false) => "Following the system, which currently allows motion.",
+        (ReduceMotion::On, _) => "Animations skip straight to their final state.",
+        (ReduceMotion::Off, _) => "Animations play even if the system asks for less motion.",
+    }
+}
+
 fn background_effect_choice(
     theme: &Theme,
     effect: crate::settings::NewThreadBackgroundEffect,
     selected: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
+    choice_chip(
+        theme,
+        format!(
             "new-thread-background-effect-{}",
             effect.label().to_lowercase()
-        )))
+        ),
+        effect.label(),
+        selected,
+    )
+}
+
+/// A captioned group of rows, so the long page reads in sections.
+fn labeled_card(theme: &Theme, label: &'static str, rows: Vec<AnyElement>) -> gpui::Div {
+    div()
+        .mt(px(32.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(widgets::field_label(theme, label))
+        .child(widgets::section_card(theme).mt_0().children(rows))
+}
+
+/// One option in a row of mutually exclusive chips.
+fn choice_chip(
+    theme: &Theme,
+    id: String,
+    label: &'static str,
+    selected: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
         .h(px(28.0))
         .px(px(9.0))
         .rounded(px(7.0))
@@ -1276,7 +1312,7 @@ fn background_effect_choice(
         .when(!selected, |control| {
             control.hover(|style| style.bg(theme.surface_raised_hover))
         })
-        .child(effect.label())
+        .child(label)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2992,8 +3028,8 @@ impl Render for AppearancePage {
         // The switch shows what is on screen, so "theme default" reads as the
         // theme's own recommendation; flipping it stores an explicit choice.
         let frosted = theme.surface_treatment == SurfaceTreatment::Frosted;
-        let mut settings_rows = theme_rows;
-        settings_rows.push(
+        let mut theme_card_rows = theme_rows;
+        theme_card_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::TUNING))
                 .child(
@@ -3021,8 +3057,9 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
-        settings_rows.push(
-            widgets::card_row(&theme, false)
+        let mut window_rows = Vec::new();
+        window_rows.push(
+            widgets::card_row(&theme, true)
                 .child(widgets::row_tile(&theme, icons::WIDGET))
                 .child(
                     div()
@@ -3101,7 +3138,7 @@ impl Render for AppearancePage {
                     .into_any_element(),
             ],
         };
-        settings_rows.push(
+        window_rows.push(
             widgets::card_row(&theme, false)
                 .child(background_tile)
                 .child(
@@ -3168,7 +3205,7 @@ impl Render for AppearancePage {
                         }))
                 })
                 .collect::<Vec<_>>();
-            settings_rows.push(
+            window_rows.push(
                 widgets::card_row(&theme, false)
                     .child(widgets::row_tile(&theme, icons::TUNING))
                     .child(
@@ -3200,7 +3237,7 @@ impl Render for AppearancePage {
             );
         }
         if let Some(error) = self.background_error.clone() {
-            settings_rows.push(
+            window_rows.push(
                 div()
                     .px(px(20.0))
                     .py(px(10.0))
@@ -3210,8 +3247,8 @@ impl Render for AppearancePage {
                     .into_any_element(),
             );
         }
-        settings_rows.push(
-            widgets::card_row(&theme, false)
+        let conversation_rows = vec![
+            widgets::card_row(&theme, true)
                 .child(widgets::row_tile(&theme, icons::EYE_CLOSED))
                 .child(
                     div()
@@ -3239,8 +3276,88 @@ impl Render for AppearancePage {
                         })),
                 )
                 .into_any_element(),
+        ];
+        let current_reduce_motion = crate::motion::preference(cx);
+        let reduce_motion_controls = ReduceMotion::ALL
+            .into_iter()
+            .map(|preference| {
+                choice_chip(
+                    &theme,
+                    format!("reduce-motion-{}", preference.label().to_lowercase()),
+                    preference.label(),
+                    preference == current_reduce_motion,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    crate::motion::set_preference(preference, cx);
+                    cx.notify();
+                }))
+            })
+            .collect::<Vec<_>>();
+        let mut motion_rows = Vec::new();
+        motion_rows.push(
+            widgets::card_row(&theme, true)
+                .child(widgets::row_tile(&theme, icons::MAGIC_STICK_3))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Reduce motion"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(reduce_motion_helper(
+                                        current_reduce_motion,
+                                        crate::motion::system_reduces_motion(cx),
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .ml(px(10.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .children(reduce_motion_controls),
+                )
+                .into_any_element(),
         );
-        settings_rows.extend(self.render_theme_library_rows(&theme, cx));
+        let pause_in_background = crate::motion::pause_in_background(cx);
+        motion_rows.push(
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::ACTION_PLAY))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Pause animations in background"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(
+                                        "Hold animations still while Harness isn't the focused window. Saves CPU and battery.",
+                                    )
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, pause_in_background)
+                        .id("pause-animations-in-background-toggle")
+                        .ml(px(10.0))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::motion::set_pause_in_background(!pause_in_background, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
+        theme_card_rows.extend(self.render_theme_library_rows(&theme, cx));
         let library_warning = self
             .library_error
             .clone()
@@ -3382,7 +3499,10 @@ impl Render for AppearancePage {
                                     .child(widgets::field_label(&theme, "Appearance"))
                                     .child(widgets::option_card_row().children(cards)),
                             )
-                            .child(widgets::section_card(&theme).children(settings_rows))
+                            .child(labeled_card(&theme, "Theme", theme_card_rows))
+                            .child(labeled_card(&theme, "Window and background", window_rows))
+                            .child(labeled_card(&theme, "Conversation", conversation_rows))
+                            .child(labeled_card(&theme, "Motion", motion_rows))
                             .child(font_section)
                             .when_some(library_warning, |page, warning| {
                                 page.child(
