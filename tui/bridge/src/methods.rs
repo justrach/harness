@@ -57,6 +57,9 @@ pub async fn handle(conn: &std::sync::Arc<Conn>, method: &str, params: Value) ->
         "turn/start" => crate::turn::start(conn, params),
         "turn/steer" => crate::turn::steer(conn, params),
         "turn/interrupt" => turn_interrupt(conn, params),
+        realtime if realtime.starts_with("thread/realtime/") => {
+            crate::voice::handle(conn, realtime, params).await
+        }
         other => err(RpcError::method_not_found(other)),
     }
 }
