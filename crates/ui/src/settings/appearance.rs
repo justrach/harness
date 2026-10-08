@@ -1265,6 +1265,17 @@ fn background_effect_choice(
     )
 }
 
+/// A captioned group of rows, so the long page reads in sections.
+fn labeled_card(theme: &Theme, label: &'static str, rows: Vec<AnyElement>) -> gpui::Div {
+    div()
+        .mt(px(32.0))
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .child(widgets::field_label(theme, label))
+        .child(widgets::section_card(theme).mt_0().children(rows))
+}
+
 /// One option in a row of mutually exclusive chips.
 fn choice_chip(
     theme: &Theme,
@@ -3017,8 +3028,8 @@ impl Render for AppearancePage {
         // The switch shows what is on screen, so "theme default" reads as the
         // theme's own recommendation; flipping it stores an explicit choice.
         let frosted = theme.surface_treatment == SurfaceTreatment::Frosted;
-        let mut settings_rows = theme_rows;
-        settings_rows.push(
+        let mut theme_card_rows = theme_rows;
+        theme_card_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::TUNING))
                 .child(
@@ -3046,8 +3057,9 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
-        settings_rows.push(
-            widgets::card_row(&theme, false)
+        let mut window_rows = Vec::new();
+        window_rows.push(
+            widgets::card_row(&theme, true)
                 .child(widgets::row_tile(&theme, icons::WIDGET))
                 .child(
                     div()
@@ -3126,7 +3138,7 @@ impl Render for AppearancePage {
                     .into_any_element(),
             ],
         };
-        settings_rows.push(
+        window_rows.push(
             widgets::card_row(&theme, false)
                 .child(background_tile)
                 .child(
@@ -3193,7 +3205,7 @@ impl Render for AppearancePage {
                         }))
                 })
                 .collect::<Vec<_>>();
-            settings_rows.push(
+            window_rows.push(
                 widgets::card_row(&theme, false)
                     .child(widgets::row_tile(&theme, icons::TUNING))
                     .child(
@@ -3225,7 +3237,7 @@ impl Render for AppearancePage {
             );
         }
         if let Some(error) = self.background_error.clone() {
-            settings_rows.push(
+            window_rows.push(
                 div()
                     .px(px(20.0))
                     .py(px(10.0))
@@ -3235,8 +3247,8 @@ impl Render for AppearancePage {
                     .into_any_element(),
             );
         }
-        settings_rows.push(
-            widgets::card_row(&theme, false)
+        let conversation_rows = vec![
+            widgets::card_row(&theme, true)
                 .child(widgets::row_tile(&theme, icons::EYE_CLOSED))
                 .child(
                     div()
@@ -3264,7 +3276,7 @@ impl Render for AppearancePage {
                         })),
                 )
                 .into_any_element(),
-        );
+        ];
         let current_reduce_motion = crate::motion::preference(cx);
         let reduce_motion_controls = ReduceMotion::ALL
             .into_iter()
@@ -3281,8 +3293,9 @@ impl Render for AppearancePage {
                 }))
             })
             .collect::<Vec<_>>();
-        settings_rows.push(
-            widgets::card_row(&theme, false)
+        let mut motion_rows = Vec::new();
+        motion_rows.push(
+            widgets::card_row(&theme, true)
                 .child(widgets::row_tile(&theme, icons::MAGIC_STICK_3))
                 .child(
                     div()
@@ -3313,7 +3326,7 @@ impl Render for AppearancePage {
                 .into_any_element(),
         );
         let pause_in_background = crate::motion::pause_in_background(cx);
-        settings_rows.push(
+        motion_rows.push(
             widgets::card_row(&theme, false)
                 .child(widgets::row_tile(&theme, icons::ACTION_PLAY))
                 .child(
@@ -3344,7 +3357,7 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
-        settings_rows.extend(self.render_theme_library_rows(&theme, cx));
+        theme_card_rows.extend(self.render_theme_library_rows(&theme, cx));
         let library_warning = self
             .library_error
             .clone()
@@ -3486,7 +3499,10 @@ impl Render for AppearancePage {
                                     .child(widgets::field_label(&theme, "Appearance"))
                                     .child(widgets::option_card_row().children(cards)),
                             )
-                            .child(widgets::section_card(&theme).children(settings_rows))
+                            .child(labeled_card(&theme, "Theme", theme_card_rows))
+                            .child(labeled_card(&theme, "Window and background", window_rows))
+                            .child(labeled_card(&theme, "Conversation", conversation_rows))
+                            .child(labeled_card(&theme, "Motion", motion_rows))
                             .child(font_section)
                             .when_some(library_warning, |page, warning| {
                                 page.child(

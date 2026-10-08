@@ -24,6 +24,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod search;
 pub mod shortcuts;
 pub mod widgets;
 
