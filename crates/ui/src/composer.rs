@@ -407,6 +407,8 @@ pub const CLUSTER_X_DELTA: f32 = 4.0;
 /// than the structural spacing ladder because the narrow paperclip glyph
 /// otherwise looks farther away than its hit target actually is.
 pub const ACTION_UTILITY_GAP: f32 = 2.0;
+/// One leading utility's hit target (attach, dictate).
+pub const UTILITY_BUTTON: f32 = 28.0;
 /// Structural separation between utility actions and the primary Send action.
 pub const ACTION_PRIMARY_GAP: f32 = Theme::SPACE_SM;
 
@@ -5542,6 +5544,7 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        probe_dictation();
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
         let input = cx.new(|cx| {
@@ -9976,7 +9979,9 @@ impl Render for Composer {
                     .size(px(18.0))
                     .text_color(theme.text_muted),
             );
-        let dictate = self.render_dictation_button(&theme, cx);
+        let dictate = self
+            .show_dictation()
+            .then(|| self.render_dictation_button(&theme, cx));
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
@@ -10054,7 +10059,7 @@ impl Render for Composer {
         let model_travel = (surface_width
             - PILL_BORDER_V
             - action_inset
-            - 28.0
+            - self.leading_cluster_width()
             - ACTION_UTILITY_GAP
             - self
                 .model_bounds
@@ -10135,7 +10140,7 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(attach)
-                                .child(dictate)
+                                .children(dictate)
                                 .child(model_picker),
                         )
                         .child(send_button),
@@ -10180,7 +10185,7 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(attach)
-                                .child(dictate),
+                                .children(dictate),
                         )
                         .child(
                             div()
@@ -10403,6 +10408,39 @@ impl Render for Composer {
             ));
         }
         container
+    }
+}
+
+/// Whether this device can dictate (a Codex CLI with its voice helper),
+/// found once in the background so the mic only appears where it works.
+static DICTATION_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn probe_dictation() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if cfg!(test) {
+        return;
+    }
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            let available = harness_adapters::DictationRuntime::detect().is_ok();
+            let _ = DICTATION_AVAILABLE.set(available);
+        });
+    });
+}
+
+impl Composer {
+    /// The mic shows where dictation can run, and while a session is live.
+    fn show_dictation(&self) -> bool {
+        self.dictation.is_some() || DICTATION_AVAILABLE.get().copied().unwrap_or(false)
+    }
+
+    /// Attach, plus dictate when it shows: the model selector's expanded anchor.
+    fn leading_cluster_width(&self) -> f32 {
+        if self.show_dictation() {
+            UTILITY_BUTTON + ACTION_UTILITY_GAP + UTILITY_BUTTON
+        } else {
+            UTILITY_BUTTON
+        }
     }
 }
 
