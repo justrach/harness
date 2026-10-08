@@ -702,6 +702,16 @@ impl Auth {
         self.clear_session(&mut sign_in);
     }
 
+    /// The person's own Sign out: also signs graff out of the key this
+    /// sign-in gave it (one sign-in, one sign-out). A session that merely
+    /// expires goes through [`Self::sign_out`] and leaves graff alone.
+    pub async fn sign_out_with_graff(&self) {
+        self.sign_out();
+        crate::codegraff_auth::CodegraffAuth::shared(&self.inner.config.data_dir)
+            .sign_out_harness_key()
+            .await;
+    }
+
     fn clear_session(&self, sign_in: &mut SignInLifecycle) {
         sign_in.generation = sign_in.generation.wrapping_add(1);
         sign_in.pending.clear();

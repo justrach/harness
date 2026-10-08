@@ -1552,7 +1552,7 @@ impl RpcService for AuthRpc {
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::SIGN_OUT => {
-                self.auth.sign_out();
+                self.auth.sign_out_with_graff().await;
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::LIST_ORGS => {

@@ -1,7 +1,8 @@
 //! One sign-in covers the app and `graff` in the terminal: a Harness sign-in
 //! on a device whose graff has no key asks the edge for one and writes it to
 //! graff's own credential file; a device that has one never asks, and its key
-//! is never replaced.
+//! is never replaced. Harness's own Sign out takes back (and revokes) only a
+//! key a Harness sign-in gave graff.
 //!
 //! One test function: graff's key file is found from HOME, which this sets.
 #![cfg(unix)]
@@ -52,7 +53,22 @@ async fn stub_edge() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
                         }
                     }
                 };
-                let reply = if head.starts_with("POST /auth/exchange") {
+                let reply = if head.starts_with("POST /v1/keys/revoke") {
+                    let bearer = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("authorization: Bearer "))
+                        .or_else(|| {
+                            head.lines()
+                                .find_map(|l| l.strip_prefix("Authorization: Bearer "))
+                        })
+                        .unwrap_or_default()
+                        .to_string();
+                    record
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::json!({ "revoked": bearer }));
+                    r#"{"ok":true}"#.to_string()
+                } else if head.starts_with("POST /auth/exchange") {
                     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
                     let asked = parsed["graffKey"] == true;
                     record.lock().unwrap().push(parsed);
@@ -81,7 +97,7 @@ async fn stub_edge() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
     (url, seen)
 }
 
-async fn sign_in(edge: &str, data_dir: &std::path::Path) {
+async fn sign_in(edge: &str, data_dir: &std::path::Path) -> Auth {
     let mut config = AuthConfig::new(edge, data_dir);
     config.codegraff_client_id = Some("cg_client_test".into());
     config.codegraff_api_base = "https://codegraff.example".into();
@@ -96,6 +112,7 @@ async fn sign_in(edge: &str, data_dir: &std::path::Path) {
     auth.complete_sign_in(&format!("{state}.code"))
         .await
         .expect("sign-in");
+    auth
 }
 
 #[tokio::test]
@@ -106,12 +123,14 @@ async fn harness_sign_in_signs_graff_in_without_replacing_its_key() {
         std::env::set_var("HOME", home.path());
         std::env::remove_var("CODEGRAFF_API_KEY");
     }
-    let key_file = home.path().join(".simple-harness-codegraff.json");
     let (edge, seen) = stub_edge().await;
+    // The stub also stands in for the gateway's key revocation.
+    unsafe { std::env::set_var("HARNESS_CODEGRAFF_GATEWAY", &edge) };
+    let key_file = home.path().join(".simple-harness-codegraff.json");
 
     // No graff key yet: the sign-in asks for one and graff gets it.
     let first = tempfile::tempdir().unwrap();
-    sign_in(&edge, first.path()).await;
+    let auth = sign_in(&edge, first.path()).await;
     {
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0]["graffKey"], true);
@@ -132,11 +151,33 @@ async fn harness_sign_in_signs_graff_in_without_replacing_its_key() {
         assert_eq!(mode, 0o600, "graff's credential stays private");
     }
 
+    // Harness's Sign out takes back the key its sign-in gave graff, and revokes it.
+    auth.sign_out_with_graff().await;
+    assert!(!key_file.exists(), "graff is signed out with Harness");
+    assert!(
+        seen.lock().unwrap().iter().any(|e| e["revoked"] == MINTED),
+        "the key is revoked, not just deleted: {:?}",
+        seen.lock().unwrap()
+    );
+
     // graff already has a key (its own `graff login`): never asked, never replaced.
     std::fs::write(&key_file, br#"{"api_key":"cg_sk_mine"}"#).unwrap();
     let second = tempfile::tempdir().unwrap();
-    sign_in(&edge, second.path()).await;
-    assert_eq!(seen.lock().unwrap()[1]["graffKey"], false);
+    let auth = sign_in(&edge, second.path()).await;
+    let exchanges: Vec<_> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.get("graffKey").is_some())
+        .cloned()
+        .collect();
+    assert_eq!(exchanges[1]["graffKey"], false);
+    assert_eq!(
+        std::fs::read_to_string(&key_file).unwrap(),
+        r#"{"api_key":"cg_sk_mine"}"#
+    );
+    // ...and Harness's Sign out leaves that key alone.
+    auth.sign_out_with_graff().await;
     assert_eq!(
         std::fs::read_to_string(&key_file).unwrap(),
         r#"{"api_key":"cg_sk_mine"}"#
