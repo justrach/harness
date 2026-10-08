@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.window.Dialog
 import harness.codegraff.android.AccountDeletionState
+import harness.codegraff.android.WorkspaceState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,22 +56,31 @@ fun SettingsSheet(
     deletion: AccountDeletionState = AccountDeletionState(),
     onDeleteAccount: () -> Unit = {},
     onDismissDeletionError: () -> Unit = {},
+    /** The workspace and the relay calls behind Settings > Graff compaction; the row is hidden without them. */
+    workspace: WorkspaceState? = null,
+    loadCompactAt: suspend (deviceId: String) -> Int? = { null },
+    saveCompactAt: suspend (deviceId: String, pct: Int?) -> Int? = { _, pct -> pct },
 ) {
     var showAppearance by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
     var showPerformance by rememberSaveable { mutableStateOf(false) }
+    var showCompaction by rememberSaveable { mutableStateOf(false) }
     val version = LocalContext.current.let { c ->
         runCatching { c.packageManager.getPackageInfo(c.packageName, 0).versionName }.getOrNull() ?: "?"
     }
     HarnessSheet(
-        title = if (showAppearance) "Appearance" else if (showPerformance) "Performance" else "Settings",
+        title = if (showAppearance) "Appearance" else if (showPerformance) "Performance" else if (showCompaction) "Graff compaction" else "Settings",
         // The sheet stays put while the account is being deleted (interactiveDismissDisabled).
         onDismiss = { if (!deletion.busy) onDismiss() },
-        trailing = if (showAppearance || showPerformance) ({ BackButton { showAppearance = false; showPerformance = false } }) else null,
+        trailing = if (showAppearance || showPerformance || showCompaction) ({ BackButton { showAppearance = false; showPerformance = false; showCompaction = false } }) else null,
     ) {
-        if (showAppearance) AppearanceContent() else if (showPerformance) PerformanceContent(version) else SettingsContent(
+        if (showAppearance) AppearanceContent()
+        else if (showPerformance) PerformanceContent(version)
+        else if (showCompaction && workspace != null) CompactionContent(workspace, loadCompactAt, saveCompactAt)
+        else SettingsContent(
             onOpenAppearance = { showAppearance = true },
             onOpenPerformance = { showPerformance = true },
+            onOpenCompaction = if (workspace != null) ({ showCompaction = true }) else null,
             onSignOut = { onDismiss(); onSignOut() },
             canDeleteAccount = canDeleteAccount,
             deleting = deletion.busy,
@@ -120,6 +130,7 @@ private fun BackButton(onClick: () -> Unit) {
 private fun SettingsContent(
     onOpenAppearance: () -> Unit,
     onOpenPerformance: () -> Unit,
+    onOpenCompaction: (() -> Unit)?,
     onSignOut: () -> Unit,
     canDeleteAccount: Boolean,
     deleting: Boolean,
@@ -146,6 +157,11 @@ private fun SettingsContent(
         }
         Section("Appearance") {
             LinkRow("Theme", themeSummary, onOpenAppearance)
+        }
+        if (onOpenCompaction != null) {
+            Section("Agents") {
+                LinkRow("Graff compaction", "", onOpenCompaction)
+            }
         }
         Section("Diagnostics") {
             LinkRow("Performance", Perf.startupMs?.let { "Started in $it ms" } ?: "", onOpenPerformance)
