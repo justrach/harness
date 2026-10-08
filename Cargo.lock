@@ -3893,6 +3893,7 @@ dependencies = [
  "harness-sync",
  "harness-update",
  "ignore",
+ "indexmap",
  "libc",
  "loro",
  "notify",

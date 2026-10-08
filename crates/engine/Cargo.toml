@@ -33,6 +33,7 @@ gethostname.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 sha2.workspace = true
 reqwest.workspace = true
+indexmap = { version = "2", features = ["serde"] }
 ignore.workspace = true
 nucleo-matcher.workspace = true
 

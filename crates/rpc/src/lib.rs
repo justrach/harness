@@ -47,6 +47,12 @@ pub mod methods {
     /// window; `null` is graff's own default (80%).
     pub const GET_GRAFF_COMPACT_AT: &str = "GetGraffCompactAt";
     pub const SET_GRAFF_COMPACT_AT: &str = "SetGraffCompactAt";
+    /// graff's MCP servers on the target device: `~/.codegraff/mcp.json` and,
+    /// with `cwd`, that project's `.mcp.json` (Settings → MCP).
+    pub const LIST_GRAFF_MCP_SERVERS: &str = "ListGraffMcpServers";
+    pub const SET_GRAFF_MCP_SERVER: &str = "SetGraffMcpServer";
+    pub const REMOVE_GRAFF_MCP_SERVER: &str = "RemoveGraffMcpServer";
+    pub const SET_GRAFF_MCP_SERVER_ENABLED: &str = "SetGraffMcpServerEnabled";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

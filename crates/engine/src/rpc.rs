@@ -117,6 +117,55 @@ struct SetGraffDraftSubagentsParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraffMcpParams {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    scope: Option<crate::graff_mcp::McpScope>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    server: Option<crate::graff_mcp::McpServerEdit>,
+}
+
+/// The four graff MCP methods: file edits plus a `graff mcp list --json` run,
+/// all blocking, so they run on a blocking thread.
+fn graff_mcp_blocking(method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+    use crate::graff_mcp;
+    let p: GraffMcpParams = parse_params(params)?;
+    let cwd = p.cwd.as_deref().filter(|c| !c.is_empty());
+    let scope = || {
+        p.scope
+            .ok_or_else(|| RpcError::Failed("scope is required".into()))
+    };
+    let name = || {
+        p.name
+            .as_deref()
+            .ok_or_else(|| RpcError::Failed("name is required".into()))
+    };
+    match method {
+        methods::LIST_GRAFF_MCP_SERVERS => Ok(()),
+        methods::SET_GRAFF_MCP_SERVER => {
+            let server = p
+                .server
+                .clone()
+                .ok_or_else(|| RpcError::Failed("server is required".into()))?;
+            graff_mcp::upsert(scope()?, cwd, server)
+        }
+        methods::REMOVE_GRAFF_MCP_SERVER => graff_mcp::remove(scope()?, cwd, name()?),
+        _ => graff_mcp::set_enabled(scope()?, cwd, name()?, p.enabled.unwrap_or(true)),
+    }
+    .map_err(RpcError::Failed)?;
+    // Every method answers with the fresh listing, imported servers included.
+    let graff = harness_adapters::acp::graff_cli_path();
+    let listing = graff_mcp::list(cwd, graff.as_deref()).map_err(RpcError::Failed)?;
+    RpcReply::value(&listing)
+}
+
+#[derive(Debug, Deserialize)]
 struct SetGraffCompactAtParams {
     /// Percent of the context window; `null` restores graff's default.
     pct: Option<u8>,
@@ -692,6 +741,21 @@ impl EngineRpc {
         }
     }
 
+    /// Built and boxed in its own frame: the dispatcher's stack is budgeted.
+    #[inline(never)]
+    fn handle_graff_mcp<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> futures::future::BoxFuture<'a, Result<RpcReply, RpcError>> {
+        let method = method.to_string();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || graff_mcp_blocking(&method, params))
+                .await
+                .map_err(|e| RpcError::Failed(format!("graff MCP task failed: {e}")))?
+        })
+    }
+
     pub fn with_previews(mut self, previews: harness_preview::PreviewService) -> Self {
         self.previews = Some(previews);
         self
@@ -1250,6 +1314,11 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::GET_GRAFF_COMPACT_AT
             | methods::SET_GRAFF_COMPACT_AT
+            // graff's MCP config lives on the computer that runs graff.
+            | methods::LIST_GRAFF_MCP_SERVERS
+            | methods::SET_GRAFF_MCP_SERVER
+            | methods::REMOVE_GRAFF_MCP_SERVER
+            | methods::SET_GRAFF_MCP_SERVER_ENABLED
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1609,6 +1678,17 @@ impl RpcService for EngineRpc {
             return AuthRpc::new(self.auth()?.clone())
                 .handle(method, params)
                 .await;
+        }
+        // Answered here, not in the method match below: that match's frame is
+        // budgeted against the worker stack and has no room for another await.
+        if matches!(
+            method,
+            methods::LIST_GRAFF_MCP_SERVERS
+                | methods::SET_GRAFF_MCP_SERVER
+                | methods::REMOVE_GRAFF_MCP_SERVER
+                | methods::SET_GRAFF_MCP_SERVER_ENABLED
+        ) {
+            return self.handle_graff_mcp(method, params).await;
         }
         match method {
             methods::CODEGRAFF_SIGN_IN => {

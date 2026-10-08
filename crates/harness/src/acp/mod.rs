@@ -491,6 +491,17 @@ fn hermes_spec() -> AcpAgentSpec {
     }
 }
 
+/// The graff CLI Harness would launch: `GRAFF_EXECUTABLE` when it points at a
+/// usable binary, else the same search as the agent spec. For engine features
+/// that run graff's own subcommands (Settings → MCP lists through
+/// `graff mcp list --json`).
+pub fn graff_cli_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("GRAFF_EXECUTABLE").filter(|p| !p.is_empty()) {
+        return crate::executable::validate_native_override(&PathBuf::from(p)).ok();
+    }
+    find_on_paths("graff", graff_install_paths())
+}
+
 fn graff_install_paths() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     // The app-managed copy (updated in-app) and the one shipped in the

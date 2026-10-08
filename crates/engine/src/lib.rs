@@ -26,6 +26,7 @@ pub mod diff_sync;
 pub mod doc_host;
 pub mod external_history;
 mod graff_logins;
+pub mod graff_mcp;
 mod http_error;
 pub mod instance_lock;
 pub mod local_import;

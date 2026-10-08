@@ -41,6 +41,7 @@ use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
+use crate::settings::mcp::McpPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
@@ -553,6 +554,8 @@ pub enum SettingsSection {
     Devices,
     /// Which harnesses the composer offers (enable/disable toggles).
     Harnesses,
+    /// graff's MCP servers on the selected device.
+    Mcp,
     /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
     Agents,
     Appearance,
@@ -564,9 +567,10 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [SettingsSection; 9] = [
+    pub const ALL: [SettingsSection; 10] = [
         SettingsSection::Devices,
         SettingsSection::Harnesses,
+        SettingsSection::Mcp,
         SettingsSection::Agents,
         SettingsSection::Appearance,
         SettingsSection::Files,
@@ -581,6 +585,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "devices",
             SettingsSection::Harnesses => "harnesses",
+            SettingsSection::Mcp => "mcp",
             SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
@@ -602,6 +607,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Agents",
+            SettingsSection::Mcp => "MCP",
             SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
@@ -1814,6 +1820,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    mcp_page: Option<Entity<McpPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -2152,6 +2159,7 @@ impl Shell {
             }
             Some("settings/agents") => Route::Settings(SettingsSection::Agents),
             Some("settings/harnesses") => Route::Settings(SettingsSection::Harnesses),
+            Some("settings/mcp") => Route::Settings(SettingsSection::Mcp),
             Some("settings/appearance") => Route::Settings(SettingsSection::Appearance),
             Some("settings/notifications") => Route::Settings(SettingsSection::Notifications),
             Some("settings/shortcuts") => Route::Settings(SettingsSection::Shortcuts),
@@ -2312,6 +2320,7 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
+            mcp_page: None,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -4513,6 +4522,10 @@ impl Shell {
         if section == SettingsSection::Harnesses {
             self.harnesses_page = None;
         }
+        // Re-read the config files on each visit: graff or an editor may have changed them.
+        if section == SettingsSection::Mcp {
+            self.mcp_page = None;
+        }
         if section == SettingsSection::Shortcuts
             && let Some(page) = &self.shortcuts_page
         {
@@ -4621,6 +4634,16 @@ impl Shell {
                     self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
                 }
                 match &self.harnesses_page {
+                    Some(page) => page.clone().into_any_element(),
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Mcp => {
+                if self.mcp_page.is_none() {
+                    let state = self.state.clone();
+                    self.mcp_page = Some(cx.new(|cx| McpPage::new(state, cx)));
+                }
+                match &self.mcp_page {
                     Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
@@ -6537,6 +6560,7 @@ impl Shell {
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::MONITOR,
             SettingsSection::Harnesses => icons::WIDGET,
+            SettingsSection::Mcp => icons::REMOTE_SERVER,
             SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,
