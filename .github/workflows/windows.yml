@@ -58,6 +58,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/windows-rust
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: UI tests
         env:
           RUST_BACKTRACE: '1'
@@ -77,6 +83,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/windows-rust
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Build application
         run: cargo build --release --locked -p harness
       - name: Verify portable packaging
@@ -143,6 +155,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/windows-rust
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Native harness security and integration tests
         run: cargo test --release --locked -p harness-adapters --features native-fixture --lib --test codex_availability --test windows_native
       - name: Codegraff sign-in finds a home without HOME
