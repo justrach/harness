@@ -257,12 +257,15 @@ impl WorkspaceHost {
             .read_devices()?
             .into_iter()
             .find(|d| d.id == config.device_id);
+        let device_name = device_name_on_boot(
+            existing.as_ref().map(|device| device.name.as_str()),
+            &config.device_name,
+        );
+        // graff tells the gateway which computer it runs on, by this name.
+        harness_adapters::set_graff_device_name(&device_name);
         doc.upsert_device(&Device {
             id: config.device_id.clone(),
-            name: device_name_on_boot(
-                existing.as_ref().map(|device| device.name.as_str()),
-                &config.device_name,
-            ),
+            name: device_name,
             platform: config.platform.clone(),
             last_seen_at: Some(now),
             // First registration stamps `createdAt`; restarts keep the original
@@ -1133,7 +1136,11 @@ impl WorkspaceHost {
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.rename_device(device_id, name))?)
+        let renamed = self.mutate(|doc| doc.rename_device(device_id, name))?;
+        if renamed && device_id == self.inner.config.device_id {
+            harness_adapters::set_graff_device_name(name);
+        }
+        Ok(renamed)
     }
 
     /// Remove an offline device from the list. Never this device, and never one that is beating

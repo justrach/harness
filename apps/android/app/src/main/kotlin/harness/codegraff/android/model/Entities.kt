@@ -10,6 +10,10 @@ data class DeviceRow(
     val platform: String,
     val lastSeenAt: Long? = null,
     val createdAt: Long? = null,
+    /** Engine version the device stamps ("0.2.12"); capability checks read it. */
+    val version: String? = null,
+    /** Explicit feature declarations, which tell a personal build from upstream at the same version. */
+    val capabilities: List<String> = emptyList(),
 ) {
     /** Phones and tablets are peers, not hosts: only desktops and servers run sessions. */
     val canHostSessions: Boolean get() = platform == "macos" || platform == "linux" || platform == "windows"

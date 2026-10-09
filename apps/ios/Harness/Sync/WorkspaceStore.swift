@@ -684,6 +684,18 @@ final class WorkspaceStore {
                                             timeoutSeconds: 45)
     }
 
+    /// GetGraffCompactAt on the target device: the percent of the context
+    /// window where its graff chats compact, nil for graff's default.
+    func graffCompactAt(deviceId: String) async throws -> Int? {
+        try await relay(for: deviceId).call(method: "GetGraffCompactAt", params: [:])
+    }
+
+    /// SetGraffCompactAt; nil restores the default. Answers with the stored value.
+    func setGraffCompactAt(deviceId: String, pct: Int?) async throws -> Int? {
+        try await relay(for: deviceId).call(method: "SetGraffCompactAt",
+                                            params: ["pct": pct.map { $0 as Any } ?? NSNull()])
+    }
+
     /// ListRefs on the target device — branches with current/worktree markers
     /// (default branch first, per the engine's ordering).
     func listRefs(deviceId: String, repoPath: String) async -> [RepoRef]? {

@@ -1,5 +1,9 @@
 package harness.codegraff.android.ui.newsession
 
+import androidx.compose.runtime.produceState
+import harness.codegraff.android.model.RepoRef
+import harness.codegraff.android.model.HostNotice
+
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -118,13 +122,19 @@ fun NewSessionScreen(
         is NewSessionDestination.Project -> space?.displayName ?: "Project unavailable"
         is NewSessionDestination.Projectless -> "No project"
     }
-    val refs = remember(space?.path) { space?.takeIf { it.gitDetected }?.let { DemoDataset.listRefs(it.path) }.orEmpty() }
+    // The project's branches, from the computer it lives on.
+    val refs by produceState(emptyList<RepoRef>(), space?.id, space?.path, space?.gitDetected) {
+        value = space?.let { model.listRefs(it) }.orEmpty()
+    }
     if (selectedRef == null && refs.isNotEmpty()) selectedRef = (refs.firstOrNull { it.current } ?: refs.first()).name
     val selectedRefRow = refs.firstOrNull { it.name == selectedRef }
 
     val harness = harnessPref.value
-    val harnesses = HarnessCatalog.harnesses
-    val models = HarnessCatalog.models(harness)
+    // The catalog source is the computer that will run the session; the static catalog stands in until it answers.
+    val harnesses by produceState(HarnessCatalog.harnesses, deviceId) { value = deviceId?.let { model.listHarnesses(it) } ?: HarnessCatalog.harnesses }
+    val models by produceState(HarnessCatalog.models(harness), deviceId, harness) {
+        value = deviceId?.let { model.listModels(it, harness) } ?: HarnessCatalog.models(harness)
+    }
     val selectedModel = HarnessCatalog.resolveExisting(modelPref.value, models) ?: models.firstOrNull() ?: HarnessCatalog.defaultModel(harness)
     val reasoning = if (selectedModel.reasoningLevels.isEmpty()) null
     else reasoningPref.value.takeIf { it in selectedModel.reasoningLevels } ?: HarnessCatalog.defaultReasoning(selectedModel)
@@ -217,6 +227,20 @@ fun NewSessionScreen(
             }
         }
 
+        // Only what is true: a phone that is not connected, or a computer that is positively gone.
+        deviceId?.let { id -> model.hostNotice(id) }?.let { notice ->
+            val name = state.deviceName(deviceId!!)
+            Text(
+                when (notice) {
+                    HostNotice.SignedOut -> "You're signed out — tap to sign in again."
+                    HostNotice.Reconnecting -> "Reconnecting — $name's status will show once you're connected."
+                    HostNotice.Offline -> "$name is offline — the run will start when it reconnects."
+                },
+                style = sans(12f), color = p.warning.opacity(0.9f),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 8.dp)
+                    .background(p.warning.opacity(0.1f), RoundedCornerShape(12.dp)).padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
         ComposerShell(
             draft = draft, onDraftChange = { draft = it },
             placeholder = "Do anything…", sendEnabled = deviceId != null, showStop = false,
@@ -238,7 +262,7 @@ fun NewSessionScreen(
     if (showPicker) {
         ModelPickerSheet(
             harness = harness, modelId = selectedModel.id, reasoning = reasoning, lockedHarness = false,
-            harnesses = harnesses, catalogs = emptyMap(),
+            harnesses = harnesses, catalogs = mapOf(harness to models),
             onPick = { h, picked, r -> harnessPref.set(h); modelPref.set(picked.id); reasoningPref.set(r ?: "") },
             onDismiss = { showPicker = false },
         )

@@ -141,6 +141,18 @@ crate's `v2` feature (mimalloc 2.3.2, ~half of v3's retention); Linux runs the
 system allocator. Purge knobs (`MIMALLOC_PURGE_DELAY=0`,
 `MIMALLOC_ABANDONED_PAGE_PURGE=1`) measurably do NOT rescue v3.
 
+**Linux arenas (2026-10-08, from upstream zeron#635):** glibc gives every
+thread its own 64MB arena (default cap 8 × cores) and trims only the top of a
+heap, so threads that come and go (harness readers, the tokio blocking pool)
+leave freed pages resident; upstream saw a headless engine reach 7.2GB RSS
+after a day, 6.6GB of it in 129 anonymous ~64MB mappings. Long-running modes on
+Linux/glibc (`apps/harness/src/main.rs`) now run a `malloc-trim` thread that
+calls `malloc_trim(0)` once a minute; unlike the automatic top-of-heap trim it
+returns the free pages inside every arena. Capping arenas (`M_ARENA_MAX=2`)
+was measured first and rejected: it reclaimed less and cost ~6x the engine's
+CPU in arena-lock contention while chats streamed. Each trim pass takes ~25ms.
+An explicit `MALLOC_*`/`GLIBC_TUNABLES` setting still applies on top.
+
 Known follow-ups: GPU atlas tiles for raw-bytes images still free only on
 window close (needs a small gpui-fork patch exposing a drop path for
 `ImageSource::Image`); UI-side full-transcript clone per frame

@@ -578,12 +578,25 @@ impl SessionsEngine {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
-                let (tx, rx) = oneshot::channel();
+                let (mut tx, rx) = oneshot::channel();
+                let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), tx);
+                lock(&pending).insert(request_id.clone(), answer_tx);
                 let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
+                    request_id: request_id.clone(),
                     questions,
+                });
+                let pending = pending.clone();
+                let engine_tx = engine_tx.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        // A dropped resolver stays an error for the harness, as before.
+                        answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+                        _ = tx.closed() => {
+                            lock(&pending).remove(&request_id);
+                            let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                        }
+                    }
                 });
                 rx
             })
@@ -1589,6 +1602,15 @@ pub(crate) fn subagent_doc_id(chat_id: &str, tool_use_id: &str) -> String {
     format!("{chat_id}--sub--{hex}")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of `drive_run`'s coalesced commit ticks, so a test can
+    /// tell one commit per window from one per event. Thread-local: a
+    /// current-thread test runtime runs its spawned `drive_run` on the test's
+    /// own thread, and parallel tests can't bleed into the count.
+    static FLUSH_TICKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A live subagent transcript sink: its own doc (opened by id — the room
 /// `chat2/{docId}/ws` dials automatically, so viewers sync it like a chat),
 /// one streaming assistant entry folded from the tagged events. The held
@@ -2052,7 +2074,13 @@ async fn drive_run(
     // routes into a live run) starts the next turn with zero respawn/resume
     // latency. `Some(when)` = idle since then; the 30-min reaper below ends
     // a session nobody comes back to (harness SESSION_IDLE_MS).
-    const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    // `HARNESS_SESSION_IDLE_MS` overrides the window (tests shorten it).
+    let session_idle = std::env::var("HARNESS_SESSION_IDLE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(30 * 60));
     let mut idle_since: Option<tokio::time::Instant> = None;
     let steerable = harness.supports_steering();
     // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
@@ -2117,6 +2145,21 @@ async fn drive_run(
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
+    // NESTED spawns → the sink whose transcript holds their chip (a
+    // workflow's agent rows live in the workflow's doc, not the chat's).
+    let mut nested_owner: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // Subagents still RUNNING, by spawn id: tagged traffic seen and no tagged
+    // Done since. A background subagent outlives the turn that spawned it,
+    // so the idle reaper holds off while any is live (reaping cancels the
+    // agent process under it, and its chip ends failed, unresumable). A
+    // spawn whose own ToolResult arrives after its traffic was a foreground
+    // child that finished with the call — some drivers send no tagged Done
+    // for those — so the result clears it; later tagged traffic (a
+    // background child) re-adds it. `last_subagent_activity` restarts the
+    // idle window once they all settle.
+    let mut live_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_subagent_activity: Option<tokio::time::Instant> = None;
 
     let mut final_completed_turn = None;
     let final_status = loop {
@@ -2148,9 +2191,13 @@ async fn drive_run(
                 // Idle reaper (harness SESSION_IDLE_MS): a parked persistent session
                 // nobody returned to in 30 minutes releases its child. The turn
                 // was finalized at Done, so this end is clean — no aborted stamp.
+                // Disarmed while a subagent runs; the window counts from the
+                // park or the last subagent activity, whichever is later.
                 _ = tokio::time::sleep_until(
-                    idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
-                ), if idle_since.is_some() => {
+                    idle_since
+                        .map(|at| last_subagent_activity.map_or(at, |a| a.max(at)) + session_idle)
+                        .unwrap_or_else(tokio::time::Instant::now)
+                ), if idle_since.is_some() && live_subagents.is_empty() => {
                     tracing::info!(chat = %chat_id, "reaping idle persistent session");
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -2272,6 +2319,8 @@ async fn drive_run(
                     },
                 },
                 _ = tokio::time::sleep_until(flush_at), if dirty || subagents.values().any(|s| s.dirty) => {
+                    #[cfg(test)]
+                    FLUSH_TICKS.with(|t| t.set(t.get() + 1));
                     // Coalesced STREAM_COMMIT_MS tick: one doc commit per window
                     // (parent + any dirty subagent docs).
                     if dirty {
@@ -2407,10 +2456,33 @@ async fn drive_run(
                 // pre-viz behavior), never a reopened doc.
                 continue;
             }
+            last_subagent_activity = Some(tokio::time::Instant::now());
+            if matches!(sub_event.as_ref(), AgentEvent::Done { .. }) {
+                live_subagents.remove(parent_tool_use_id);
+            } else {
+                live_subagents.insert(parent_tool_use_id.clone());
+            }
             let sub_id = subagent_doc_id(&chat_id, parent_tool_use_id);
             let chip_streaming = folded
                 .iter()
                 .any(|p| matches!(p, MessagePart::Tool { id, .. } if id == parent_tool_use_id));
+            // A progress summary restamps the chip only — it never opens or
+            // feeds the subagent's own doc. Low-frequency by contract, so the
+            // in-place path's per-call doc write is bounded.
+            if let AgentEvent::SubagentProgress { summary } = sub_event.as_ref() {
+                if chip_streaming {
+                    harness_doc::fold_event_into_parts(&mut folded, &event);
+                    if !dirty {
+                        dirty = true;
+                        flush_at = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    }
+                } else {
+                    let _ =
+                        doc_ref.update_subagent_chip(parent_tool_use_id, None, None, Some(summary));
+                }
+                continue;
+            }
             let sink_known = subagents.contains_key(parent_tool_use_id);
             // A Done with NO sink (a subagent that never streamed — codex
             // turn ends can beat registration) is chip-only: minting a doc
@@ -2418,6 +2490,55 @@ async fn drive_run(
             // would link the chip to that never-created doc (an empty tab
             // on click).
             let done_only = !sink_known && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
+            // A NESTED spawn: its chip lives in another subagent's transcript
+            // (a workflow's agent rows). Ref and lifecycle fold into that
+            // owner sink's parts — never the chat doc — while its own
+            // transcript gets a doc like any subagent's. The driver settles
+            // nested children before their owner, so the owner is live here.
+            let owner = (!chip_streaming)
+                .then(|| {
+                    nested_owner.get(parent_tool_use_id).cloned().or_else(|| {
+                        subagents
+                            .iter()
+                            .find(|(_, sink)| {
+                                sink.folded.iter().any(|p| {
+                                    matches!(p, MessagePart::Tool { id, call, .. }
+                                        if id == parent_tool_use_id && call.is_subagent_spawn())
+                                })
+                            })
+                            .map(|(owner, _)| owner.clone())
+                    })
+                })
+                .flatten()
+                .filter(|owner| owner != parent_tool_use_id);
+            let nested = owner.is_some();
+            if let Some(owner) = owner {
+                nested_owner.insert(parent_tool_use_id.clone(), owner.clone());
+                if let Some(owner_sink) = subagents.get_mut(&owner) {
+                    if !sink_known && !done_only {
+                        for p in owner_sink.folded.iter_mut() {
+                            if let MessagePart::Tool {
+                                id,
+                                call,
+                                subagent_ref,
+                                ..
+                            } = p
+                                && id == parent_tool_use_id
+                                && call.is_subagent_spawn()
+                            {
+                                *subagent_ref = Some(sub_id.clone());
+                            }
+                        }
+                    }
+                    harness_doc::fold_event_into_parts(&mut owner_sink.folded, &event);
+                    let was_clean = !owner_sink.dirty;
+                    owner_sink.dirty = true;
+                    if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
+                        flush_at = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                    }
+                }
+            }
             if chip_streaming {
                 if !sink_known && !done_only {
                     for p in folded.iter_mut() {
@@ -2468,7 +2589,7 @@ async fn drive_run(
                             dirty: false,
                         },
                     );
-                    if !chip_streaming {
+                    if !chip_streaming && !nested {
                         let _ = doc_ref.update_subagent_chip(
                             parent_tool_use_id,
                             Some(&sub_id),
@@ -2489,9 +2610,19 @@ async fn drive_run(
                     sink.push_user(&device_id, text);
                     continue;
                 }
+                let was_clean = !sink.dirty;
                 harness_doc::fold_event_into_parts(&mut sink.folded, sub_event);
                 sink.dirty = true;
-                if !chip_streaming && done {
+                // `flush_at` is otherwise only rescheduled when the parent
+                // turns dirty. A child streaming under an idle parent would
+                // find the deadline already past and commit its doc on every
+                // event instead of once per STREAM_COMMIT_MS window.
+                if was_clean && !dirty && flush_at <= tokio::time::Instant::now() {
+                    flush_at = tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(STREAM_COMMIT_MS);
+                }
+                // A nested chip's lifecycle folded into its owner above.
+                if !chip_streaming && !nested && done {
                     // In-place chip refresh on lifecycle transitions only —
                     // content never rewrites the parent doc.
                     let _ = doc_ref.update_subagent_chip(
@@ -2539,6 +2670,11 @@ async fn drive_run(
                 }
             }
             continue;
+        }
+        // A spawn call returning settles a foreground child (see
+        // `live_subagents`). Before the parked gate, which drops late results.
+        if let AgentEvent::ToolResult { id, .. } = &event {
+            live_subagents.remove(id);
         }
 
         // Any stream activity proves the run is alive — keep the session's
@@ -3008,9 +3144,34 @@ async fn drive_run(
 
     // Any subagent still streaming when the run ends freezes as-is: the
     // parent process is gone, so nothing more can arrive on this stream.
+    // Nested chips fail inside their owner's transcript first, so the
+    // owner's freeze carries them.
+    let open_nested: Vec<String> = subagents
+        .keys()
+        .filter(|id| nested_owner.contains_key(*id))
+        .cloned()
+        .collect();
+    for id in open_nested {
+        if let Some(owner_sink) = nested_owner.get(&id).and_then(|o| subagents.get_mut(o)) {
+            harness_doc::fold_event_into_parts(
+                &mut owner_sink.folded,
+                &AgentEvent::Subagent {
+                    parent_tool_use_id: id,
+                    event: Box::new(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }),
+                },
+            );
+        }
+    }
     for (parent_id, sink) in subagents.drain() {
         let doc_id = sink.doc_id.clone();
-        let _ = doc_ref.update_subagent_chip(&parent_id, None, Some("failed"), None);
+        if !nested_owner.contains_key(&parent_id) {
+            let _ = doc_ref.update_subagent_chip(&parent_id, None, Some("failed"), None);
+        }
         if let Some(json) = sink.finish(&device_id, MessageStatus::Aborted)
             && let Some(host) = inner.doc_host()
         {
@@ -3419,5 +3580,114 @@ mod tests {
             subagent_doc_id("chat", "a:b"),
             subagent_doc_id("chat", "a:c")
         );
+    }
+
+    /// Hand-fed harness: the test pushes wire events and decides when the
+    /// stream ends.
+    struct FeedHarness {
+        feed: std::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedReceiver<harness_proto::AgentEvent>>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl harness_adapters::Harness for FeedHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::Mock
+        }
+        fn display_name(&self) -> &str {
+            "Feed"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> harness_proto::SteeringMode {
+            harness_proto::SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[harness_proto::ReasoningLevel] {
+            &[]
+        }
+        async fn models(
+            &self,
+        ) -> Result<Vec<harness_proto::Model>, harness_adapters::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            _request: RunRequest,
+            _controls: harness_adapters::RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<harness_proto::AgentEvent, harness_adapters::HarnessError>,
+            >,
+            harness_adapters::HarnessError,
+        > {
+            use futures::StreamExt as _;
+            let mut feed = self.feed.lock().unwrap().take().expect("one run per test");
+            Ok(futures::stream::poll_fn(move |cx| feed.poll_recv(cx).map(|e| e.map(Ok))).boxed())
+        }
+    }
+
+    // A child streaming under an idle parent found the commit deadline
+    // already past, so every event fired the commit branch and wrote the
+    // child doc, instead of once per STREAM_COMMIT_MS window.
+    #[tokio::test]
+    async fn subagent_streaming_under_idle_parent_commits_once_per_window() {
+        use super::{AgentEvent, DoneStatus, FLUSH_TICKS, STREAM_COMMIT_MS, SessionStatus};
+        use std::time::Duration;
+
+        let (feed, rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::registry::HarnessRegistry::new();
+        registry.register(std::sync::Arc::new(FeedHarness {
+            feed: std::sync::Mutex::new(Some(rx)),
+        }));
+        let dir = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble(
+            dir.path(),
+            std::sync::Arc::new(registry),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let chat = "chat-sub-window";
+        core.sessions
+            .dispatch(chat, HarnessId::Mock, request(), None)
+            .await
+            .unwrap();
+        let child = |text: &str| AgentEvent::Subagent {
+            parent_tool_use_id: "spawn-1".into(),
+            event: Box::new(AgentEvent::TextDelta { text: text.into() }),
+        };
+        // Open the child's sink and let the parent's own window settle, so
+        // the parent is clean and the deadline is in the past.
+        feed.send(child("start ")).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        FLUSH_TICKS.with(|t| t.set(0));
+        let started = std::time::Instant::now();
+        for i in 0..60 {
+            feed.send(child(&format!("chunk {i} "))).unwrap();
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let windows = started.elapsed().as_millis() as usize / STREAM_COMMIT_MS as usize;
+        let ticks = FLUSH_TICKS.with(|t| t.get());
+        assert!(
+            ticks <= windows + 2,
+            "60 child events in ~{windows} commit windows fired {ticks} commits"
+        );
+        assert_eq!(
+            core.sessions.session_status(chat).map(|s| s.status),
+            Some(SessionStatus::Working),
+        );
+        feed.send(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        })
+        .unwrap();
+        core.shutdown().await;
     }
 }

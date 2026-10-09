@@ -1,0 +1,278 @@
+{
+  "about": "Session doc values to transcript entries (SessionStore.entryFrom / partFrom / joinContinuations / queuedFrom on iOS, crates/mobile decode.rs on Android). Entries read id|role|status|deviceId|createdAt; parts read as listed per kind; tool fields are key=kind:value sorted by key; queue rows read id|text|hold|gate|issuedBy|issuedAt|attachments.",
+  "cases": [
+    {
+      "name": "continuations join their root, orphans stand alone, malformed entries are skipped",
+      "messages": [
+        {
+          "id": "a",
+          "role": "assistant",
+          "createdAt": 1700000000123,
+          "deviceId": "mac",
+          "status": "complete",
+          "parts": [
+            {
+              "id": "p1",
+              "kind": "text",
+              "text": "one"
+            }
+          ]
+        },
+        {
+          "id": "b",
+          "role": "assistant",
+          "continuationOf": "a",
+          "parts": [
+            {
+              "id": "p2",
+              "kind": "text",
+              "text": "two"
+            }
+          ]
+        },
+        {
+          "id": "c",
+          "role": "user",
+          "continuationOf": "gone",
+          "status": "streaming",
+          "parts": []
+        },
+        {
+          "id": "bad",
+          "role": "robot",
+          "parts": []
+        },
+        {
+          "role": "user",
+          "parts": []
+        }
+      ],
+      "queue": [],
+      "entries": [
+        {
+          "entry": "a|assistant|complete|mac|1700000000123",
+          "parts": [
+            "text p1 one",
+            "text p2 two"
+          ]
+        },
+        {
+          "entry": "c|user|streaming||0",
+          "parts": []
+        }
+      ],
+      "rows": []
+    },
+    {
+      "name": "every part kind, and the kinds a phone drops",
+      "messages": [
+        {
+          "id": "m",
+          "role": "assistant",
+          "createdAt": 1700000000123,
+          "deviceId": "mac",
+          "status": "aborted",
+          "parts": [
+            {
+              "id": "t",
+              "kind": "tool",
+              "call": {
+                "kind": "exec",
+                "command": "ls",
+                "timeout": 5.9,
+                "ok": true,
+                "nested": {
+                  "a": 2
+                }
+              },
+              "isError": false
+            },
+            {
+              "id": "u",
+              "kind": "tool",
+              "call": {
+                "kind": "todo",
+                "items": [
+                  {
+                    "text": "x",
+                    "done": true
+                  },
+                  {
+                    "done": false
+                  },
+                  {
+                    "text": "y"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "v",
+              "kind": "tool",
+              "call": {
+                "kind": "applyPatch",
+                "changes": [
+                  {
+                    "path": "a,b"
+                  },
+                  {
+                    "path": "c"
+                  }
+                ]
+              },
+              "isError": true
+            },
+            {
+              "id": "w",
+              "kind": "tool"
+            },
+            {
+              "id": "i",
+              "kind": "image",
+              "path": "relative.png",
+              "name": "n",
+              "mimeType": "image/png"
+            },
+            {
+              "id": "i2",
+              "kind": "image",
+              "path": "/tmp/a.png",
+              "name": "a.png",
+              "mimeType": "image/png"
+            },
+            {
+              "id": "i3",
+              "kind": "image",
+              "path": "/tmp/a.bmp",
+              "name": "a.bmp",
+              "mimeType": "image/bmp"
+            },
+            {
+              "id": "q",
+              "kind": "input",
+              "questions": [
+                {
+                  "id": "q1",
+                  "header": "h",
+                  "question": "?",
+                  "options": [
+                    "a"
+                  ]
+                },
+                {
+                  "id": "q2"
+                }
+              ]
+            },
+            {
+              "id": "q3",
+              "kind": "input",
+              "resolved": true,
+              "questions": [
+                {
+                  "id": "q1",
+                  "header": "Scope",
+                  "question": "Which?",
+                  "options": [
+                    "a",
+                    "b"
+                  ],
+                  "multiSelect": true
+                }
+              ]
+            },
+            {
+              "id": "e",
+              "kind": "error",
+              "message": "signed out",
+              "reauth": "codex"
+            },
+            {
+              "id": "e2",
+              "kind": "error",
+              "message": "boom",
+              "reauth": "somewhere"
+            },
+            {
+              "id": "r",
+              "kind": "reasoning",
+              "reasoning": "hidden"
+            },
+            {
+              "kind": "text",
+              "text": "no id"
+            }
+          ]
+        }
+      ],
+      "queue": [],
+      "entries": [
+        {
+          "entry": "m|assistant|aborted|mac|1700000000123",
+          "parts": [
+            "tool t exec resolved=true error=false fields=command=s:ls,ok=b:true,timeout=n:5",
+            "tool u todo resolved=false error=false fields=items=tasks:x+,y-",
+            "tool v applyPatch resolved=true error=true fields=changes=list:2",
+            "error i Generated image unavailable reauth=-",
+            "image i2 /tmp/a.png a.png image/png",
+            "error i3 Generated image unavailable reauth=-",
+            "input q request=q questions=0 resolved=false",
+            "input q3 request=q3 questions=1 resolved=true",
+            "error e signed out reauth=codex",
+            "error e2 boom reauth=-"
+          ]
+        }
+      ],
+      "rows": []
+    },
+    {
+      "name": "queue rows need an id and text; unknown gates fail closed",
+      "messages": [],
+      "queue": [
+        {
+          "id": " q1 ",
+          "text": "hello",
+          "issuedBy": "mac",
+          "issuedAt": 1700000000123,
+          "deliveryGate": {
+            "kind": "later"
+          }
+        },
+        {
+          "id": "q2",
+          "text": "  \n "
+        },
+        {
+          "text": "no id"
+        },
+        {
+          "id": "q3",
+          "text": "edit me",
+          "holdForTurnEnd": true,
+          "attachments": [
+            "/up/a.png",
+            7
+          ],
+          "deliveryGate": {
+            "kind": "editing",
+            "ownerDeviceId": "mac",
+            "expiresAtMs": 1700000000123
+          }
+        },
+        {
+          "id": "q4",
+          "text": "review",
+          "deliveryGate": {
+            "kind": "reviewRequired"
+          }
+        }
+      ],
+      "entries": [],
+      "rows": [
+        "q1|hello|false|review another device|mac|1700000000123|0",
+        "q3|edit me|true|editing mac 1700000000123||0|1",
+        "q4|review|false|review another device||0|0"
+      ]
+    }
+  ]
+}

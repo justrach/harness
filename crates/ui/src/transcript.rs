@@ -95,6 +95,34 @@ fn row_gutter(viewport_width: f32) -> f32 {
     }
     (viewport_width * 0.06).clamp(12.0, 48.0)
 }
+
+/// After a layout, warn when the rows just placed can't be one viewport or
+/// the viewport flips between two positions (#23). Rate-limited per view.
+fn check_painted_rows(
+    list: &ListState,
+    rows: usize,
+    check: &RefCell<crate::transcript_paint_check::ViewportFlicker>,
+) {
+    use crate::transcript_paint_check::{ViewportSample, painted_rows_anomaly};
+    let painted = list.painted_items();
+    let anomaly = painted_rows_anomaly(&painted);
+    let flicker =
+        ViewportSample::new(rows, &painted).is_some_and(|sample| check.borrow_mut().record(sample));
+    if (anomaly.is_some() || flicker) && check.borrow_mut().should_report(Instant::now()) {
+        let top = list.logical_scroll_top();
+        tracing::warn!(
+            problem = anomaly
+                .as_deref()
+                .unwrap_or("viewport alternating between two positions"),
+            rows,
+            painted = painted.len(),
+            scroll_item = top.item_ix,
+            scroll_offset = f32::from(top.offset_in_item),
+            following = list.is_following_tail(),
+            "transcript rows painted inconsistently"
+        );
+    }
+}
 /// Activity row height / gap — analytic, so fold heights need no measurement.
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
 /// Rows stack without a gap so the rail continues alongside expanded output.
@@ -410,9 +438,10 @@ pub struct ToolItem {
     /// Subagent lifecycle, distinct from `resolved` (eager-done: the spawn
     /// tool's own result lands while the subagent still runs).
     pub subagent_status: Option<SubagentStatus>,
-    /// One-line live tail — LEGACY docs only (new runs stopped folding it;
-    /// per-delta header rewrites read as noise). Never rendered; still
-    /// fingerprinted so an old doc's chips re-splice correctly.
+    /// One-line summary. Rendered only on WORKFLOW spawns, where a driver's
+    /// low-frequency progress writes it; other chips may carry a LEGACY live
+    /// tail (per-delta header rewrites read as noise) that is never rendered
+    /// but still fingerprinted so an old doc's chips re-splice correctly.
     pub subagent_tail: Option<SharedString>,
     /// A page the tool saved on its host (graff views, MCP Apps); the chip
     /// then offers "Open view".
@@ -1091,6 +1120,19 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             ),
             None => format!("{server} · {tool}"),
         },
+        // A spawn's input is only the doc's kept badge keys (model, type):
+        // name them plainly rather than as a JSON object.
+        ToolCall::Unknown {
+            name,
+            input: Some(serde_json::Value::Object(input)),
+        } if call.is_subagent_spawn() => std::iter::once(name.clone())
+            .chain(input.iter().filter_map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|value| format!("{}: {value}", key.replace('_', " ")))
+            }))
+            .collect::<Vec<_>>()
+            .join("\n"),
         ToolCall::Unknown { name, input } => match input {
             Some(input) => format!(
                 "{name}\n{}",
@@ -3520,6 +3562,8 @@ pub struct Transcript {
     /// transcript's bottom (measured last frame): the last row pads past it
     /// so pinned content rests above the glass chrome it scrolls under.
     bottom_clearance: f32,
+    /// Post-layout check for a viewport flipping between two positions (#23).
+    paint_check: Rc<RefCell<crate::transcript_paint_check::ViewportFlicker>>,
     /// Hovered rail tick (grows + shows the preview card).
     rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -3780,6 +3824,7 @@ impl Transcript {
             selection_scroll_task: None,
             rail_enabled,
             bottom_clearance: 0.0,
+            paint_check: Rc::default(),
             rail_hover: None,
             hovered_entry: None,
             copied_code: None,
@@ -7329,9 +7374,18 @@ impl Transcript {
                 // Baseline rows (text already streamed when the transcript
                 // attached) start seeded: the existing reply must not fade in
                 // on a session switch — only fresh appends animate.
+                let reduced_motion = motion::reduced_motion(cx);
+                if reduced_motion {
+                    // Motion can resume mid-stream (background pause, or the OS
+                    // setting flipping back). Text painted meanwhile is already
+                    // on screen, so the next veil seeds it rather than
+                    // dissolving the reply in again.
+                    self.veils.remove(&row.id);
+                    self.veil_baseline.insert(row.id.clone());
+                }
                 let seed_history = !self.veils.contains_key(&row.id)
                     && self.historical_markdown.contains_key(&row.id);
-                let veil = (!motion::reduced_motion(cx)).then(|| {
+                let veil = (!reduced_motion).then(|| {
                     self.veils
                         .entry(row.id.clone())
                         .or_insert_with(|| {
@@ -9219,6 +9273,26 @@ fn chip_header_row(
                     .child(SharedString::from(model.to_owned())),
             )
         })
+        .when_some(
+            tool.subagent_tail
+                .clone()
+                .filter(|_| tool.call.is_workflow_spawn()),
+            |row, summary| {
+                // A workflow's progress ("1/3 agents · 26.6k tokens"), the same
+                // passive faint label as the model. Workflow chips only: the
+                // field also carries legacy per-delta tails, never rendered.
+                row.child(
+                    div()
+                        .flex_none()
+                        .h(px(18.0))
+                        .flex()
+                        .items_center()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(summary),
+                )
+            },
+        )
         .when(running, |row| {
             // The sidebar working-row spinner, in the chip's trailing slot —
             // paint-local (fixed footprint), so it never moves the layout.
@@ -9896,16 +9970,20 @@ impl Render for Transcript {
             .child(content)
             .child(rail)
             // After the list lays out: a resize that changed the gutter asks
-            // for one more frame, where render picks the new width up.
+            // for one more frame, where render picks the new width up. The
+            // rows it just placed are checked here too (#23).
             .child({
                 let list = self.list.clone();
                 let used = self.row_gutter;
+                let rows = self.rows.len();
+                let paint_check = self.paint_check.clone();
                 gpui::canvas(
                     move |_, window, _| {
                         let width = f32::from(list.viewport_bounds().size.width);
                         if (row_gutter(width) - used).abs() > 0.5 {
                             window.refresh();
                         }
+                        check_painted_rows(&list, rows, &paint_check);
                     },
                     |_, _, _, _| {},
                 )
@@ -10059,6 +10137,172 @@ mod tests {
     /// row count; anchoring the own turn inside that `sync` read the
     /// freshly-zeroed heights as a short list and snapped the viewport to
     /// item 0 before gliding back down. Runs on the portable test platform.
+    /// #23: chat text read doubled and blurred after scrolling to the bottom.
+    /// Wheel to the bottom of a long chat with fractional deltas (two events
+    /// per frame, like a trackpad outpacing paint) while the stick spring
+    /// engages, rest there, then stream a reply while following. Every frame
+    /// must paint each row once, back to back; the viewport must never flip
+    /// between two positions; at rest it must not move; and while following,
+    /// the newest row must end exactly at the viewport bottom.
+    #[gpui::test]
+    fn scrolling_to_the_bottom_paints_each_row_once_and_settles(cx: &mut gpui::TestAppContext) {
+        use crate::transcript_paint_check::{
+            ViewportFlicker, ViewportSample, painted_rows_anomaly,
+        };
+        struct Host(Entity<Transcript>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.new(|_| AppState::new())
+        });
+        let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+        let transcript = window.update(cx, |host, _, _| host.0.clone()).unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            })
+            .unwrap();
+        };
+        let feed = |entries: Vec<SessionMessageEntry>, cx: &mut gpui::TestAppContext| {
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = entries;
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |this, cx| this.sync(cx));
+        };
+        let tick = |cx: &mut gpui::TestAppContext| {
+            transcript.update(cx, |this, cx| {
+                this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
+                if this.own_turn.is_some() || this.deferred_own_send.is_some() {
+                    this.step_own_turn(cx);
+                }
+                if this.pinned {
+                    this.step_spring(cx);
+                }
+            });
+            draw(cx);
+        };
+        let wheel = |delta: f32, cx: &mut gpui::TestAppContext| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                        position: gpui::point(px(500.0), px(300.0)),
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(delta))),
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let mut flicker = ViewportFlicker::default();
+        let mut frame = |label: &str, cx: &mut gpui::TestAppContext| {
+            let (painted, rows) =
+                transcript.read_with(cx, |this, _| (this.list.painted_items(), this.rows.len()));
+            assert!(!painted.is_empty(), "{label}: nothing painted");
+            if let Some(problem) = painted_rows_anomaly(&painted) {
+                panic!("{label}: {problem}: {painted:?}");
+            }
+            let sample = ViewportSample::new(rows, &painted).unwrap();
+            assert!(!flicker.record(sample), "{label}: viewport alternating");
+            painted
+        };
+        let prompt = |id: &str| {
+            let mut entry = assistant(
+                id,
+                MessageStatus::Complete,
+                vec![text_part("text", "Please explain this.")],
+            );
+            entry.role = MessageRole::User;
+            entry.status = None;
+            entry
+        };
+        let body = (0..12)
+            .map(|i| format!("Paragraph {i} of a long answer, with enough words to wrap.\n\n"))
+            .collect::<String>();
+        let mut history = Vec::new();
+        for i in 0..20 {
+            history.push(prompt(&format!("p{i}")));
+            history.push(assistant(
+                &format!("r{i}"),
+                MessageStatus::Complete,
+                vec![text_part("text", &body)],
+            ));
+        }
+        feed(history.clone(), cx);
+        transcript.update(cx, |this, _| this.rail_enabled = false);
+        for _ in 0..10 {
+            tick(cx);
+        }
+
+        for _ in 0..8 {
+            wheel(97.3, cx);
+            draw(cx);
+            frame("scrolling up", cx);
+        }
+        assert!(
+            !transcript.read_with(cx, |this, _| this.pinned),
+            "scrolled away"
+        );
+        for step in 0..40 {
+            wheel(-17.35, cx);
+            wheel(-14.35, cx);
+            tick(cx);
+            frame(&format!("scrolling down {step}"), cx);
+        }
+        assert!(
+            transcript.read_with(cx, |this, _| this.pinned),
+            "reached the bottom"
+        );
+
+        let rest = frame("at the bottom", cx);
+        for step in 0..30 {
+            tick(cx);
+            assert_eq!(frame(&format!("resting {step}"), cx), rest, "moved at rest");
+        }
+
+        history.push(prompt("p-live"));
+        for paragraphs in 1..30 {
+            let mut entries = history.clone();
+            let live = (0..paragraphs)
+                .map(|i| format!("Live paragraph {i} streams in with a few more words.\n\n"))
+                .collect::<String>();
+            entries.push(assistant(
+                "r-live",
+                MessageStatus::Streaming,
+                vec![text_part("text", &live)],
+            ));
+            feed(entries, cx);
+            tick(cx);
+            let painted = frame(&format!("following {paragraphs}"), cx);
+            let (rows, viewport) =
+                transcript.read_with(cx, |this, _| (this.rows.len(), this.list.viewport_bounds()));
+            let (last, bounds) = *painted.last().unwrap();
+            assert_eq!(
+                last + 1,
+                rows,
+                "following {paragraphs}: newest row not painted"
+            );
+            assert_eq!(
+                bounds.bottom(),
+                viewport.bottom(),
+                "following {paragraphs}: tail drifted"
+            );
+        }
+    }
+
     #[gpui::test]
     fn steer_promotion_never_snaps_a_long_chat_to_the_top(cx: &mut gpui::TestAppContext) {
         struct Host(Entity<Transcript>);
@@ -14266,6 +14510,73 @@ mod tests {
         }
 
         #[test]
+        fn text_streamed_under_reduced_motion_does_not_fade_in_when_motion_resumes() {
+            fn render_rows(
+                transcript: &Entity<Transcript>,
+                window: gpui::WindowHandle<CachedTranscript>,
+                cx: &mut gpui::App,
+            ) {
+                cx.update_window(window.into(), |_, window, cx| {
+                    transcript.update(cx, |this, cx| {
+                        for ix in 0..this.list.item_count() {
+                            let _ = this.render_row(ix, window, cx);
+                        }
+                    });
+                })
+                .unwrap();
+            }
+            fn streaming(text: &str) -> Vec<SessionMessageEntry> {
+                vec![
+                    prompt("ask"),
+                    assistant(
+                        "reply",
+                        MessageStatus::Streaming,
+                        vec![text_part("body", text)],
+                    ),
+                ]
+            }
+            with_window(|transcript, window, cx| {
+                let body = SharedString::from("reply#body.0");
+                // Attach on the prompt alone, so the reply is live text rather
+                // than an attach-time baseline.
+                transcript.update(cx, |this, cx| feed(this, vec![prompt("ask")], cx));
+                render_rows(&transcript, window, cx);
+
+                // A row that first streams while motion is reduced.
+                cx.set_reduce_motion(true);
+                transcript.update(cx, |this, cx| feed(this, streaming("uno"), cx));
+                render_rows(&transcript, window, cx);
+                assert!(!transcript.read(cx).veils.contains_key(&body));
+                cx.set_reduce_motion(false);
+                render_rows(&transcript, window, cx);
+                let veil = transcript.read(cx).veils[&body].clone();
+                assert!(
+                    veil.borrow_mut()
+                        .advance(0, "uno", Instant::now())
+                        .is_empty(),
+                    "text painted under reduced motion must not dissolve in"
+                );
+
+                // A row already fading when motion pauses, then resumes.
+                cx.set_reduce_motion(true);
+                transcript.update(cx, |this, cx| feed(this, streaming("uno dos"), cx));
+                render_rows(&transcript, window, cx);
+                cx.set_reduce_motion(false);
+                render_rows(&transcript, window, cx);
+                let veil = transcript.read(cx).veils[&body].clone();
+                assert!(
+                    veil.borrow_mut()
+                        .advance(0, "uno dos", Instant::now())
+                        .is_empty(),
+                    "text streamed while paused is already on screen"
+                );
+                let spans = veil.borrow_mut().advance(0, "uno dos tres", Instant::now());
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].0, "uno dos".len().."uno dos tres".len());
+            });
+        }
+
+        #[test]
         fn replay_growth_snaps_only_when_following_the_tail() {
             with_window(|transcript, window, cx| {
                 let entries: Vec<_> = (0..30).map(|ix| prompt(&format!("prompt-{ix}"))).collect();
@@ -16242,6 +16553,18 @@ mod tests {
         assert_eq!(
             lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
             vec!["[x] a", "[ ] b"]
+        );
+
+        // A spawn's kept badge keys read as plain labels, not a JSON object.
+        let Some(ToolDetail::Output { lines, .. }) = call_block(&ToolCall::Unknown {
+            name: "Agent: scan-a — done · → APPLE".into(),
+            input: Some(serde_json::json!({"model": "claude-haiku-4-5"})),
+        }) else {
+            panic!("expected an output block")
+        };
+        assert_eq!(
+            lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            vec!["Agent: scan-a — done · → APPLE", "model: claude-haiku-4-5"]
         );
 
         // Blank invocation → no block; the chip stays a plain card.

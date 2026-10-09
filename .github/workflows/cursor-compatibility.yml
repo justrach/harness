@@ -16,13 +16,21 @@ permissions:
 jobs:
   cursor-compatibility:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Dependency updater validation
         run: python3 scripts/test-update-cursor-sdk.py
       - name: Harness compatibility, steering, and session recovery
@@ -32,6 +40,10 @@ jobs:
           cargo test --locked -p harness-doc
           cargo test --locked -p harness-engine --test message_queue
           cargo test --locked -p harness-engine --lib sessions::tests
+      - name: Native Pi RPC driver
+        run: |
+          cargo test --locked -p harness-adapters --features native-fixture --test pi_rpc
+          cargo test --locked -p harness-engine --test pi_resume
       - name: Install the exact SDK selected by this engine
         run: |
           pin=$(python3 -c 'import re; print(re.search(r"const CURSOR_SDK_PIN: &str = \"([^\"]+)\"", open("crates/harness/src/cursor/mod.rs").read())[1])')

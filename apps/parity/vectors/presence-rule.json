@@ -1,0 +1,140 @@
+{
+  "about": "PresenceRule (iOS) / presence.rs (Android): what a phone may say about another device. Times are epoch ms; null means not known. nextChange is when the status can next change by the clock alone.",
+  "liveFreshMs": 45000,
+  "darkMs": 300000,
+  "warmupMs": 60000,
+  "cases": [
+    {
+      "name": "a beat 10s ago is online",
+      "now": 10000000,
+      "received": 9990000,
+      "connected": true,
+      "joinedAt": 9400000,
+      "rowLastSeen": null,
+      "status": "online",
+      "liveness": "live",
+      "nextChange": 10035000
+    },
+    {
+      "name": "a beat 10s ago is online with the socket down",
+      "now": 10000000,
+      "received": 9990000,
+      "connected": false,
+      "joinedAt": null,
+      "rowLastSeen": null,
+      "status": "online",
+      "liveness": "unknown",
+      "nextChange": 10035000
+    },
+    {
+      "name": "a beat exactly 45s ago is no longer online",
+      "now": 10000000,
+      "received": 9955000,
+      "connected": true,
+      "joinedAt": 9400000,
+      "rowLastSeen": null,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": 10255000
+    },
+    {
+      "name": "a minute of quiet is unknown, not offline",
+      "now": 10000000,
+      "received": 9940000,
+      "connected": true,
+      "joinedAt": 9400000,
+      "rowLastSeen": null,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": 10240000
+    },
+    {
+      "name": "five quiet minutes in a joined room is offline",
+      "now": 10000000,
+      "received": 9700000,
+      "connected": true,
+      "joinedAt": 9400000,
+      "rowLastSeen": null,
+      "status": "offline",
+      "liveness": "dark",
+      "nextChange": null
+    },
+    {
+      "name": "five quiet minutes with the room down stays unknown",
+      "now": 10000000,
+      "received": 9700000,
+      "connected": false,
+      "joinedAt": null,
+      "rowLastSeen": null,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": null
+    },
+    {
+      "name": "never heard, room just joined: unknown until warmed up",
+      "now": 10000000,
+      "received": null,
+      "connected": true,
+      "joinedAt": 9970000,
+      "rowLastSeen": 6400000,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": 10030000
+    },
+    {
+      "name": "never heard, warmed-up room, stale row: offline",
+      "now": 10000000,
+      "received": null,
+      "connected": true,
+      "joinedAt": 9940000,
+      "rowLastSeen": 9700000,
+      "status": "offline",
+      "liveness": "dark",
+      "nextChange": null
+    },
+    {
+      "name": "never heard, warmed-up room, recent row: unknown",
+      "now": 10000000,
+      "received": null,
+      "connected": true,
+      "joinedAt": 9880000,
+      "rowLastSeen": 9940000,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": 10240000
+    },
+    {
+      "name": "never heard, warmed-up room, no row stamp: unknown",
+      "now": 10000000,
+      "received": null,
+      "connected": true,
+      "joinedAt": 9880000,
+      "rowLastSeen": null,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": null
+    },
+    {
+      "name": "never heard, room down: unknown with nothing to wait for",
+      "now": 10000000,
+      "received": null,
+      "connected": false,
+      "joinedAt": null,
+      "rowLastSeen": 6400000,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": null
+    },
+    {
+      "name": "connected without a join time is not evidence",
+      "now": 10000000,
+      "received": 9600000,
+      "connected": true,
+      "joinedAt": null,
+      "rowLastSeen": null,
+      "status": "unknown",
+      "liveness": "unknown",
+      "nextChange": null
+    }
+  ]
+}

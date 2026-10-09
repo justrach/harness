@@ -6,8 +6,8 @@
 //! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
 //! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
-//! (`devin acp`), Grok (`grok agent stdio`) and Hermes (`hermes acp`) — plus
-//! pi via the community `pi-acp` adapter until a native driver exists.
+//! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
+//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
 //! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
 //! ACP layer with it: the adapters held prompt turns open for background
 //! work the CLIs themselves settle eagerly (and opencode's settles on the
@@ -182,6 +182,7 @@ mod catalog;
 mod catalog_failure;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
+pub mod codedb_bundle;
 pub mod codex;
 pub mod cursor;
 pub mod graff_bundle;
@@ -192,6 +193,7 @@ pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;
 pub mod opencode;
+pub mod pi;
 pub mod process;
 mod scratch;
 pub mod shell_env;
@@ -244,6 +246,13 @@ fn compose_path<'a>(
     }
     if let Some(shell_path) = shell_env::login_shell_path() {
         paths.extend(std::env::split_paths(shell_path));
+    }
+    // Harness's own tools (codedb, in ~/.harness/tools/bin) come last: one
+    // the user installed wins.
+    if let Some(managed) = codedb_bundle::managed_path()
+        && let Some(dir) = managed.parent()
+    {
+        paths.push(dir.to_path_buf());
     }
     let mut seen = std::collections::HashSet::new();
     paths.retain(|p| !p.as_os_str().is_empty() && seen.insert(p.clone()));
@@ -408,6 +417,7 @@ pub(crate) fn crash_message(
 
 pub use acp::AcpHarness;
 pub use acp::exo_bridge::serve as serve_exo_acp;
+pub use acp::graff_client::set_device_name as set_graff_device_name;
 pub use acp::graff_login::login_command as graff_login_command;
 pub use acp::graff_login::logout_command as graff_logout_command;
 pub use acp::graff_worktree::{
@@ -415,8 +425,10 @@ pub use acp::graff_worktree::{
 };
 pub use claude::ClaudeHarness;
 pub use codex::CodexHarness;
+pub use codex::dictation::{Dictation, DictationControls, DictationEvent, DictationRuntime};
 pub use cursor::CursorHarness;
 pub use opencode::OpencodeHarness;
+pub use pi::PiHarness;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)

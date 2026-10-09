@@ -1,0 +1,21 @@
+name: Windows Rust setup
+description: Pinned toolchain, the Windows SDK shader compiler GPUI needs, and this job's Rust cache.
+runs:
+  using: composite
+  steps:
+    - name: Rust toolchain
+      shell: pwsh
+      run: rustup show active-toolchain || rustup toolchain install
+    - name: Locate Windows SDK shader compiler
+      shell: pwsh
+      run: |
+        $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+          Sort-Object FullName -Descending | Select-Object -First 1
+        if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+        "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+    # Keyed per job: each parallel group keeps the cache for what it compiles.
+    - uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+        cache-on-failure: true
+        cache-workspace-crates: true

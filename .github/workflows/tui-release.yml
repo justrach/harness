@@ -1,7 +1,8 @@
 name: tui-release
 
 # Build the terminal UI (tui/) and attach it to a release.
-#   - macOS (Apple silicon) and Linux (x86_64 + aarch64) tarballs via tui/package.sh
+#   - macOS (Apple silicon) and Linux (x86_64 + aarch64) tarballs via tui/package.sh, each with
+#     a <tarball>.sha256 that `graff tui` checks before installing it
 # The app release workflow (release.yml) calls this after publish so every tagged
 # release ships TUI tarballs; a failure here cannot hold up the app release
 # (it runs last, and the app artifacts are already uploaded).
@@ -53,23 +54,33 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             tui/bridge
             tui/launcher
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: package
         run: tui/package.sh
       - name: smoke test the tarball
         run: |
+          (cd tui/dist && { sha256sum -c ./*.sha256 2>/dev/null || shasum -a 256 -c ./*.sha256; })
           mkdir smoke && tar -xzf tui/dist/*.tar.gz -C smoke
           CODEX_HOME="$RUNNER_TEMP/codex-home" smoke/*/bin/harness-tui --version
           CODEX_HOME="$RUNNER_TEMP/codex-home" smoke/*/bin/graff-tui --version
       - uses: actions/upload-artifact@v4
         with:
           name: tui-${{ runner.os }}-${{ runner.arch }}
-          path: tui/dist/*.tar.gz
+          path: |
+            tui/dist/*.tar.gz
+            tui/dist/*.tar.gz.sha256
           if-no-files-found: error
       - name: attach to release
         if: inputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.tag }}" tui/dist/*.tar.gz --clobber
+        run: gh release upload "${{ inputs.tag }}" tui/dist/*.tar.gz tui/dist/*.tar.gz.sha256 --clobber

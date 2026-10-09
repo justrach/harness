@@ -358,7 +358,6 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         // its address bar: its Browser-scoped binding is bound later).
         KeyBinding::new(&b("cmd-l", "ctrl-shift-l"), FocusComposer, None),
         // Chat tabs (`chat_tabs.rs`): Safari/Terminal's keys on macOS.
-        KeyBinding::new(&b("cmd-t", "ctrl-shift-t"), NewChatTab, None),
         KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
         KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
     ]
@@ -425,7 +424,9 @@ impl Shell {
     /// a drag that selected text there keeps its selection (and the pane
     /// stays unfocused) so the text can be copied.
     pub(super) fn release_on_peer_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::markdown::selection::selected_text().is_some() {
+        // Dropping a dragged session over the pane isn't a click on it: it
+        // focused this pane's chat instead of opening the dropped one.
+        if crate::markdown::selection::selected_text().is_some() || cx.has_active_drag() {
             return;
         }
         self.focus_chat_pane(ix, window, cx);
@@ -1055,14 +1056,22 @@ impl Shell {
     /// While a sidebar session is being dragged, Ghostty-style drop targets
     /// over the chat area: the right edge opens it in a new pane to the
     /// right, the bottom edge in a new pane below.
-    pub(super) fn render_split_drop_zones(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if !matches!(self.route, Route::Chat) || self.sidebar_session_transfer.is_none() {
+    ///
+    /// Keyed on [`Shell::split_drop_session`], not the sidebar's reorder
+    /// transfer: a synced pins or chats frame mid-drag cancels that transfer,
+    /// and the zones vanished under the pointer, so the drop did nothing.
+    pub(super) fn render_split_drop_zones(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if !cx.has_active_drag() {
+            self.split_drop_session = None;
+        }
+        if !matches!(self.route, Route::Chat) || self.split_drop_session.is_none() {
             return Vec::new();
         }
         let zone = |id: &'static str, axis: SplitAxis, label: &'static str| {
             let accent = theme.accent;
             div()
                 .id(id)
+                .debug_selector(move || id.to_owned())
                 .absolute()
                 .flex()
                 .items_center()
@@ -1083,8 +1092,12 @@ impl Shell {
                 })
                 .on_drop(cx.listener(move |this, payload: &SidebarSessionDrag, window, cx| {
                     let chat = payload.chat_id.clone();
+                    this.split_drop_session = None;
                     this.cancel_sidebar_session_transfer(cx);
-                    this.split_chat_opening(axis, Some(chat), window, cx);
+                    // Archived or deleted while it was being dragged.
+                    if this.state.read(cx).visible_chats().any(|c| c.id == chat) {
+                        this.split_chat_opening(axis, Some(chat), window, cx);
+                    }
                 }))
         };
         let mut zones = Vec::new();

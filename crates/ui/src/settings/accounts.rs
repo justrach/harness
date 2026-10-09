@@ -33,6 +33,8 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
+mod relay_callback;
+
 // ---------------------------------------------------------------------------
 // Pure: usage meters + labels
 // ---------------------------------------------------------------------------
@@ -279,9 +281,11 @@ enum LoginFlow {
         provider: Option<String>,
         reauthenticate: bool,
     },
-    /// Claude-style: open the URL, paste the code back.
+    /// Claude-style: open the URL, paste the code back. graff's relayed
+    /// ChatGPT sign-in uses it too: the "code" is the redirect address.
     PasteCode {
         harness: HarnessId,
+        provider: Option<String>,
         start: AgentLoginStart,
         submitting: bool,
         error: Option<SharedString>,
@@ -312,7 +316,9 @@ impl LoginFlow {
                 reauthenticate,
                 ..
             } => (*harness, provider.as_deref(), *reauthenticate),
-            LoginFlow::PasteCode { harness, .. } => (*harness, None, false),
+            LoginFlow::PasteCode {
+                harness, provider, ..
+            } => (*harness, provider.as_deref(), false),
         };
         match harness {
             HarnessId::Codex if reauthenticate => "Sign in to ChatGPT (Codex)".into(),
@@ -331,6 +337,9 @@ pub struct AccountsPage {
     /// Retargeted by the page-header device switcher (harness parity: the
     /// accounts RPCs are relay-forwardable, CLI logins are per-device).
     target_device: Option<String>,
+    /// Listens on this computer's loopback callback during a relayed sign-in.
+    relay_capture: Option<relay_callback::Capture>,
+    relay_capture_task: Option<Task<()>>,
     device_menu: popover::Popup<()>,
     snapshot: Loadable<AgentAccountsSnapshot>,
     codegraff_usage: Loadable<Option<CodegraffUsage>>,
@@ -388,6 +397,8 @@ impl AccountsPage {
             state,
             scroll: widgets::PageScroll::default(),
             target_device: None,
+            relay_capture: None,
+            relay_capture_task: None,
             device_menu: popover::Popup::default(),
             snapshot: Loadable::Idle,
             codegraff_usage: Loadable::Idle,
@@ -1188,8 +1199,12 @@ impl AccountsPage {
         harness: HarnessId,
         provider: Option<&str>,
         reauthenticate: bool,
+        relay: bool,
     ) -> serde_json::Value {
         let mut params = serde_json::json!({ "harness": harness });
+        if relay {
+            params["relayBrowser"] = serde_json::json!(true);
+        }
         if reauthenticate {
             params["reauthenticate"] = serde_json::json!(true);
             if harness == HarnessId::Codex {
@@ -1259,7 +1274,14 @@ impl AccountsPage {
             reauthenticate,
         });
         self.error = None;
-        let params = self.login_params(harness, provider.as_deref(), reauthenticate);
+        // ChatGPT's sign-in lands on the execution device's loopback callback,
+        // which a browser on this computer can't reach: relay it from here.
+        let relay = harness == HarnessId::Graff
+            && provider.as_deref() == Some("chatgpt-new")
+            && self.target_is_remote(cx);
+        self.relay_capture = None;
+        self.relay_capture_task = None;
+        let params = self.login_params(harness, provider.as_deref(), reauthenticate, relay);
         let mut cancel_params = self.params(serde_json::json!({}));
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -1274,6 +1296,7 @@ impl AccountsPage {
                 Ok(start)
                     if reauthenticate
                         && !(harness == HarnessId::Codex && start.is_safe_device_code())
+                        && !(relay && start.mode == AgentLoginMode::RelayBrowser)
                         && (start.mode != AgentLoginMode::HostBrowser
                             || !start.url.is_empty()
                             || start.code.is_some()
@@ -1298,15 +1321,20 @@ impl AccountsPage {
                             cx.open_url(&start.url);
                         }
                         match start.mode {
-                            AgentLoginMode::PasteCode => {
+                            AgentLoginMode::PasteCode | AgentLoginMode::RelayBrowser => {
+                                let relayed = start.mode == AgentLoginMode::RelayBrowser;
                                 page.code_input
                                     .update(cx, |input, cx| input.set_text("", cx));
                                 page.login = Some(LoginFlow::PasteCode {
                                     harness,
+                                    provider,
                                     start,
                                     submitting: false,
                                     error: None,
                                 });
+                                if relayed {
+                                    page.spawn_relay_capture(cx);
+                                }
                             }
                             AgentLoginMode::Browser
                             | AgentLoginMode::HostBrowser
@@ -1364,6 +1392,8 @@ impl AccountsPage {
                 match result {
                     Ok(_) => {
                         page.login = None;
+                        page.relay_capture = None;
+                        page.relay_capture_task = None;
                         page.load(force_usage_for(LoadTrigger::PostLogin), cx);
                     }
                     Err(err) => {
@@ -1381,6 +1411,46 @@ impl AccountsPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Whether the page shows another computer's logins.
+    fn target_is_remote(&self, cx: &gpui::App) -> bool {
+        let local = self.state.read(cx).local_device_id.clone();
+        self.target_device
+            .as_deref()
+            .is_some_and(|target| local.as_deref() != Some(target))
+    }
+
+    /// Catch the browser's loopback redirect for a relayed sign-in and send it
+    /// on. A busy port leaves the paste field as the way to finish.
+    fn spawn_relay_capture(&mut self, cx: &mut Context<Self>) {
+        let Some(LoginFlow::PasteCode { start, .. }) = &self.login else {
+            return;
+        };
+        let Some((port, path)) = relay_callback::callback_target(&start.url) else {
+            return;
+        };
+        let Some((capture, landed)) = relay_callback::start(port, path) else {
+            tracing::info!(
+                port,
+                "loopback port busy; relayed sign-in falls back to pasting"
+            );
+            return;
+        };
+        self.relay_capture = Some(capture);
+        self.relay_capture_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(landed) = landed.await else {
+                return;
+            };
+            this.update(cx, |page, cx| {
+                if matches!(page.login, Some(LoginFlow::PasteCode { .. })) {
+                    page.code_input
+                        .update(cx, |input, cx| input.set_text(landed, cx));
+                    page.submit_code(cx);
+                }
+            })
+            .ok();
+        }));
     }
 
     /// The browser-wait poll loop: PollAgentLogin every 1.5s until Done/Error.
@@ -1479,6 +1549,8 @@ impl AccountsPage {
         self.login = None;
         self.poll_task = None;
         self.action_task = None;
+        self.relay_capture = None;
+        self.relay_capture_task = None;
         if let (Some(login_id), Some(engine)) = (login_id, self.state.read(cx).engine().cloned()) {
             let params = self.params(serde_json::json!({ "loginId": login_id }));
             cx.spawn(async move |_, _| {
@@ -2400,15 +2472,22 @@ impl AccountsPage {
                 ..
             } => {
                 let submitting = *submitting;
+                let relayed = start.mode == AgentLoginMode::RelayBrowser;
+                let body = if relayed {
+                    "A browser window opened on this computer. Sign in to ChatGPT there; \
+                     Harness catches the page it returns to and finishes the sign-in on the \
+                     computer shown above, which keeps the login. If the browser instead \
+                     shows a page that can't load (127.0.0.1…), copy its address and paste \
+                     it below."
+                } else {
+                    "A browser window opened. Sign in to the account you want to add, \
+                     approve access, then paste the code Anthropic shows you below. Your \
+                     current login is untouched until you switch."
+                };
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().mt(px(8.0)).child(popover::dialog_body(
-                        &theme,
-                        "A browser window opened. Sign in to the account you want to add, \
-                         approve access, then paste the code Anthropic shows you below. Your \
-                         current login is untouched until you switch.",
-                    )))
+                    .child(div().mt(px(8.0)).child(popover::dialog_body(&theme, body)))
                     .child(url_link(
                         "login-open-url",
                         "Reopen the authorization page",
@@ -2447,10 +2526,10 @@ impl AccountsPage {
                             .child(
                                 popover::btn_primary(
                                     &theme,
-                                    if submitting {
-                                        "Verifying…"
-                                    } else {
-                                        "Add account"
+                                    match (submitting, relayed) {
+                                        (true, _) => "Verifying…",
+                                        (false, true) => "Finish sign-in",
+                                        (false, false) => "Add account",
                                     },
                                 )
                                 .id("login-submit-code")

@@ -120,7 +120,7 @@ pub fn executable_override(harness: HarnessId) -> Option<&'static str> {
         HarnessId::Grok => Some("GROK_EXECUTABLE"),
         HarnessId::Hermes => Some("HERMES_EXECUTABLE"),
         HarnessId::Graff => Some("GRAFF_EXECUTABLE"),
-        HarnessId::Pi => Some("PI_ACP_EXECUTABLE"),
+        HarnessId::Pi => Some("PI_EXECUTABLE"),
         HarnessId::Opencode => Some("OPENCODE_EXECUTABLE"),
         HarnessId::Antigravity => Some("ANTIGRAVITY_ACP_EXECUTABLE"),
         HarnessId::Exo => Some("EXO_ACP_EXECUTABLE"),
@@ -149,6 +149,10 @@ pub struct HarnessesPage {
     graff_draft_subagents: Loadable<bool>,
     graff_draft_subagents_task: Option<Task<()>>,
     graff_draft_subagents_saving: bool,
+    /// graff's compaction point; `Ready(None)` is graff's own default.
+    graff_compact_at: Loadable<Option<u8>>,
+    graff_compact_at_task: Option<Task<()>>,
+    graff_compact_at_saving: bool,
     title_settings: Loadable<TitleSettings>,
     title_models: Loadable<Vec<Model>>,
     title_menu: Option<bool>, // false = harness, true = model
@@ -227,6 +231,9 @@ impl HarnessesPage {
             graff_draft_subagents: Loadable::Idle,
             graff_draft_subagents_task: None,
             graff_draft_subagents_saving: false,
+            graff_compact_at: Loadable::Idle,
+            graff_compact_at_task: None,
+            graff_compact_at_saving: false,
             title_settings: Loadable::Idle,
             title_models: Loadable::Idle,
             title_menu: None,
@@ -275,6 +282,9 @@ impl HarnessesPage {
         self.graff_draft_subagents_task = None;
         self.graff_draft_subagents = Loadable::Idle;
         self.graff_draft_subagents_saving = false;
+        self.graff_compact_at_task = None;
+        self.graff_compact_at = Loadable::Idle;
+        self.graff_compact_at_saving = false;
         self.title_settings = Loadable::Idle;
         self.title_models = Loadable::Idle;
         self.title_menu = None;
@@ -300,6 +310,7 @@ impl HarnessesPage {
         let params = self.with_target(serde_json::json!({}));
         self.load_titles(None, cx);
         self.load_graff_draft_subagents(None, cx);
+        self.load_graff_compact_at(None, cx);
         self.harnesses = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
@@ -376,6 +387,109 @@ impl HarnessesPage {
                                 this.load_graff_draft_subagents(Some(!enabled), cx);
                             }))
                         })))
+            .into_any_element()
+    }
+
+    /// `save: Some(pct)` writes it (`Some(None)` restores graff's default);
+    /// `None` only reads.
+    fn load_graff_compact_at(&mut self, save: Option<Option<u8>>, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let saving = save.is_some();
+        let method = if saving {
+            methods::SET_GRAFF_COMPACT_AT
+        } else {
+            methods::GET_GRAFF_COMPACT_AT
+        };
+        let params = self.with_target(serde_json::json!({ "pct": save.flatten() }));
+        self.graff_compact_at_saving = saving;
+        if !saving {
+            self.graff_compact_at = Loadable::Loading;
+        }
+        self.graff_compact_at_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(method, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<Option<u8>>(value).map_err(|e| e.to_string())
+                });
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(pct) => {
+                        page.graff_compact_at = Loadable::Ready(pct);
+                        page.error = None;
+                    }
+                    Err(error) if saving => page.error = Some(error),
+                    Err(error) => page.graff_compact_at = Loadable::Error(error),
+                }
+                page.graff_compact_at_saving = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_graff_compact_at(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        // `None` is graff's default (80%); the rest are explicit points.
+        const CHOICES: [(Option<u8>, &str); 7] = [
+            (None, "Default (80%)"),
+            (Some(50), "50%"),
+            (Some(60), "60%"),
+            (Some(70), "70%"),
+            (Some(75), "75%"),
+            (Some(85), "85%"),
+            (Some(90), "90%"),
+        ];
+        let current = match &self.graff_compact_at {
+            Loadable::Ready(pct) => Some(*pct),
+            _ => None,
+        };
+        let busy = current.is_none() || self.graff_compact_at_saving;
+        let mut choices = div().flex().flex_wrap().items_center().gap(px(6.0)).child(
+            div()
+                .text_color(theme.text_muted)
+                .child("Compact context at"),
+        );
+        for (index, (value, label)) in CHOICES.into_iter().enumerate() {
+            let selected = current == Some(value);
+            let pill = if selected {
+                widgets::badge_active(theme, label)
+            } else {
+                widgets::badge(theme, label)
+            };
+            choices = choices.child(
+                pill.id(("graff-compact-at", index))
+                    .when(busy, |el| el.opacity(0.35))
+                    .when(!busy && !selected, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.text_color(theme.text))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.load_graff_compact_at(Some(value), cx);
+                            }))
+                    }),
+            );
+        }
+        let custom = match current {
+            Some(Some(pct)) if !CHOICES.iter().any(|(v, _)| *v == Some(pct)) => {
+                Some(div().child(format!("Currently {pct}%, set on this device.")))
+            }
+            _ => None,
+        };
+        // Shown inside the graff row, where people look for graff settings.
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .mt(px(6.0))
+            .child(choices)
+            .child(div().text_color(theme.text_muted).child(
+                "How full the context window gets before Graff compacts. Applies to new Graff chats; /compact-at 70 changes one chat.",
+            ))
+            .children(custom)
             .into_any_element()
     }
 
@@ -1140,6 +1254,9 @@ impl HarnessesPage {
                         .child(SharedString::from(blurb(harness)))
                         .into_any_element(),
                 ];
+                if harness == HarnessId::Graff {
+                    meta.push(self.render_graff_compact_at(&theme, cx));
+                }
                 if harness == HarnessId::Graff && descriptor.can_install {
                     meta.push(
                         div()

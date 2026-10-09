@@ -1,9 +1,12 @@
 //! Settings → Files: local preferences for workspace-file editing.
 
-use gpui::{Context, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    Context, Entity, EventEmitter, SharedString, Subscription, Window, div, prelude::*, px,
+};
 
-use super::widgets;
+use super::{project_folders::ProjectFoldersSettings, widgets};
 use crate::popover;
+use crate::state::AppState;
 use crate::{icons, theme::Theme};
 
 const DELAY_OPTIONS: [u64; 5] = [300, 600, 900, 1_500, 3_000];
@@ -22,24 +25,31 @@ pub struct FilesSettingsPage {
     autosave_delay_ms: u64,
     word_wrap: bool,
     show_all_files: bool,
+    project_folders: Entity<ProjectFoldersSettings>,
+    _project_folders_observe: Subscription,
 }
 
 impl EventEmitter<FilesSettingsEvent> for FilesSettingsPage {}
 
 impl FilesSettingsPage {
     pub fn new(
+        state: Entity<AppState>,
         autosave_enabled: bool,
         autosave_delay_ms: u64,
         word_wrap: bool,
         show_all_files: bool,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let project_folders = cx.new(|cx| ProjectFoldersSettings::new(state, cx));
+        let observe = cx.observe(&project_folders, |_, _, cx| cx.notify());
         Self {
             scroll: widgets::PageScroll::default(),
             autosave_enabled,
             autosave_delay_ms,
             word_wrap,
             show_all_files,
+            project_folders,
+            _project_folders_observe: observe,
         }
     }
 
@@ -77,7 +87,7 @@ impl popover::ScrollRailHost for FilesSettingsPage {
 }
 
 impl Render for FilesSettingsPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let autosave_enabled = self.autosave_enabled;
         let selected = self.autosave_delay_ms;
@@ -243,13 +253,15 @@ impl Render for FilesSettingsPage {
                                 cx.notify();
                             })),
                     ),
-            );
+            )
+            .child(self.project_folders.clone());
 
         let scrollbar = popover::rail(self, "files-settings-page-scrollbar", &theme, cx);
         div()
             .id("files-settings-page-host")
             .relative()
             .size_full()
+            .overflow_hidden()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
                 div()
@@ -272,5 +284,8 @@ impl Render for FilesSettingsPage {
                     ),
             )
             .children(scrollbar)
+            .children(self.project_folders.update(cx, |folders, cx| {
+                folders.render_picker(window, cx)
+            }))
     }
 }

@@ -446,6 +446,150 @@ async fn steer_racing_the_turn_end_never_emits_steered_after_done() {
     );
 }
 
+/// A message arriving while the agent runs a turn it started itself (a
+/// background-task wake) must not cancel that work: it waits for the agent
+/// to go quiet, then goes out as the next prompt.
+#[tokio::test]
+async fn steer_into_self_continued_turn_waits_instead_of_cancelling() {
+    let (controls, steer, _token) = controls();
+    let harness = harness();
+    let stream = harness
+        .run(request("scenario:busy-steer"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(15), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        let mut steer = Some(steer);
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            if matches!(ev, AgentEvent::ToolCall { ref id, .. } if id == "sc-1")
+                && let Some(steer) = &steer
+            {
+                steer
+                    .send(SteerMessage {
+                        prompt: "what about now".into(),
+                        message_id: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .expect("steer sent");
+            }
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "fresh answer") {
+                steer = None;
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    assert!(
+        !events.contains(&AgentEvent::TextDelta {
+            text: "CANCELLED-SELF-CONTINUED-WORK".into()
+        }),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&AgentEvent::TextDelta {
+            text: "fresh answer".into()
+        }),
+        "{events:?}"
+    );
+    let finished = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ToolResult { id, .. } if id == "sc-1"))
+        .expect("self-continued tool finished");
+    let steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("held steer delivered");
+    assert!(
+        finished < steered,
+        "steer must wait for the self-continued work: {events:?}"
+    );
+}
+
+/// Several messages during one self-continued turn: no cancel, and each goes
+/// out once, in order, after the agent's own work finishes.
+#[tokio::test]
+async fn burst_of_steers_into_self_continued_turn_all_deliver_in_order() {
+    let (controls, steer, _token) = controls();
+    let harness = harness();
+    let stream = harness
+        .run(request("scenario:busy-burst"), controls)
+        .await
+        .expect("run starts");
+    let events = tokio::time::timeout(Duration::from_secs(30), async move {
+        let mut events = Vec::new();
+        let mut stream = stream;
+        let mut steer = Some(steer);
+        while let Some(ev) = stream.next().await {
+            let ev = ev.expect("stream event");
+            let word = match &ev {
+                AgentEvent::ToolCall { id, .. } if id == "sc-3" => Some("one"),
+                AgentEvent::TextDelta { text } if text == "tick-1" => Some("two"),
+                AgentEvent::TextDelta { text } if text == "tick-3" => Some("three"),
+                _ => None,
+            };
+            if let (Some(word), Some(steer)) = (word, &steer) {
+                steer
+                    .send(SteerMessage {
+                        prompt: format!("msg {word}"),
+                        message_id: None,
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .expect("steer sent");
+            }
+            if matches!(ev, AgentEvent::TextDelta { ref text } if text == "reply three") {
+                steer = None;
+            }
+            events.push(ev);
+        }
+        events
+    })
+    .await
+    .expect("run finished in time");
+
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !texts
+            .iter()
+            .any(|t| t.starts_with("CANCELLED") || t.starts_with("OUT-OF-ORDER")),
+        "{events:?}"
+    );
+    let replies: Vec<&str> = texts
+        .iter()
+        .copied()
+        .filter(|t| t.starts_with("reply "))
+        .collect();
+    assert_eq!(
+        replies,
+        ["reply one", "reply two", "reply three"],
+        "{events:?}"
+    );
+    let finished = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ToolResult { id, .. } if id == "sc-3"))
+        .expect("self-continued tool finished");
+    let first_steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("held steers delivered");
+    assert!(
+        finished < first_steered,
+        "steers must wait for the self-continued work: {events:?}"
+    );
+}
+
 #[tokio::test]
 async fn rejected_steer_queues_and_delivers_at_the_turn_boundary() {
     let (controls, steer, _token) = controls();
@@ -651,14 +795,14 @@ async fn models_fall_back_to_the_static_catalog_when_the_probe_fails() {
     // after launch, and the static catalog is served instead.
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let broken = dir.path().join("broken-pi-acp");
+    let broken = dir.path().join("broken-acp");
     std::fs::write(&broken, "#!/bin/sh\nexit 1\n").unwrap();
     std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let harness = AcpHarness::pi().with_executable(broken);
+    let harness = AcpHarness::hermes().with_executable(broken);
     assert!(harness.installed());
     let models = harness.models().await.expect("static fallback");
     let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(ids, vec!["default"], "{models:?}");
+    assert_eq!(ids, vec!["hermes-4-405b", "hermes-4-70b"], "{models:?}");
 }
 
 #[tokio::test]
@@ -666,7 +810,7 @@ async fn missing_override_is_not_installed_and_fails_discovery() {
     // An override that points at nothing is not an installed agent: the
     // registry must not offer it, and discovery names the problem instead of
     // quietly serving a catalog for a binary that can never launch.
-    let harness = AcpHarness::pi().with_executable("/nonexistent/never-a-pi-acp");
+    let harness = AcpHarness::hermes().with_executable("/nonexistent/never-an-acp");
     assert!(!harness.installed());
     let err = harness.models().await.expect_err("missing override");
     assert!(
@@ -720,22 +864,12 @@ fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
     assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
     assert!(hermes.reasoning_levels().is_empty());
 
-    let pi = AcpHarness::pi();
+    let pi = harness_adapters::PiHarness::new();
     assert_eq!(pi.id(), HarnessId::Pi);
     assert_eq!(pi.display_name(), "Pi");
     assert!(pi.supports_steering());
-    assert_eq!(pi.steering_mode(), SteeringMode::TurnBoundary);
-    assert_eq!(
-        pi.reasoning_levels(),
-        &[
-            harness_proto::ReasoningLevel::Minimal,
-            harness_proto::ReasoningLevel::Low,
-            harness_proto::ReasoningLevel::Medium,
-            harness_proto::ReasoningLevel::High,
-            harness_proto::ReasoningLevel::XHigh,
-            harness_proto::ReasoningLevel::Max,
-        ]
-    );
+    assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
+    assert!(pi.reasoning_levels().is_empty());
 }
 
 fn antigravity_harness() -> AcpHarness {
@@ -2109,16 +2243,16 @@ async fn antigravity_spawn_failure_returns_an_error_for_the_engine_to_surface() 
     assert!(error.to_string().contains("missing-acp-server"), "{error}");
 }
 
-fn pi_fixture() -> AcpHarness {
-    AcpHarness::pi()
+fn lifecycle_fixture() -> AcpHarness {
+    AcpHarness::hermes()
         .with_executable(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-acp.sh"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-lifecycle-acp.sh"),
         )
         .with_graces(Duration::from_millis(100), Duration::from_millis(150))
 }
 
 #[tokio::test]
-async fn pi_crash_reports_status_and_stderr_once() {
+async fn acp_crash_reports_status_and_stderr_once() {
     for (prompt, status, tail) in [
         ("crash", "exit code 23", "last stderr context"),
         ("signal-crash", "signal 9", "signal context"),
@@ -2129,7 +2263,7 @@ async fn pi_crash_reports_status_and_stderr_once() {
         ),
     ] {
         let (controls, _steer, _) = controls();
-        let events = run_to_end(&pi_fixture(), request(prompt), controls).await;
+        let events = run_to_end(&lifecycle_fixture(), request(prompt), controls).await;
         let done = dones(&events);
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].0, DoneStatus::Errored);
@@ -2139,9 +2273,9 @@ async fn pi_crash_reports_status_and_stderr_once() {
 }
 
 #[tokio::test]
-async fn pi_idle_crash_then_load_preserves_session() {
+async fn acp_idle_crash_then_load_preserves_session() {
     let (ctl, _steer, _) = controls();
-    let events = run_to_end(&pi_fixture(), request("idle-crash"), ctl).await;
+    let events = run_to_end(&lifecycle_fixture(), request("idle-crash"), ctl).await;
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
     let session = events
         .iter()
@@ -2154,7 +2288,7 @@ async fn pi_idle_crash_then_load_preserves_session() {
     drop(steer);
     let mut req = request("resumed");
     req.resume = Some(session);
-    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    let events = run_to_end(&lifecycle_fixture(), req, ctl).await;
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
     assert!(events.contains(&AgentEvent::TextDelta {
         text: "reply:resumed".into()
@@ -2162,45 +2296,48 @@ async fn pi_idle_crash_then_load_preserves_session() {
 }
 
 #[tokio::test]
-async fn pi_failed_load_announces_lost_context() {
+async fn acp_failed_load_announces_lost_context() {
     let (ctl, steer, _) = controls();
     drop(steer);
     let mut req = request("fresh");
     req.resume = Some("missing".into());
-    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    let events = run_to_end(&lifecycle_fixture(), req, ctl).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("without the previous context"))));
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
 #[tokio::test]
-async fn pi_frames_and_model_effort_round_trip() {
+async fn acp_frames_and_model_effort_round_trip() {
     let (ctl, steer, _) = controls();
     drop(steer);
     let mut req = request("frames");
     req.model = Some("mock/model".into());
     req.reasoning = Some(ReasoningLevel::Max);
-    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    let events = run_to_end(&lifecycle_fixture(), req, ctl).await;
     assert!(
         events
             .iter()
             .any(|e| matches!(e, AgentEvent::TextDelta { text } if text.len() == 1024 * 1024 + 17))
     );
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
-    assert_eq!(pi_fixture().models().await.unwrap()[0].id, "mock/model");
+    assert_eq!(
+        lifecycle_fixture().models().await.unwrap()[0].id,
+        "mock/model"
+    );
 }
 
 #[tokio::test]
-async fn pi_error_stop_reason_is_failed() {
+async fn acp_error_stop_reason_is_failed() {
     let (ctl, steer, _) = controls();
     drop(steer);
-    let events = run_to_end(&pi_fixture(), request("error"), ctl).await;
+    let events = run_to_end(&lifecycle_fixture(), request("error"), ctl).await;
     assert_eq!(dones(&events)[0].0, DoneStatus::Errored);
 }
 
 #[tokio::test]
-async fn pi_interrupt_error_and_duplicate_terminal_settle_once() {
+async fn acp_interrupt_error_and_duplicate_terminal_settle_once() {
     let (ctl, _steer, token) = controls();
-    let mut stream = pi_fixture()
+    let mut stream = lifecycle_fixture()
         .run(request("interrupt-error"), ctl)
         .await
         .unwrap();
@@ -2221,9 +2358,9 @@ async fn pi_interrupt_error_and_duplicate_terminal_settle_once() {
 }
 
 #[tokio::test]
-async fn pi_interrupt_kills_tool_process_group() {
+async fn acp_interrupt_kills_tool_process_group() {
     let (ctl, _steer, token) = controls();
-    let mut stream = pi_fixture().run(request("tree"), ctl).await.unwrap();
+    let mut stream = lifecycle_fixture().run(request("tree"), ctl).await.unwrap();
     let mut tree_pids = Vec::new();
     let events = tokio::time::timeout(Duration::from_secs(5), async {
         let mut events = Vec::new();
@@ -2254,20 +2391,20 @@ async fn pi_interrupt_kills_tool_process_group() {
 }
 
 #[tokio::test]
-async fn pi_rejected_model_config_keeps_default_and_runs_prompt() {
+async fn acp_rejected_model_config_keeps_default_and_runs_prompt() {
     let (ctl, steer, _) = controls();
     drop(steer);
     let mut req = request("config-rejected");
     req.model = Some("mock/reject".into());
-    let events = run_to_end(&pi_fixture(), req, ctl).await;
+    let events = run_to_end(&lifecycle_fixture(), req, ctl).await;
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
     assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error { .. })));
 }
 
 #[tokio::test]
-async fn pi_dropping_stream_terminates_tool_tree() {
+async fn acp_dropping_stream_terminates_tool_tree() {
     let (ctl, _steer, _) = controls();
-    let mut stream = pi_fixture().run(request("tree"), ctl).await.unwrap();
+    let mut stream = lifecycle_fixture().run(request("tree"), ctl).await.unwrap();
     let mut pids = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         while pids.len() < 2 {
@@ -2400,7 +2537,7 @@ async fn foreign_notifications_and_permissions_cannot_affect_parent_turn() {
 async fn cancel_watchdog_ignores_late_settlement_for_all_acp_specs() {
     for adapter in [
         AcpHarness::grok(),
-        AcpHarness::pi(),
+        AcpHarness::devin(),
         AcpHarness::antigravity(),
     ] {
         let adapter = adapter
@@ -2524,8 +2661,8 @@ async fn antigravity_stdout_sign_in_and_sibling_environment_on_every_spawn() {
     );
 }
 
-async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
-    let adapter = AcpHarness::pi().with_executable(
+async fn acp_boundary_steer(scenario: &str, trigger_on_done: bool) {
+    let adapter = AcpHarness::devin().with_executable(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-robust-acp.py"),
     );
     let (ctl, steer, _) = controls();
@@ -2578,13 +2715,13 @@ async fn pi_boundary_steer(scenario: &str, trigger_on_done: bool) {
 }
 
 #[tokio::test]
-async fn pi_without_steering_extension_queues_live_steer_once() {
-    pi_boundary_steer("steer-live", false).await;
+async fn acp_without_steering_extension_queues_live_steer_once() {
+    acp_boundary_steer("steer-live", false).await;
 }
 
 #[tokio::test]
-async fn pi_without_steering_extension_dispatches_idle_steer_immediately() {
-    pi_boundary_steer("steer-idle", true).await;
+async fn acp_without_steering_extension_dispatches_idle_steer_immediately() {
+    acp_boundary_steer("steer-idle", true).await;
 }
 
 #[test]
@@ -2698,7 +2835,6 @@ async fn all_acp_harnesses_use_project_scoped_session_command_updates() {
         AcpHarness::devin(),
         AcpHarness::grok(),
         AcpHarness::hermes(),
-        AcpHarness::pi(),
         AcpHarness::antigravity(),
     ] {
         let h = h.with_executable(fixture_path());
@@ -2722,7 +2858,6 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
         AcpHarness::devin(),
         AcpHarness::grok(),
         AcpHarness::hermes(),
-        AcpHarness::pi(),
         AcpHarness::antigravity(),
     ] {
         let h = h.with_executable(fixture_path());
@@ -2730,11 +2865,7 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
         let skill_dir = cwd.path().join(".agents/skills/harness-fixture-review");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "---\nname: harness-fixture-review\ndescription: Review changes\n---\nReview the changes.").unwrap();
-        let command_name = if h.id() == HarnessId::Pi {
-            "skill:harness-fixture-review"
-        } else {
-            "harness-fixture-review"
-        };
+        let command_name = "harness-fixture-review";
         std::fs::write(cwd.path().join(".command-fixture"), command_name).unwrap();
         let skills = h
             .skills(&cwd.path().canonicalize().unwrap())
@@ -2745,7 +2876,7 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
             .into_iter()
             .find(|s| s.name == "harness-fixture-review")
             .unwrap();
-        assert_eq!(skill.command.is_some(), h.id() == HarnessId::Pi);
+        assert!(skill.command.is_none());
         let invocation = Invocation::Skill {
             name: skill.name,
             path: skill.path,
@@ -2753,11 +2884,7 @@ async fn shared_acp_skills_require_explicit_native_command_classification() {
         };
         assert_eq!(
             harness_prompt(&format!("{} inspect tests", invocation.link()), h.id()),
-            if h.id() == HarnessId::Pi {
-                format!("/{command_name} inspect tests")
-            } else {
-                format!("Use the skill {} inspect tests", invocation.prompt_text())
-            }
+            format!("Use the skill {} inspect tests", invocation.prompt_text())
         );
     }
 }

@@ -247,6 +247,86 @@ pub fn chatgpt_plan_denied(output: &str) -> bool {
     })
 }
 
+/// The ChatGPT sign-in graff is waiting on, for finishing it on another
+/// device: OpenAI's authorize page, plus the loopback redirect and `state`
+/// that a completed sign-in must come back with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatgptRelay {
+    pub url: String,
+    pub redirect: reqwest::Url,
+    pub state: String,
+}
+
+/// The authorize page `graff login chatgpt-new` printed, once graff is
+/// listening for its callback. Only OpenAI's own page with a `127.0.0.1`
+/// redirect qualifies: that redirect is the only address the host will ever
+/// deliver a relayed sign-in to.
+pub fn scan_chatgpt_relay(output: &str) -> Option<ChatgptRelay> {
+    if !output.contains("waiting for the sign-in on ") {
+        return None;
+    }
+    let start = output.find("https://auth.openai.com/")?;
+    let rest = &output[start..];
+    let url = &rest[..rest.find(char::is_whitespace)?];
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("auth.openai.com") {
+        return None;
+    }
+    let param = |name: &str| {
+        parsed
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+    };
+    let redirect = reqwest::Url::parse(&param("redirect_uri")?).ok()?;
+    let state = param("state").filter(|state| !state.is_empty())?;
+    let loopback = redirect.scheme() == "http"
+        && redirect.host_str() == Some("127.0.0.1")
+        && redirect.port().is_some()
+        && redirect.query().is_none()
+        && redirect.fragment().is_none();
+    loopback.then(|| ChatgptRelay {
+        url: url.to_string(),
+        redirect,
+        state,
+    })
+}
+
+/// The callback to deliver for a sign-in finished elsewhere: the redirect the
+/// browser landed on, accepted only when it is exactly `relay`'s redirect with
+/// its `state` and an outcome (`code` or `error`). The returned URL is built
+/// from the expected redirect, never from the caller's host, port or path.
+pub fn relayed_callback(relay: &ChatgptRelay, landed: &str) -> Result<reqwest::Url, &'static str> {
+    const NOT_IT: &str = "That isn't the address ChatGPT sent you to. Sign in again.";
+    let landed = reqwest::Url::parse(landed.trim()).map_err(|_| NOT_IT)?;
+    let same_place = landed.scheme() == relay.redirect.scheme()
+        && landed.host_str() == relay.redirect.host_str()
+        && landed.port_or_known_default() == relay.redirect.port_or_known_default()
+        && landed.path() == relay.redirect.path();
+    if !same_place {
+        return Err(NOT_IT);
+    }
+    let pairs: Vec<(String, String)> = landed
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let has = |name: &str| pairs.iter().any(|(key, _)| key == name);
+    let state_matches = pairs
+        .iter()
+        .filter(|(key, _)| key == "state")
+        .map(|(_, value)| value)
+        .eq([&relay.state]);
+    if !state_matches {
+        return Err("That sign-in belongs to an older attempt. Sign in again.");
+    }
+    if !has("code") && !has("error") {
+        return Err(NOT_IT);
+    }
+    let mut target = relay.redirect.clone();
+    target.query_pairs_mut().extend_pairs(&pairs);
+    Ok(target)
+}
+
 /// What to tell the user when a sign-in ended without one: graff's `✗` line,
 /// else its last line of output, else a plain sentence.
 pub fn failure_message(output: &str) -> String {
@@ -269,6 +349,73 @@ mod tests {
     const XAI: &str = "\nTo log in to Grok (xAI), open this URL (browser should open automatically):\n\n  https://accounts.x.ai/device?user_code=ABCD-1234\n\nand confirm the code:  ABCD-1234\n\nwaiting for authorization…\n";
     const KIMI: &str = "\nTo log in to Kimi, open this URL (browser should open automatically):\n\n  https://www.kimi.com/code/authorize_device?user_code=WXYZ\n\nand confirm the code:  WXYZ\n\nwaiting for authorization…\n";
     const ZAI: &str = "\nTo log in to Z.AI Coding Plan, open this URL (browser should open automatically):\n\n  https://chat.z.ai/cli/authorize?flow=f1\n\nwaiting for authorization…\n";
+
+    // Shape of `graff login chatgpt-new` with its browser open muted (0.0.302.18).
+    const CHATGPT: &str = "\nSign in with ChatGPT (your browser should open it):\n\nhttps://auth.openai.com/api/accounts/authorize?client_id=dynamic_agent_client&response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&scope=openid%20profile&state=st4te&nonce=n&code_challenge=c&code_challenge_method=S256\n\nwaiting for the sign-in on http://127.0.0.1:1455/auth/callback …\n";
+
+    #[test]
+    fn chatgpt_relay_reads_the_authorize_page_once_graff_listens() {
+        let relay = scan_chatgpt_relay(CHATGPT).expect("relay");
+        assert!(
+            relay
+                .url
+                .starts_with("https://auth.openai.com/api/accounts/authorize?")
+        );
+        assert_eq!(
+            relay.redirect.as_str(),
+            "http://127.0.0.1:1455/auth/callback"
+        );
+        assert_eq!(relay.state, "st4te");
+        // Not listening yet: nothing to hand out.
+        let (printed, _) = CHATGPT.split_once("waiting").unwrap();
+        assert_eq!(scan_chatgpt_relay(printed), None);
+        // Anything but OpenAI's page with a loopback redirect is refused.
+        for bad in [
+            CHATGPT.replace("auth.openai.com/api", "auth.openai.com.evil.test/api"),
+            CHATGPT.replace("https://auth.openai.com", "http://auth.openai.com"),
+            CHATGPT.replace("127.0.0.1%3A1455", "evil.test%3A1455"),
+            CHATGPT.replace("127.0.0.1%3A1455", "127.0.0.1"),
+            CHATGPT.replace("state=st4te&", ""),
+        ] {
+            assert_eq!(scan_chatgpt_relay(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn relayed_callback_only_reaches_the_expected_loopback() {
+        let relay = scan_chatgpt_relay(CHATGPT).unwrap();
+        let ok = relayed_callback(
+            &relay,
+            " http://127.0.0.1:1455/auth/callback?code=abc&state=st4te&client_id=issued \n",
+        )
+        .unwrap();
+        assert_eq!(
+            ok.as_str(),
+            "http://127.0.0.1:1455/auth/callback?code=abc&state=st4te&client_id=issued"
+        );
+        // A provider error still goes to graff, so it ends the sign-in itself.
+        assert!(
+            relayed_callback(
+                &relay,
+                "http://127.0.0.1:1455/auth/callback?error=access_denied&state=st4te"
+            )
+            .is_ok()
+        );
+        for bad in [
+            "http://127.0.0.1:1455/auth/callback?code=abc&state=other",
+            "http://127.0.0.1:1455/auth/callback?code=abc",
+            "http://127.0.0.1:1455/auth/callback?code=abc&state=st4te&state=x",
+            "http://127.0.0.1:1455/auth/callback?state=st4te",
+            "http://127.0.0.1:1456/auth/callback?code=abc&state=st4te",
+            "http://127.0.0.1:1455/admin?code=abc&state=st4te",
+            "http://localhost:1455/auth/callback?code=abc&state=st4te",
+            "https://127.0.0.1:1455/auth/callback?code=abc&state=st4te",
+            "http://evil.test:1455/auth/callback?code=abc&state=st4te",
+            "not a url",
+        ] {
+            assert!(relayed_callback(&relay, bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn reauth_chatgpt_requires_explicit_plan_grant() {

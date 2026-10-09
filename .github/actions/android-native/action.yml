@@ -1,0 +1,17 @@
+name: Android native core toolchain
+description: >
+  The Rust toolchain pinned in rust-toolchain.toml with the Android targets, and a cargo cache, for the native core
+  (crates/mobile) that Gradle builds into the app. The NDK comes from setup-android (the version app/build.gradle.kts
+  pins).
+runs:
+  using: composite
+  steps:
+    - name: Rust toolchain and Android targets
+      shell: bash
+      run: |
+        rustup show active-toolchain || rustup toolchain install
+        rustup target add aarch64-linux-android x86_64-linux-android
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: android-${{ github.job }}
+        cache-on-failure: true

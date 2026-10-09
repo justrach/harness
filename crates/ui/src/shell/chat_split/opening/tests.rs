@@ -161,6 +161,129 @@ fn split_from_projectless_session_does_not_inherit_another_folder(cx: &mut TestA
         .unwrap();
 }
 
+/// A chats frame that briefly drops the dragged session cancels the sidebar's
+/// reorder preview mid-drag. The split drop zones used to go with it, so the
+/// drop landed on nothing and the session never opened.
+#[gpui::test]
+fn a_sidebar_drop_still_splits_after_a_mid_drag_chats_frame(cx: &mut TestAppContext) {
+    struct Host(Entity<Shell>);
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |shell, cx| {
+                let theme = Theme::default();
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_row()
+                    .on_drop::<SidebarSessionDrag>(
+                        cx.listener(|shell, _, _, cx| shell.cancel_sidebar_session_transfer(cx)),
+                    )
+                    .child(
+                        div()
+                            .w(px(280.0))
+                            .h_full()
+                            .child(shell.render_chat_sidebar(&theme, cx)),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .h_full()
+                            .children(shell.render_split_drop_zones(&theme, cx)),
+                    )
+            })
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        crate::history::init(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+    });
+    let named = |id: &str| Chat {
+        id: id.into(),
+        title: Some(id.into()),
+        ..chat(None)
+    };
+    let (host, cx) = cx.add_window_view(|_, cx| {
+        Host(cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            let shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: HarnessId::Mock,
+                },
+                cx,
+            );
+            shell.state.update(cx, |state, cx| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = vec![named("open"), named("dragged")];
+                state.select_chat(Some("open".into()), cx);
+            });
+            shell
+        }))
+    });
+    let shell = host.read_with(cx, |host, _| host.0.clone());
+
+    let from = cx.debug_bounds("chat-dragged").unwrap().center();
+    cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+    cx.simulate_mouse_move(
+        from + gpui::point(px(8.0), px(0.0)),
+        Some(MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    assert!(cx.debug_bounds("chat-drop-right").is_some());
+
+    // The session drops out of one chats frame and comes back in the next.
+    shell.update(cx, |shell, cx| {
+        shell
+            .state
+            .update(cx, |state, _| state.chats.retain(|c| c.id != "dragged"));
+    });
+    cx.simulate_mouse_move(from, Some(MouseButton::Left), gpui::Modifiers::default());
+    shell.update(cx, |shell, cx| {
+        assert!(
+            shell.sidebar_session_transfer.is_none(),
+            "the reorder preview ended"
+        );
+        shell
+            .state
+            .update(cx, |state, _| state.chats.push(named("dragged")));
+    });
+
+    let target = cx.debug_bounds("chat-drop-right").unwrap().center();
+    cx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+    cx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+    shell.update(cx, |shell, cx| {
+        assert_eq!(
+            shell.state.read(cx).selected_chat.as_deref(),
+            Some("dragged")
+        );
+        let split = shell.chat_split.as_ref().expect("the drop splits");
+        assert_eq!(split.panes, vec![Some("open".into()), None]);
+        assert!(shell.split_drop_session.is_none());
+    });
+    assert!(
+        cx.debug_bounds("chat-drop-right").is_none(),
+        "the zones go with the drag"
+    );
+}
+
 #[gpui::test]
 fn selecting_text_in_an_unfocused_pane_keeps_the_selection(cx: &mut TestAppContext) {
     let _selection = crate::markdown::selection::test_state_lock();

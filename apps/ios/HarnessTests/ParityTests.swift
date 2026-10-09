@@ -440,4 +440,106 @@ final class ParityTests: XCTestCase {
             XCTAssertTrue(source.contains("\"\(value)\""), "\(value) is missing from the SwiftUI app")
         }
     }
+
+    // MARK: Live sync: registry projection and transcript decoding (Android runs these in crates/mobile)
+
+    func testRegistryRowsProjectTheSameWay() throws {
+        let vector = try load("vectors/registry-projection.json")
+        let data = try JSONSerialization.data(withJSONObject: try XCTUnwrap(vector["rows"]))
+        let doc = RegistryDoc(deviceId: "parity")
+        doc.applyState(seq: 1, full: true, gcFloor: 0, rows: try JSONDecoder().decode([RegistryRow].self, from: data))
+        let config = AppConfig(edgeURL: URL(string: "https://edge.invalid")!, mode: .dev, userId: "u", orgId: "o",
+                               deviceId: "parity", deviceName: "Parity")
+        let store = WorkspaceStore(config: config, doc: doc)
+        let expect = try XCTUnwrap(vector["expect"] as? [String: Any])
+        XCTAssertEqual(store.devices.map(\.id), strings(expect["devices"]))
+        XCTAssertEqual(store.devices.map(\.name), strings(expect["deviceNames"]))
+        XCTAssertEqual(store.devices.map(\.capabilities), expect["deviceCapabilities"] as? [[String]])
+        XCTAssertEqual(store.spaces.map(\.id), strings(expect["spaces"]))
+        let chats = store.chats.sorted { $0.id < $1.id }.map { chat in
+            [chat.id, chat.title ?? "-", "\(chat.archived)", chat.config?.harness ?? "-", chat.config?.model ?? "-",
+             chat.roomGen.map(String.init) ?? "-", chat.spaceId ?? "-", "\(chat.createdAt)"].joined(separator: "|")
+        }
+        XCTAssertEqual(chats, strings(expect["chats"]))
+        XCTAssertEqual(store.sessions.mapValues(\.status.rawValue), expect["sessions"] as? [String: String])
+        XCTAssertEqual(store.pinnedSessionIds, strings(expect["pinned"]))
+    }
+
+    private func field(_ value: AnyHashable) -> String {
+        switch value.base {
+        case let text as String: return "s:\(text)"
+        case let flag as Bool: return "b:\(flag)"
+        case let number as Int64: return "n:\(number)"
+        case let tasks as [TaskItem]: return "tasks:" + tasks.map { $0.text + ($0.done ? "+" : "-") }.joined(separator: ",")
+        case let list as [String]: return "list:\(list.count)"
+        default: return "?"
+        }
+    }
+
+    private func part(_ part: MessagePart) -> String {
+        switch part {
+        case .text(let id, let text): return "text \(id) \(text)"
+        case .image(let id, let reference):
+            return "image \(id) \(reference.path) \(reference.name) \(reference.mimeType)"
+        case .tool(let id, let call, let isError, let resolved):
+            let fields = call.fields.keys.sorted().map { "\($0)=\(field(call.fields[$0]!))" }.joined(separator: ",")
+            return "tool \(id) \(call.tag) resolved=\(resolved) error=\(isError) fields=\(fields)"
+        case .input(let id, let requestId, let questions, let resolved):
+            return "input \(id) request=\(requestId) questions=\(questions.count) resolved=\(resolved)"
+        case .error(let id, let message, let reauth):
+            return "error \(id) \(message) reauth=\(reauth?.rawValue ?? "-")"
+        }
+    }
+
+    private func gateSummary(_ gate: QueueDeliveryGate?) -> String {
+        switch gate {
+        case .editing(let owner, let expires): return "editing \(owner) \(expires)"
+        case .reviewRequired(let owner): return "review \(owner)"
+        case nil: return "-"
+        }
+    }
+
+    func testSessionDocsDecodeTheSameWay() throws {
+        for c in try rows(try load("vectors/transcript-decode.json"), "cases") {
+            let name = c["name"] as? String ?? "?"
+            let messages = (c["messages"] as? [Any]) ?? []
+            let entries = SessionStore.joinContinuations(messages.compactMap { SessionStore.entryFrom(LoroValue.fromJSON($0)) })
+            let expected = try rows(c, "entries")
+            XCTAssertEqual(entries.map { e in
+                "\(e.id)|\(e.role.rawValue)|\(e.status?.rawValue ?? "-")|\(e.deviceId)|\(e.createdAt)"
+            }, expected.map { $0["entry"] as? String ?? "" }, name)
+            XCTAssertEqual(entries.map { $0.parts.map(part) }, expected.map { strings($0["parts"]) }, name)
+            let queue = ((c["queue"] as? [Any]) ?? []).compactMap { SessionStore.queuedFrom(LoroValue.fromJSON($0)) }
+            XCTAssertEqual(queue.map { q in
+                [q.id, q.text, "\(q.holdForTurnEnd)", gateSummary(q.deliveryGate), q.issuedBy, "\(q.issuedAt)",
+                 "\(q.attachments.count)"].joined(separator: "|")
+            }, strings(c["rows"]), name)
+        }
+    }
+
+    // MARK: Presence (Android runs this rule in crates/mobile)
+
+    func testThePresenceRuleMatches() throws {
+        let vector = try load("vectors/presence-rule.json")
+        XCTAssertEqual(PresenceRule.liveFreshMs, (vector["liveFreshMs"] as? NSNumber)?.int64Value)
+        XCTAssertEqual(PresenceRule.darkMs, (vector["darkMs"] as? NSNumber)?.int64Value)
+        XCTAssertEqual(PresenceRule.warmupMs, (vector["warmupMs"] as? NSNumber)?.int64Value)
+        for c in try rows(vector, "cases") {
+            let name = c["name"] as? String ?? "?"
+            let now = try XCTUnwrap((c["now"] as? NSNumber)?.int64Value)
+            let received = (c["received"] as? NSNumber)?.int64Value
+            let connected = c["connected"] as? Bool ?? false
+            let joinedAt = (c["joinedAt"] as? NSNumber)?.int64Value
+            let row = (c["rowLastSeen"] as? NSNumber)?.int64Value
+            let status = PresenceRule.status(now: now, received: received, connected: connected, joinedAt: joinedAt,
+                                             rowLastSeen: row)
+            XCTAssertEqual("\(status)", c["status"] as? String, name)
+            let liveness = PresenceRule.liveness(now: now, received: received, connected: connected,
+                                                 joinedAt: joinedAt, rowLastSeen: row)
+            XCTAssertEqual("\(liveness)", c["liveness"] as? String, name)
+            XCTAssertEqual(PresenceRule.nextChange(after: now, received: received, connected: connected,
+                                                   joinedAt: joinedAt, rowLastSeen: row),
+                           (c["nextChange"] as? NSNumber)?.int64Value, name)
+        }
+    }
 }

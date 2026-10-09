@@ -13,7 +13,10 @@
 # client-id configuration needed. Overrides (if any) go in ~/.harness/env.
 set -eu
 
-BASE="${HARNESS_BASE_URL:-https://edge.codegraff.com}"
+# The same feed `harness update` reads: the latest stable GitHub release, whose
+# manifest.json carries the version and a sha256 for every artifact.
+RELEASES="${HARNESS_RELEASES_URL:-https://github.com/justrach/harness/releases/latest/download}"
+RELEASES="${RELEASES%/}"
 
 # --- platform ---------------------------------------------------------------
 os="$(uname -s)"
@@ -22,7 +25,7 @@ case "$os" in
   Linux) plat=linux ;;
   Darwin)
     echo "harness install: on macOS, download the desktop app instead:" >&2
-    echo "  $BASE/releases/latest.txt → $BASE/releases/harness-<version>-macos-arm64.dmg" >&2
+    echo "  $RELEASES/Harness-macos-arm64.dmg" >&2
     exit 1
     ;;
   *)
@@ -40,9 +43,12 @@ case "$arch" in
 esac
 
 # --- download ----------------------------------------------------------------
-ver="$(curl -fsSL "$BASE/releases/latest.txt" | tr -d '[:space:]')"
+manifest="$(curl -fsSL "$RELEASES/manifest.json" | tr -d ' \t\r\n')"
+ver="$(printf '%s' "$manifest" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
 [ -n "$ver" ] || { echo "harness install: could not resolve latest version" >&2; exit 1; }
 file="harness-$ver-$plat-$arch.tar.gz"
+sum="$(printf '%s' "$manifest" | sed -n "s/.*\"$file\":{\"sha256\":\"\([0-9a-f]*\)\".*/\1/p")"
+[ -n "$sum" ] || { echo "harness install: release $ver has no checksum for $file" >&2; exit 1; }
 data_root="$HOME/.harness"
 app_root="$data_root/app"
 dest="$app_root/$ver"
@@ -53,7 +59,13 @@ else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   echo "downloading harness $ver ($plat-$arch)…"
-  curl -fSL --progress-bar "$BASE/releases/$file" -o "$tmp/$file"
+  curl -fSL --progress-bar "$RELEASES/$file" -o "$tmp/$file"
+  if command -v sha256sum >/dev/null 2>&1; then
+    got="$(sha256sum "$tmp/$file" | cut -d' ' -f1)"
+  else
+    got="$(shasum -a 256 "$tmp/$file" | cut -d' ' -f1)"
+  fi
+  [ "$got" = "$sum" ] || { echo "harness install: $file does not match the release checksum" >&2; exit 1; }
   mkdir -p "$dest"
   tar -xzf "$tmp/$file" -C "$dest" --strip-components=1
 fi
@@ -113,6 +125,9 @@ case "$service" in
   running)
     echo "the engine is running with the new version (local-only unless sync is enabled)."
     echo "  systemctl --user status harness    check the service"
+    echo "  harness update                     install the latest release and restart"
+    echo "it also updates itself while no chat or terminal is running"
+    echo "(set HARNESS_AUTO_UPDATE=0 in ~/.harness/env to turn that off)."
     echo ""
     echo "optional sync (local sessions stay local):"
     echo "  systemctl --user stop harness"
@@ -122,5 +137,7 @@ case "$service" in
   manual)
     echo "next: run the local-only engine with \`harness headless\`."
     echo "optional sync: run \`harness login\` before starting the engine."
+    echo "it updates itself while no chat or terminal is running, and"
+    echo "\`harness update\` installs the latest release on demand."
     ;;
 esac

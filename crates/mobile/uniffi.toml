@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "harness.codegraff.android.core"
+cdylib_name = "harness_mobile"
+# Android's Cleaner arrives in API 33 (minSdk is 26): guard it with an SDK check and fall back to JNA's.
+android = true

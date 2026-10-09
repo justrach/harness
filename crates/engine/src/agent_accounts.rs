@@ -247,6 +247,9 @@ enum LoginFlow {
         /// ChatGPT: graff had not registered in the account yet, so this
         /// sign-in is the first (and shows the one-time plan confirmation).
         first_registration: bool,
+        /// A ChatGPT sign-in being finished on another device: the only
+        /// callback the host will deliver for it.
+        relay: Option<graff_logins::ChatgptRelay>,
     },
 }
 
@@ -777,14 +780,19 @@ impl AgentAccounts {
 
     /// Explicit recovery of a graff provider's sign-in (the ChatGPT route): attaches to a recovery
     /// already waiting on this host, else starts one. An ordinary sign-in from Accounts still
-    /// supersedes ([`Self::start_graff_login`]).
-    pub async fn start_graff_reauth(&self, provider: &str) -> Result<AgentLoginStart, EngineError> {
+    /// supersedes ([`Self::start_graff_login`]). `relay_browser` finishes the ChatGPT sign-in on
+    /// the device that asked (a phone), instead of in the host's browser.
+    pub async fn start_graff_reauth(
+        &self,
+        provider: &str,
+        relay_browser: bool,
+    ) -> Result<AgentLoginStart, EngineError> {
         // graff keeps one registration per provider per home, so the provider names the account.
-        let route = reauth_route("graff", false, provider);
+        let route = reauth_route("graff", relay_browser, provider);
         if let Some(start) = self.pending_reauth(&route) {
             return Ok(start);
         }
-        let start = self.start_graff_login(provider).await?;
+        let start = self.start_graff_login_with(provider, relay_browser).await?;
         lock(&self.inner.reauth_starts).insert(route, start.clone());
         Ok(start)
     }
@@ -1119,6 +1127,24 @@ impl AgentAccounts {
     /// when graff writes its credential. graff runs against the real home, so
     /// nothing is imported afterwards, and this service never reads the token.
     pub async fn start_graff_login(&self, provider: &str) -> Result<AgentLoginStart, EngineError> {
+        self.start_graff_login_with(provider, false).await
+    }
+
+    /// An ordinary graff sign-in finished on the device that asked: Settings
+    /// on another computer can't reach this host's browser, whose loopback
+    /// callback ChatGPT's sign-in must land on.
+    pub async fn start_graff_login_relayed(
+        &self,
+        provider: &str,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.start_graff_login_with(provider, true).await
+    }
+
+    async fn start_graff_login_with(
+        &self,
+        provider: &str,
+        relay_browser: bool,
+    ) -> Result<AgentLoginStart, EngineError> {
         self.sweep_flows();
         let home = self.inner.config.graff_home.clone();
         if graff_logins::credential_path(&home, provider).is_none() {
@@ -1126,14 +1152,26 @@ impl AgentAccounts {
                 "graff can't sign in to {provider} from here"
             )));
         }
+        if relay_browser && provider != "chatgpt-new" {
+            return Err(EngineError::Other(format!(
+                "{provider} sign-in can't be finished on another device"
+            )));
+        }
         self.reap_graff_flows(provider);
         let root = self.inner.config.root_dir();
         let no_open = std::fs::create_dir_all(&root)
             .ok()
             .and_then(|()| graff_logins::no_open_dir(&root));
+        if relay_browser && no_open.is_none() {
+            return Err(EngineError::Other(
+                "This execution device can't hand its ChatGPT sign-in to another device.".into(),
+            ));
+        }
         let mut command = harness_adapters::graff_login_command(
             provider,
-            if provider == "chatgpt-new" {
+            // The ChatGPT sign-in opens the host's browser unless another
+            // device is finishing it.
+            if provider == "chatgpt-new" && !relay_browser {
                 None
             } else {
                 no_open.as_deref()
@@ -1178,11 +1216,40 @@ impl AgentAccounts {
                 exit: exit.clone(),
                 before,
                 first_registration,
+                relay: None,
             },
         );
         // graff asks the provider for the link first, which takes longer than
         // a local spawn, and a sign-in without a link can't proceed.
         let deadline = Instant::now() + Duration::from_secs(20);
+        if relay_browser {
+            // Hand out the page only once graff listens for its callback.
+            let relay = loop {
+                if let Some(relay) = graff_logins::scan_chatgpt_relay(&lock(&output)) {
+                    break relay;
+                }
+                if lock(&exit).is_some() || Instant::now() > deadline {
+                    self.cancel_login(&login_id);
+                    return Err(EngineError::Other(
+                        "ChatGPT sign-in did not start on the execution device. Update graff there and try again."
+                            .into(),
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            };
+            let url = relay.url.clone();
+            if let Some(LoginFlow::Graff { relay: slot, .. }) =
+                lock(&self.inner.flows).get_mut(&login_id)
+            {
+                *slot = Some(relay);
+            }
+            return Ok(AgentLoginStart {
+                login_id,
+                url,
+                mode: AgentLoginMode::RelayBrowser,
+                code: None,
+            });
+        }
         if provider == "chatgpt-new" {
             loop {
                 let waiting = lock(&output).contains("waiting for the sign-in on ");
@@ -1293,13 +1360,56 @@ impl AgentAccounts {
                     if graff_logins::chatgpt_plan_denied(&output) {
                         CHATGPT_PLAN_OFF.into()
                     } else {
-                        "ChatGPT sign-in did not grant plan access. Complete sign-in on the execution device and try again.".into()
+                        "ChatGPT sign-in did not grant plan access. Sign in again and allow plan usage.".into()
                     }
                 } else {
                     graff_logins::failure_message(&output)
                 }),
                 url: None,
             }
+        })
+    }
+
+    /// Finish a ChatGPT sign-in another device completed: deliver the redirect
+    /// its browser landed on to graff's loopback callback on this host. graff
+    /// holds the PKCE verifier, so it alone exchanges the code; polling then
+    /// reports the outcome. `None` when `login_id` isn't a relayed sign-in.
+    pub async fn complete_relayed_login(
+        &self,
+        login_id: &str,
+        landed: &str,
+    ) -> Option<Result<(), EngineError>> {
+        let relay = match lock(&self.inner.flows).get(login_id) {
+            Some(LoginFlow::Graff {
+                relay: Some(relay), ..
+            }) => relay.clone(),
+            Some(LoginFlow::Graff { .. }) => {
+                return Some(Err(EngineError::Other(
+                    "This sign-in finishes in the execution device's browser.".into(),
+                )));
+            }
+            _ => return None,
+        };
+        let callback = match graff_logins::relayed_callback(&relay, landed) {
+            Ok(callback) => callback,
+            Err(message) => return Some(Err(EngineError::Other(message.into()))),
+        };
+        // Straight to graff's listener: no proxy, and no following a redirect
+        // off this machine.
+        let client = match reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(15))
+            .build()
+        {
+            Ok(client) => client,
+            Err(err) => return Some(Err(EngineError::Other(err.to_string()))),
+        };
+        Some(match client.get(callback).send().await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(EngineError::Other(
+                "The execution device is no longer waiting for this sign-in. Start again.".into(),
+            )),
         })
     }
 
@@ -2545,10 +2655,12 @@ type LoginChildHandles = (
 /// access.
 /// The coalescing key for an explicit recovery on this host: the route (harness, and whether it is
 /// device authorization) and the account it renews.
-fn reauth_route(harness: &str, device_auth: bool, account: &str) -> String {
+/// `remote` = approved on another device (device code, or a relayed browser
+/// sign-in), so it never attaches to a recovery whose browser is on the host.
+fn reauth_route(harness: &str, remote: bool, account: &str) -> String {
     format!(
         "{harness}:{}:{account}",
-        if device_auth { "device" } else { "browser" }
+        if remote { "device" } else { "browser" }
     )
 }
 

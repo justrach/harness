@@ -14,6 +14,7 @@ import harness.codegraff.android.model.ChatConfig
 import harness.codegraff.android.model.ChatIndicator
 import harness.codegraff.android.model.DeviceRow
 import harness.codegraff.android.model.HomeFilterNames
+import harness.codegraff.android.model.HostStatus
 import harness.codegraff.android.model.MessageEntry
 import harness.codegraff.android.model.MessagePart
 import harness.codegraff.android.model.MessageRole
@@ -38,6 +39,19 @@ import harness.codegraff.android.model.chatIndicator
 import harness.codegraff.android.model.effectiveStatus
 import harness.codegraff.android.model.sortActive
 import harness.codegraff.android.model.sortPinnedFirst
+import harness.codegraff.android.core.SessionSnapshot
+import harness.codegraff.android.sync.LiveSync
+import harness.codegraff.android.sync.toModel
+import harness.codegraff.android.sync.toNative
+import harness.codegraff.android.demo.FolderListing
+import harness.codegraff.android.model.ConnectivityRules
+import harness.codegraff.android.model.ConnectivityUi
+import harness.codegraff.android.model.HarnessCatalog
+import harness.codegraff.android.model.HarnessInfo
+import harness.codegraff.android.model.HostNotice
+import harness.codegraff.android.model.ModelInfo
+import harness.codegraff.android.model.RepoRef
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -73,8 +87,18 @@ data class WorkspaceState(
     val pinnedSessionIds: List<String>,
     /** Wall clock, refreshed on a slow tick and on writes: relative times and stale-session checks read it. */
     val now: Long,
-    /** What each computer reports in `ListHarnesses`, by device id. Demo only until live sync is wired on Android. */
+    /** What each computer reports in `ListHarnesses`, by device id. Demo only until the device relay is wired on Android. */
     val agents: Map<String, List<AgentDescriptor>> = emptyMap(),
+    /** Device id to the epoch ms of its last presence beat heard this session (live sync only). */
+    val presence: Map<String, Long> = emptyMap(),
+    /** The registry socket is joined. Always true for the demo. */
+    val connected: Boolean = true,
+    /** Server state has reached this session over any transport. Always true for the demo. */
+    val synced: Boolean = true,
+    /** Live sync: what the presence rule says about each computer. Unused by the demo. */
+    val hostStatuses: Map<String, HostStatus> = emptyMap(),
+    /** Statuses come from the presence rule (live) rather than the demo's `lastSeenAt` freshness. */
+    val live: Boolean = false,
 ) {
     private val chatsById by lazy(LazyThreadSafetyMode.NONE) { chats.associateBy { it.id } }
 
@@ -92,10 +116,17 @@ data class WorkspaceState(
 
     fun deviceName(deviceId: String): String = devices.firstOrNull { it.id == deviceId }?.name ?: deviceId
 
-    fun deviceOnline(deviceId: String): Boolean {
-        val seen = devices.firstOrNull { it.id == deviceId }?.lastSeenAt ?: return false
-        return now - seen < PRESENCE_FRESH_MS
+    /**
+     * What a screen may claim about a computer (AppModel.hostStatus): live sync applies the presence rule; the demo
+     * reads a fresh `lastSeenAt` as online and anything else as offline, as the iOS demo does.
+     */
+    fun hostStatus(deviceId: String): HostStatus {
+        if (live) return hostStatuses[deviceId] ?: HostStatus.Unknown
+        val seen = devices.firstOrNull { it.id == deviceId }?.lastSeenAt ?: return HostStatus.Offline
+        return if (now - seen < PRESENCE_FRESH_MS) HostStatus.Online else HostStatus.Offline
     }
+
+    fun deviceOnline(deviceId: String): Boolean = hostStatus(deviceId) == HostStatus.Online
 
     /** Whether an agent has been brought in: every computer's agents, judged by [AgentReadiness]. */
     val agentReadiness: AgentReadiness by lazy(LazyThreadSafetyMode.NONE) {
@@ -147,9 +178,9 @@ data class AppState(val workspace: WorkspaceState, val entries: Map<String, List
 }
 
 /**
- * Screen state for the app. Today it drives the offline demo dataset, the same starting point as the
- * iOS `-demo` mode; the live sync client will replace it behind the same flows. Which session is open
- * is UI state (the navigation path), not model state.
+ * Screen state for the app. It drives either the offline demo dataset (the iOS `-demo` mode) or a live sync with
+ * the edge through the native core ([LiveSync]), behind the same flows. Which session is open is UI state (the
+ * navigation path), not model state.
  *
  * The workspace and the transcripts are separate flows on purpose: a streamed token replaces only one
  * chat's entry list, so only that session's screen recomposes.
@@ -158,6 +189,8 @@ class AppModel(
     private val clock: () -> Long = System::currentTimeMillis,
     /** Fixed delay between streamed words; null uses the demo's 30-140 ms jitter. */
     private val tickMs: Long? = null,
+    /** A live sync to drive instead of the demo; null falls back to [liveFactory], then to the demo. */
+    liveSync: LiveSync? = null,
 ) : ViewModel() {
     private val _workspace: MutableStateFlow<WorkspaceState>
     private val _entries: MutableStateFlow<Map<String, List<MessageEntry>>>
@@ -168,7 +201,17 @@ class AppModel(
         /** Demo rig: which dataset a new model starts with (`onboarding-*`; anything else is the standard demo). Set from an intent extra. */
         @Volatile
         var scenario: String? = null
+
+        /** Opens the live sync for a new model; null runs the demo. Set by the activity before the model exists. */
+        @Volatile
+        var liveFactory: (() -> LiveSync)? = null
     }
+
+    /** The live sync this model drives, or null for the demo. */
+    val live: LiveSync? = liveSync ?: liveFactory?.invoke()
+
+    /** Live sync with an edge, rather than the offline demo. */
+    val isLive: Boolean get() = live != null
 
     /** The workspace and all transcripts as one value. */
     val state: AppState get() = AppState(_workspace.value, _entries.value)
@@ -184,16 +227,20 @@ class AppModel(
 
     init {
         val now = clock()
-        val demo = when (scenario) {
+        val demo = if (live != null) null else when (scenario) {
             "onboarding-nocomputer" -> DemoDataset.onboarding(now, computerOnline = false, agentReady = false)
             "onboarding-noagent" -> DemoDataset.onboarding(now, computerOnline = true, agentReady = false)
             "onboarding-ready" -> DemoDataset.onboarding(now, computerOnline = true, agentReady = true)
             else -> DemoDataset.standard(now)
         }
         _workspace = MutableStateFlow(
-            WorkspaceState(demo.devices, demo.spaces, demo.chats, demo.sessions, demo.changeRequests, emptyList(), now, demo.agents),
+            if (demo == null) {
+                WorkspaceState(emptyList(), emptyList(), emptyList(), emptyMap(), emptyMap(), emptyList(), now, connected = false, synced = false)
+            } else {
+                WorkspaceState(demo.devices, demo.spaces, demo.chats, demo.sessions, demo.changeRequests, emptyList(), now, demo.agents)
+            },
         )
-        _entries = MutableStateFlow(demo.entries)
+        _entries = MutableStateFlow(demo?.entries.orEmpty())
     }
 
     /** Refreshes `now` on a slow interval so relative times and stale-session checks move on. Launch from the UI's lifecycle. */
@@ -217,27 +264,44 @@ class AppModel(
 
     /** Opening a session marks it seen, which clears its "needs you" state. */
     fun markSeen(chatId: String) {
+        // Live: the synced seen mark, which only ever moves forward (WorkspaceStore.markSeen).
+        live?.let { it.core.markSeen(chatId); return }
         // Skip the write when nothing would change: leaving a session marks it seen again.
         val chat = _workspace.value.chat(chatId) ?: return
         if (!chat.unseen) return
         updateChat(chatId) { it.copy(lastSeenAt = clock()) }
     }
 
-    fun archive(chatId: String) = updateChat(chatId) { it.copy(archived = true) }
-
-    fun unarchive(chatId: String) = updateChat(chatId) { it.copy(archived = false) }
-
-    fun setPinned(chatId: String, pinned: Boolean) = update { s ->
-        s.copy(pinnedSessionIds = if (pinned) listOf(chatId) + s.pinnedSessionIds.filter { it != chatId } else s.pinnedSessionIds - chatId)
+    fun archive(chatId: String) {
+        live?.let { it.core.setArchived(chatId, true); return }
+        updateChat(chatId) { it.copy(archived = true) }
     }
 
-    fun createSpace(deviceId: String, path: String, name: String?): String {
+    fun unarchive(chatId: String) {
+        live?.let { it.core.setArchived(chatId, false); return }
+        updateChat(chatId) { it.copy(archived = false) }
+    }
+
+    fun setPinned(chatId: String, pinned: Boolean) {
+        live?.let { it.core.setPinned(chatId, pinned); return }
+        update { s ->
+            s.copy(pinnedSessionIds = if (pinned) listOf(chatId) + s.pinnedSessionIds.filter { it != chatId } else s.pinnedSessionIds - chatId)
+        }
+    }
+
+    /**
+     * Add a project folder on a computer. Live: the owning host creates it over the relay, and the phone writes the
+     * row itself only when the host cannot be reached (WorkspaceStore.createSpace).
+     */
+    suspend fun createSpace(deviceId: String, path: String, name: String?, gitDetected: Boolean = false): String {
+        live?.let { return it.core.addSpace(deviceId, path.trim(), gitDetected) }
         val id = "space-${++counter}-${clock()}"
         update { s -> s.copy(spaces = s.spaces + Space(id, deviceId, path.trim(), name?.trim()?.ifEmpty { null }, gitDetected = false, createdAt = clock())) }
         return id
     }
 
     fun createChat(space: Space, config: ChatConfig, branch: String?, cwd: String?): String {
+        live?.let { return it.core.createChat(space.deviceId, space.id, cwd ?: space.path, config.toNative(), branch) }
         val id = "chat-new-${++counter}-${clock()}"
         val now = clock()
         update { s ->
@@ -247,6 +311,7 @@ class AppModel(
     }
 
     fun createProjectlessChat(deviceId: String, config: ChatConfig): String {
+        live?.let { return it.core.createChat(deviceId, null, "~", config.toNative(), null) }
         val id = "chat-new-${++counter}-${clock()}"
         val now = clock()
         update { s -> s.copy(chats = s.chats + Chat(id, deviceId, null, false, "~", null, config, null, null, now, null, now)) }
@@ -254,11 +319,13 @@ class AppModel(
     }
 
     /** Merge picks into the chat's config for the next dispatch (harness stays locked mid-chat). */
-    fun setChatConfig(chatId: String, model: String?, reasoning: String?, modelOptions: Map<String, String>? = null) =
-        updateChat(chatId) { chat ->
-            val current = chat.config ?: ChatConfig("claude-code")
-            chat.copy(config = current.copy(model = model, reasoning = reasoning, modelOptions = modelOptions ?: current.modelOptions))
-        }
+    fun setChatConfig(chatId: String, model: String?, reasoning: String?, modelOptions: Map<String, String>? = null) {
+        val chat = _workspace.value.chat(chatId) ?: return
+        val current = chat.config ?: ChatConfig("claude-code")
+        val next = current.copy(model = model, reasoning = reasoning, modelOptions = modelOptions ?: current.modelOptions)
+        live?.let { it.core.setChatConfig(chatId, next.toNative()); return }
+        updateChat(chatId) { it.copy(config = next) }
+    }
 
     /**
      * Sends the message, or parks it on the chat's queue while a reply is still streaming, like the composer does
@@ -550,5 +617,164 @@ class AppModel(
     /** A streamed token: touches only this chat's transcript, never the workspace. */
     private fun setReply(chatId: String, replyId: String, text: String, status: MessageStatus) = setEntries(chatId) { entries ->
         entries.map { e -> if (e.id == replyId) e.copy(parts = listOf(MessagePart.Text("t0", text)), status = status) else e }
+    }
+
+    // MARK: connectivity (Connectivity.swift, AppModel.hostNotice / chatDeliveryDegraded)
+
+    private val _connectivity = MutableStateFlow(ConnectivityUi())
+
+    /** The graced connection state. The demo is always connected. */
+    val connectivity: StateFlow<ConnectivityUi> get() = _connectivity
+
+    /** Chats whose room has dialed (live). A room that never dialed is not "degraded". */
+    private val roomsActive = MutableStateFlow<Set<String>>(emptySet())
+
+    /** The one warning the new-session screen may show for a computer; null when there is nothing true to say. */
+    fun hostNotice(deviceId: String): HostNotice? {
+        if (live == null) return null
+        val ws = _workspace.value
+        return ConnectivityRules.hostNotice(sessionExpired = false, ws.hostStatus(deviceId), ws.connected)
+    }
+
+    /** A send to this chat would queue rather than deliver promptly. Never in the demo. */
+    fun chatDeliveryDegraded(chat: Chat): Boolean {
+        if (live == null) return false
+        return ConnectivityRules.deliveryDegraded(
+            _connectivity.value, chat.id, chat.id in roomsActive.value, _workspace.value.hostStatus(chat.deviceId),
+        )
+    }
+
+    // MARK: requests to a computer (the device relay). The demo serves its canned data.
+
+    private val harnessCache = HashMap<String, List<HarnessInfo>>()
+    private val modelCache = HashMap<String, List<ModelInfo>>()
+
+    /** A computer's folders; null when it cannot be reached. */
+    suspend fun listFolders(deviceId: String, path: String?): FolderListing? {
+        val live = live ?: return DemoDataset.listFolders(deviceId, path)
+        return runCatching { live.core.listFolders(deviceId, path) }.getOrNull()?.toModel()
+    }
+
+    /** The project's branches (git projects only); empty when the computer cannot be reached. */
+    suspend fun listRefs(space: Space): List<RepoRef> {
+        if (!space.gitDetected) return emptyList()
+        val live = live ?: return DemoDataset.listRefs(space.path)
+        return runCatching { live.core.listRefs(space.deviceId, space.path) }.getOrNull().orEmpty().map { it.toModel() }
+    }
+
+    /**
+     * The agents a computer offers: its live catalog, else the last one it sent this session, else the static pair
+     * (AppModel.listHarnesses).
+     */
+    suspend fun listHarnesses(deviceId: String): List<HarnessInfo> {
+        val live = live ?: return HarnessCatalog.harnesses
+        val fetched = runCatching { live.core.listHarnesses(deviceId) }.getOrNull()?.map { it.toModel() }
+        if (!fetched.isNullOrEmpty()) harnessCache[deviceId] = fetched
+        return harnessCache[deviceId] ?: HarnessCatalog.harnesses
+    }
+
+    /** Where graff compacts on one computer (Settings > Graff compaction); null is graff's default. The demo keeps it. */
+    suspend fun graffCompactAt(deviceId: String): Int? {
+        val live = live ?: return null
+        return live.core.graffCompactAt(deviceId)?.toInt()
+    }
+
+    suspend fun setGraffCompactAt(deviceId: String, pct: Int?): Int? {
+        val live = live ?: return pct
+        return live.core.setGraffCompactAt(deviceId, pct?.toUByte())?.toInt()
+    }
+
+    /** The models an agent offers on the computer that runs the session, with the same fallbacks. */
+    suspend fun listModels(deviceId: String, harness: String): List<ModelInfo> {
+        val live = live ?: return HarnessCatalog.models(harness)
+        val key = "$deviceId|$harness"
+        val fetched = runCatching { live.core.listModels(deviceId, harness) }.getOrNull()?.map { it.toModel() }
+        if (!fetched.isNullOrEmpty()) modelCache[key] = fetched
+        return modelCache[key] ?: HarnessCatalog.models(harness)
+    }
+
+    // MARK: live sync. Started last, so every flow the collectors write to already exists.
+
+    init {
+        live?.let(::startLive)
+    }
+
+    private fun startLive(live: LiveSync) {
+        viewModelScope.launch {
+            live.feed.connectivity.collect { snapshot -> snapshot?.let { _connectivity.value = it.toModel() } }
+        }
+        // Onboarding asks every online computer which agents it has (AppModel.agentReadiness).
+        viewModelScope.launch {
+            _workspace.map { ws -> ws.devices.filter { ws.deviceOnline(it.id) }.map { it.id }.toSet() }
+                .distinctUntilChanged()
+                .collect { online ->
+                    val agents = online.associateWith { id ->
+                        runCatching { live.core.agentDescriptors(id) }.getOrNull().orEmpty().map { it.toModel() }
+                    }
+                    _workspace.update { it.copy(agents = agents) }
+                }
+        }
+        viewModelScope.launch {
+            live.feed.workspace.collect { snapshot ->
+                snapshot ?: return@collect
+                val w = snapshot.toModel()
+                _workspace.update {
+                    it.copy(
+                        devices = w.devices, spaces = w.spaces, chats = w.chats, sessions = w.sessions,
+                        pinnedSessionIds = w.pinnedSessionIds, presence = w.presence, connected = w.connected,
+                        synced = w.synced, hostStatuses = w.hostStatuses, changeRequests = w.changeRequests,
+                        live = true, now = clock(),
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            var seen = emptyMap<String, SessionSnapshot>()
+            live.feed.sessions.collect { snapshots ->
+                // Only the chats whose snapshot was replaced are re-mapped; the rest keep their lists (and identity).
+                val changed = snapshots.filter { (id, snapshot) -> seen[id] !== snapshot }
+                seen = snapshots
+                roomsActive.value = snapshots.filterValues { it.roomActive }.keys
+                if (changed.isEmpty()) return@collect
+                _entries.update { all ->
+                    all + changed.mapValues { (id, snapshot) -> snapshot.entries.toModel(all[id].orEmpty()) }
+                }
+                _queues.update { all ->
+                    all + changed.mapValues { (id, snapshot) ->
+                        (all[id] ?: QueueState()).copy(rows = snapshot.queue.map { it.toModel() })
+                    }
+                }
+            }
+        }
+        live.core.start()
+    }
+
+    /** A session screen opened: the live core hydrates the chat from disk and joins its room. */
+    fun attachSession(chatId: String) {
+        val live = live ?: return
+        viewModelScope.launch(Dispatchers.IO) { live.feed.sessionChanged(live.core.openSession(chatId)) }
+    }
+
+    /** The session screen went away; the chat stays warm until it is among the coldest. */
+    fun detachSession(chatId: String) {
+        live?.core?.closeSession(chatId)
+    }
+
+    /** The app came to the front: revive the rooms now rather than after their backoff. */
+    fun foregrounded() {
+        live?.core?.foregrounded()
+    }
+
+    /** The app went to the background: persist everything now, and stop status wake-ups until it returns. */
+    fun backgrounded() {
+        val live = live ?: return
+        live.core.backgrounded()
+        viewModelScope.launch(Dispatchers.IO) { live.core.flush() }
+    }
+
+    override fun onCleared() {
+        val live = live ?: return
+        // Leaving the rooms persists and waits on the core's own threads; not on the main thread.
+        Thread({ live.core.stop() }, "harness-sync-stop").start()
     }
 }

@@ -72,6 +72,7 @@ pub mod terminal;
 pub mod theme;
 pub mod theme_library;
 pub mod transcript;
+mod transcript_paint_check;
 pub mod typography;
 mod workspace_links;
 
@@ -202,6 +203,11 @@ pub fn run_app(config: UiConfig) {
             ui_settings.git_history_column_widths,
             ui_settings.git_history_column_order,
             ui_settings.git_history_author_display,
+            cx,
+        );
+        motion::init(
+            ui_settings.reduce_motion,
+            ui_settings.pause_animations_in_background,
             cx,
         );
         composer::init(cx, ui_settings.composer_send_behavior);

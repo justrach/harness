@@ -608,13 +608,7 @@ fn build_watchers(
 ) -> Vec<notify::RecommendedWatcher> {
     let mut watchers = Vec::new();
     for target in watch_targets(identity) {
-        let tx = kick_tx.clone();
-        let watcher =
-            notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
-                if event.is_ok() {
-                    let _ = tx.send(());
-                }
-            });
+        let watcher = notify::recommended_watcher(kick_on_change(kick_tx.clone()));
         match watcher {
             Ok(mut watcher) => {
                 use notify::Watcher as _;
@@ -629,6 +623,27 @@ fn build_watchers(
         }
     }
     watchers
+}
+
+/// Watcher callback: kick the entry's sync for events that can change the
+/// snapshot. Access events are not changes. Linux's inotify backend reports
+/// every open and close as `EventKind::Access`, and each capture's own git
+/// commands open files under the watched root and git dir, so kicking on them
+/// re-synced an idle checkout every debounce window forever (and linked
+/// worktrees sharing one git dir kept each other going). A write still lands
+/// as a `Modify`, so dropping `Access(Close(Write))` loses nothing.
+/// [`crate::workspace_files`] filters the same way.
+fn kick_on_change(
+    kick_tx: mpsc::UnboundedSender<()>,
+) -> impl FnMut(Result<notify::Event, notify::Error>) + Send + 'static {
+    move |event| {
+        if event
+            .as_ref()
+            .is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_)))
+        {
+            let _ = kick_tx.send(());
+        }
+    }
 }
 
 /// Per-checkout task: trailing-debounce fs kicks, then compute + publish. Runs
@@ -1866,9 +1881,11 @@ pub async fn capture_turn_diff(
 
 #[cfg(test)]
 mod watch_budget_tests {
+    #[cfg(target_os = "linux")]
+    use super::build_watchers;
     use super::{
         CheckoutIdentity, MAX_WATCH_DIRS, exceeds_watch_budget, has_non_utf8_status_path,
-        path_batches, watch_targets,
+        kick_on_change, path_batches, watch_targets,
     };
 
     #[test]
@@ -1961,6 +1978,96 @@ mod watch_budget_tests {
             watch_targets(&identity(root, &root.join(".git"))),
             vec![root.join(".git")]
         );
+    }
+
+    fn kicks(kick_rx: &mut tokio::sync::mpsc::UnboundedReceiver<()>) -> usize {
+        std::iter::from_fn(|| kick_rx.try_recv().ok()).count()
+    }
+
+    #[test]
+    fn access_events_do_not_kick_a_sync() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, EventKind, ModifyKind, RemoveKind,
+            RenameMode,
+        };
+        let (kick_tx, mut kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut callback = kick_on_change(kick_tx);
+        let event = |kind| Ok(notify::Event::new(kind).add_path("/repo/src/lib.rs".into()));
+
+        // What inotify reports while git (or anything else) merely reads.
+        for kind in [
+            AccessKind::Any,
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Write),
+        ] {
+            callback(event(EventKind::Access(kind)));
+        }
+        callback(Err(notify::Error::generic("watch dropped")));
+        assert_eq!(kicks(&mut kick_rx), 0);
+
+        let changes = [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Any,
+            EventKind::Other,
+        ];
+        for kind in changes {
+            callback(event(kind));
+        }
+        assert_eq!(kicks(&mut kick_rx), changes.len());
+    }
+
+    /// The real inotify watcher: reading the checkout the way a capture does
+    /// must not schedule another capture, while an edit still does.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reading_the_checkout_does_not_kick_a_sync_on_inotify() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn main() {}\n").unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+
+        let (kick_tx, mut kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let watchers = build_watchers(&identity(&root, &root.join(".git")), &kick_tx);
+        assert_eq!(watchers.len(), 1);
+
+        // A capture's reads: status walks the tree and opens the index, diff
+        // reads the objects, and untracked files are read for their patch.
+        git(&["--no-optional-locks", "status", "--porcelain=v1", "-z"]);
+        git(&["--no-optional-locks", "diff", "--cached", "--numstat"]);
+        std::fs::read(root.join("src/lib.rs")).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(kicks(&mut kick_rx), 0, "reads re-kicked the diff sync");
+
+        std::fs::write(root.join("src/lib.rs"), "fn main() { edited() }\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while kicks(&mut kick_rx) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "an edit never kicked the diff sync"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(watchers);
     }
 
     #[cfg(unix)]

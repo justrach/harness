@@ -49,6 +49,10 @@
     { "binding": "BLOBS", "bucket_name": "harness-blobs" },
     { "binding": "RELEASES", "bucket_name": "harness-releases" }
   ],
+  // Session push notifications (registry-room.ts) need two secrets:
+  // `wrangler secret put APNS_KEY_P8` (the AuthKey_XXXX.p8 file's contents)
+  // and `wrangler secret put APNS_KEY_ID`. Unset ⇒ decided and logged on
+  // /registry/:org/stats, not sent.
   "vars": {
     "CODEGRAFF_OAUTH_CLIENT_ID": "cg_client_43e753878956c2cf7b5b0f53",
     "AUTH_MODE": "codegraff"

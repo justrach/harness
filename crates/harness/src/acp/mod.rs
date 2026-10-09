@@ -5,11 +5,11 @@
 //! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`) and Hermes
 //! ([`AcpHarness::hermes`], `hermes acp`) and Antigravity
 //! ([`AcpHarness::antigravity`], Google's `agy_acp_server`, installed from its
-//! pinned release archive) — plus pi ([`AcpHarness::pi`]) via the community
-//! `pi-acp` adapter until a native driver exists — and Exo
-//! ([`AcpHarness::exo`]) through Harness's own bridge ([`exo_bridge`], `harness
-//! exo-acp`), since Exo only exposes its agent-cli socket. Claude, Codex and Cursor moved to native drivers
-//! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
+//! pinned release archive) — and Exo ([`AcpHarness::exo`]) through Harness's
+//! own bridge ([`exo_bridge`], `harness exo-acp`), since Exo only exposes its
+//! agent-cli socket. Pi, Claude, Codex and Cursor use native drivers
+//! ([`crate::PiHarness`], [`crate::ClaudeHarness`], [`crate::CodexHarness`],
+//! [`crate::CursorHarness`])
 //! after adapter-mediated ACP kept manufacturing done-status bugs the native
 //! wires don't have (turn-hold bookkeeping vs the CLI's own eager result).
 //!
@@ -36,6 +36,7 @@ mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
+pub mod graff_client;
 mod graff_models;
 pub use graff_models::{ModelMismatch, parse_model_mismatch};
 pub mod graff_login;
@@ -51,7 +52,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Duration;
 
@@ -69,11 +70,11 @@ use harness_proto::{
 };
 
 use crate::jsonrpc::{Incoming, RpcClient};
+pub(crate) use crate::process::owned as child;
 use crate::process::{Command, Stdio};
 use crate::scratch::ScratchDir;
-use child::Child;
-pub(crate) mod child;
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
+use child::Child;
 use compaction::CompactionTracker;
 use normalize::{map_update, parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
@@ -108,7 +109,7 @@ struct AcpAgentSpec {
     extra_paths: fn() -> Vec<PathBuf>,
     /// The agent's own CLI binary (`claude`, `codex`, …) — what "installed"
     /// means to the user. Distinct from `executable` where the spawned adapter
-    /// wraps the CLI (`claude-agent-acp`, `codex-acp`, `pi-acp`), and the npx
+    /// wraps the CLI (third-party ACP adapters), and the npx
     /// fallback deliberately doesn't count: npx can fetch an adapter on
     /// demand, but an absent CLI still means no logins/config to drive.
     cli_executable: &'static str,
@@ -190,27 +191,6 @@ fn default_effort_values(
             vec!["ultra", "max", "high"]
         }
     }
-}
-
-/// npm-global bin dirs for an adapter binary (`npm i -g` installs).
-fn npm_global_paths(exe: &'static str) -> fn() -> Vec<PathBuf> {
-    // fn pointers can't capture; probe the fixed npm-global locations and
-    // append the exe at call time via a small per-exe shim table.
-    match exe {
-        "pi-acp" => || npm_global_bins("pi-acp"),
-        _ => || Vec::new(),
-    }
-}
-
-fn npm_global_bins(exe: &str) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(home) = crate::executable::home_dir() {
-        dirs.push(home.join(".local").join("bin").join(exe));
-        dirs.push(home.join(".npm-global").join("bin").join(exe));
-    }
-    dirs.push(PathBuf::from("/opt/homebrew/bin").join(exe));
-    dirs.push(PathBuf::from("/usr/local/bin").join(exe));
-    dirs
 }
 
 fn grok_effort() -> Vec<ReasoningLevel> {
@@ -641,69 +621,6 @@ fn exo_spec() -> AcpAgentSpec {
     }
 }
 
-fn pi_spec() -> AcpAgentSpec {
-    AcpAgentSpec {
-        id: HarnessId::Pi,
-        display_name: "Pi",
-        executable: "pi-acp",
-        env_override: "PI_ACP_EXECUTABLE",
-        args: &[],
-        npm_package: Some("pi-acp@0.0.33"),
-        archive: None,
-        extra_paths: npm_global_paths("pi-acp"),
-        cli_executable: "pi",
-        cli_extra_paths: || npm_global_bins("pi"),
-        install_hint: "pi-acp (searched PATH, the login shell's PATH, npm global bins, \
-             and fnm/nvm/volta/pnpm/bun install dirs; harness installs the pinned \
-             pi-acp automatically when npm is available — the pi CLI itself is \
-             still required, `npm install -g --ignore-scripts \
-             @earendil-works/pi-coding-agent`; set PI_ACP_EXECUTABLE to override)",
-        // pi routes models through its own provider config (~/.pi); the picker
-        // advertises the pass-through entry and pi keeps whatever the user set
-        // up. Unknown ids are skipped by the config-option set.
-        models: || {
-            vec![Model {
-                id: "default".into(),
-                label: "pi default".into(),
-                description: Some("Runs the model configured in pi (`pi` settings)".into()),
-                reasoning_levels: vec![
-                    ReasoningLevel::Minimal,
-                    ReasoningLevel::Low,
-                    ReasoningLevel::Medium,
-                    ReasoningLevel::High,
-                    ReasoningLevel::XHigh,
-                    ReasoningLevel::Max,
-                ],
-                options: Vec::new(),
-                maker: None,
-                billing: None,
-            }]
-        },
-        // The adapter has no `_session/steering` extension: turn boundaries.
-        steering_mode: SteeringMode::TurnBoundary,
-        // pi's thinking ladder (minimal→max; its extra "off" tier has no harness
-        // equivalent and is left to the agent default).
-        reasoning_levels: &[
-            ReasoningLevel::Minimal,
-            ReasoningLevel::Low,
-            ReasoningLevel::Medium,
-            ReasoningLevel::High,
-            ReasoningLevel::XHigh,
-            ReasoningLevel::Max,
-        ],
-        prompt_transform: identity_transform,
-        effort_values: default_effort_values,
-        ladder_extras: &[],
-        prompt_complete_extension: false,
-        prompt_stall: None,
-        stall_hint: "The agent process is likely wedged.",
-        effort_in_model_id: false,
-        auth_method: None,
-        skill_dirs: Vec::new,
-        hidden_commands: &[],
-    }
-}
-
 /// google's builds as the acp registry lists them (`antigravity-acp`); `None`
 /// on platforms without one, where only an explicit override can launch.
 fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
@@ -1049,7 +966,7 @@ pub fn prewarm_managed_adapters() {
 }
 
 fn prewarm_managed_adapters_on(handle: &tokio::runtime::Handle) {
-    for spec in [grok_spec(), pi_spec()] {
+    for spec in [grok_spec()] {
         let Some(pkg) = spec.npm_package else {
             continue;
         };
@@ -1098,6 +1015,8 @@ enum Launch {
 pub struct AcpHarness {
     spec: AcpAgentSpec,
     graff_draft_subagents: Option<Arc<AtomicBool>>,
+    /// Settings → graff's compaction point (percent; 0 = graff's default).
+    graff_compact_at: Option<Arc<AtomicU8>>,
     executable: Option<PathBuf>,
     /// Override of the agent's on-disk sessions root (grok's
     /// `~/.grok/sessions`), where subagent transcripts are tailed from.
@@ -1126,6 +1045,7 @@ impl AcpHarness {
         Self {
             spec,
             graff_draft_subagents: None,
+            graff_compact_at: None,
             executable: None,
             sessions_root: None,
             interrupt_grace: Duration::from_secs(2),
@@ -1167,6 +1087,21 @@ impl AcpHarness {
         self
     }
 
+    pub fn with_graff_compact_at(mut self, pct: Arc<AtomicU8>) -> Self {
+        self.graff_compact_at = Some(pct);
+        self
+    }
+
+    /// The compaction point to pass graff, unless the user's own
+    /// `GRAFF_COMPACT_PCT` is set (an explicit environment setting wins).
+    fn graff_compact_at_env(&self) -> Option<u8> {
+        if self.spec.id != HarnessId::Graff || std::env::var_os("GRAFF_COMPACT_PCT").is_some() {
+            return None;
+        }
+        let pct = self.graff_compact_at.as_ref()?.load(Ordering::Relaxed);
+        (pct != 0).then_some(pct)
+    }
+
     fn draft_subagents_enabled(&self) -> bool {
         self.spec.id == HarnessId::Graff
             && (graff_draft_subagents_enabled()
@@ -1174,12 +1109,6 @@ impl AcpHarness {
                     .graff_draft_subagents
                     .as_ref()
                     .is_some_and(|flag| flag.load(Ordering::Relaxed)))
-    }
-
-    /// The pi coding agent over ACP — the community `pi-acp` adapter wrapping
-    /// pi's RPC mode.
-    pub fn pi() -> Self {
-        Self::with_spec(pi_spec()).with_model_discovery_timeout(Duration::from_secs(60))
     }
 
     /// google antigravity over its acp server (`agy_acp_server`).
@@ -1529,6 +1458,13 @@ impl AcpHarness {
             }
             if self.draft_subagents_enabled() {
                 cmd.env("GRAFF_ACP_DRAFT_SUBAGENTS", "1");
+            }
+            if let Some(pct) = self.graff_compact_at_env() {
+                cmd.env("GRAFF_COMPACT_PCT", pct.to_string());
+            }
+            // Which Harness and which computer sent each gateway request.
+            for (key, value) in graff_client::env() {
+                cmd.env(key, value);
             }
         }
         if self.spec.id == HarnessId::Antigravity
@@ -2209,6 +2145,7 @@ impl Harness for AcpHarness {
             // Session start is the natural moment for a graff update check;
             // it never blocks and this session keeps the resolved binary.
             crate::graff_bundle::maybe_check_soon();
+            crate::codedb_bundle::maybe_check_soon();
             request.model = request
                 .model
                 .take()
@@ -3107,6 +3044,8 @@ fn handle_server_request_live(
             .unwrap_or("The agent needs your input.")
             .to_owned(),
         options: names.clone(),
+        prefill: None,
+        multiline: false,
         multi_select: false,
     };
     let client = client.clone();
@@ -3989,14 +3928,22 @@ async fn run_session(session: Session) {
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
     // starve). Visibly busy = an open tool call, or stream traffic within
-    // BUSY_RECENT, with no prompt of ours outstanding. The discipline is
-    // Zed's, verified against the real adapter: `session/cancel` the
-    // unowned turn, give it CANCEL_FLUSH to die and drain, then prompt.
-    // This makes the interactive path starve-free; the settle layers below
-    // remain for the notification race a client cannot see coming.
+    // BUSY_RECENT, with no prompt of ours outstanding. The message waits
+    // (rechecked every BUSY_RECHECK) until the agent goes quiet, then goes
+    // out as the next prompt. It never cancels the unowned turn: that was
+    // Zed's discipline, but it killed the agent's own work every time a
+    // message (typed, or another chat's `send_message`) arrived mid-turn.
+    // The settle layers below remain for the notification race a client
+    // cannot see coming.
+    // Graff needs none of this: a prompt sent into its self-continued turn
+    // (a background subagent finishing wakes the parent) waits for that turn's
+    // `gui_turn_end` and then gets its own response (verified live, graff
+    // 0.0.302.18). Its background subagents also stream `graff/subagent_event`
+    // frames, which would read as busy for as long as a child runs.
+    let defer_into_busy = harness != HarnessId::Graff;
     const BUSY_RECENT: Duration = Duration::from_secs(3);
-    const CANCEL_FLUSH: Duration = Duration::from_secs(2);
-    let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
+    const BUSY_RECHECK: Duration = Duration::from_millis(500);
+    let mut busy_defer_deadline: Option<tokio::time::Instant> = None;
 
     let mut child_exit = None;
     let mut exit_drain_deadline = None;
@@ -4540,15 +4487,20 @@ async fn run_session(session: Session) {
                 }
             },
 
-            // Busy-session cancel flushed (see BUSY_RECENT/CANCEL_FLUSH
-            // above): the unowned self-continued turn had its cancel and a
-            // drain window; the queued steer becomes a fresh prompt on a
-            // now-idle agent.
+            // Deferred steer recheck (see BUSY_RECENT/BUSY_RECHECK above):
+            // while the self-continued turn is still busy, keep waiting;
+            // once it has gone quiet, the queued steer becomes a fresh
+            // prompt on a now-idle agent.
             _ = tokio::time::sleep_until(
-                cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
-            ), if cancel_flush_deadline.is_some() && !interrupted => {
-                cancel_flush_deadline = None;
+                busy_defer_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if busy_defer_deadline.is_some() && !interrupted => {
+                busy_defer_deadline = None;
                 if turn.is_none()
+                    && !queued_steers.is_empty()
+                    && (!open_tools.is_empty() || last_update_at.elapsed() < BUSY_RECENT)
+                {
+                    busy_defer_deadline = Some(tokio::time::Instant::now() + BUSY_RECHECK);
+                } else if turn.is_none()
                     && let Some(text) = queued_steers.pop_front()
                 {
                     let (prev, next) = rotate(&mut assistant_message_id);
@@ -4670,29 +4622,26 @@ async fn run_session(session: Session) {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
-                    if turn.is_none() && cancel_flush_deadline.is_some() {
-                        // A busy-session cancel is already in flight: this
-                        // steer lines up behind it and dispatches at flush.
+                    if turn.is_none() && busy_defer_deadline.is_some() {
+                        // A steer is already waiting out the busy session:
+                        // this one lines up behind it.
                         queued_steers.push_back(text);
                     } else if turn.is_none()
+                        && defer_into_busy
                         && (!open_tools.is_empty()
                             || last_update_at.elapsed() < BUSY_RECENT)
                     {
                         // Mid self-continued turn (see BUSY_RECENT above):
-                        // cancel it rather than prompt into the starve.
-                        //
+                        // wait for it to go quiet rather than prompt into
+                        // the starve or cancel the agent's work.
                         tracing::info!(
                             target: "harness_adapters::acp",
-                            "steer into a self-continuing session; cancelling \
-                             the unowned turn before prompting"
-                        );
-                        client.notify(
-                            "session/cancel",
-                            Some(json!({ "sessionId": session_id })),
+                            "steer into a self-continuing session; holding it \
+                             until the agent goes quiet"
                         );
                         queued_steers.push_back(text);
-                        cancel_flush_deadline =
-                            Some(tokio::time::Instant::now() + CANCEL_FLUSH);
+                        busy_defer_deadline =
+                            Some(tokio::time::Instant::now() + BUSY_RECHECK);
                     } else if turn.is_none() {
                         // Idle between turns: a steer is simply the next turn.
                         let (prev, next) = rotate(&mut assistant_message_id);
@@ -4915,6 +4864,35 @@ mod tests {
     }
 
     #[test]
+    fn graff_compact_at_setting_reaches_the_graff_child() {
+        let env_of = |cmd: &mut Command| {
+            cmd.as_std_mut()
+                .get_envs()
+                .find(|(key, _)| *key == "GRAFF_COMPACT_PCT")
+                .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+        };
+        let pct = Arc::new(AtomicU8::new(0));
+        let harness = AcpHarness::graff().with_graff_compact_at(pct.clone());
+        // A user-set GRAFF_COMPACT_PCT wins, so the setting stays out of the way.
+        let user_set = std::env::var_os("GRAFF_COMPACT_PCT").is_some();
+
+        let mut default = Command::new("graff");
+        harness.configure_adapter_environment(&mut default, Path::new("graff"));
+        assert_eq!(env_of(&mut default), None);
+
+        pct.store(70, Ordering::Relaxed);
+        let mut set = Command::new("graff");
+        harness.configure_adapter_environment(&mut set, Path::new("graff"));
+        assert_eq!(env_of(&mut set), (!user_set).then(|| "70".to_string()));
+
+        let mut grok = Command::new("grok");
+        AcpHarness::grok()
+            .with_graff_compact_at(pct.clone())
+            .configure_adapter_environment(&mut grok, Path::new("grok"));
+        assert_eq!(env_of(&mut grok), None);
+    }
+
+    #[test]
     fn graff_draft_subagents_setting_controls_launch_and_capability() {
         let flag = Arc::new(AtomicBool::new(false));
         let harness = AcpHarness::graff().with_graff_draft_subagents(flag.clone());
@@ -4951,14 +4929,6 @@ mod tests {
                 .get_envs()
                 .any(|(key, _)| key == "GRAFF_ACP_DRAFT_SUBAGENTS")
         );
-    }
-
-    #[test]
-    fn pi_discovery_allows_cold_extension_startup() {
-        let pi = AcpHarness::pi();
-        assert_eq!(pi.model_discovery_timeout, Duration::from_secs(60));
-        assert_eq!(pi.handshake_timeout, Duration::from_secs(120));
-        assert!(pi.spec.prompt_stall.is_none());
     }
 
     #[test]

@@ -961,6 +961,11 @@ pub enum AgentLoginMode {
     HostBrowser,
     /// Approve a one-time code on any device; tokens are stored on the host.
     DeviceCode,
+    /// The CLI's loopback sign-in, finished on the device that asked for it:
+    /// `url` is the provider's authorize page, and that device sends the
+    /// redirect it lands on back with `CompleteAgentLogin`. The host delivers
+    /// it to the CLI's callback, so tokens stay on the host (PKCE).
+    RelayBrowser,
 }
 
 impl AgentLoginStart {

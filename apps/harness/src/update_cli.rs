@@ -66,12 +66,16 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
             Ok(())
         }
         InstallKind::Unmanaged => {
-            bail!(
-                "this binary is not update-managed (source build or hand-copied).\n\
-                 Linux: rebuild from source or use a Harness release package\n\
-                 macOS: download the new Harness.app dmg, or rebuild from source.\n\
-                 Windows: use an update-enabled portable package, or rebuild from source."
-            )
+            let how = if cfg!(target_os = "linux") {
+                "Switch to the managed install (it keeps ~/.harness, and `harness update`\n\
+                 works from then on):\n  curl -fsSL https://edge.codegraff.com/install.sh | sh\n\
+                 Pacman installs: reinstall the new .pkg.tar.zst instead."
+            } else if cfg!(target_os = "macos") {
+                "Download the new Harness.app dmg, or rebuild from source."
+            } else {
+                "Use an update-enabled portable package, or rebuild from source."
+            };
+            bail!("this binary is not update-managed (source build or hand-copied).\n{how}")
         }
     }
 }

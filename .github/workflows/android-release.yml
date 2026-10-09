@@ -36,7 +36,8 @@ jobs:
           java-version: 17
       - uses: android-actions/setup-android@v3
         with:
-          packages: ""
+          packages: "ndk;27.1.12297006"
+      - uses: ./.github/actions/android-native
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Release keystore

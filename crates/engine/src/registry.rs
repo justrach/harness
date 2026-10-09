@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, MutexGuard, PoisonError,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,15 @@ fn describe(harness: &dyn Harness) -> HarnessDescriptor {
     }
 }
 
+/// graff accepts 10-95% from clients: lower compacts on the standing prompt
+/// alone, and at 95% graff's emergency trim fires first.
+pub const GRAFF_COMPACT_AT_MIN: u8 = 10;
+pub const GRAFF_COMPACT_AT_MAX: u8 = 95;
+
+fn valid_compact_at(pct: u8) -> bool {
+    (GRAFF_COMPACT_AT_MIN..=GRAFF_COMPACT_AT_MAX).contains(&pct)
+}
+
 /// The persisted shape of `harness-prefs.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -112,6 +121,9 @@ struct HarnessPrefsFile {
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
     graff_draft_subagents: bool,
+    /// graff's automatic compaction point, percent of the context window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graff_compact_at: Option<u8>,
     /// The allow-list written back when enablement was a fixed default set.
     /// Read once, folded into `disabled`, and never written again.
     #[serde(skip_serializing, deserialize_with = "known_harnesses_opt")]
@@ -180,6 +192,8 @@ pub struct HarnessRegistry {
     /// This device's enabled set; `None` inner value = the default set.
     prefs: Mutex<HarnessPrefsFile>,
     graff_draft_subagents: Arc<AtomicBool>,
+    /// The spawn-time view of `graff_compact_at`; 0 = graff's default.
+    graff_compact_at: Arc<AtomicU8>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
 }
@@ -198,6 +212,7 @@ impl HarnessRegistry {
             order: Mutex::new(Vec::new()),
             prefs: Mutex::new(HarnessPrefsFile::default()),
             graff_draft_subagents: Arc::new(AtomicBool::new(false)),
+            graff_compact_at: Arc::new(AtomicU8::new(0)),
             prefs_path: Mutex::new(None),
         }
     }
@@ -224,6 +239,9 @@ impl HarnessRegistry {
             .unwrap_or_default();
         self.graff_draft_subagents
             .store(loaded.graff_draft_subagents, Ordering::Relaxed);
+        let compact_at = loaded.graff_compact_at.filter(|pct| valid_compact_at(*pct));
+        self.graff_compact_at
+            .store(compact_at.unwrap_or(0), Ordering::Relaxed);
         *self.prefs() = loaded;
         *self
             .prefs_path
@@ -375,6 +393,28 @@ impl HarnessRegistry {
         self.persist_prefs();
     }
 
+    pub fn graff_compact_at(&self) -> Option<u8> {
+        self.prefs().graff_compact_at
+    }
+
+    /// `None` returns graff to its own default. Applies to graff processes
+    /// started after the change; a running session keeps its point until it
+    /// restarts (or the user runs `/compact-at` in it).
+    pub fn set_graff_compact_at(&self, pct: Option<u8>) -> Result<(), String> {
+        if let Some(pct) = pct
+            && !valid_compact_at(pct)
+        {
+            return Err(format!(
+                "compaction point must be {GRAFF_COMPACT_AT_MIN}-{GRAFF_COMPACT_AT_MAX}%"
+            ));
+        }
+        self.prefs().graff_compact_at = pct;
+        self.graff_compact_at
+            .store(pct.unwrap_or(0), Ordering::Relaxed);
+        self.persist_prefs();
+        Ok(())
+    }
+
     pub fn set_title_settings(&self, mut settings: TitleSettings) -> Result<(), String> {
         if let Some(id) = settings.harness {
             if !harness_adapters::supports_titles(id) || !self.enabled_set().contains(&id) {
@@ -518,6 +558,7 @@ pub fn default_registry() -> HarnessRegistry {
     // Turn-boundary steering. Per-model effort comes from the live catalog;
     // session/new does not yet advertise thought_level.
     let graff_draft_subagents = registry.graff_draft_subagents.clone();
+    let graff_compact_at = registry.graff_compact_at.clone();
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Graff,
@@ -540,7 +581,8 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(move || {
             Ok(Arc::new(
                 harness_adapters::AcpHarness::graff()
-                    .with_graff_draft_subagents(graff_draft_subagents.clone()),
+                    .with_graff_draft_subagents(graff_draft_subagents.clone())
+                    .with_graff_compact_at(graff_compact_at.clone()),
             ) as Arc<dyn Harness>)
         }),
     );
@@ -670,29 +712,20 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| harness_adapters::AcpHarness::hermes().installed()),
         Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::hermes()) as Arc<dyn Harness>)),
     );
-    // pi over ACP (community `pi-acp` adapter), same lazy pattern: the static
-    // descriptor mirrors AcpHarness::pi() exactly — turn-boundary steering,
-    // pi's thinking ladder minus its "off" tier.
+    // Native Pi RPC. Thinking levels are discovered per model.
     registry.register_lazy(
         HarnessDescriptor {
             id: HarnessId::Pi,
             name: "Pi".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
-            reasoning_levels: vec![
-                ReasoningLevel::Minimal,
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max,
-            ],
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
             installed: true,
             can_install: false,
             enabled: None,
         },
-        Box::new(|| harness_adapters::AcpHarness::pi().installed()),
-        Box::new(|| Ok(Arc::new(harness_adapters::AcpHarness::pi()) as Arc<dyn Harness>)),
+        Box::new(|| harness_adapters::PiHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(harness_adapters::PiHarness::new()) as Arc<dyn Harness>)),
     );
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
@@ -761,6 +794,32 @@ pub fn default_registry() -> HarnessRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graff_compact_at_defaults_to_graff_and_survives_reload() {
+        let data = tempfile::tempdir().unwrap();
+        let registry = default_registry();
+        registry.load_prefs(data.path());
+        assert_eq!(registry.graff_compact_at(), None);
+        assert_eq!(registry.graff_compact_at.load(Ordering::Relaxed), 0);
+
+        assert!(registry.set_graff_compact_at(Some(5)).is_err());
+        assert!(registry.set_graff_compact_at(Some(96)).is_err());
+        assert_eq!(registry.graff_compact_at(), None);
+
+        registry.set_graff_compact_at(Some(70)).unwrap();
+        assert_eq!(registry.graff_compact_at.load(Ordering::Relaxed), 70);
+        let reloaded = default_registry();
+        reloaded.load_prefs(data.path());
+        assert_eq!(reloaded.graff_compact_at(), Some(70));
+        assert_eq!(reloaded.graff_compact_at.load(Ordering::Relaxed), 70);
+
+        reloaded.set_graff_compact_at(None).unwrap();
+        let again = default_registry();
+        again.load_prefs(data.path());
+        assert_eq!(again.graff_compact_at(), None);
+        assert_eq!(again.graff_compact_at.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn graff_draft_subagents_defaults_off_and_survives_reload() {
@@ -956,18 +1015,8 @@ mod tests {
         let pi = registry.resolve(HarnessId::Pi).unwrap();
         assert_eq!(pi.id(), HarnessId::Pi);
         assert_eq!(pi.display_name(), "Pi");
-        assert_eq!(pi.steering_mode(), SteeringMode::TurnBoundary);
-        assert_eq!(
-            pi.reasoning_levels(),
-            &[
-                ReasoningLevel::Minimal,
-                ReasoningLevel::Low,
-                ReasoningLevel::Medium,
-                ReasoningLevel::High,
-                ReasoningLevel::XHigh,
-                ReasoningLevel::Max
-            ]
-        );
+        assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
+        assert!(pi.reasoning_levels().is_empty());
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`

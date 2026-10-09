@@ -23,8 +23,15 @@ data class UserInputQuestion(
 
 data class UserInputAnswer(val questionId: String, val labels: List<String>)
 
-/** A tool call as the desktop renders it: a tag ("exec", "readFile", ...) and its string fields. */
-data class RenderToolCall(val tag: String, val fields: Map<String, String> = emptyMap()) {
+/**
+ * A tool call as the desktop renders it: a tag ("exec", "readFile", ...), its scalar fields as text, and its list
+ * fields item by item (`applyPatch` changes, `todo` items).
+ */
+data class RenderToolCall(
+    val tag: String,
+    val fields: Map<String, String> = emptyMap(),
+    val lists: Map<String, List<String>> = emptyMap(),
+) {
     private fun string(key: String): String? = fields[key]
 
     val chipLabel: String
@@ -53,7 +60,7 @@ data class RenderToolCall(val tag: String, val fields: Map<String, String> = emp
             "exec" -> string("command").orEmpty()
             "readFile", "writeFile", "editFile" -> shortPath(string("path").orEmpty())
             "applyPatch" -> {
-                val n = string("changes")?.split(',')?.size ?: 0
+                val n = lists["changes"]?.size ?: string("changes")?.split(',')?.size ?: 0
                 if (n == 1) "1 file" else "$n files"
             }
             "search", "glob" -> string("pattern").orEmpty()
@@ -105,6 +112,8 @@ sealed interface MessagePart {
         val resolved: Boolean,
     ) : MessagePart
     data class Error(override val id: String, val message: String) : MessagePart
+    /** An image the agent produced; the bytes stay on the host that made it. */
+    data class Image(override val id: String, val path: String, val name: String, val mimeType: String) : MessagePart
 }
 
 data class MessageEntry(
@@ -125,6 +134,7 @@ sealed interface RowKind {
     data class ToolGroup(val tools: List<ToolItem>, val autoOpen: Boolean) : RowKind
     data class InputChip(val header: String, val resolved: Boolean) : RowKind
     data class ErrorChip(val message: String) : RowKind
+    data class GeneratedImage(val name: String) : RowKind
 }
 
 data class TranscriptRow(
@@ -205,7 +215,11 @@ object TranscriptRowBuilder {
             if (pending.messageId in ids) continue
             rows += TranscriptRow(pending.messageId, true, RowKind.User(pending.text, pending = true), pending.messageId, null, null)
         }
-        return rows.mapIndexed { ix, row -> row.copy(topGap = gap(row, rows.getOrNull(ix - 1), ix == 0)) }
+        // A doc that merged two writers' copies of an entry can repeat an id. The lazy list keys rows by id and
+        // cannot take a repeat, so the first row with an id wins.
+        val seen = HashSet<String>()
+        val unique = rows.filter { seen.add(it.id) }
+        return unique.mapIndexed { ix, row -> row.copy(topGap = gap(row, unique.getOrNull(ix - 1), ix == 0)) }
     }
 
     private fun gap(row: TranscriptRow, previous: TranscriptRow?, isFirst: Boolean): Float = when {
@@ -282,6 +296,14 @@ object TranscriptRowBuilder {
                 is MessagePart.Error -> {
                     flushTools(ix - 1)
                     rows += TranscriptRow("${entry.id}#${part.id}", first, RowKind.ErrorChip(part.message), entry.id, null, null)
+                    first = false
+                }
+                is MessagePart.Image -> {
+                    flushTools(ix - 1)
+                    rows += TranscriptRow(
+                        "${entry.id}#${part.id}", first, RowKind.GeneratedImage(part.name), entry.id,
+                        if (settled && ix == lastPartIx) entry.createdAt else null, null,
+                    )
                     first = false
                 }
             }

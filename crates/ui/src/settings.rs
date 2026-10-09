@@ -24,6 +24,8 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod project_folders;
+pub mod search;
 pub mod shortcuts;
 pub mod widgets;
 
@@ -736,6 +738,9 @@ pub struct UiSettings {
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_space_id: Option<String>,
+    /// New Project defaults and successful-add history, keyed by host device.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub project_folders_by_device: HashMap<String, project_folders::ProjectFolderPreference>,
     /// Last successfully launched Action per project in this viewport.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
@@ -881,6 +886,10 @@ pub struct UiSettings {
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// Snap animations to rest. Defaults to following the OS.
+    pub reduce_motion: crate::motion::ReduceMotion,
+    /// Also snap animations while the main window is not focused.
+    pub pause_animations_in_background: bool,
     /// The graff engine update card's dismissed version — re-raised only when
     /// a newer stable exists.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -906,6 +915,7 @@ impl Default for UiSettings {
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             last_space_id: None,
+            project_folders_by_device: HashMap::new(),
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
@@ -965,6 +975,8 @@ impl Default for UiSettings {
             surface: harness_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            reduce_motion: crate::motion::ReduceMotion::System,
+            pause_animations_in_background: false,
             graff_notice_dismissed: None,
             legacy_accent_color: None,
         }
@@ -1062,7 +1074,7 @@ impl ShortcutId {
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::SplitTerminal => "Split terminal right",
             ShortcutId::SplitTerminalDown => "Split terminal down",
-            ShortcutId::NewSession => "New session",
+            ShortcutId::NewSession => "New chat",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenModelPicker => "Open model picker",
             ShortcutId::NextSession => "Next tab or session",
@@ -1095,7 +1107,8 @@ impl ShortcutId {
             ShortcutId::SplitTerminal => "mod-shift-d",
             ShortcutId::SplitTerminalDown if mac => "mod-shift-d",
             ShortcutId::SplitTerminalDown => "mod-alt-shift-d",
-            ShortcutId::NewSession => "mod-n",
+            ShortcutId::NewSession if mac => "mod-t",
+            ShortcutId::NewSession => "mod-shift-t",
             ShortcutId::NewProject => "mod-shift-n",
             ShortcutId::OpenModelPicker => "mod-/",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
@@ -1583,6 +1596,19 @@ impl UiSettings {
                             settings.entry("codeFontSize").or_insert(legacy);
                         }
                     }
+                    // Replace the retired new-session default with the unified
+                    // new-tab shortcut, without changing custom bindings.
+                    if let Some(keymap) = value
+                        .get_mut("keymap")
+                        .and_then(serde_json::Value::as_object_mut)
+                        && keymap.get("newSession").and_then(serde_json::Value::as_str)
+                            == Some("mod-n")
+                    {
+                        keymap.insert(
+                            "newSession".into(),
+                            serde_json::json!(ShortcutId::NewSession.default_combo()),
+                        );
+                    }
                     if let Some(keymap) = value
                         .get_mut("keymap")
                         .and_then(serde_json::Value::as_object_mut)
@@ -1865,6 +1891,8 @@ mod tests {
             loaded.new_thread_background_effect,
             NewThreadBackgroundEffect::None
         );
+        assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
+        assert!(!loaded.pause_animations_in_background);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
         for sound in [
@@ -2336,6 +2364,13 @@ mod tests {
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             last_space_id: Some("space-1".into()),
+            project_folders_by_device: HashMap::from([(
+                "local".into(),
+                project_folders::ProjectFolderPreference {
+                    override_path: Some("~/Projects".into()),
+                    parent_counts: HashMap::from([("/projects".into(), 3)]),
+                },
+            )]),
             last_project_action_by_space_id: std::collections::HashMap::from([(
                 "space-1".into(),
                 "dev".into(),
@@ -2451,6 +2486,8 @@ mod tests {
                 name: "background.png".into(),
             }),
             new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
+            reduce_motion: crate::motion::ReduceMotion::On,
+            pause_animations_in_background: true,
             graff_notice_dismissed: Some("0.0.9".into()),
             legacy_accent_color: None,
         };
@@ -2461,6 +2498,8 @@ mod tests {
         assert!(json.contains(r#""codeFencesFitContent": true"#));
         assert!(json.contains(r#""openWebLinksInHarness": false"#));
         assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
+        assert!(json.contains(r#""reduceMotion": "on""#));
+        assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
@@ -3103,7 +3142,10 @@ mod tests {
             keymap.get(ShortcutId::PrevSession),
             format!("{ctrl}-shift-tab")
         );
-        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-n");
+        assert_eq!(
+            keymap.get(ShortcutId::NewSession),
+            ShortcutId::NewSession.default_combo()
+        );
         assert_eq!(keymap.get(ShortcutId::ArchiveSession), "mod-shift-a");
         keymap.set(ShortcutId::ToggleSidebar, "mod-shift-x".into());
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");

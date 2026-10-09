@@ -65,6 +65,50 @@ pub fn parse_dotted(text: &str) -> Option<Vec<u64>> {
     })
 }
 
+/// The "What's new" lines `graff --version` lists for releases after `from`,
+/// up to and including `to`, newest first. With no `from`, only `to`'s own
+/// lines. Release headers are bare dotted versions; their lines start with `•`.
+pub fn whats_new(version_output: &str, from: Option<&str>, to: &str) -> Vec<String> {
+    let Some(to) = parse_dotted(to) else {
+        return Vec::new();
+    };
+    let from = from.and_then(parse_dotted);
+    let mut lines = Vec::new();
+    let mut in_range = false;
+    for line in version_output.lines() {
+        if let Some(item) = line.trim_start().strip_prefix('•') {
+            if in_range && !item.trim().is_empty() {
+                lines.push(item.trim().to_string());
+            }
+        } else if !line.starts_with(char::is_whitespace) && line.split_whitespace().count() == 1 {
+            if let Some(version) = parse_dotted(line) {
+                in_range = version <= to
+                    && match &from {
+                        Some(from) => version > *from,
+                        None => version == to,
+                    };
+            }
+        }
+    }
+    lines
+}
+
+/// [`whats_new`] read from the managed graff's own `--version`. Empty when
+/// the binary is missing or prints no matching release.
+pub fn release_highlights(from: Option<&str>, to: &str) -> Vec<String> {
+    let Some(path) = managed_path() else {
+        return Vec::new();
+    };
+    let Ok(output) = std::process::Command::new(path)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    whats_new(&String::from_utf8_lossy(&output.stdout), from, to)
+}
+
 pub fn display_version(version: &[u64]) -> String {
     version
         .iter()
@@ -496,6 +540,8 @@ async fn install_release(
     .await??;
     if matches!(outcome, UpdateOutcome::Updated { .. }) {
         crate::executable::invalidate_versions(&["graff"]);
+        // A new graff is the moment to bring its codedb up to date too.
+        crate::codedb_bundle::maybe_check_soon();
     }
     Ok(outcome)
 }
@@ -556,6 +602,21 @@ mod tests {
         maybe_check_soon_inner(&count);
         assert_eq!(checks.get(), 1);
         reset_check_clock();
+    }
+
+    #[test]
+    fn whats_new_lists_the_releases_since_the_previous_version() {
+        let output = "graff 0.0.302.25\n\nWhat's new\n──────────\n0.0.302.25\n  • compaction fix\n  • server-only routes\n\n0.0.302.24\n  • native wire\n\n0.0.302.23\n  • cache again\n";
+        assert_eq!(
+            whats_new(output, Some("0.0.302.23"), "0.0.302.25"),
+            ["compaction fix", "server-only routes", "native wire"]
+        );
+        assert_eq!(
+            whats_new(output, None, "0.0.302.25"),
+            ["compaction fix", "server-only routes"]
+        );
+        assert!(whats_new(output, Some("0.0.302.25"), "0.0.302.25").is_empty());
+        assert!(whats_new("graff 0.0.302.25\n", Some("0.0.302.24"), "0.0.302.25").is_empty());
     }
 
     #[test]

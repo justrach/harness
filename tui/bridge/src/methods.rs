@@ -55,6 +55,7 @@ pub async fn handle(conn: &std::sync::Arc<Conn>, method: &str, params: Value) ->
             ok(json!({ "data": [], "nextCursor": null, "backwardsCursor": null }))
         }
         "turn/start" => crate::turn::start(conn, params),
+        "turn/steer" => crate::turn::steer(conn, params),
         "turn/interrupt" => turn_interrupt(conn, params),
         other => err(RpcError::method_not_found(other)),
     }
@@ -185,6 +186,10 @@ async fn thread_start(conn: &std::sync::Arc<Conn>, params: Value) -> Reply {
             model: model.clone(),
             resume: None,
             interrupt: None,
+            turn_id: None,
+            steer: None,
+            steers: Default::default(),
+            steerable: false,
         },
     );
     let response = json!({

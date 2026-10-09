@@ -43,6 +43,10 @@ pub mod methods {
     pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
     pub const GET_GRAFF_DRAFT_SUBAGENTS: &str = "GetGraffDraftSubagents";
     pub const SET_GRAFF_DRAFT_SUBAGENTS: &str = "SetGraffDraftSubagents";
+    /// Where graff starts automatic compaction, as a percent of the context
+    /// window; `null` is graff's own default (80%).
+    pub const GET_GRAFF_COMPACT_AT: &str = "GetGraffCompactAt";
+    pub const SET_GRAFF_COMPACT_AT: &str = "SetGraffCompactAt";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";

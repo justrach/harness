@@ -137,6 +137,17 @@ pub fn install_path_shims() {
 pub fn install_path_shims_and_auto_update_graff() {
     use harness_adapters::graff_bundle as bundle;
     install_path_shims();
+    // Dev builds only: `HARNESS_DEV_GRAFF_NOTICE=0.0.302.24..0.0.302.25`
+    // raises the "updated" card without an update, to preview its design.
+    #[cfg(debug_assertions)]
+    if let Ok(range) = std::env::var("HARNESS_DEV_GRAFF_NOTICE")
+        && let Some((from, to)) = range.split_once("..")
+    {
+        bundle::publish_notice(bundle::GraffNotice::Updated {
+            from: Some(from.to_string()).filter(|from| !from.is_empty()),
+            to: to.to_string(),
+        });
+    }
     if !bundle::managed_updates_allowed() {
         return;
     }
