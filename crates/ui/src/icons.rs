@@ -139,6 +139,8 @@ icon_assets![
     (EYE, "eye"),
     (EYE_CLOSED, "eye-closed"),
     (PAPERCLIP, "paperclip"),
+    // Hand-drawn microphone in the Solar Linear style for composer dictation.
+    (MICROPHONE, "microphone"),
     // Hand-drawn pushpin in the Solar Linear style for local sidebar pins.
     (PIN, "pin"),
     (PEN, "pen"),

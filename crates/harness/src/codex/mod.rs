@@ -37,8 +37,10 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+pub mod dictation;
 mod normalize;
 mod subagents;
+pub mod voice_host;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;

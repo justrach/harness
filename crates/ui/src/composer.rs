@@ -407,6 +407,8 @@ pub const CLUSTER_X_DELTA: f32 = 4.0;
 /// than the structural spacing ladder because the narrow paperclip glyph
 /// otherwise looks farther away than its hit target actually is.
 pub const ACTION_UTILITY_GAP: f32 = 2.0;
+/// One leading utility's hit target (attach, dictate).
+pub const UTILITY_BUTTON: f32 = 28.0;
 /// Structural separation between utility actions and the primary Send action.
 pub const ACTION_PRIMARY_GAP: f32 = Theme::SPACE_SM;
 
@@ -3928,6 +3930,64 @@ impl Focusable for ComposerInput {
     }
 }
 
+impl ComposerInput {
+    /// Insert dictated words at the caret (replacing any selection), spaced
+    /// from the text around them, as one undoable edit.
+    pub fn insert_dictation(&mut self, words: &str, cx: &mut Context<Self>) {
+        let words = words.trim();
+        if self.read_only || words.is_empty() {
+            return;
+        }
+        let range = self
+            .marked_range
+            .clone()
+            .unwrap_or(self.selected_range.clone());
+        let range = self.projection.normalize_range(range);
+        let before = self.content[..range.start].chars().next_back();
+        let after = self.content[range.end..].chars().next();
+        let mut text = String::with_capacity(words.len() + 2);
+        if before.is_some_and(|c| !c.is_whitespace()) {
+            text.push(' ');
+        }
+        text.push_str(words);
+        if after.is_some_and(|c| !c.is_whitespace()) {
+            text.push(' ');
+        }
+        let text = if self.single_line {
+            text.replace(['\r', '\n'], " ")
+        } else {
+            text
+        };
+        self.replace_range(range, &text, cx);
+    }
+
+    fn replace_range(&mut self, range: Range<usize>, new_text: &str, cx: &mut Context<Self>) {
+        let range = self.projection.normalize_range(range);
+        self.invalidate_mention_tooltip();
+        // An IME commit is the tail of a composition whose pre-composition
+        // snapshot was already taken (`replace_and_mark_text_in_range`);
+        // recording here would pin undo to the half-composed text instead.
+        if self.marked_range.is_none() {
+            self.record_edit(&range, new_text);
+        }
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.content =
+            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+        self.selection_reversed = false;
+        self.caret_affinity = CaretAffinity::Downstream;
+        self.preferred_column = None;
+        self.marked_range.take();
+        self.refresh_projection();
+        self.follow_cursor = true;
+        self.reset_blink();
+        self.needs_measure = true;
+        cx.emit(ComposerInputEvent::Edited);
+        cx.notify();
+    }
+}
+
 impl EntityInputHandler for ComposerInput {
     fn text_for_range(
         &mut self,
@@ -3994,29 +4054,7 @@ impl EntityInputHandler for ComposerInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        let range = self.projection.normalize_range(range);
-        self.invalidate_mention_tooltip();
-        // An IME commit is the tail of a composition whose pre-composition
-        // snapshot was already taken (`replace_and_mark_text_in_range`);
-        // recording here would pin undo to the half-composed text instead.
-        if self.marked_range.is_none() {
-            self.record_edit(&range, new_text);
-        }
-        self.edit_revision = self.edit_revision.wrapping_add(1);
-        self.content =
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
-        self.selection_reversed = false;
-        self.caret_affinity = CaretAffinity::Downstream;
-        self.preferred_column = None;
-        self.marked_range.take();
-        self.refresh_projection();
-        self.follow_cursor = true;
-        self.reset_blink();
-        self.needs_measure = true;
-        cx.emit(ComposerInputEvent::Edited);
-        cx.notify();
+        self.replace_range(range, new_text, cx);
     }
 
     fn replace_and_mark_text_in_range(
@@ -5349,6 +5387,8 @@ pub struct Composer {
     /// under their own chat — a blanket clear-on-switch erased the one
     /// visible trace of a failed send (2026-08-19).
     failure_key: Option<String>,
+    /// Live dictation through the device's Codex voice, while one runs.
+    dictation: Option<ComposerDictation>,
     wizard: Option<Wizard>,
     wizard_focus: FocusHandle,
     wizard_expanded: bool,
@@ -5514,6 +5554,7 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        probe_dictation();
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
         let input = cx.new(|cx| {
@@ -5611,6 +5652,7 @@ impl Composer {
             sending: false,
             launching_new_chat: false,
             failure: None,
+            dictation: None,
             wizard: None,
             wizard_focus: cx.focus_handle(),
             wizard_expanded: false,
@@ -9659,6 +9701,8 @@ impl Render for Composer {
                 ))
             });
 
+        let container = container.children(self.render_dictation_status(&theme));
+
         // What is waiting to be sent, stacked directly above the box it was
         // typed in — the queue is a property of this composer, not a panel
         // somewhere else.
@@ -9988,6 +10032,9 @@ impl Render for Composer {
                     .size(px(18.0))
                     .text_color(theme.text_muted),
             );
+        let dictate = self
+            .show_dictation()
+            .then(|| self.render_dictation_button(&theme, cx));
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
@@ -10065,7 +10112,7 @@ impl Render for Composer {
         let model_travel = (surface_width
             - PILL_BORDER_V
             - action_inset
-            - 28.0
+            - self.leading_cluster_width()
             - ACTION_UTILITY_GAP
             - self
                 .model_bounds
@@ -10146,6 +10193,7 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(attach)
+                                .children(dictate)
                                 .child(model_picker),
                         )
                         .child(send_button),
@@ -10186,7 +10234,11 @@ impl Render for Composer {
                                 .pl(px(action_inset))
                                 .relative()
                                 .top(px(-cluster_dy))
-                                .child(attach),
+                                .flex()
+                                .items_center()
+                                .gap(px(ACTION_UTILITY_GAP))
+                                .child(attach)
+                                .children(dictate),
                         )
                         .child(
                             div()
@@ -10409,6 +10461,257 @@ impl Render for Composer {
             ));
         }
         container
+    }
+}
+
+/// Whether this device can dictate (a Codex CLI with its voice helper),
+/// found once in the background so the mic only appears where it works.
+static DICTATION_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn probe_dictation() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if cfg!(test) {
+        return;
+    }
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            let available = harness_adapters::DictationRuntime::detect().is_ok();
+            let _ = DICTATION_AVAILABLE.set(available);
+        });
+    });
+}
+
+impl Composer {
+    /// The mic shows where dictation can run, and while a session is live.
+    fn show_dictation(&self) -> bool {
+        self.dictation.is_some() || DICTATION_AVAILABLE.get().copied().unwrap_or(false)
+    }
+
+    /// Attach, plus dictate when it shows: the model selector's expanded anchor.
+    fn leading_cluster_width(&self) -> f32 {
+        if self.show_dictation() {
+            UTILITY_BUTTON + ACTION_UTILITY_GAP + UTILITY_BUTTON
+        } else {
+            UTILITY_BUTTON
+        }
+    }
+}
+
+/// A dictation session as the composer shows it.
+struct ComposerDictation {
+    /// `None` until the device's Codex voice is found and the session starts.
+    controls: Option<harness_adapters::DictationControls>,
+    listening: bool,
+    finishing: bool,
+    level: f32,
+    /// The utterance being heard, before it is final.
+    partial: String,
+    _task: Task<()>,
+}
+
+impl Composer {
+    /// The mic button: start dictating; while listening, stop and keep the
+    /// last words; while starting or finishing, cancel.
+    fn toggle_dictation(&mut self, cx: &mut Context<Self>) {
+        if let Some(dictation) = &mut self.dictation {
+            match &dictation.controls {
+                Some(controls) if dictation.listening && !dictation.finishing => {
+                    controls.finish();
+                    dictation.finishing = true;
+                }
+                Some(controls) => controls.cancel(),
+                None => self.dictation = None,
+            }
+            cx.notify();
+            return;
+        }
+        // Finding Codex can consult the login shell's PATH: off the UI thread.
+        let detect = gpui_tokio::Tokio::spawn(cx, async {
+            tokio::task::spawn_blocking(harness_adapters::DictationRuntime::detect).await
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let runtime = match detect.await {
+                Ok(Ok(Ok(runtime))) => runtime,
+                Ok(Ok(Err(error))) => {
+                    let message = dictation_unavailable_message(&error);
+                    let _ = this.update(cx, |this, cx| {
+                        this.on_dictation_event(
+                            harness_adapters::DictationEvent::Failed(message),
+                            cx,
+                        )
+                    });
+                    let _ = this.update(cx, |this, cx| {
+                        this.on_dictation_event(harness_adapters::DictationEvent::Ended, cx)
+                    });
+                    return;
+                }
+                _ => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.on_dictation_event(harness_adapters::DictationEvent::Ended, cx)
+                    });
+                    return;
+                }
+            };
+            let Ok(mut dictation) = this.update(cx, |this, cx| {
+                // The session's tasks run on the desktop Tokio runtime.
+                let _runtime = gpui_tokio::Tokio::handle(cx).enter();
+                let dictation = harness_adapters::Dictation::start(runtime);
+                if let Some(state) = &mut this.dictation {
+                    state.controls = Some(dictation.controls());
+                }
+                dictation
+            }) else {
+                return;
+            };
+            while let Some(event) = dictation.next_event().await {
+                let ended = event == harness_adapters::DictationEvent::Ended;
+                if this
+                    .update(cx, |this, cx| this.on_dictation_event(event, cx))
+                    .is_err()
+                    || ended
+                {
+                    break;
+                }
+            }
+        });
+        self.dictation = Some(ComposerDictation {
+            controls: None,
+            listening: false,
+            finishing: false,
+            level: 0.0,
+            partial: String::new(),
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    fn on_dictation_event(
+        &mut self,
+        event: harness_adapters::DictationEvent,
+        cx: &mut Context<Self>,
+    ) {
+        use harness_adapters::DictationEvent as E;
+        match event {
+            E::Listening => {
+                if let Some(d) = &mut self.dictation {
+                    d.listening = true;
+                }
+            }
+            E::Level(level) => {
+                if let Some(d) = &mut self.dictation {
+                    d.level = level;
+                }
+            }
+            E::Partial(text) => {
+                if let Some(d) = &mut self.dictation {
+                    d.partial = text;
+                }
+            }
+            E::Segment(text) => {
+                if let Some(d) = &mut self.dictation {
+                    d.partial.clear();
+                }
+                self.input
+                    .update(cx, |input, cx| input.insert_dictation(&text, cx));
+            }
+            E::Failed(message) => {
+                // Global, not chat-scoped: the device's voice failed, not a send.
+                self.failure = Some(message.into());
+                self.failure_key = None;
+            }
+            E::Ended => {
+                // The session task ends on its own right after this event.
+                if let Some(d) = self.dictation.take() {
+                    d._task.detach();
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn render_dictation_button(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let state = self.dictation.as_ref();
+        let listening = state.is_some_and(|d| d.listening && !d.finishing);
+        let busy = state.is_some() && !listening;
+        let level = state.map_or(0.0, |d| d.level.clamp(0.0, 1.0));
+        div()
+            .id("composer-dictate")
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .cursor_pointer()
+            .when(listening, |el| {
+                el.bg(theme.danger.opacity(0.10 + 0.30 * level))
+            })
+            .when(!listening, |el| {
+                el.bg(motion::hover_blend(
+                    "composer-dictate",
+                    gpui::transparent_black(),
+                    crate::theme::ink(0.10),
+                ))
+            })
+            .on_hover(motion::hover_listener("composer-dictate"))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_dictation(cx)))
+            .child(
+                crate::icons::icon(crate::icons::MICROPHONE)
+                    .size(px(17.0))
+                    .text_color(if listening {
+                        theme.danger
+                    } else if busy {
+                        theme.text_faint
+                    } else {
+                        theme.text_muted
+                    }),
+            )
+    }
+
+    /// One quiet caption above the box while dictating, like the queue notice.
+    fn render_dictation_status(&self, theme: &Theme) -> Option<gpui::AnyElement> {
+        let d = self.dictation.as_ref()?;
+        let (dot, text): (gpui::Hsla, SharedString) = if d.finishing {
+            (theme.text_faint, "Finishing dictation…".into())
+        } else if !d.listening {
+            (theme.text_faint, "Starting dictation…".into())
+        } else if d.partial.is_empty() {
+            (theme.danger, "Listening — click the mic to stop".into())
+        } else {
+            (theme.danger, format!("Listening — {}", d.partial).into())
+        };
+        Some(
+            div()
+                .id("composer-dictation-status")
+                .mx(px(8.0))
+                .mt(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(11.0))
+                .line_height(px(14.0))
+                .text_color(theme.text_faint)
+                .child(div().size(px(5.0)).rounded_full().bg(dot))
+                .child(div().min_w_0().truncate().child(text))
+                .into_any_element(),
+        )
+    }
+}
+
+/// Why the mic can't dictate on this device, in words a person can act on.
+fn dictation_unavailable_message(
+    error: &harness_adapters::codex::voice_host::VoiceHostError,
+) -> String {
+    use harness_adapters::codex::voice_host::VoiceHostError as E;
+    match error {
+        E::Unavailable => "Dictation uses Codex's voice: install the Codex CLI 0.159 or newer and sign in with `codex login`.".into(),
+        E::RuntimeUnavailable => "Codex's voice runtime would not start. Updating the Codex CLI may help.".into(),
+        E::DeviceUnavailable => "The microphone could not be opened. Check that Harness may use it in System Settings.".into(),
+        E::Protocol => "Codex's voice helper stopped responding.".into(),
     }
 }
 
@@ -12327,6 +12630,35 @@ mod tests {
                     .iter()
                     .any(|(_, face)| *face == composer_markdown::Face::Bold)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn dictated_words_are_spaced_at_the_caret_as_one_undoable_edit(cx: &mut gpui::TestAppContext) {
+        let input = cx.new(|cx| ComposerInput::new("Draft", cx));
+        input.update(cx, |input, cx| {
+            input.insert_dictation("  hello there ", cx);
+            assert_eq!(input.text(), "hello there");
+            input.set_text("Fix the", cx);
+            input.insert_dictation("login bug", cx);
+            assert_eq!(input.text(), "Fix the login bug");
+            assert_eq!(input.cursor_offset(), input.text().len());
+            // In the middle of a word pair: spaced on both sides.
+            input.set_text("ab", cx);
+            input.selected_range = 1..1;
+            input.insert_dictation("x", cx);
+            assert_eq!(input.text(), "a x b");
+            // A selection is replaced; the space already there is kept.
+            input.set_text("say WORD now", cx);
+            input.selected_range = 4..8;
+            input.insert_dictation("this", cx);
+            assert_eq!(input.text(), "say this now");
+            assert_eq!(input.undo_stack.len(), 1);
+            let previous = input.undo_stack.pop().unwrap();
+            input.restore(previous, cx);
+            assert_eq!(input.text(), "say WORD now");
+            input.insert_dictation("   ", cx);
+            assert_eq!(input.text(), "say WORD now");
         });
     }
 
