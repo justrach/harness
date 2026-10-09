@@ -1,13 +1,11 @@
-// Settings — opened from the person button on Home. Account actions live here
-// rather than in a quick menu: signing out is one tap away, and deleting the
-// account sits apart at the bottom behind its own confirmation.
+// Settings — opened from the gear on Home: how the app looks and behaves.
+// The account (usage, sign out, deletion) is Profile, behind the person button.
 
 import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var confirmDeleteAccount = false
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
 
     /// "Codegraff · System", or the two variant names when light and dark
@@ -34,24 +32,6 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Account") {
-                    if model.demo != nil {
-                        LabeledContent("Signed in", value: "Demo mode")
-                    } else if model.canDeleteAccount {
-                        LabeledContent("Signed in with", value: "CodeGraff")
-                    }
-                    NavigationLink {
-                        UsageView()
-                    } label: {
-                        Text("Usage")
-                    }
-                    .accessibilityIdentifier("settings-usage")
-                    Button("Sign out", role: .destructive) {
-                        dismiss()
-                        model.signOut()
-                    }
-                }
-
                 Section("Appearance") {
                     NavigationLink {
                         AppearanceView()
@@ -60,6 +40,7 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings-appearance")
                 }
+                .harnessListRow()
 
                 Section("Notifications") {
                     NavigationLink {
@@ -69,6 +50,7 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings-notifications")
                 }
+                .harnessListRow()
 
                 Section("Agents") {
                     NavigationLink {
@@ -78,6 +60,7 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings-compaction")
                 }
+                .harnessListRow()
 
                 // iPad already shows the list beside the open session; a phone can too, when there is room.
                 if UIDevice.current.userInterfaceIdiom == .phone {
@@ -93,6 +76,7 @@ struct SettingsView: View {
                     } footer: {
                         Text("Shows the session list and the open session together when there is room. Auto does it side by side whenever the screen is wide enough, such as in landscape. Side by side and Stacked pick a shape. Off keeps the single screen.")
                     }
+                    .harnessListRow()
                 }
 
                 Section("Diagnostics") {
@@ -109,6 +93,7 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings-performance")
                 }
+                .harnessListRow()
 
                 Section("About") {
                     LabeledContent("Version", value: version)
@@ -116,19 +101,9 @@ struct SettingsView: View {
                     Link("Help and feedback", destination: Endpoints.supportURL)
                     Link("Email support", destination: Endpoints.supportEmailURL)
                 }
-
-                if model.canDeleteAccount {
-                    Section {
-                        Button("Delete account…", role: .destructive) {
-                            confirmDeleteAccount = true
-                        }
-                        .disabled(model.accountDeletionBusy)
-                        .accessibilityIdentifier("settings-delete-account")
-                    } footer: {
-                        Text("Permanently deletes your CodeGraff account and everything Harness keeps for it.")
-                    }
-                }
+                .harnessListRow()
             }
+            .harnessGroupedList()
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -136,29 +111,7 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            .alert("Delete your account?", isPresented: $confirmDeleteAccount) {
-                Button("Delete", role: .destructive) { Task { await model.deleteAccount() } }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This permanently deletes your CodeGraff account and everything Harness keeps for it: chats, sessions, devices, and the agent rooms you made. Your posts in other people's rooms lose their text. This can't be undone.")
-            }
-            .alert("Account not deleted", isPresented: Binding(
-                get: { model.accountDeletionError != nil },
-                set: { if !$0 { model.accountDeletionError = nil } }
-            )) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(model.accountDeletionError ?? "")
-            }
-            .overlay {
-                if model.accountDeletionBusy {
-                    ProgressView("Deleting account…")
-                        .padding(20)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-                }
-            }
         }
-        .interactiveDismissDisabled(model.accountDeletionBusy)
         .harnessAppearance()
     }
 }
