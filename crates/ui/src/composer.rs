@@ -623,6 +623,76 @@ fn escape_dismisses_completion(key: &str, completion_open: bool) -> bool {
     key == "escape" && completion_open
 }
 
+/// A question renders in its own pane down to this size; it scrolls apart
+/// from the answer controls, so only a pane narrower or shorter than this
+/// needs the launcher and popover.
+const QUESTION_INLINE_MIN_WIDTH: f32 = 220.0;
+const QUESTION_INLINE_MIN_HEIGHT: f32 = 160.0;
+/// The popover is at least this wide so a question opened from a sliver of
+/// a pane wraps into readable lines.
+const QUESTION_POPOVER_MIN_WIDTH: f32 = 340.0;
+
+/// The constrained-pane stand-in for a pending question, styled like the
+/// transcript's Question chip it answers: the chat-bubble tile, "Question",
+/// the question itself, and "Answer". Below 100px only the tile fits.
+fn question_launcher(theme: &Theme, summary: Option<SharedString>, width: f32) -> gpui::Div {
+    let tile = div()
+        .flex_none()
+        .size(px(20.0))
+        .rounded(px(6.0))
+        .bg(crate::theme::ink(0.09))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+        );
+    let row = div()
+        .h(px(34.0))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .overflow_hidden()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(crate::theme::hairline(0.08))
+        .bg(crate::theme::ink(0.045))
+        .hover(|el| el.bg(crate::theme::ink(0.07)))
+        .cursor_pointer()
+        .px(px(7.0))
+        .text_size(px(12.0))
+        .child(tile);
+    if width < 100.0 {
+        return row.justify_center();
+    }
+    row.child(
+        div()
+            .flex_none()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text_muted)
+            .child("Question"),
+    )
+    .child(
+        div()
+            .min_w_0()
+            .flex_1()
+            .truncate()
+            .text_color(theme.text.opacity(0.9))
+            .children(summary),
+    )
+    .child(
+        div()
+            .flex_none()
+            .text_color(theme.accent)
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child("Answer"),
+    )
+}
+
 fn wizard_escape_goes_back(key: &str, input_focused: bool, input_empty: bool) -> bool {
     key == "escape" && (!input_focused || input_empty)
 }
@@ -9734,82 +9804,126 @@ impl Render for Composer {
             let viewport = window.viewport_size();
             let available = self.available_height.unwrap_or(f32::from(viewport.height));
             let container = container.max_h(px(available)).min_h_0();
-            let narrow = self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) < 300.0
-                || available < 240.0;
-            if narrow || self.wizard_expanded {
+            // The question stays in its own pane while it can be read there
+            // (it scrolls apart from the answer controls). Below that, a
+            // compact launcher opens it in a popover anchored to this pane:
+            // wide enough to read, without dimming or blocking other panes.
+            let pane_width = self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH);
+            let narrow =
+                pane_width < QUESTION_INLINE_MIN_WIDTH || available < QUESTION_INLINE_MIN_HEIGHT;
+            if narrow {
                 if !self.wizard_expanded && self.input.focus_handle(cx).is_focused(window) {
                     window.focus(&self.wizard_focus, cx);
                 }
-                let launcher = crate::popover::btn_primary(
-                    &theme,
-                    if self.last_available_width.unwrap_or(COMPOSER_MAX_WIDTH) < 100.0 {
-                        "?"
+                let summary: Option<SharedString> = self.wizard.as_ref().and_then(|w| {
+                    let q = w.questions.get(w.page)?;
+                    let text = if q.header.trim().is_empty() {
+                        &q.question
                     } else {
-                        "Answer"
-                    },
-                )
-                .id("question-expand")
-                .debug_selector(|| "question-expand".into())
-                .role(Role::Button)
-                .aria_label("Open agent question")
-                .when(!self.wizard_expanded, |el| el.track_focus(&self.wizard_focus))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        &q.header
+                    };
+                    Some(text.trim().to_owned().into())
+                });
+                let launcher = question_launcher(&theme, summary, pane_width)
+                    .id("question-expand")
+                    .debug_selector(|| "question-expand".into())
+                    .role(Role::Button)
+                    .aria_label("Open agent question")
+                    .when(!self.wizard_expanded, |el| {
+                        el.track_focus(&self.wizard_focus)
+                    })
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.wizard_expanded = true;
+                            window.focus(&this.wizard_focus, cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.wizard_expanded = true;
                         window.focus(&this.wizard_focus, cx);
-                        cx.stop_propagation();
                         cx.notify();
-                    }
-                }))
-                .px(px(4.0))
-                .text_center()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.wizard_expanded = true;
-                    window.focus(&this.wizard_focus, cx);
-                    cx.notify();
-                }));
+                    }));
                 let container = container.px(px(4.0)).child(launcher);
                 if !self.wizard_expanded {
                     return container;
                 }
-                let panel = self.render_wizard((f32::from(viewport.height) - 96.0).max(120.0), cx);
+                let max_height = (f32::from(viewport.height) - 96.0).max(120.0);
+                let width = (viewport.width - px(16.0))
+                    .min(px(pane_width.max(QUESTION_POPOVER_MIN_WIDTH)))
+                    .min(px(COMPOSER_MAX_WIDTH));
+                let panel = self.render_wizard(max_height - 36.0, cx);
                 return container.child(
                     gpui::deferred(
-                        gpui::anchored().position(point(px(0.0), px(0.0))).child(
-                            div()
-                                .id("question-overlay")
-                                .flex_none()
-                                .occlude()
-                                .w(viewport.width)
-                                .h(viewport.height)
-                                .bg(crate::popover::scrim_alpha(0.7))
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                                .child(
-                                    div()
-                                        .w((viewport.width - px(24.0)).min(px(COMPOSER_MAX_WIDTH)))
-                                        .rounded(px(COMPOSER_RADIUS))
-                                        .bg(theme.bg)
-                                        .child(panel),
-                                )
-                                .child(
-                                    crate::popover::btn_primary(&theme, "Close")
-                                        .id("question-close")
-                                        .debug_selector(|| "question-close".into())
-                                        .mt(px(8.0))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.wizard_expanded = false;
-                                            window.focus(&this.wizard_focus, cx);
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                    ).priority(3),
+                        gpui::anchored()
+                            .anchor(gpui::Anchor::BottomLeft)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(
+                                div()
+                                    .id("question-popover")
+                                    .debug_selector(|| "question-popover".into())
+                                    .occlude()
+                                    .w(width)
+                                    .max_h(px(max_height))
+                                    .mb(px(6.0))
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .rounded(px(COMPOSER_RADIUS))
+                                    .border_1()
+                                    .border_color(theme.border_strong)
+                                    .bg(theme.bg)
+                                    .shadow_lg()
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                        this.wizard_expanded = false;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .h(px(32.0))
+                                            .px(px(10.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .text_size(px(12.0))
+                                            .child(
+                                                div()
+                                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                                    .text_color(theme.text_muted)
+                                                    .child("Question"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("question-close")
+                                                    .debug_selector(|| "question-close".into())
+                                                    .role(Role::Button)
+                                                    .aria_label("Collapse agent question")
+                                                    .cursor_pointer()
+                                                    .px(px(6.0))
+                                                    .py(px(2.0))
+                                                    .rounded(px(6.0))
+                                                    .text_color(theme.text_muted)
+                                                    .hover(|el| el.bg(crate::theme::ink(0.07)))
+                                                    .child("Collapse")
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.wizard_expanded = false;
+                                                            window.focus(&this.wizard_focus, cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                    .child(div().min_h_0().flex().flex_col().child(panel)),
+                            ),
+                    )
+                    .priority(3),
                 );
             }
+            self.wizard_expanded = false;
             let wizard = self.render_wizard((available - Theme::SPACE_LG).max(120.0), cx);
             return container.child(motion::fade_quick(
                 "composer-wizard",
@@ -10947,11 +11061,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn agent_question_narrow_pane_opens_readable_overlay(cx: &mut gpui::TestAppContext) {
+    fn agent_question_narrow_pane_opens_pane_anchored_popover(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
         let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
         visual.simulate_resize(size(px(1000.0), px(600.0)));
-        for width in [220.0, 160.0, 100.0, 80.0, 64.0] {
+        for width in [200.0, 160.0, 100.0, 80.0, 64.0] {
             handle
                 .update(cx, |composer, _, cx| {
                     composer.set_available_width(width, cx);
@@ -10970,24 +11084,25 @@ mod tests {
                 window.draw(cx).clear();
             });
             let launcher = visual.debug_bounds("question-expand").unwrap();
-            assert!(launcher.size.width <= px(width) && launcher.size.height < px(60.0));
+            assert!(launcher.size.width <= px(width) && launcher.size.height < px(40.0));
             visual.simulate_click(launcher.center(), Default::default());
             visual.update(|window, cx| {
                 window.refresh();
                 window.draw(cx).clear();
             });
-            let panel = visual.debug_bounds("question-panel").unwrap();
+            let popover = visual.debug_bounds("question-popover").unwrap();
             let submit = visual.debug_bounds("wizard-submit").unwrap();
             assert!(
-                panel.size.width >= px(600.0),
-                "overlay must escape the narrow pane: {panel:?}"
+                popover.size.width >= px(QUESTION_POPOVER_MIN_WIDTH),
+                "the question must be readable outside a sliver pane: {popover:?}"
             );
             assert!(
-                panel.left() >= px(0.0) && panel.right() <= px(1000.0),
-                "overlay outside window: {panel:?}"
+                popover.size.width < px(1000.0) && popover.size.height < px(600.0),
+                "a popover, not a window-wide takeover: {popover:?}"
             );
-            assert!(panel.top() >= px(0.0) && panel.bottom() <= px(600.0));
-            assert!(submit.bottom() <= panel.bottom());
+            assert!(popover.left() >= px(0.0) && popover.right() <= px(1000.0));
+            assert!(popover.top() >= px(0.0) && popover.bottom() <= px(600.0));
+            assert!(submit.bottom() <= popover.bottom());
             visual.simulate_click(submit.center(), Default::default());
             handle
                 .read_with(cx, |composer, _| {
@@ -10999,6 +11114,43 @@ mod tests {
             handle
                 .read_with(cx, |composer, _| assert!(!composer.wizard_expanded))
                 .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn agent_question_stays_in_a_modest_pane(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        visual.simulate_resize(size(px(1000.0), px(600.0)));
+        for (width, height, inline) in [
+            (260.0, 600.0, true),
+            (600.0, 180.0, true),
+            (600.0, 140.0, false),
+        ] {
+            handle
+                .update(cx, |composer, _, cx| {
+                    composer.set_available_width(width, cx);
+                    composer.set_available_height(height, cx);
+                    composer.wizard_expanded = false;
+                    let q = question("modest", &["Yes", "No"], true);
+                    composer.wizard = Some(Wizard::new("modest".into(), vec![q]));
+                    cx.notify();
+                })
+                .unwrap();
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+            assert_eq!(
+                visual.debug_bounds("question-expand").is_none(),
+                inline,
+                "{width}x{height}"
+            );
+            assert_eq!(
+                visual.debug_bounds("wizard-submit").is_some(),
+                inline,
+                "{width}x{height}"
+            );
         }
     }
 
