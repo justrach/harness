@@ -209,4 +209,18 @@ extension View {
     func harnessAppearance() -> some View {
         preferredColorScheme(ThemeStore.shared.preferredScheme)
     }
+
+    /// Grouped lists (Settings, Profile and their pages) on the theme's own
+    /// panel instead of the system's grouped gray, which read as the app
+    /// changing theme whenever Settings opened. Pair with
+    /// [`harnessListRow`] on each section for the card surface.
+    func harnessGroupedList() -> some View {
+        scrollContentBackground(.hidden)
+            .background(Theme.bg.ignoresSafeArea())
+    }
+
+    /// A grouped list section's rows on the theme's raised card surface.
+    func harnessListRow() -> some View {
+        listRowBackground(Theme.surfaceRaised)
+    }
 }

@@ -22,9 +22,11 @@ struct ConnectionView: View {
                         .disabled(model.signInBusy)
                 }
             }
+            .harnessListRow()
             Section("Registry") {
                 LabeledContent("Status", value: report.registry)
             }
+            .harnessListRow()
             Section("Devices") {
                 if report.devices.isEmpty {
                     Text("None yet").foregroundStyle(.secondary)
@@ -38,6 +40,7 @@ struct ConnectionView: View {
                     }
                 }
             }
+            .harnessListRow()
             Section {
                 Button("Refresh") { reload() }
                 Button("Copy report") {
@@ -46,7 +49,9 @@ struct ConnectionView: View {
             } footer: {
                 Text("Nothing here is sent anywhere. It updates when you open it or pull down.")
             }
+            .harnessListRow()
         }
+        .harnessGroupedList()
         .refreshable { reload() }
         .task { reload() }
         .navigationTitle("Connection")

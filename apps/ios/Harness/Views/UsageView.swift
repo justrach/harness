@@ -56,10 +56,12 @@ struct UsageView: View {
                         }
                         .accessibilityIdentifier("usage-device")
                     }
+                    .harnessListRow()
                 }
                 content
             }
         }
+        .harnessGroupedList()
         .refreshable { await reload() }
         .task(id: deviceId) { await reload() }
         .navigationTitle("Usage")
@@ -77,11 +79,13 @@ struct UsageView: View {
                     Spacer()
                 }
             }
+            .harnessListRow()
         case .failed(let message):
             Section {
                 Text(message).foregroundStyle(.secondary)
                 Button("Try again") { Task { await reload() } }
             }
+            .harnessListRow()
         case .loaded(let codegraff, let accounts):
             codegraffSection(codegraff)
             agentSections(accounts)
@@ -108,6 +112,7 @@ struct UsageView: View {
         } header: {
             Text("CodeGraff")
         }
+        .harnessListRow()
         .accessibilityIdentifier("usage-codegraff")
     }
 
@@ -119,6 +124,7 @@ struct UsageView: View {
                 Text("No agent sign-ins with plan limits on this computer.")
                     .foregroundStyle(.secondary)
             }
+            .harnessListRow()
         }
         ForEach(shown) { account in
             Section {
@@ -134,6 +140,7 @@ struct UsageView: View {
                 Text([account.title, account.planLabel, account.active ? "In use" : nil]
                     .compactMap { $0 }.joined(separator: " · "))
             }
+            .harnessListRow()
         }
     }
 

@@ -112,14 +112,27 @@ jobs:
             exit 3
           fi
           caps="$RUNNER_TEMP/capabilities.json"
-          api "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_id/bundleIdCapabilities?limit=200" > "$caps"
+          # The capabilities relationship takes no paging parameters (`limit`
+          # made Apple answer 400); print Apple's reply if it still refuses.
+          if ! api "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_id/bundleIdCapabilities" > "$caps"; then
+            echo "::error::Couldn't read the capabilities of harness.codegraff.ios:"
+            jq -r '.errors[]? | "\(.status) \(.code): \(.title) — \(.detail)"' "$caps" 2>/dev/null || cat "$caps"
+            exit 4
+          fi
           if jq -e '.data[] | select(.attributes.capabilityType == "PUSH_NOTIFICATIONS")' "$caps" > /dev/null; then
             echo "Push Notifications already enabled on harness.codegraff.ios."
           else
-            curl --globoff --fail-with-body --silent --show-error -X POST \
+            # Apple's error body says why a capability can't be added; keep it.
+            push_reply="$RUNNER_TEMP/push-capability.json"
+            if ! curl --globoff --fail-with-body --silent --show-error -X POST \
               -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
               'https://api.appstoreconnect.apple.com/v1/bundleIdCapabilities' \
-              --data "$(jq -n --arg id "$bundle_id" '{data: {type: "bundleIdCapabilities", attributes: {capabilityType: "PUSH_NOTIFICATIONS"}, relationships: {bundleId: {data: {type: "bundleIds", id: $id}}}}}')" > /dev/null
+              --data "$(jq -n --arg id "$bundle_id" '{data: {type: "bundleIdCapabilities", attributes: {capabilityType: "PUSH_NOTIFICATIONS"}, relationships: {bundleId: {data: {type: "bundleIds", id: $id}}}}}')" \
+              -o "$push_reply"; then
+              echo "::error::Couldn't enable Push Notifications on harness.codegraff.ios:"
+              jq -r '.errors[]? | "\(.status) \(.code): \(.title) — \(.detail)"' "$push_reply" 2>/dev/null || cat "$push_reply"
+              exit 4
+            fi
             echo "Enabled Push Notifications on harness.codegraff.ios."
           fi
 

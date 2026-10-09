@@ -1,0 +1,41 @@
+name: Kache
+description: >-
+  Compiler cache for this job's Rust builds, shared across jobs, pull requests
+  and releases through the CI cache bucket. Skipped, so the job builds as
+  before, when the bucket credentials are not available (fork pull requests).
+inputs:
+  access-key-id:
+    description: Bucket access key id (secrets.KACHE_S3_ACCESS_KEY_ID).
+    default: ''
+  secret-access-key:
+    description: Bucket secret access key (secrets.KACHE_S3_SECRET_ACCESS_KEY).
+    default: ''
+  endpoint:
+    description: S3 endpoint of the bucket (secrets.KACHE_S3_ENDPOINT).
+    default: ''
+  manifest-key:
+    description: >-
+      Build variant this job compiles, so jobs that build different things
+      keep separate prefetch manifests.
+    required: true
+runs:
+  using: composite
+  steps:
+    # Pushes to main publish under artifacts/. A pull request reads those,
+    # and writes its own work under artifacts-pr/ so its next push reuses it.
+    # Tags and other refs only read.
+    - name: Pull request cache prefix
+      if: inputs.access-key-id != '' && github.event_name == 'pull_request'
+      shell: bash
+      run: echo "KACHE_PULL_REQUEST_PREFIX=artifacts-pr" >> "$GITHUB_ENV"
+    - if: inputs.access-key-id != '' && inputs.secret-access-key != '' && inputs.endpoint != ''
+      uses: kunobi-ninja/kache-action@v1
+      with:
+        s3-bucket: harness-kache
+        s3-region: auto
+        s3-endpoint: ${{ inputs.endpoint }}
+        s3-access-key-id: ${{ inputs.access-key-id }}
+        s3-secret-access-key: ${{ inputs.secret-access-key }}
+        github-cache: false
+        manifest-key: ${{ inputs.manifest-key }}-${{ runner.os }}-${{ runner.arch }}
+        job-summary: true
