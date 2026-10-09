@@ -1,12 +1,13 @@
 //! The codedb CLI that Harness keeps for its agents, the way it keeps graff.
 //!
-//! - Managed: `~/.harness/bin/codedb`, installed from codedb's GitHub
+//! - Managed: `~/.harness/tools/bin/codedb`, installed from codedb's GitHub
 //!   releases when missing and replaced when a newer release is out. Every
 //!   asset is checked against the release's `checksums.sha256` and must run
 //!   `--version` before it is swapped in.
 //! - Agents find it on `PATH`: [`crate::compose_path`] appends
-//!   `~/.harness/bin`, after the user's own directories, so a codedb the user
-//!   installed themselves still wins.
+//!   `~/.harness/tools/bin`, after the user's own directories, so a codedb
+//!   the user installed themselves still wins. Not `~/.harness/bin`: a graff
+//!   session puts graff's own directory first, which would shadow theirs.
 //!
 //! Set `HARNESS_CODEDB_AUTO_INSTALL=0` to leave codedb alone entirely.
 
@@ -42,7 +43,12 @@ fn binary_name() -> &'static str {
 
 /// Where Harness keeps its codedb (whether or not it exists yet).
 pub fn managed_path() -> Option<PathBuf> {
-    crate::executable::home_dir().map(|home| home.join(".harness").join("bin").join(binary_name()))
+    crate::executable::home_dir().map(|home| {
+        home.join(".harness")
+            .join("tools")
+            .join("bin")
+            .join(binary_name())
+    })
 }
 
 /// Whether Harness may install or update codedb.

@@ -247,7 +247,8 @@ fn compose_path<'a>(
     if let Some(shell_path) = shell_env::login_shell_path() {
         paths.extend(std::env::split_paths(shell_path));
     }
-    // Harness's own tools (codedb) come last: one the user installed wins.
+    // Harness's own tools (codedb, in ~/.harness/tools/bin) come last: one
+    // the user installed wins.
     if let Some(managed) = codedb_bundle::managed_path()
         && let Some(dir) = managed.parent()
     {
