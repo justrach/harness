@@ -6,6 +6,10 @@ name: release-prebuild
 # instead of spending most of its time compiling them. The version bump
 # changes every workspace crate, so nothing earlier can warm those.
 #
+# kache uploads only from pushes to protected branches, so release/v*
+# branches carry a ruleset (no force-push) like main's; without it this job
+# reads the cache and writes nothing.
+#
 # Keep the job name (`macos`), the kache manifest key and the cargo command
 # identical to release.yml's macOS job and scripts/package-macos.sh, or the
 # cache keys stop matching. Nothing is signed, packaged or published here.

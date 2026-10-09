@@ -29,9 +29,9 @@ runs:
   steps:
     # Pushes to main publish under artifacts/. A pull request reads those,
     # and writes its own work under artifacts-pr/ so its next push reuses it.
-    # Other pushes, release tags and release/v* branches included, also
-    # publish under artifacts/, which is how release-prebuild.yml warms the
-    # tag build.
+    # kache writes only from pushes to protected branches: main and
+    # release/v* (each has a ruleset), which is how release-prebuild.yml
+    # warms the tag build. Tags and other refs only read.
     - name: Pull request cache prefix
       if: inputs.access-key-id != '' && github.event_name == 'pull_request'
       shell: bash
