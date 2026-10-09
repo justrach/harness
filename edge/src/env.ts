@@ -37,7 +37,25 @@ export interface Env {
   AUTH_MODE: string;
   /** Gateway that vouches for a sandbox's device token (default https://gateway.codegraff.com); tests point it elsewhere. */
   CODEGRAFF_GATEWAY_URL?: string;
+  /** APNs auth key (contents of AuthKey_XXXX.p8, wrangler secret) and its
+   * key id. Unset ⇒ session notifications are decided and logged, not sent. */
+  APNS_KEY_P8?: string;
+  APNS_KEY_ID?: string;
+  /** Apple team id and the app's bundle id (defaults: the Harness iOS app). */
+  APNS_TEAM_ID?: string;
+  APNS_TOPIC?: string;
 }
+
+/** APNs settings, when push is set up for this deployment. */
+export const apnsConfig = (env: Env) =>
+  env.APNS_KEY_P8 && env.APNS_KEY_ID
+    ? {
+        keyP8: env.APNS_KEY_P8,
+        keyId: env.APNS_KEY_ID,
+        teamId: env.APNS_TEAM_ID ?? "WWP9DLJ27P",
+        topic: env.APNS_TOPIC ?? "harness.codegraff.ios"
+      }
+    : undefined;
 
 /** Header the Worker stamps on requests it forwards into DOs after verifying
  * the caller's JWT. DOs trust it blindly — they are only reachable through
