@@ -26,6 +26,8 @@ jobs:
     runs-on: macos-latest # Apple silicon, as in release.yml
     steps:
       - uses: actions/checkout@v4
+      - name: protected ref (temporary diagnostic)
+        run: echo "GITHUB_REF_PROTECTED=$GITHUB_REF_PROTECTED"
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ./.github/actions/kache
@@ -35,8 +37,5 @@ jobs:
           endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
           cache-executables: 'true'
-      - name: key components for small crates that miss (temporary diagnostic)
-        run: |
-          KACHE_LOG='kache=trace' cargo build --release -p collections -p http_client 2>&1 \
-            | grep -E '\[key:(collections|http_client|serde|libc)\]' | sed -E 's/^.*\[key:/[key:/' > keys.txt || true
-          wc -l keys.txt; cat keys.txt
+      - name: build the release binary (as scripts/package-macos.sh)
+        run: cargo build --release -p harness
