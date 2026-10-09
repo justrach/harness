@@ -181,7 +181,7 @@ impl Shell {
     /// stays whole in its own tab.
     pub(super) fn new_chat_tab(&mut self, open: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.route, Route::Chat) {
-            return;
+            self.close_settings(cx);
         }
         let parked = self.park_chat_tab(cx);
         let project = parked.project.clone();

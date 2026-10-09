@@ -1069,7 +1069,7 @@ impl ShortcutId {
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::SplitTerminal => "Split terminal right",
             ShortcutId::SplitTerminalDown => "Split terminal down",
-            ShortcutId::NewSession => "New session",
+            ShortcutId::NewSession => "New chat",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenModelPicker => "Open model picker",
             ShortcutId::NextSession => "Next tab or session",
@@ -1102,7 +1102,8 @@ impl ShortcutId {
             ShortcutId::SplitTerminal => "mod-shift-d",
             ShortcutId::SplitTerminalDown if mac => "mod-shift-d",
             ShortcutId::SplitTerminalDown => "mod-alt-shift-d",
-            ShortcutId::NewSession => "mod-n",
+            ShortcutId::NewSession if mac => "mod-t",
+            ShortcutId::NewSession => "mod-shift-t",
             ShortcutId::NewProject => "mod-shift-n",
             ShortcutId::OpenModelPicker => "mod-/",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
@@ -1589,6 +1590,19 @@ impl UiSettings {
                         if let Some(legacy) = settings.remove("filesEditorFontSize") {
                             settings.entry("codeFontSize").or_insert(legacy);
                         }
+                    }
+                    // Replace the retired new-session default with the unified
+                    // new-tab shortcut, without changing custom bindings.
+                    if let Some(keymap) = value
+                        .get_mut("keymap")
+                        .and_then(serde_json::Value::as_object_mut)
+                        && keymap.get("newSession").and_then(serde_json::Value::as_str)
+                            == Some("mod-n")
+                    {
+                        keymap.insert(
+                            "newSession".into(),
+                            serde_json::json!(ShortcutId::NewSession.default_combo()),
+                        );
                     }
                     if let Some(keymap) = value
                         .get_mut("keymap")
@@ -3116,7 +3130,10 @@ mod tests {
             keymap.get(ShortcutId::PrevSession),
             format!("{ctrl}-shift-tab")
         );
-        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-n");
+        assert_eq!(
+            keymap.get(ShortcutId::NewSession),
+            ShortcutId::NewSession.default_combo()
+        );
         assert_eq!(keymap.get(ShortcutId::ArchiveSession), "mod-shift-a");
         keymap.set(ShortcutId::ToggleSidebar, "mod-shift-x".into());
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");

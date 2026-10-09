@@ -358,7 +358,6 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         // its address bar: its Browser-scoped binding is bound later).
         KeyBinding::new(&b("cmd-l", "ctrl-shift-l"), FocusComposer, None),
         // Chat tabs (`chat_tabs.rs`): Safari/Terminal's keys on macOS.
-        KeyBinding::new(&b("cmd-t", "ctrl-shift-t"), NewChatTab, None),
         KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
         KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
     ]

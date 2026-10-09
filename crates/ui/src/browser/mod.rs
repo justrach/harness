@@ -31,6 +31,10 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
         !combo.is_empty()
             && !ShortcutId::ALL.iter().any(|id| {
                 Some(*id) != own
+                    // The default new-chat key remains contextual: in a browser,
+                    // Cmd+T opens a browser tab. Custom app chords still win.
+                    && !(*id == ShortcutId::NewSession
+                        && keymap.get(*id) == id.default_combo())
                     && gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
                         == gpui::Keystroke::parse(&platform_combo(combo)).ok()
             })
