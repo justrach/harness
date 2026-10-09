@@ -82,8 +82,15 @@ jobs:
         run: cargo test --release --locked -p harness-ui --lib -- --test-threads=1
 
   macos-frame-recovery:
+    # Three release builds that share little, so they run side by side
+    # instead of one after another on a single runner.
+    name: macos-frame-recovery (${{ matrix.suite }})
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [app, native-ui, browser]
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
@@ -108,20 +115,32 @@ jobs:
           PY
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ matrix.suite }}
           cache-on-failure: true
           workspaces: |
             .
             ${{ steps.gpui-source.outputs.workspace }}
       - name: Check macOS application
+        if: matrix.suite == 'app'
         run: cargo check --release --locked -p harness
+      - name: Native frame-source recovery regression
+        if: matrix.suite == 'app'
+        working-directory: ${{ steps.gpui-source.outputs.workspace }}
+        # The vendored GPUI workspace has no independent lockfile. Its source
+        # is pinned by this checkout and selected from Cargo.toml above.
+        run: cargo test --release -p gpui_macos --test frame_source_recovery
       - name: Native diff font geometry regression
+        if: matrix.suite == 'native-ui'
         run: cargo test --release --locked -p harness-ui --lib native_diff_font_geometry -- --test-threads=1
       - name: Native notification click regressions
+        if: matrix.suite == 'native-ui'
         run: |
           cargo test --release --locked -p harness-ui --lib notify::tests:: -- --test-threads=1
       - name: Build native browser fixture
+        if: matrix.suite == 'browser'
         run: cargo build --release --locked -p harness-ui --example browser-fixture --example preview-fixture --features browser-fixture
       - name: Native browser regression and screenshots
+        if: matrix.suite == 'browser'
         timeout-minutes: 3
         env:
           RUST_BACKTRACE: 1
@@ -129,18 +148,21 @@ jobs:
           bash scripts/run-macos-browser-fixture.sh target/release/examples/browser-fixture "$RUNNER_TEMP/browser-captures"
           test -f "$RUNNER_TEMP/browser-captures/result.txt"
       - name: Upload browser screenshots
-        if: always()
+        if: always() && matrix.suite == 'browser'
         uses: actions/upload-artifact@v4
         with:
           name: browser-macos-captures
           path: ${{ runner.temp }}/browser-captures
           if-no-files-found: ignore
       - uses: actions/setup-node@v4
+        if: matrix.suite == 'browser'
         with:
           node-version: 24
       - name: Install preview fixture server
+        if: matrix.suite == 'browser'
         run: npm ci --prefix edge
       - name: Project discovery, stable URLs and HMR in native WebKit
+        if: matrix.suite == 'browser'
         timeout-minutes: 3
         env:
           HARNESS_PREVIEW_AUTO_OPEN: 1
@@ -148,17 +170,12 @@ jobs:
           VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
       - name: Upload preview screenshots
-        if: always()
+        if: always() && matrix.suite == 'browser'
         uses: actions/upload-artifact@v4
         with:
           name: preview-macos-captures
           path: ${{ runner.temp }}/preview-captures
           if-no-files-found: ignore
-      - name: Native frame-source recovery regression
-        working-directory: ${{ steps.gpui-source.outputs.workspace }}
-        # The vendored GPUI workspace has no independent lockfile. Its source
-        # is pinned by this checkout and selected from Cargo.toml above.
-        run: cargo test --release -p gpui_macos --test frame_source_recovery
 
   ios-tests:
     # Skipped for now: the iOS app isn't shipping yet and this job fails.
