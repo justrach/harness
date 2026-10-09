@@ -558,7 +558,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // was tried and rejected: rewriting the chip per delta batch grew
         // the parent doc's oplog for the whole subagent run and rendered as
         // distracting mid-stream fragments (user call, 2026-08-18). The
-        // `subagent_tail` field stays in the schema for docs that carry it.
+        // `subagent_tail` field is written only by an explicit, low-frequency
+        // [`AgentEvent::SubagentProgress`] (a workflow's agent count moving).
         AgentEvent::Subagent {
             parent_tool_use_id,
             event,
@@ -577,11 +578,16 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
                 _ => None,
             };
+            let summary = match event.as_ref() {
+                AgentEvent::SubagentProgress { summary } => Some(summary),
+                _ => None,
+            };
             for p in out.iter_mut() {
                 if let MessagePart::Tool {
                     id,
                     call,
                     subagent_status,
+                    subagent_tail,
                     ..
                 } = p
                     && id == parent_tool_use_id
@@ -609,6 +615,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                         }
                         None => {}
                     }
+                    if let Some(summary) = summary {
+                        *subagent_tail = Some(summary.clone());
+                    }
                 }
             }
         }
@@ -623,7 +632,9 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::ReasoningChanged { .. }
         | AgentEvent::ToolProgress { .. }
-        | AgentEvent::UserMessage { .. } => {}
+        // SubagentProgress only means something tagged (handled above).
+        | AgentEvent::UserMessage { .. }
+        | AgentEvent::SubagentProgress { .. } => {}
     }
 }
 
@@ -1492,6 +1503,57 @@ mod tests {
             } => assert_eq!(*subagent_status, None),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn subagent_progress_stamps_only_a_spawn_chips_tail() {
+        let progress = |id: &str| AgentEvent::Subagent {
+            parent_tool_use_id: id.into(),
+            event: Box::new(AgentEvent::SubagentProgress {
+                summary: "1/2 agents".into(),
+            }),
+        };
+        let mut parts = Vec::new();
+        for (id, call) in [
+            (
+                "toolu_wf",
+                ToolCall::Unknown {
+                    name: "Agent: Repo scan".into(),
+                    input: None,
+                },
+            ),
+            (
+                "toolu_bash",
+                ToolCall::Exec {
+                    command: "ls".into(),
+                },
+            ),
+        ] {
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: id.into(),
+                    call,
+                },
+            );
+            fold_event_into_parts(&mut parts, &progress(id));
+        }
+        let tails: Vec<_> = parts
+            .iter()
+            .map(|p| match p {
+                MessagePart::Tool { subagent_tail, .. } => subagent_tail.as_deref(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(tails, [Some("1/2 agents"), None]);
+        // Untagged, it means nothing and adds no part.
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::SubagentProgress {
+                summary: "x".into(),
+            },
+        );
+        assert_eq!(parts.len(), 2);
     }
 
     #[test]
