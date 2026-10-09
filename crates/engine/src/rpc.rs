@@ -459,6 +459,11 @@ struct StartAgentLoginParams {
     /// Which sign-in, for harnesses that have several (graff: `xai`, `kimi`, `zai`).
     #[serde(default)]
     provider: Option<String>,
+    /// Finish graff's ChatGPT recovery on the calling device (a phone) instead
+    /// of the host's browser: the reply carries the authorize page, and the
+    /// caller returns the redirect via `CompleteAgentLogin`.
+    #[serde(default)]
+    relay_browser: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3259,10 +3264,26 @@ impl RpcService for EngineRpc {
                             .into(),
                     ));
                 }
+                if p.relay_browser
+                    && (p.harness != HarnessId::Graff
+                        || p.provider.as_deref() != Some("chatgpt-new"))
+                {
+                    return Err(RpcError::Failed(
+                        "Finishing sign-in on another device is supported only for graff's ChatGPT sign-in."
+                            .into(),
+                    ));
+                }
                 let start = match (p.harness, p.provider.as_deref()) {
                     // Recovery attaches to a sign-in already waiting on this host.
                     (HarnessId::Graff, Some(provider)) if p.reauthenticate => {
-                        self.agent_accounts.start_graff_reauth(provider).await
+                        self.agent_accounts
+                            .start_graff_reauth(provider, p.relay_browser)
+                            .await
+                    }
+                    (HarnessId::Graff, Some(provider)) if p.relay_browser => {
+                        self.agent_accounts
+                            .start_graff_login_relayed(provider)
+                            .await
                     }
                     (HarnessId::Graff, Some(provider)) => {
                         self.agent_accounts.start_graff_login(provider).await
@@ -3292,6 +3313,15 @@ impl RpcService for EngineRpc {
             }
             methods::COMPLETE_AGENT_LOGIN => {
                 let p: CompleteAgentLoginParams = parse_params(params)?;
+                // A relayed ChatGPT sign-in: `code` is the redirect it landed on.
+                if let Some(done) = self
+                    .agent_accounts
+                    .complete_relayed_login(&p.login_id, &p.code)
+                    .await
+                {
+                    done.map_err(|e| RpcError::Failed(e.to_string()))?;
+                    return RpcReply::value(&serde_json::json!({ "ok": true }));
+                }
                 let snapshot = self
                     .agent_accounts
                     .complete_login(&p.login_id, &p.code)

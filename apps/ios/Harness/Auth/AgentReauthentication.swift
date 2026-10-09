@@ -1,12 +1,14 @@
 // Agent credentials belong to the execution host. The phone may approve a
-// device-code login, but token exchange and credential storage stay on the host.
-// A host-browser fallback never exposes its loopback OAuth URL.
+// device-code login, or finish graff's ChatGPT sign-in in its own browser and
+// hand the redirect back, but token exchange and credential storage stay on
+// the host (it holds the PKCE verifier).
 import Foundation
 import Observation
 
 struct AgentLoginStart: Decodable, Sendable {
     enum Mode: String, Decodable, Sendable {
         case browser, hostBrowser = "host-browser", pasteCode = "paste-code", deviceCode = "device-code"
+        case relayBrowser = "relay-browser"
     }
     let loginId: String
     let url: String
@@ -28,6 +30,8 @@ protocol AgentLoginTransport {
     func start(provider: AgentReauthProvider) async throws -> AgentLoginStart
     func poll(loginId: String) async throws -> AgentLoginPoll
     func cancel(loginId: String) async
+    /// Hand the host the redirect a phone-browser sign-in landed on.
+    func complete(loginId: String, redirect: String) async throws
 }
 
 /// SessionStore selects the chat's host once, including for cleanup.
@@ -46,6 +50,12 @@ struct RelayAgentLoginTransport: AgentLoginTransport {
     func cancel(loginId: String) async {
         let _: AgentLoginAcknowledgement? = try? await relay.call(
             method: "CancelAgentLogin", params: ["loginId": loginId])
+    }
+
+    func complete(loginId: String, redirect: String) async throws {
+        let _: AgentLoginAcknowledgement = try await relay.call(
+            method: "CompleteAgentLogin", params: ["loginId": loginId, "code": redirect],
+            timeoutSeconds: 30)
     }
 }
 
@@ -75,7 +85,44 @@ final class AgentReauthentication {
         }
     }
 
+    /// graff's ChatGPT sign-in, finished in this phone's browser. Only OpenAI's
+    /// authorize page with a 127.0.0.1 redirect qualifies; the host re-checks the
+    /// redirect against its own sign-in before delivering it.
+    struct BrowserSignIn: Equatable, Sendable {
+        let url: URL
+        let callbackPort: Int
+        let callbackPath: String
+
+        fileprivate init?(url: String) {
+            guard let parsed = URLComponents(string: url),
+                  parsed.scheme == "https", parsed.host == "auth.openai.com",
+                  parsed.user == nil, parsed.password == nil, parsed.port == nil,
+                  parsed.fragment == nil, parsed.path == "/api/accounts/authorize",
+                  let items = parsed.queryItems,
+                  items.contains(where: { $0.name == "state" && !($0.value ?? "").isEmpty }),
+                  let redirectValue = items.first(where: { $0.name == "redirect_uri" })?.value,
+                  let redirect = URLComponents(string: redirectValue),
+                  redirect.scheme == "http", redirect.host == "127.0.0.1",
+                  let port = redirect.port, !redirect.path.isEmpty,
+                  redirect.query == nil, redirect.fragment == nil,
+                  let approvedURL = parsed.url else { return nil }
+            self.url = approvedURL
+            self.callbackPort = port
+            self.callbackPath = redirect.path
+        }
+
+        /// The browser reached this sign-in's loopback redirect.
+        func isCallback(_ url: URL) -> Bool {
+            guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+            return parts.scheme == "http" && parts.host == "127.0.0.1"
+                && parts.port == callbackPort && parts.path == callbackPath
+        }
+    }
+
     private(set) var approval: Approval?
+    private(set) var browserSignIn: BrowserSignIn?
+    /// The redirect went to the host, which is now finishing the sign-in.
+    private(set) var handedOff = false
     private var loginId: String?
     @ObservationIgnored private var generation: UInt64 = 0
     /// Attempts ended by an explicit Cancel: a sign-in that starts late for one of them is ended too.
@@ -108,8 +155,46 @@ final class AgentReauthentication {
         generation &+= 1
         loginId = nil
         approval = nil
+        browserSignIn = nil
+        handedOff = false
+        redirectError = nil
         phase = .idle
     }
+
+    /// Finish a phone-browser sign-in: send the address the browser landed on
+    /// (caught in the in-app browser, or pasted after Safari). The host checks
+    /// it is this sign-in's redirect; polling then reports the outcome.
+    @discardableResult
+    func finish(redirect: String) async -> Bool {
+        let landed = redirect.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard phase == .waiting, let signIn = browserSignIn, let loginId, let transport,
+              !handedOff else { return false }
+        guard let url = URL(string: landed), signIn.isCallback(url) else {
+            redirectError = "That isn't the address ChatGPT sent you to. Copy the whole address of the page that didn't load."
+            return false
+        }
+        let attempt = generation
+        redirectError = nil
+        handedOff = true
+        do {
+            try await transport.complete(loginId: loginId, redirect: landed)
+            return generation == attempt
+        } catch {
+            guard generation == attempt else { return false }
+            handedOff = false
+            switch error {
+            case RelayError.hostOffline, RelayError.notConnected:
+                redirectError = "The execution device is offline. Reconnect it and try again."
+            default:
+                // Host text may echo the redirect; keep a fixed message.
+                redirectError = "The execution device didn't accept this sign-in. Start again."
+            }
+            return false
+        }
+    }
+
+    /// Why the last redirect wasn't handed to the host.
+    private(set) var redirectError: String?
 
     /// User-triggered only. Late start/poll responses cannot restore a
     /// dismissed sheet or overwrite a replacement attempt's state.
@@ -149,6 +234,13 @@ final class AgentReauthentication {
                 guard started.url.isEmpty, started.code == nil || started.code == "" else {
                     throw RelayError.rpc("The execution device returned invalid desktop sign-in details.")
                 }
+            case .relayBrowser:
+                // graff's ChatGPT sign-in, finished in this phone's browser.
+                guard provider == .chatGPTNew, started.code == nil || started.code == "",
+                      let signIn = BrowserSignIn(url: started.url) else {
+                    throw RelayError.rpc("The execution device returned invalid sign-in details.")
+                }
+                browserSignIn = signIn
             case .browser, .pasteCode:
                 throw RelayError.rpc("Update Harness on the execution device to use supported sign-in recovery.")
             }
@@ -165,6 +257,8 @@ final class AgentReauthentication {
                 case .done:
                     loginId = nil
                     approval = nil
+                    browserSignIn = nil
+                    handedOff = false
                     phase = .done
                 case .error:
                     // Do not retain arbitrary host output or OAuth material.
@@ -186,7 +280,9 @@ final class AgentReauthentication {
                 message = "The execution device did not respond. Check its connection and try again."
             default:
                 // Relay/CLI error text may contain authorization URLs or tokens.
-                message = "Sign-in failed. Try again on the execution device."
+                message = browserSignIn != nil
+                    ? "ChatGPT sign-in didn't finish. Sign in again, and allow plan usage when asked."
+                    : "Sign-in failed. Try again on the execution device."
             }
             cancel()
             phase = .failed(message)

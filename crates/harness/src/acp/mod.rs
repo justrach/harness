@@ -3928,14 +3928,22 @@ async fn run_session(session: Session) {
     // `session/prompt` into a session that is visibly mid SELF-CONTINUED
     // turn — that prompt's reply is what the adapter drops (the verified
     // starve). Visibly busy = an open tool call, or stream traffic within
-    // BUSY_RECENT, with no prompt of ours outstanding. The discipline is
-    // Zed's, verified against the real adapter: `session/cancel` the
-    // unowned turn, give it CANCEL_FLUSH to die and drain, then prompt.
-    // This makes the interactive path starve-free; the settle layers below
-    // remain for the notification race a client cannot see coming.
+    // BUSY_RECENT, with no prompt of ours outstanding. The message waits
+    // (rechecked every BUSY_RECHECK) until the agent goes quiet, then goes
+    // out as the next prompt. It never cancels the unowned turn: that was
+    // Zed's discipline, but it killed the agent's own work every time a
+    // message (typed, or another chat's `send_message`) arrived mid-turn.
+    // The settle layers below remain for the notification race a client
+    // cannot see coming.
+    // Graff needs none of this: a prompt sent into its self-continued turn
+    // (a background subagent finishing wakes the parent) waits for that turn's
+    // `gui_turn_end` and then gets its own response (verified live, graff
+    // 0.0.302.18). Its background subagents also stream `graff/subagent_event`
+    // frames, which would read as busy for as long as a child runs.
+    let defer_into_busy = harness != HarnessId::Graff;
     const BUSY_RECENT: Duration = Duration::from_secs(3);
-    const CANCEL_FLUSH: Duration = Duration::from_secs(2);
-    let mut cancel_flush_deadline: Option<tokio::time::Instant> = None;
+    const BUSY_RECHECK: Duration = Duration::from_millis(500);
+    let mut busy_defer_deadline: Option<tokio::time::Instant> = None;
 
     let mut child_exit = None;
     let mut exit_drain_deadline = None;
@@ -4479,15 +4487,20 @@ async fn run_session(session: Session) {
                 }
             },
 
-            // Busy-session cancel flushed (see BUSY_RECENT/CANCEL_FLUSH
-            // above): the unowned self-continued turn had its cancel and a
-            // drain window; the queued steer becomes a fresh prompt on a
-            // now-idle agent.
+            // Deferred steer recheck (see BUSY_RECENT/BUSY_RECHECK above):
+            // while the self-continued turn is still busy, keep waiting;
+            // once it has gone quiet, the queued steer becomes a fresh
+            // prompt on a now-idle agent.
             _ = tokio::time::sleep_until(
-                cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
-            ), if cancel_flush_deadline.is_some() && !interrupted => {
-                cancel_flush_deadline = None;
+                busy_defer_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if busy_defer_deadline.is_some() && !interrupted => {
+                busy_defer_deadline = None;
                 if turn.is_none()
+                    && !queued_steers.is_empty()
+                    && (!open_tools.is_empty() || last_update_at.elapsed() < BUSY_RECENT)
+                {
+                    busy_defer_deadline = Some(tokio::time::Instant::now() + BUSY_RECHECK);
+                } else if turn.is_none()
                     && let Some(text) = queued_steers.pop_front()
                 {
                     let (prev, next) = rotate(&mut assistant_message_id);
@@ -4609,29 +4622,26 @@ async fn run_session(session: Session) {
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
-                    if turn.is_none() && cancel_flush_deadline.is_some() {
-                        // A busy-session cancel is already in flight: this
-                        // steer lines up behind it and dispatches at flush.
+                    if turn.is_none() && busy_defer_deadline.is_some() {
+                        // A steer is already waiting out the busy session:
+                        // this one lines up behind it.
                         queued_steers.push_back(text);
                     } else if turn.is_none()
+                        && defer_into_busy
                         && (!open_tools.is_empty()
                             || last_update_at.elapsed() < BUSY_RECENT)
                     {
                         // Mid self-continued turn (see BUSY_RECENT above):
-                        // cancel it rather than prompt into the starve.
-                        //
+                        // wait for it to go quiet rather than prompt into
+                        // the starve or cancel the agent's work.
                         tracing::info!(
                             target: "harness_adapters::acp",
-                            "steer into a self-continuing session; cancelling \
-                             the unowned turn before prompting"
-                        );
-                        client.notify(
-                            "session/cancel",
-                            Some(json!({ "sessionId": session_id })),
+                            "steer into a self-continuing session; holding it \
+                             until the agent goes quiet"
                         );
                         queued_steers.push_back(text);
-                        cancel_flush_deadline =
-                            Some(tokio::time::Instant::now() + CANCEL_FLUSH);
+                        busy_defer_deadline =
+                            Some(tokio::time::Instant::now() + BUSY_RECHECK);
                     } else if turn.is_none() {
                         // Idle between turns: a steer is simply the next turn.
                         let (prev, next) = rotate(&mut assistant_message_id);

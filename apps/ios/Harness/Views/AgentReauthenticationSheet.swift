@@ -10,6 +10,8 @@ struct AgentReauthenticationSheet: View {
     var resume: (() -> Bool)? = nil
     @State private var recovery: AgentReauthentication
     @State private var attempt = 0
+    @State private var browsing = false
+    @State private var pasted = ""
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
@@ -60,6 +62,8 @@ struct AgentReauthenticationSheet: View {
                                 ProgressView()
                                 Text("Waiting for approval and host sign-in…")
                             }
+                        } else if let signIn = recovery.browserSignIn {
+                            phoneSignIn(signIn)
                         } else {
                             Text("Complete sign-in on \(hostName)")
                                 .font(Theme.sans(16, weight: .medium))
@@ -121,5 +125,58 @@ struct AgentReauthenticationSheet: View {
         // Dismissal only stops watching: the sign-in keeps waiting on the host, and reopening
         // attaches to it. The Cancel button is the explicit way to end it.
         .onDisappear { recovery.detach() }
+        .sheet(isPresented: $browsing) {
+            if let signIn = recovery.browserSignIn {
+                ChatGPTSignInBrowser(signIn: signIn) { redirect in
+                    Task { await recovery.finish(redirect: redirect) }
+                }
+            }
+        }
+    }
+
+    /// graff's ChatGPT sign-in finished here: in the in-app browser, or in Safari
+    /// for accounts whose provider blocks in-app sign-in (Google), then pasting
+    /// the address of the page that didn't load.
+    @ViewBuilder
+    private func phoneSignIn(_ signIn: AgentReauthentication.BrowserSignIn) -> some View {
+        if recovery.handedOff {
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Finishing sign-in on \(hostName)…")
+            }
+        } else {
+            Text("Sign in on your iPhone")
+                .font(Theme.sans(16, weight: .medium))
+            Text("Sign in to ChatGPT here and allow access for \(hostName). Only continue with a sign-in you started.")
+                .foregroundStyle(Theme.textMuted)
+            Button("Sign in with ChatGPT") { browsing = true }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("agent-reauth-phone-browser")
+            if let error = recovery.redirectError {
+                Text(error).foregroundStyle(Theme.danger)
+            }
+            DisclosureGroup("Signing in with Google?") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Google doesn't allow sign-in inside apps. Open the page in Safari, sign in, and when Safari says it can't open the final page, copy that page's address and paste it here.")
+                        .foregroundStyle(Theme.textMuted)
+                    Button("Open in Safari") { openURL(signIn.url) }
+                    TextField("Address of the page that didn't load", text: $pasted)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("agent-reauth-pasted-redirect")
+                    Button("Finish sign-in") {
+                        let redirect = pasted
+                        Task {
+                            if await recovery.finish(redirect: redirect) { pasted = "" }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(pasted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(.top, 8)
+            }
+        }
     }
 }
