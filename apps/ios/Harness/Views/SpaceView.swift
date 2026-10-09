@@ -132,6 +132,7 @@ struct NewSpaceSheet: View {
     @State private var loading = false
     @State private var error: String?
     @State private var creating = false
+    @State private var query = ""
 
     private var devices: [DeviceRow] {
         model.executionDevices
@@ -161,6 +162,8 @@ struct NewSpaceSheet: View {
             .background(SheetStyle.panel)
             .navigationTitle("New space")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "Search this folder")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button {
@@ -187,6 +190,10 @@ struct NewSpaceSheet: View {
         .presentationCornerRadius(32)
         .harnessAppearance()
         .task(id: selectedDeviceId) {
+            // Hold on to the computer the sheet opened on: falling back to "the
+            // first device" let a re-sorted device list switch computers and
+            // reload the listing from the top while someone was browsing.
+            if deviceId == nil { deviceId = selectedDeviceId }
             await load(path: nil)
         }
     }
@@ -264,9 +271,12 @@ struct NewSpaceSheet: View {
                         .foregroundStyle(Theme.danger)
                         .padding(.horizontal, 4)
                 }
-                let folders = (listing?.entries ?? []).filter(\.isDir)
+                let needle = query.trimmingCharacters(in: .whitespaces)
+                let folders = (listing?.entries ?? []).filter {
+                    $0.isDir && (needle.isEmpty || $0.name.localizedCaseInsensitiveContains(needle))
+                }
                 if folders.isEmpty, !loading, error == nil, listing != nil {
-                    Text("No folders here")
+                    Text(needle.isEmpty ? "No folders here" : "No folders match \u{201C}\(needle)\u{201D}")
                         .font(Theme.sans(13))
                         .foregroundStyle(Theme.textFaint)
                         .frame(maxWidth: .infinity)
