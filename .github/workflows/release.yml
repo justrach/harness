@@ -118,7 +118,10 @@ jobs:
           access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
           endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          # Same job name, key and command as release-prebuild.yml, which
+          # builds the release branch first: keep the three in step.
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
+          cache-executables: 'true'
       - name: import Developer ID certificate
         if: steps.signing.outputs.enabled == 'true'
         run: |

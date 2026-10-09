@@ -18,12 +18,20 @@ inputs:
       Build variant this job compiles, so jobs that build different things
       keep separate prefetch manifests.
     required: true
+  cache-executables:
+    description: >-
+      Also cache binaries, dylibs and proc macros. The release builds turn it
+      on so the app binary, the slowest unit to build, can come from the
+      cache when release-prebuild.yml already built the same tree.
+    default: 'false'
 runs:
   using: composite
   steps:
     # Pushes to main publish under artifacts/. A pull request reads those,
     # and writes its own work under artifacts-pr/ so its next push reuses it.
-    # Tags and other refs only read.
+    # Other pushes, release tags and release/v* branches included, also
+    # publish under artifacts/, which is how release-prebuild.yml warms the
+    # tag build.
     - name: Pull request cache prefix
       if: inputs.access-key-id != '' && github.event_name == 'pull_request'
       shell: bash
@@ -39,3 +47,4 @@ runs:
         github-cache: false
         manifest-key: ${{ inputs.manifest-key }}-${{ runner.os }}-${{ runner.arch }}
         job-summary: true
+        cache-executables: ${{ inputs.cache-executables }}

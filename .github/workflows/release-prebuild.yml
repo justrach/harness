@@ -1,0 +1,39 @@
+name: release-prebuild
+
+# Builds a release branch's macOS app into the compiler cache before it is
+# tagged. The tag build (release.yml's `macos` job) then compiles the same
+# tree, so it takes the workspace crates and the app binary from the cache
+# instead of spending most of its time compiling them. The version bump
+# changes every workspace crate, so nothing earlier can warm those.
+#
+# Keep the job name (`macos`), the kache manifest key and the cargo command
+# identical to release.yml's macOS job and scripts/package-macos.sh, or the
+# cache keys stop matching. Nothing is signed, packaged or published here.
+
+on:
+  push:
+    branches: ["release/v*"]
+
+concurrency:
+  group: release-prebuild-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest # Apple silicon, as in release.yml
+    steps:
+      - uses: actions/checkout@v4
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
+          cache-executables: 'true'
+      - name: build the release binary (as scripts/package-macos.sh)
+        run: cargo build --release -p harness
