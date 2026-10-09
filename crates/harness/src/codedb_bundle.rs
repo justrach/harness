@@ -1,6 +1,10 @@
 //! The codedb CLI that Harness keeps for its agents, the way it keeps graff.
 //!
-//! - Managed: `~/.harness/tools/bin/codedb`, installed from codedb's GitHub
+//! - Bundled: `Harness.app/Contents/Resources/bin/codedb`, fixed per app
+//!   build (`scripts/package-macos.sh`), so agents have codedb from the first
+//!   launch, offline included.
+//! - Managed: `~/.harness/tools/bin/codedb`, seeded from the bundle when the
+//!   bundle is newer, otherwise installed from codedb's GitHub
 //!   releases when missing and replaced when a newer release is out. Every
 //!   asset is checked against the release's `checksums.sha256` and must run
 //!   `--version` before it is swapped in.
@@ -49,6 +53,39 @@ pub fn managed_path() -> Option<PathBuf> {
             .join("bin")
             .join(binary_name())
     })
+}
+
+/// `Contents/Resources/bin/codedb` next to the running executable, when this
+/// process is an app bundle that ships one.
+pub fn bundled() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let path = exe
+        .parent()? // Contents/MacOS
+        .parent()? // Contents
+        .join("Resources")
+        .join("bin")
+        .join(binary_name());
+    path.is_file().then_some(path)
+}
+
+/// Copy the bundled codedb into place when the managed copy is missing or
+/// older than it. No network: agents get codedb on an offline first launch.
+pub fn seed_managed() -> anyhow::Result<Option<Outcome>> {
+    let (Some(bundled), Some(managed)) = (bundled(), managed_path()) else {
+        return Ok(None);
+    };
+    let Some(shipped) = version_of(&bundled) else {
+        return Ok(None);
+    };
+    let current = version_of(&managed);
+    if current.as_ref().is_some_and(|current| *current >= shipped) {
+        return Ok(None);
+    }
+    install_bytes(&std::fs::read(&bundled)?, &managed)?;
+    Ok(Some(Outcome::Installed {
+        from: current.as_deref().map(display),
+        to: display(&shipped),
+    }))
 }
 
 /// Whether Harness may install or update codedb.
@@ -219,6 +256,13 @@ const INITIAL_DELAY: Duration = Duration::from_secs(30);
 pub async fn keep_current() {
     if !auto_install_enabled() {
         return;
+    }
+    match seed_managed() {
+        Ok(Some(Outcome::Installed { from, to })) => {
+            tracing::info!(?from, %to, "codedb installed from the app bundle");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "couldn't install the bundled codedb"),
     }
     tokio::time::sleep(INITIAL_DELAY).await;
     loop {
