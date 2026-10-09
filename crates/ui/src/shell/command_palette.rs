@@ -397,7 +397,7 @@ impl Shell {
         }
         self.close_command_palette(window, cx);
         match entry {
-            Entry::NewChat => self.open_new_session(cx),
+            Entry::NewChat => self.new_chat_tab(None, window, cx),
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => {
                 let section = self.remembered_settings_section();

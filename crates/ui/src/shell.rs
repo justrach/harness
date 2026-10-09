@@ -90,7 +90,6 @@ actions!(
         AddSpacePalette,
         ToggleCommandPalette,
         OpenModelPicker,
-        NewSession,
         OpenSettings,
         /// Quit and reopen (a new Screen Recording grant applies only then).
         RestartHarness,
@@ -490,8 +489,8 @@ pub fn apply_keymap(
             Some("Terminal"),
         ),
         KeyBinding::new(
-            &valid_or_default(&keymap.new_session, "mod-n"),
-            NewSession,
+            &valid_or_default(&keymap.new_session, ShortcutId::NewSession.default_combo()),
+            NewChatTab,
             None,
         ),
         KeyBinding::new(
@@ -12341,16 +12340,13 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            // New session works from anywhere — `open_new_session` routes back
-            // to chat itself, so Settings is not a dead spot.
-            .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(cx)))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) land on the section last viewed.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 let section = this.remembered_settings_section();
                 this.open_settings(section, cx)
             }))
-            // Chat-scoped, unlike new-session — `cycle_session` holds the guard
+            // Chat-scoped, unlike new-chat — `cycle_session` holds the guard
             // and says why.
             .on_action(cx.listener(|this, _: &NextSession, window, cx| {
                 this.cycle_tab_or_session(true, window, cx)
