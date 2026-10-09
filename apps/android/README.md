@@ -8,8 +8,9 @@ handset. Agents run on your desktop hosts and the phone renders their sessions a
 
 The UI is a port of the SwiftUI app, screen for screen. It runs either on the offline **demo dataset** (the
 same fixtures as the iOS `-demo` mode) or on **live sync** with an edge through the native core (see
-[Live sync](#live-sync)). Signing in with CodeGraff is not wired yet, so live sync is reached through a
-debug launch rig against a dev edge.
+[Live sync](#live-sync)). **Log in to Harness** signs in with CodeGraff (PKCE in the browser, back through
+`harness://callback`, as on iOS) and opens live sync; **Explore the demo** opens the demo. Debug builds also
+take a launch rig against a dev edge.
 
 | Screen | What is ported |
 | --- | --- |
@@ -28,8 +29,8 @@ Not built yet, in the order they are needed for a real connection:
 
 1. Connectivity states on screen (offline, reconnecting), presence by iOS's rule, and the device relay
    (folders, agents, models, refs, change requests).
-2. CodeGraff sign-in (PKCE, `harness://callback`) and the durable command queue (sending, steering,
-   stopping, answering questions).
+2. The durable command queue (sending, steering, stopping, answering questions). CodeGraff sign-in is
+   built (`auth/`): the tokens are sealed with an Android Keystore key and refreshed by iOS's rules.
 3. Real attachment upload, the queued-message panel, notifications, launcher icon, Live Activity analogue.
 
 ## Staying in step with iOS

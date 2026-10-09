@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -14,6 +15,7 @@ import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfSpan
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -23,6 +25,15 @@ import org.junit.runner.RunWith
 class SessionFlowTest {
     @get:Rule
     val rule = createAndroidComposeRule<MainActivity>()
+
+    /** A launch with no stored sign-in opens the sign-in gate; the demo is one tap past it. */
+    @Before
+    fun enterDemo() {
+        if (rule.onAllNodesWithText("Explore the demo").fetchSemanticsNodes().isNotEmpty()) {
+            rule.onNodeWithText("Explore the demo").performClick()
+            rule.waitForIdle()
+        }
+    }
 
     private fun openToolGroupSession() {
         rule.onNodeWithContentDescription("Tool group header colors", substring = true).performClick()
