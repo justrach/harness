@@ -3900,6 +3900,10 @@ async fn run_session(session: Session) {
     let mut interrupted = false;
     let mut interrupt_sent = false;
     let mut done_current = false;
+    // graff produced output while no prompt of ours was outstanding: a turn
+    // it started itself (a background subagent or peer message woke the
+    // parent). Its only end is `gui_turn_end` (#276); any Done clears it.
+    let mut autonomous_turn = false;
     let mut done_after_interrupt = false;
     let mut escalation_target = None;
     let mut escalation_deadline = None;
@@ -4124,6 +4128,7 @@ async fn run_session(session: Session) {
                 }
                 trackers.effort.finish_turn();
                 done_current = true;
+                autonomous_turn = false;
                 if interrupted {
                     done_after_interrupt = true;
                 }
@@ -4248,6 +4253,66 @@ async fn run_session(session: Session) {
                                 Ok(json!({ "stopReason": stop }))
                             }));
                         }
+                    }
+                    // graff ends a turn it started itself with `gui_turn_end`
+                    // (ACP v1): no `session/prompt` of ours is outstanding,
+                    // so the response arm can never settle it (#276). While
+                    // a prompt of ours IS outstanding, graff answers that
+                    // prompt after the end and its response settles the
+                    // turn, so the notification is ignored here; one with no
+                    // agent-started output since the last Done is stale.
+                    let update_kind = (method == "session/update")
+                        .then(|| {
+                            params
+                                .get("update")
+                                .and_then(|u| u.get("sessionUpdate"))
+                                .and_then(Value::as_str)
+                        })
+                        .flatten();
+                    if harness == HarnessId::Graff && update_kind == Some("gui_turn_end") {
+                        if turn.is_none() && autonomous_turn && !interrupted {
+                            let stop = params
+                                .get("update")
+                                .and_then(|u| u.get("stopReason"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("end_turn");
+                            let (status, error) =
+                                stop_outcome(&Ok(json!({ "stopReason": stop })), false);
+                            let (prev, _next) = rotate(&mut assistant_message_id);
+                            if !send(
+                                &event_tx,
+                                AgentEvent::AssistantMessageCompleted { assistant_message_id: prev },
+                            )
+                            .await
+                            {
+                                break 'main;
+                            }
+                            trackers.effort.finish_turn();
+                            open_tools.clear();
+                            done_current = true;
+                            autonomous_turn = false;
+                            if !send(
+                                &event_tx,
+                                AgentEvent::Done {
+                                    status,
+                                    result: None,
+                                    error,
+                                    session_id: Some(session_id.clone()),
+                                },
+                            )
+                            .await
+                            {
+                                break 'main;
+                            }
+                        }
+                        continue;
+                    }
+                    if harness == HarnessId::Graff
+                        && turn.is_none()
+                        && method == "session/update"
+                        && !boilerplate
+                    {
+                        autonomous_turn = true;
                     }
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
@@ -4565,6 +4630,7 @@ async fn run_session(session: Session) {
                 }
                 trackers.effort.finish_turn();
                 done_current = true;
+                autonomous_turn = false;
                 if !send(
                     &event_tx,
                     AgentEvent::Done {
