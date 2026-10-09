@@ -126,6 +126,8 @@ case "$service" in
     echo "the engine is running with the new version (local-only unless sync is enabled)."
     echo "  systemctl --user status harness    check the service"
     echo "  harness update                     install the latest release and restart"
+    echo "it also updates itself while no chat or terminal is running"
+    echo "(set HARNESS_AUTO_UPDATE=0 in ~/.harness/env to turn that off)."
     echo ""
     echo "optional sync (local sessions stay local):"
     echo "  systemctl --user stop harness"
@@ -135,6 +137,7 @@ case "$service" in
   manual)
     echo "next: run the local-only engine with \`harness headless\`."
     echo "optional sync: run \`harness login\` before starting the engine."
-    echo "later: \`harness update\` installs the latest release."
+    echo "it updates itself while no chat or terminal is running, and"
+    echo "\`harness update\` installs the latest release on demand."
     ;;
 esac
