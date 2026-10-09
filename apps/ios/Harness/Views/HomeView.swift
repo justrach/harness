@@ -21,6 +21,9 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
+    @State private var showNewSessionPicker = false
+    /// What the "+" picker chose; acted on once it has closed.
+    @State private var pendingNewSession: NewSessionTarget?
     @State private var showSettings = false
     @State private var showProfile = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
@@ -377,6 +380,19 @@ struct HomeView: View {
         .sheet(isPresented: $showProfile) {
             ProfileView()
         }
+        .sheet(isPresented: $showNewSessionPicker, onDismiss: {
+            guard let target = pendingNewSession else { return }
+            pendingNewSession = nil
+            switch target {
+            case .space(let id): open(.newSession(spaceId: id))
+            case .projectless: showProjectlessDevices = true
+            case .newSpace: showNewSpace = true
+            }
+        }) {
+            NewSessionPickerSheet(selectedSpaceId: selectedSpace?.id) { target in
+                pendingNewSession = target
+            }
+        }
         .sheet(isPresented: $showNewSpace) {
             NewSpaceSheet { spaceId in
                 open(.space(spaceId))
@@ -533,40 +549,11 @@ struct HomeView: View {
         }
     }
 
-    /// Both destinations are available even when Home is scoped to a project
-    /// or the workspace has no projects yet.
+    /// "+" opens a searchable picker of projects, plus a projectless session
+    /// and a new space; a menu listed every project with no way to search.
     private var newButton: some View {
-        Menu {
-            if let space = selectedSpace {
-                Button("New session in \(space.displayName)") {
-                    open(.newSession(spaceId: space.id))
-                }
-            } else if !model.spaces.isEmpty {
-                // Untitled: a titled menu section left a tall gap above the
-                // first project. Opened from "+", the rows read as new
-                // sessions on their own.
-                Section {
-                    ForEach(model.spaces) { space in
-                        Button {
-                            open(.newSession(spaceId: space.id))
-                        } label: {
-                            Text(space.displayName)
-                            Text(deviceTag(space))
-                        }
-                    }
-                }
-            }
-            Button {
-                showProjectlessDevices = true
-            } label: {
-                Label("Session without a project…", systemImage: "xmark")
-            }
-            .accessibilityIdentifier("new-projectless-session")
-            Button {
-                showNewSpace = true
-            } label: {
-                Label("New space…", systemImage: "folder.badge.plus")
-            }
+        Button {
+            showNewSessionPicker = true
         } label: {
             // A title as well as the symbol: the bar shows the symbol, and the
             // overflow menu on a foldable's side bar needs the title.

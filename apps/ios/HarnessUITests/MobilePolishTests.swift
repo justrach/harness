@@ -244,7 +244,9 @@ final class MobilePolishTests: XCTestCase {
         let create = app.buttons["New session"]
         XCTAssertTrue(create.waitForExistence(timeout: 3))
         create.tap()
-        app.buttons.matching(NSPredicate(format: "label == %@", "harness")).firstMatch.tap()
+        let project = app.buttons["new-session-space-space-harness"]
+        XCTAssertTrue(project.waitForExistence(timeout: 3))
+        project.tap()
         XCTAssertTrue(app.buttons["composer-send"].waitForExistence(timeout: 3))
         capture("new-session")
     }
