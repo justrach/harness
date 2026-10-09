@@ -109,7 +109,8 @@ async fn the_users_words_become_text_once_and_finish_keeps_what_was_in_flight() 
     assert_eq!(thread["config"]["features.shell_tool"], false);
     let realtime = method("thread/realtime/start").expect("realtime start")["params"].clone();
     assert_eq!(realtime["transport"]["sdp"], "fixture-offer");
-    assert_eq!(realtime["outputModality"], "text");
+    assert_eq!(realtime["version"], "v3");
+    assert_eq!(realtime["outputModality"], "audio");
     assert_eq!(realtime["includeStartupContext"], false);
     assert!(method("thread/realtime/stop").is_some(), "{codex:?}");
 
