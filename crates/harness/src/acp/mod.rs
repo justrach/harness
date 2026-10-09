@@ -2145,6 +2145,7 @@ impl Harness for AcpHarness {
             // Session start is the natural moment for a graff update check;
             // it never blocks and this session keeps the resolved binary.
             crate::graff_bundle::maybe_check_soon();
+            crate::codedb_bundle::maybe_check_soon();
             request.model = request
                 .model
                 .take()

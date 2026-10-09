@@ -540,6 +540,8 @@ async fn install_release(
     .await??;
     if matches!(outcome, UpdateOutcome::Updated { .. }) {
         crate::executable::invalidate_versions(&["graff"]);
+        // A new graff is the moment to bring its codedb up to date too.
+        crate::codedb_bundle::maybe_check_soon();
     }
     Ok(outcome)
 }

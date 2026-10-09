@@ -182,6 +182,7 @@ mod catalog;
 mod catalog_failure;
 pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub mod claude;
+pub mod codedb_bundle;
 pub mod codex;
 pub mod cursor;
 pub mod graff_bundle;
@@ -245,6 +246,13 @@ fn compose_path<'a>(
     }
     if let Some(shell_path) = shell_env::login_shell_path() {
         paths.extend(std::env::split_paths(shell_path));
+    }
+    // Harness's own tools (codedb, in ~/.harness/tools/bin) come last: one
+    // the user installed wins.
+    if let Some(managed) = codedb_bundle::managed_path()
+        && let Some(dir) = managed.parent()
+    {
+        paths.push(dir.to_path_buf());
     }
     let mut seen = std::collections::HashSet::new();
     paths.retain(|p| !p.as_os_str().is_empty() && seen.insert(p.clone()));

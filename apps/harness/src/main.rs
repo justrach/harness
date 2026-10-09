@@ -239,6 +239,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Headless) => {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
+                tokio::spawn(harness_adapters::codedb_bundle::keep_current());
                 let engine = harness_engine::Engine::new(engine_config_from_env());
                 engine.run().await
             })?;
@@ -311,6 +312,15 @@ fn main() -> anyhow::Result<()> {
             std::thread::spawn(|| {
                 bundled_graff::prepare();
                 launch::install_path_shims_and_auto_update_graff();
+            });
+            // codedb for the agents, kept like graff but for every build.
+            std::thread::spawn(|| {
+                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    runtime.block_on(harness_adapters::codedb_bundle::keep_current());
+                }
             });
             let edge_token = paths::var("HARNESS_EDGE_TOKEN").ok();
             // Headed: the UI probes HARNESS_IPC_PORT and connects to a running

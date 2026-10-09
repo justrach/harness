@@ -66,6 +66,23 @@ else
   rm -rf "$GRAFF_TMP"
 fi
 echo "bundled $("$APP/Contents/Resources/bin/graff" --version | head -1)"
+# codedb ships beside it (Contents/Resources/bin/codedb): the app seeds
+# ~/.harness/tools/bin/codedb from it for the agents, then keeps that copy
+# current from codedb's releases. CODEDB_BINARY overrides; otherwise the
+# latest codedb release, checked against its checksums.sha256.
+if [[ -n "${CODEDB_BINARY:-}" ]]; then
+  install -m 755 "$CODEDB_BINARY" "$APP/Contents/Resources/bin/codedb"
+else
+  CODEDB_ASSET="codedb-darwin-$ARCH"
+  CODEDB_URL="${CODEDB_RELEASES_URL:-https://github.com/justrach/codedb/releases/latest/download}"
+  CODEDB_TMP="$(mktemp -d)"
+  curl -fsSL "$CODEDB_URL/$CODEDB_ASSET" -o "$CODEDB_TMP/$CODEDB_ASSET"
+  curl -fsSL "$CODEDB_URL/checksums.sha256" -o "$CODEDB_TMP/checksums.sha256"
+  (cd "$CODEDB_TMP" && grep " $CODEDB_ASSET\$" checksums.sha256 | shasum -a 256 -c -)
+  install -m 755 "$CODEDB_TMP/$CODEDB_ASSET" "$APP/Contents/Resources/bin/codedb"
+  rm -rf "$CODEDB_TMP"
+fi
+echo "bundled $("$APP/Contents/Resources/bin/codedb" --version | head -1)"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/"
@@ -93,6 +110,11 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --verify --strict "$APP/Contents/Resources/bin/graff" 2>/dev/null &&
     codesign -dv "$APP/Contents/Resources/bin/graff" 2>&1 | grep -q "Authority=Developer ID Application" ||
     codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/graff"
+  # codedb likewise: keep a Developer ID signature, else sign it ourselves so
+  # the bundle notarizes.
+  codesign --verify --strict "$APP/Contents/Resources/bin/codedb" 2>/dev/null &&
+    codesign -dv "$APP/Contents/Resources/bin/codedb" 2>&1 | grep -q "Authority=Developer ID Application" ||
+    codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/codedb"
   codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
