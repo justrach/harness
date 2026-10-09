@@ -3265,12 +3265,11 @@ impl RpcService for EngineRpc {
                     ));
                 }
                 if p.relay_browser
-                    && (!p.reauthenticate
-                        || p.harness != HarnessId::Graff
+                    && (p.harness != HarnessId::Graff
                         || p.provider.as_deref() != Some("chatgpt-new"))
                 {
                     return Err(RpcError::Failed(
-                        "Finishing sign-in on another device is supported only for ChatGPT recovery in graff."
+                        "Finishing sign-in on another device is supported only for graff's ChatGPT sign-in."
                             .into(),
                     ));
                 }
@@ -3279,6 +3278,11 @@ impl RpcService for EngineRpc {
                     (HarnessId::Graff, Some(provider)) if p.reauthenticate => {
                         self.agent_accounts
                             .start_graff_reauth(provider, p.relay_browser)
+                            .await
+                    }
+                    (HarnessId::Graff, Some(provider)) if p.relay_browser => {
+                        self.agent_accounts
+                            .start_graff_login_relayed(provider)
                             .await
                     }
                     (HarnessId::Graff, Some(provider)) => {

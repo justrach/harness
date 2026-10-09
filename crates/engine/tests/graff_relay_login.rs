@@ -150,4 +150,17 @@ async fn chatgpt_recovery_finishes_on_another_device() {
             .iter()
             .any(|row| row.id == "chatgpt-new" && row.signed_in)
     );
+
+    // An ordinary sign-in from Settings on another computer relays the same way.
+    let fresh = accounts
+        .start_graff_login_relayed("chatgpt-new")
+        .await
+        .expect("relayed sign-in");
+    assert_eq!(fresh.mode, AgentLoginMode::RelayBrowser);
+    assert_ne!(fresh.login_id, start.login_id);
+    assert!(
+        fresh
+            .url
+            .starts_with("https://auth.openai.com/api/accounts/authorize?")
+    );
 }

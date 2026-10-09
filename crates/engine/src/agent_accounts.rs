@@ -1081,6 +1081,16 @@ impl AgentAccounts {
         self.start_graff_login_with(provider, false).await
     }
 
+    /// An ordinary graff sign-in finished on the device that asked: Settings
+    /// on another computer can't reach this host's browser, whose loopback
+    /// callback ChatGPT's sign-in must land on.
+    pub async fn start_graff_login_relayed(
+        &self,
+        provider: &str,
+    ) -> Result<AgentLoginStart, EngineError> {
+        self.start_graff_login_with(provider, true).await
+    }
+
     async fn start_graff_login_with(
         &self,
         provider: &str,
