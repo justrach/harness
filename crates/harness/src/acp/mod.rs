@@ -36,6 +36,7 @@ mod compaction;
 mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
+pub mod graff_client;
 mod graff_models;
 pub use graff_models::{ModelMismatch, parse_model_mismatch};
 pub mod graff_login;
@@ -1460,6 +1461,10 @@ impl AcpHarness {
             }
             if let Some(pct) = self.graff_compact_at_env() {
                 cmd.env("GRAFF_COMPACT_PCT", pct.to_string());
+            }
+            // Which Harness and which computer sent each gateway request.
+            for (key, value) in graff_client::env() {
+                cmd.env(key, value);
             }
         }
         if self.spec.id == HarnessId::Antigravity
