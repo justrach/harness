@@ -58,6 +58,12 @@ jobs:
           workspaces: |
             tui/bridge
             tui/launcher
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: package
         run: tui/package.sh
       - name: smoke test the tarball

@@ -46,6 +46,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: OpenCode protocol and permission regressions
         run: |
           cargo test --locked -p harness-adapters --lib opencode::
@@ -81,6 +87,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - wait: system-deps
       - name: UI and headless layout regressions
         run: cargo test --release --locked -p harness-ui --lib -- --test-threads=1
@@ -125,6 +137,12 @@ jobs:
           workspaces: |
             .
             ${{ steps.gpui-source.outputs.workspace }}
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - name: Check macOS application
         if: matrix.suite == 'app'
         run: cargo check --release --locked -p harness
@@ -241,6 +259,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: ./.github/actions/kache
+        with:
+          access-key-id: ${{ secrets.KACHE_S3_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.KACHE_S3_SECRET_ACCESS_KEY }}
+          endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
+          manifest-key: ${{ github.job }}-${{ strategy.job-index }}
       - wait: system-deps
       - name: Build browser fixture
         run: cargo build --release --locked -p harness-ui --example browser-fixture --features browser-fixture
