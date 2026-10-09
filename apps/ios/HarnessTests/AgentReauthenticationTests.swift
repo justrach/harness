@@ -42,6 +42,13 @@ private final class LoginTransportStub: AgentLoginTransport {
 
 
     func cancel(loginId: String) async { cancelled.append(loginId) }
+
+    var completed: [(loginId: String, redirect: String)] = []
+    var completeError: Error?
+    func complete(loginId: String, redirect: String) async throws {
+        if let completeError { throw completeError }
+        completed.append((loginId, redirect))
+    }
 }
 
 @MainActor
@@ -117,7 +124,8 @@ final class AgentReauthenticationTests: XCTestCase {
             await recovery.run(provider: provider)
             XCTAssertEqual(transport.providers, [provider])
             XCTAssertEqual(provider.startParameters as NSDictionary, provider == .chatGPTNew
-                ? ["harness": "graff", "provider": "chatgpt-new", "reauthenticate": true] as NSDictionary
+                ? ["harness": "graff", "provider": "chatgpt-new", "reauthenticate": true,
+                   "relayBrowser": true] as NSDictionary
                 : ["harness": "codex", "reauthenticate": true, "deviceAuth": true] as NSDictionary)
             XCTAssertEqual(recovery.phase, .done)
             XCTAssertNil(recovery.approval, "desktop fallback must not expose browser URLs/codes")
@@ -391,6 +399,134 @@ final class AgentReauthenticationTests: XCTestCase {
             row("e3", .errorChip(message: "plain", reauth: nil)),
         ]
         XCTAssertEqual(TranscriptView.earlierReauthRows(rows), ["e1"])
+    }
+
+    // graff's ChatGPT sign-in finished on the phone (relay-browser).
+    private static let authorize = "https://auth.openai.com/api/accounts/authorize?client_id=dynamic_agent_client&response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&state=st4te&code_challenge=c&code_challenge_method=S256"
+    private static let landed = "http://127.0.0.1:1455/auth/callback?code=abc&state=st4te"
+
+    private func relayRecovery(_ transport: LoginTransportStub) -> (AgentReauthentication, Task<Void, Never>, XCTestExpectation) {
+        transport.mode = .relayBrowser
+        transport.url = Self.authorize
+        transport.deferPoll = true
+        let polling = expectation(description: "waiting on the host")
+        transport.onPoll = { polling.fulfill() }
+        let recovery = AgentReauthentication(transport: transport, pollDelay: {})
+        let run = Task { await recovery.run(provider: .chatGPTNew) }
+        return (recovery, run, polling)
+    }
+
+    func testWireDecodesRelayBrowser() throws {
+        let start = try JSONDecoder().decode(AgentLoginStart.self, from: Data(
+            #"{"loginId":"login","url":"https://auth.openai.com/api/accounts/authorize","mode":"relay-browser"}"#.utf8))
+        XCTAssertEqual(start.mode, .relayBrowser)
+    }
+
+    func testPhoneSignInHandsTheRedirectToTheHostAndOnlyPollProvesSuccess() async throws {
+        let transport = LoginTransportStub()
+        let (recovery, run, polling) = relayRecovery(transport)
+        await fulfillment(of: [polling], timeout: 1)
+        XCTAssertEqual(recovery.phase, .waiting)
+        let signIn = try XCTUnwrap(recovery.browserSignIn)
+        XCTAssertEqual(signIn.url.absoluteString, Self.authorize)
+        XCTAssertNil(recovery.approval)
+        XCTAssertTrue(signIn.isCallback(URL(string: Self.landed)!))
+        for other in ["http://127.0.0.1:1456/auth/callback?code=abc", "http://localhost:1455/auth/callback",
+                      "https://127.0.0.1:1455/auth/callback", "http://127.0.0.1:1455/other",
+                      "https://auth.openai.com/auth/callback"] {
+            XCTAssertFalse(signIn.isCallback(URL(string: other)!), other)
+        }
+
+        // A pasted address that isn't this sign-in's redirect never reaches the host.
+        let refused = await recovery.finish(redirect: "https://chatgpt.com/")
+        XCTAssertFalse(refused)
+        XCTAssertNotNil(recovery.redirectError)
+        XCTAssertTrue(transport.completed.isEmpty)
+
+        let handed = await recovery.finish(redirect: " \(Self.landed)\n")
+        XCTAssertTrue(handed)
+        XCTAssertTrue(recovery.handedOff)
+        XCTAssertNil(recovery.redirectError)
+        XCTAssertEqual(transport.completed.map(\.loginId), ["login-1"])
+        XCTAssertEqual(transport.completed.map(\.redirect), [Self.landed])
+        XCTAssertEqual(recovery.phase, .waiting, "handing off is not proof of host success")
+        let second = await recovery.finish(redirect: Self.landed)
+        XCTAssertFalse(second, "one hand-off per sign-in")
+
+        try XCTUnwrap(transport.polls.removeValue(forKey: "login-1"))
+            .resume(returning: AgentLoginPoll(status: .done, message: nil, url: nil))
+        await run.value
+        XCTAssertEqual(recovery.phase, .done)
+        XCTAssertNil(recovery.browserSignIn)
+        XCTAssertFalse(recovery.handedOff)
+    }
+
+    func testRefusedHandOffShowsFixedTextAndCanBeRetried() async throws {
+        let transport = LoginTransportStub()
+        transport.completeError = RelayError.rpc("http://127.0.0.1:1455/auth/callback?code=secret")
+        let (recovery, run, polling) = relayRecovery(transport)
+        await fulfillment(of: [polling], timeout: 1)
+        let handed = await recovery.finish(redirect: Self.landed)
+        XCTAssertFalse(handed)
+        XCTAssertFalse(recovery.handedOff)
+        XCTAssertEqual(recovery.redirectError, "The execution device didn't accept this sign-in. Start again.")
+        transport.completeError = nil
+        let retried = await recovery.finish(redirect: Self.landed)
+        XCTAssertTrue(retried)
+        recovery.cancel()
+        XCTAssertNil(recovery.browserSignIn)
+        try XCTUnwrap(transport.polls.removeValue(forKey: "login-1"))
+            .resume(returning: AgentLoginPoll(status: .done, message: nil, url: nil))
+        await run.value
+        XCTAssertEqual(recovery.phase, .idle)
+    }
+
+    func testPhoneSignInFailureSaysToSignInAgainNotToGoToTheHost() async throws {
+        let transport = LoginTransportStub()
+        let (recovery, run, polling) = relayRecovery(transport)
+        await fulfillment(of: [polling], timeout: 1)
+        try XCTUnwrap(transport.polls.removeValue(forKey: "login-1")).resume(returning:
+            AgentLoginPoll(status: .error, message: "http://127.0.0.1:1455/auth/callback?code=secret", url: nil))
+        await run.value
+        XCTAssertEqual(recovery.phase,
+                       .failed("ChatGPT sign-in didn't finish. Sign in again, and allow plan usage when asked."))
+        XCTAssertNil(recovery.browserSignIn)
+    }
+
+    func testPhoneSignInRejectsOtherRoutesAndUnsafePages() async {
+        do {
+            let transport = LoginTransportStub()
+            transport.mode = .relayBrowser
+            transport.url = Self.authorize
+            let recovery = AgentReauthentication(transport: transport, pollDelay: {})
+            await recovery.run(provider: .codex)
+            guard case .failed = recovery.phase else { return XCTFail("relay-browser is graff ChatGPT only") }
+            XCTAssertNil(recovery.browserSignIn)
+        }
+        let redirect = "redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback"
+        for url in [
+            "", "http://auth.openai.com/api/accounts/authorize?\(redirect)&state=s",
+            "https://auth.openai.com.evil.invalid/api/accounts/authorize?\(redirect)&state=s",
+            "https://user@auth.openai.com/api/accounts/authorize?\(redirect)&state=s",
+            "https://auth.openai.com:8443/api/accounts/authorize?\(redirect)&state=s",
+            "https://auth.openai.com/elsewhere?\(redirect)&state=s",
+            "https://auth.openai.com/api/accounts/authorize?\(redirect)",
+            "https://auth.openai.com/api/accounts/authorize?redirect_uri=http%3A%2F%2Fevil.invalid%3A1455%2Fcb&state=s",
+            "https://auth.openai.com/api/accounts/authorize?redirect_uri=https%3A%2F%2F127.0.0.1%3A1455%2Fcb&state=s",
+            "https://auth.openai.com/api/accounts/authorize?redirect_uri=http%3A%2F%2F127.0.0.1%2Fcb&state=s",
+            "https://auth.openai.com/api/accounts/authorize?\(redirect)&state=s#frag",
+            "javascript:alert(1)",
+        ] {
+            let transport = LoginTransportStub()
+            transport.mode = .relayBrowser
+            transport.url = url
+            let recovery = AgentReauthentication(transport: transport, pollDelay: {})
+            await recovery.run(provider: .chatGPTNew)
+            guard case .failed = recovery.phase else { return XCTFail("unsafe sign-in page accepted: \(url)") }
+            XCTAssertNil(recovery.browserSignIn)
+            await Task.yield()
+            XCTAssertEqual(transport.cancelled, ["login-1"])
+        }
     }
 
     func testHostFailureClearsApprovalWithoutRetainingPollOutput() async throws {

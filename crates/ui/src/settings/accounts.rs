@@ -1247,7 +1247,8 @@ impl AccountsPage {
                             }
                             AgentLoginMode::Browser
                             | AgentLoginMode::HostBrowser
-                            | AgentLoginMode::DeviceCode => {
+                            | AgentLoginMode::DeviceCode
+                            | AgentLoginMode::RelayBrowser => {
                                 page.login = Some(LoginFlow::Browser {
                                     harness,
                                     provider,
