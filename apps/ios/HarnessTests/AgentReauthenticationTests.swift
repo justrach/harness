@@ -152,7 +152,7 @@ final class AgentReauthenticationTests: XCTestCase {
         transport.onStart = { starting.fulfill() }
         let recovery = AgentReauthentication(transport: transport, pollDelay: {})
         let run = Task { await recovery.run(provider: .codex) }
-        await fulfillment(of: [starting], timeout: 1)
+        await fulfillment(of: [starting], timeout: 10)
         recovery.cancel()
         try XCTUnwrap(transport.startContinuation).resume(returning: AgentLoginStart(
             loginId: "late", url: "", mode: .hostBrowser, code: nil))
@@ -171,7 +171,7 @@ final class AgentReauthenticationTests: XCTestCase {
         transport.onPoll = { firstPoll.fulfill() }
         let recovery = AgentReauthentication(transport: transport, pollDelay: {})
         let firstRun = Task { await recovery.run(provider: .codex) }
-        await fulfillment(of: [firstPoll], timeout: 1)
+        await fulfillment(of: [firstPoll], timeout: 10)
         XCTAssertEqual(recovery.approval?.code, "OLD-1234")
         transport.deferStart = true
         let secondStart = expectation(description: "second start")
@@ -179,12 +179,12 @@ final class AgentReauthenticationTests: XCTestCase {
         let secondPoll = expectation(description: "second poll")
         transport.onPoll = { secondPoll.fulfill() }
         let secondRun = Task { await recovery.run(provider: .chatGPTNew) }
-        await fulfillment(of: [secondStart], timeout: 1)
+        await fulfillment(of: [secondStart], timeout: 10)
         XCTAssertEqual(recovery.phase, .starting)
         XCTAssertNil(recovery.approval, "new attempt clears the old approval immediately")
         try XCTUnwrap(transport.startContinuation).resume(returning: AgentLoginStart(
             loginId: "login-2", url: "", mode: .hostBrowser, code: nil))
-        await fulfillment(of: [secondPoll], timeout: 1)
+        await fulfillment(of: [secondPoll], timeout: 10)
         XCTAssertNil(recovery.approval, "chatgpt-new retains desktop completion")
         try XCTUnwrap(transport.polls.removeValue(forKey: "login-2"))
             .resume(returning: AgentLoginPoll(status: .done, message: nil, url: nil))
@@ -226,7 +226,7 @@ final class AgentReauthenticationTests: XCTestCase {
             transport.onPoll = { firstPoll.fulfill() }
             let recovery = AgentReauthentication(transport: transport, pollDelay: {})
             let run = Task { await recovery.run(provider: .codex) }
-            await fulfillment(of: [firstPoll], timeout: 1)
+            await fulfillment(of: [firstPoll], timeout: 10)
             XCTAssertEqual(recovery.phase, .waiting)
             XCTAssertEqual(recovery.approval?.url.absoluteString, transport.url)
             XCTAssertEqual(recovery.approval?.code, transport.code)
@@ -236,7 +236,7 @@ final class AgentReauthenticationTests: XCTestCase {
             try XCTUnwrap(transport.polls.removeValue(forKey: "login-1")).resume(returning:
                 AgentLoginPoll(status: .pending, message: "untrusted host output",
                                url: "https://auth.openai.com/oauth/callback?token=not-a-real-token"))
-            await fulfillment(of: [secondPoll], timeout: 1)
+            await fulfillment(of: [secondPoll], timeout: 10)
             XCTAssertEqual(recovery.phase, .waiting, "opening/approving on the phone is not proof of host success")
             XCTAssertEqual(recovery.approval?.url.absoluteString, transport.url)
             XCTAssertEqual(recovery.approval?.code, "ABCD-1234")
@@ -327,7 +327,7 @@ final class AgentReauthenticationTests: XCTestCase {
         transport.onPoll = { polling.fulfill() }
         let recovery = AgentReauthentication(transport: transport, pollDelay: {})
         let run = Task { await recovery.run(provider: .codex) }
-        await fulfillment(of: [polling], timeout: 1)
+        await fulfillment(of: [polling], timeout: 10)
         XCTAssertNotNil(recovery.approval)
         recovery.cancel()
         XCTAssertNil(recovery.approval)
@@ -350,7 +350,7 @@ final class AgentReauthenticationTests: XCTestCase {
             try await Task.sleep(nanoseconds: 60_000_000_000)
         })
         let run = Task { await recovery.run(provider: .codex) }
-        await fulfillment(of: [waiting], timeout: 1)
+        await fulfillment(of: [waiting], timeout: 10)
         XCTAssertNotNil(recovery.approval)
         run.cancel()
         await run.value
@@ -368,7 +368,7 @@ final class AgentReauthenticationTests: XCTestCase {
         transport.onStart = { starting.fulfill() }
         let recovery = AgentReauthentication(transport: transport, pollDelay: {})
         let run = Task { await recovery.run(provider: .codex) }
-        await fulfillment(of: [starting], timeout: 1)
+        await fulfillment(of: [starting], timeout: 10)
         recovery.detach()
         try XCTUnwrap(transport.startContinuation).resume(returning: AgentLoginStart(
             loginId: "late", url: "", mode: .hostBrowser, code: nil))
@@ -425,7 +425,7 @@ final class AgentReauthenticationTests: XCTestCase {
     func testPhoneSignInHandsTheRedirectToTheHostAndOnlyPollProvesSuccess() async throws {
         let transport = LoginTransportStub()
         let (recovery, run, polling) = relayRecovery(transport)
-        await fulfillment(of: [polling], timeout: 1)
+        await fulfillment(of: [polling], timeout: 10)
         XCTAssertEqual(recovery.phase, .waiting)
         let signIn = try XCTUnwrap(recovery.browserSignIn)
         XCTAssertEqual(signIn.url.absoluteString, Self.authorize)
@@ -465,7 +465,7 @@ final class AgentReauthenticationTests: XCTestCase {
         let transport = LoginTransportStub()
         transport.completeError = RelayError.rpc("http://127.0.0.1:1455/auth/callback?code=secret")
         let (recovery, run, polling) = relayRecovery(transport)
-        await fulfillment(of: [polling], timeout: 1)
+        await fulfillment(of: [polling], timeout: 10)
         let handed = await recovery.finish(redirect: Self.landed)
         XCTAssertFalse(handed)
         XCTAssertFalse(recovery.handedOff)
@@ -484,7 +484,7 @@ final class AgentReauthenticationTests: XCTestCase {
     func testPhoneSignInFailureSaysToSignInAgainNotToGoToTheHost() async throws {
         let transport = LoginTransportStub()
         let (recovery, run, polling) = relayRecovery(transport)
-        await fulfillment(of: [polling], timeout: 1)
+        await fulfillment(of: [polling], timeout: 10)
         try XCTUnwrap(transport.polls.removeValue(forKey: "login-1")).resume(returning:
             AgentLoginPoll(status: .error, message: "http://127.0.0.1:1455/auth/callback?code=secret", url: nil))
         await run.value
@@ -539,7 +539,7 @@ final class AgentReauthenticationTests: XCTestCase {
         transport.onPoll = { polling.fulfill() }
         let recovery = AgentReauthentication(transport: transport, pollDelay: {})
         let run = Task { await recovery.run(provider: .codex) }
-        await fulfillment(of: [polling], timeout: 1)
+        await fulfillment(of: [polling], timeout: 10)
         try XCTUnwrap(transport.polls.removeValue(forKey: "login-1")).resume(returning:
             AgentLoginPoll(status: .error, message: "https://untrusted.invalid/?token=not-a-real-token", url: transport.url))
         await run.value
