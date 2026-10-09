@@ -5095,8 +5095,13 @@ impl Shell {
         cx.notify();
     }
 
-    /// Selecting a device advances to its locations.
+    /// Start at the device's preferred project folder, or show locations.
     fn add_space_pick_device(&mut self, device: Device, cx: &mut Context<Self>) {
+        let preferred = crate::settings::project_folders::starting_folder(
+            &device.id,
+            &self.state.read(cx).spaces,
+            cx,
+        );
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };
@@ -5120,6 +5125,15 @@ impl Shell {
             input.set_text("", cx);
         });
         self.load_space_drives(cx);
+        if let Some(path) = preferred {
+            if let Some(flow) = self.add_space.as_mut() {
+                flow.step = ProjectStep::Folders;
+                flow.location = Some(("Default folder".into(), Some(path.clone())));
+                let search = flow.search.clone();
+                search.update(cx, |input, cx| input.set_placeholder("Search folders…", cx));
+            }
+            self.load_space_folders_at(Some(path), true, cx);
+        }
         cx.notify();
     }
 
@@ -5443,6 +5457,15 @@ impl Shell {
 
     /// ListFolders on the flow's device (relay-forwarded when remote).
     pub(super) fn load_space_folders(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        self.load_space_folders_at(path, false, cx);
+    }
+
+    fn load_space_folders_at(
+        &mut self,
+        path: Option<String>,
+        use_default: bool,
+        cx: &mut Context<Self>,
+    ) {
         let engine = self.state.read(cx).engine().cloned();
         let local = self.state.read(cx).local_device_id.clone();
         let Some(flow) = self.add_space.as_mut() else {
@@ -5474,26 +5497,69 @@ impl Shell {
                     serde_json::Value::String(target.clone()),
                 );
             }
-            let result = engine
-                .client()
-                .call(methods::LIST_FOLDERS, serde_json::Value::Object(params))
-                .await;
-            this.update(cx, |shell, cx| {
-                if let Some(flow) = shell.add_space.as_mut() {
-                    flow.browser = match result {
-                        Ok(value) => match serde_json::from_value::<FolderListing>(value) {
-                            Ok(listing) => {
-                                // A pathless browse resolved home — remember it
-                                // so the breadcrumbs can fold it into the
-                                // device crumb.
-                                if went_home {
-                                    flow.home = Some(listing.path.clone());
+            // Resolve Home on the HOST, even when the viewer is on another OS.
+            // Keep its listing as a fallback if the preferred folder is gone.
+            let mut home = None;
+            let mut fallback = false;
+            let result = if use_default {
+                let mut home_params = params.clone();
+                home_params.remove("path");
+                match engine.client().call(methods::LIST_FOLDERS, serde_json::Value::Object(home_params)).await {
+                    Ok(value) => match serde_json::from_value::<FolderListing>(value) {
+                        Ok(listing) => {
+                            home = Some(listing.path.clone());
+                            let target = crate::settings::project_folders::resolve_starting_folder(
+                                path.as_deref().unwrap_or("~"), &listing.path,
+                            );
+                            if target == listing.path {
+                                Ok(listing)
+                            } else {
+                                params.insert("path".into(), serde_json::Value::String(target));
+                                match engine.client().call(methods::LIST_FOLDERS, serde_json::Value::Object(params)).await {
+                                    Ok(value) => match serde_json::from_value::<FolderListing>(value) {
+                                        Ok(preferred) => Ok(preferred),
+                                        Err(_) => { fallback = true; Ok(listing) }
+                                    },
+                                    Err(_) => { fallback = true; Ok(listing) }
                                 }
-                                Loadable::Ready(listing)
                             }
-                            Err(err) => Loadable::Error(err.to_string()),
-                        },
-                        Err(err) => Loadable::Error(err.to_string()),
+                        }
+                        Err(err) => Err(err.to_string()),
+                    },
+                    Err(err) => Err(err.to_string()),
+                }
+            } else {
+                match engine.client().call(methods::LIST_FOLDERS, serde_json::Value::Object(params)).await {
+                    Ok(value) => serde_json::from_value::<FolderListing>(value).map_err(|err| err.to_string()),
+                    Err(err) => Err(err.to_string()),
+                }
+            };
+            this.update(cx, |shell, cx| {
+                if let Some(flow) = shell.add_space.as_mut()
+                    && flow.device.as_ref().map(|d| &d.id) == device_id.as_ref()
+                    && flow.browser_path == path
+                {
+                    if let Some(home) = home {
+                        flow.home = Some(home);
+                    }
+                    flow.browser = match result {
+                        Ok(listing) => {
+                            if went_home {
+                                flow.home = Some(listing.path.clone());
+                            }
+                            flow.browser_path = Some(listing.path.clone());
+                            if use_default {
+                                flow.location = Some((
+                                    if fallback { "Home" } else { "Default folder" }.into(),
+                                    Some(listing.path.clone()),
+                                ));
+                            }
+                            if fallback {
+                                flow.error = Some("Default folder unavailable; opened Home. Change it in Settings → Files.".into());
+                            }
+                            Loadable::Ready(listing)
+                        }
+                        Err(err) => Loadable::Error(err),
                     };
                 }
                 cx.notify();
@@ -5521,6 +5587,14 @@ impl Shell {
         };
         let path = listing.path.clone();
         let git_detected = flow.browser_repo;
+        let previous_paths: Vec<String> = self
+            .state
+            .read(cx)
+            .spaces
+            .iter()
+            .filter(|space| space.device_id == device.id)
+            .map(|space| space.path.clone())
+            .collect();
         // Same (device, folder) already has a space → just switch to it. The
         // engine dedupes this case too (a createSpace for a duplicate pair
         // no-ops), so creating would leave the minted id dangling.
@@ -5573,6 +5647,18 @@ impl Shell {
             this.update(cx, |shell, cx| {
                 match result {
                     Ok(_) => {
+                        settings::update(SavePolicy::Immediate, cx, |settings| {
+                            let pref = settings
+                                .project_folders_by_device
+                                .entry(device.id.clone())
+                                .or_default();
+                            if pref.parent_counts.is_empty() {
+                                for previous in &previous_paths {
+                                    pref.record_project(previous);
+                                }
+                            }
+                            pref.record_project(&path);
+                        });
                         shell.add_space = None;
                         shell.land_in_space(submit_id.clone(), cx);
                     }
@@ -6620,6 +6706,149 @@ impl Shell {
 #[cfg(test)]
 mod project_flow_tests {
     use super::*;
+
+    #[gpui::test]
+    fn project_default_falls_back_and_only_learns_successes(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(32);
+        let (replies, inbound) = tokio::sync::mpsc::channel(32);
+        let engine =
+            crate::state::EngineHandle::from_test_client(harness_rpc::RpcClient::new(out, inbound));
+        let data = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), data.path(), cx);
+            settings::update(SavePolicy::Immediate, cx, |settings| {
+                settings
+                    .project_folders_by_device
+                    .entry("remote".into())
+                    .or_default()
+                    .override_path = Some("~/missing".into());
+            });
+        });
+        let shell = cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: data.path().into(),
+                    ipc_port: 0,
+                    edge_url: String::new(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.local_device_id = Some("local".into());
+                state.set_test_engine(engine);
+            });
+            shell.open_add_space(cx);
+            shell.add_space_pick_device(
+                serde_json::from_value(serde_json::json!({
+                    "id":"remote", "name":"Server", "platform":"linux", "lastSeenAt":null
+                }))
+                .unwrap(),
+                cx,
+            );
+            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Folders);
+        });
+        cx.run_until_parked();
+        let next_request = |requests: &mut tokio::sync::mpsc::Receiver<String>, method: &str| {
+            loop {
+                let value: serde_json::Value =
+                    serde_json::from_str(&requests.try_recv().unwrap()).unwrap();
+                if value["method"] == method {
+                    break value;
+                }
+            }
+        };
+        let reply = |id: serde_json::Value, result: Result<serde_json::Value, &str>| {
+            runtime.block_on(async {
+                let frame = match result {
+                    Ok(value) => serde_json::json!({"id":id, "ok":value}),
+                    Err(error) => serde_json::json!({"id":id, "err":error}),
+                };
+                replies.send(frame.to_string()).await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while replies.capacity() < replies.max_capacity() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+        };
+        let home = next_request(&mut requests, methods::LIST_FOLDERS);
+        assert_eq!(home["params"]["targetDeviceId"], "remote");
+        assert!(home["params"].get("path").is_none());
+        reply(
+            home["id"].clone(),
+            Ok(serde_json::json!({"path":"/home/test", "entries":[], "truncated":false})),
+        );
+        cx.run_until_parked();
+        let preferred = next_request(&mut requests, methods::LIST_FOLDERS);
+        assert_eq!(preferred["params"]["path"], "/home/test/missing");
+        assert_eq!(preferred["params"]["targetDeviceId"], "remote");
+        reply(preferred["id"].clone(), Err("folder unavailable"));
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            let flow = shell.add_space.as_mut().unwrap();
+            assert_eq!(flow.browser.ready().unwrap().path, "/home/test");
+            assert_eq!(flow.home.as_deref(), Some("/home/test"));
+            assert!(flow.error.as_deref().unwrap().contains("opened Home"));
+            flow.browser = Loadable::Ready(FolderListing {
+                path: "/projects/new".into(),
+                entries: vec![],
+                truncated: false,
+            });
+            shell.submit_add_space(cx);
+        });
+        cx.run_until_parked();
+        let rejected = next_request(&mut requests, methods::MUTATE);
+        reply(rejected["id"].clone(), Err("create rejected"));
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert!(
+                settings::current(cx).project_folders_by_device["remote"]
+                    .parent_counts
+                    .is_empty()
+            );
+            assert!(shell.state.read(cx).spaces.is_empty());
+            shell.submit_add_space(cx);
+        });
+        cx.run_until_parked();
+        let accepted = next_request(&mut requests, methods::MUTATE);
+        reply(accepted["id"].clone(), Ok(serde_json::json!({"ok":true})));
+        cx.run_until_parked();
+        shell.update(cx, |shell, cx| {
+            assert!(shell.add_space.is_none());
+            assert_eq!(settings::current(cx).project_folders_by_device["remote"].parent_counts["/projects"], 1);
+            // A later geometry save must not revert either the override or learning.
+            shell.schedule_save(cx);
+            settings::flush(cx);
+            let restored = settings::UiSettings::load(data.path());
+            assert_eq!(restored.project_folders_by_device["remote"].parent_counts["/projects"], 1);
+            assert_eq!(restored.project_folders_by_device["remote"].override_path.as_deref(), Some("~/missing"));
+        });
+    }
 
     #[gpui::test]
     fn devices_locations_folders_and_back_clear_stale_state(cx: &mut gpui::TestAppContext) {

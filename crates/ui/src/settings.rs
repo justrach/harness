@@ -24,6 +24,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod project_folders;
 pub mod search;
 pub mod shortcuts;
 pub mod widgets;
@@ -737,6 +738,9 @@ pub struct UiSettings {
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_space_id: Option<String>,
+    /// New Project defaults and successful-add history, keyed by host device.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub project_folders_by_device: HashMap<String, project_folders::ProjectFolderPreference>,
     /// Last successfully launched Action per project in this viewport.
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
@@ -911,6 +915,7 @@ impl Default for UiSettings {
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             last_space_id: None,
+            project_folders_by_device: HashMap::new(),
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
@@ -2359,6 +2364,13 @@ mod tests {
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             last_space_id: Some("space-1".into()),
+            project_folders_by_device: HashMap::from([(
+                "local".into(),
+                project_folders::ProjectFolderPreference {
+                    override_path: Some("~/Projects".into()),
+                    parent_counts: HashMap::from([("/projects".into(), 3)]),
+                },
+            )]),
             last_project_action_by_space_id: std::collections::HashMap::from([(
                 "space-1".into(),
                 "dev".into(),

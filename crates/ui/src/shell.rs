@@ -4445,6 +4445,7 @@ impl Shell {
             target.new_thread_composer_background = current.new_thread_composer_background.clone();
             target.new_thread_background_effect = current.new_thread_background_effect.clone();
             target.open_web_links_in_harness = current.open_web_links_in_harness;
+            target.project_folders_by_device = current.project_folders_by_device.clone();
             target.ui_font_family = current.ui_font_family.clone();
             target.ui_font_size = current.ui_font_size;
             target.terminal_font_family = current.terminal_font_family.clone();
@@ -4790,6 +4791,7 @@ impl Shell {
                 if self.files_settings_page.is_none() {
                     let page = cx.new(|cx| {
                         FilesSettingsPage::new(
+                            self.state.clone(),
                             self.settings.files_autosave_enabled,
                             self.settings.files_autosave_delay_ms,
                             self.settings.files_word_wrap,
