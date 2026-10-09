@@ -16,5 +16,6 @@ runs:
     # Keyed per job: each parallel group keeps the cache for what it compiles.
     - uses: Swatinem/rust-cache@v2
       with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
         cache-on-failure: true
         cache-workspace-crates: true

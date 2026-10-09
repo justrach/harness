@@ -44,6 +44,8 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: OpenCode protocol and permission regressions
         run: |
           cargo test --locked -p harness-adapters --lib opencode::
@@ -77,6 +79,8 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - wait: system-deps
       - name: UI and headless layout regressions
         run: cargo test --release --locked -p harness-ui --lib -- --test-threads=1
@@ -115,6 +119,7 @@ jobs:
           PY
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: ${{ matrix.suite }}
           cache-on-failure: true
           workspaces: |
@@ -234,6 +239,8 @@ jobs:
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - wait: system-deps
       - name: Build browser fixture
         run: cargo build --release --locked -p harness-ui --example browser-fixture --features browser-fixture

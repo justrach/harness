@@ -65,6 +65,8 @@ jobs:
           echo "binary=$dir/graff-aarch64-macos/graff" >>"$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
         if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build intermediate GUI
         if: steps.selected.outputs.tag != '' && steps.cache.outputs.cache-hit != 'true'
         env:

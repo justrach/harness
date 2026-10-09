@@ -23,6 +23,8 @@ jobs:
         with:
           node-version: '22'
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Dependency updater validation
         run: python3 scripts/test-update-cursor-sdk.py
       - name: Harness compatibility, steering, and session recovery
