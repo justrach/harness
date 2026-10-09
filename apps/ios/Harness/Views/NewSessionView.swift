@@ -36,6 +36,9 @@ struct NewSessionView: View {
     /// Live per-harness catalogs from the selected device (static fallback).
     @State private var catalogs: [String: [ModelInfo]] = [:]
     @State private var optionSelections: [String: String] = [:]
+    /// The device the agent list and catalogs were loaded for, and whether that load reached it live.
+    @State private var catalogDevice: String?
+    @State private var catalogLive = false
     @State private var refs: [RepoRef] = []
     @State private var selectedRef: String?
     @State private var checkoutKind: CheckoutKind = .local
@@ -224,13 +227,28 @@ struct NewSessionView: View {
             // device that will run the session (the picker shows one sectioned
             // list across harnesses, so it needs every catalog up front).
             // Keyed on reachability too: opened offline, it reloads once the
-            // device comes back instead of staying on the fallback.
-            liveHarnesses = nil
-            catalogs = [:]
-            optionSelections = [:]
-            guard let deviceId else { return }
+            // device comes back instead of staying on the fallback. A host whose
+            // presence flaps re-runs this constantly: a list already loaded live
+            // stays, and a refresh never blanks the picker or the picks in it.
+            guard let deviceId else {
+                liveHarnesses = nil
+                catalogs = [:]
+                optionSelections = [:]
+                catalogDevice = nil
+                return
+            }
+            let online = model.deviceOnline(deviceId)
+            if catalogDevice == deviceId {
+                if catalogLive || !online { return }
+            } else {
+                liveHarnesses = nil
+                catalogs = [:]
+                optionSelections = [:]
+                catalogLive = false
+            }
             let list = await model.listHarnesses(deviceId: deviceId)
             guard !Task.isCancelled else { return }
+            catalogDevice = deviceId
             liveHarnesses = list
             if !list.contains(where: { $0.id == harness }), let first = list.first {
                 harness = first.id
@@ -244,6 +262,8 @@ struct NewSessionView: View {
                     catalogs[id] = catalog
                 }
             }
+            guard !Task.isCancelled else { return }
+            catalogLive = online
         }
         .sheet(isPresented: $showPicker) {
             ModelPickerSheet(harness: $harness, modelId: Binding(
@@ -649,6 +669,23 @@ struct ModelPickerSheet: View {
     /// the current harness — with several agents enabled a flat list of every
     /// catalog is unmanageable (t3's collapsible provider folds).
     @State private var openSections: Set<String> = []
+    @State private var query = ""
+
+    private var searching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Models in `harness` matching the search (all of them when not searching).
+    private func shown(for harness: String) -> [ModelInfo] {
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return models(for: harness) }
+        return models(for: harness).filter { m in
+            [m.label, m.id, m.description ?? ""].contains { $0.localizedCaseInsensitiveContains(needle) }
+        }
+    }
+
+    /// While searching, only sections with a match, each open.
+    private var shownSections: [HarnessInfo] {
+        searching ? sections.filter { !shown(for: $0.id).isEmpty } : sections
+    }
 
     var body: some View {
         NavigationStack {
@@ -656,12 +693,19 @@ struct ModelPickerSheet: View {
                 VStack(alignment: .leading, spacing: 22) {
                     VStack(alignment: .leading, spacing: 4) {
                         SheetLabel("Model")
-                        ForEach(sections) { h in
+                        if searching, shownSections.isEmpty {
+                            Text("No models match \u{201C}\(query)\u{201D}")
+                                .font(Theme.sans(13))
+                                .foregroundStyle(Theme.textFaint)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 28)
+                        }
+                        ForEach(shownSections) { h in
                             if sections.count > 1 {
                                 sectionHeader(h)
                             }
-                            if sections.count == 1 || openSections.contains(h.id) {
-                                ForEach(models(for: h.id)) { m in
+                            if sections.count == 1 || searching || openSections.contains(h.id) {
+                                ForEach(shown(for: h.id)) { m in
                                     PickRow(title: m.label,
                                             subtitle: m.description,
                                             selected: harness == h.id && m.id == modelId) {
@@ -679,6 +723,8 @@ struct ModelPickerSheet: View {
             .background(SheetStyle.panel)
             .navigationTitle("Select model")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "Search models")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
@@ -939,6 +985,13 @@ struct RefPickerSheet: View {
 
     @State private var switching: String?
     @State private var error: String?
+    @State private var query = ""
+
+    private var shownRefs: [RepoRef] {
+        let needle = query.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return refs }
+        return refs.filter { $0.name.localizedCaseInsensitiveContains(needle) }
+    }
 
     var body: some View {
         NavigationStack {
@@ -951,8 +1004,14 @@ struct RefPickerSheet: View {
                             .foregroundStyle(Theme.textFaint)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 28)
+                    } else if shownRefs.isEmpty {
+                        Text("No refs match \u{201C}\(query)\u{201D}")
+                            .font(Theme.sans(13))
+                            .foregroundStyle(Theme.textFaint)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 28)
                     } else {
-                        ForEach(refs, id: \.name) { ref in
+                        ForEach(shownRefs, id: \.name) { ref in
                             row(ref)
                         }
                     }
@@ -969,6 +1028,8 @@ struct RefPickerSheet: View {
             .background(SheetStyle.panel)
             .navigationTitle("Select ref")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: "Search branches and tags")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
