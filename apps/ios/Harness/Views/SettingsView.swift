@@ -61,6 +61,15 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings-appearance")
                 }
 
+                Section("Notifications") {
+                    NavigationLink {
+                        NotificationsView()
+                    } label: {
+                        Text("Session notifications")
+                    }
+                    .accessibilityIdentifier("settings-notifications")
+                }
+
                 Section("Agents") {
                     NavigationLink {
                         CompactionView()

@@ -3811,7 +3811,7 @@ dependencies = [
 
 [[package]]
 name = "harness"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "clap",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "harness-adapters"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3863,7 +3863,7 @@ dependencies = [
 
 [[package]]
 name = "harness-doc"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "chrono",
  "harness-proto",
@@ -3877,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3916,7 +3916,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mcp"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3934,7 +3934,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mobile"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "async-trait",
  "futures",
@@ -3957,7 +3957,7 @@ dependencies = [
 
 [[package]]
 name = "harness-observe"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "clap",
@@ -3970,7 +3970,7 @@ dependencies = [
 
 [[package]]
 name = "harness-preview"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3998,7 +3998,7 @@ dependencies = [
 
 [[package]]
 name = "harness-proto"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -4009,7 +4009,7 @@ dependencies = [
 
 [[package]]
 name = "harness-rpc"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4028,7 +4028,7 @@ dependencies = [
 
 [[package]]
 name = "harness-sync"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -4051,7 +4051,7 @@ dependencies = [
 
 [[package]]
 name = "harness-syntax"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -4085,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "harness-theme"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "clap",
@@ -4100,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "harness-ui"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4166,7 +4166,7 @@ dependencies = [
 
 [[package]]
 name = "harness-update"
-version = "0.2.110"
+version = "0.2.111"
 dependencies = [
  "anyhow",
  "futures",

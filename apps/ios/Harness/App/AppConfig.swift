@@ -279,6 +279,25 @@ final class AppConfig: @unchecked Sendable {
         return request
     }
 
+    /// POST /registry/{orgId}/push-target — this phone's APNs token and
+    /// notification choices; nil registration is the DELETE (sign-out, or
+    /// notifications turned off here).
+    func pushTargetRequest(register registration: PushRegistration?) async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var url = edgeURL.appending(path: "registry/\(orgId)/push-target")
+        url.append(queryItems: [URLQueryItem(name: "device", value: deviceId)])
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if let registration {
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONEncoder().encode(registration)
+        } else {
+            request.httpMethod = "DELETE"
+        }
+        return request
+    }
+
     /// Decode the JWT payload's `exp` (60s early-refresh margin). Unparseable
     /// tokens read as non-expired — the server is the arbiter.
     private static func isExpired(jwt: String) -> Bool {

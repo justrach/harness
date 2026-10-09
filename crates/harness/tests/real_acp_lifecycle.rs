@@ -1,12 +1,12 @@
-//! Real Pi ACP + model regression for #296. Requires an authenticated Pi and
+//! Real Pi RPC + model regression for #296. Requires an authenticated Pi and
 //! fixtures/pi-slow-model.ts loaded as a Pi extension (35s delay by default).
-//! PI_ACP_EXECUTABLE and PI_ACP_PI_COMMAND can select isolated installations.
+//! PI_EXECUTABLE can select an isolated Pi installation.
 //! cargo test -p harness-adapters --test real_acp_lifecycle -- --ignored --nocapture
 
 use futures::StreamExt;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
-use harness_adapters::{AcpHarness, CancellationToken, Harness, RunControls, SteerMessage};
+use harness_adapters::{CancellationToken, Harness, RunControls, SteerMessage};
 use harness_proto::{AgentEvent, DoneStatus, RunRequest, SandboxLevel};
 
 async fn live_run(cancel: bool) {
@@ -30,7 +30,7 @@ async fn live_run(cancel: bool) {
         sandbox: SandboxLevel::WorkspaceWrite, auto_approve: true,
         attachments: Vec::new(), worktree: None, resume: None,
     };
-    let mut stream = AcpHarness::pi()
+    let mut stream = harness_adapters::PiHarness::new()
         .run(request, controls)
         .await
         .expect("real Pi must start");
