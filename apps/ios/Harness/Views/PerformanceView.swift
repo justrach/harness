@@ -24,6 +24,7 @@ struct PerformanceView: View {
                 Section("Startup") {
                     LabeledContent("First frame", value: perf.startupMs.map { "\($0) ms" } ?? "Not measured this run")
                 }
+                .harnessListRow()
                 Section("Main thread") {
                     LabeledContent("Turns", value: "\(turns.turns)")
                     LabeledContent("Slow", value: "\(turns.slow) (\(String(format: "%.1f", turns.slowPercent))%)")
@@ -31,6 +32,7 @@ struct PerformanceView: View {
                     LabeledContent("Median · 95th", value: "\(String(format: "%.1f", turns.p50)) · \(String(format: "%.1f", turns.p95)) ms")
                     LabeledContent("Worst", value: "\(String(format: "%.0f", turns.worst)) ms")
                 }
+                .harnessListRow()
                 Section("Operations") {
                     if stats.isEmpty {
                         Text("Nothing measured yet").foregroundStyle(.secondary)
@@ -48,11 +50,13 @@ struct PerformanceView: View {
                         }
                     }
                 }
+                .harnessListRow()
                 Section("Device") {
                     LabeledContent("Memory", value: "\(perf.memory().footprintMb) MB")
                     LabeledContent("Thermal state", value: Perf.thermalLabel)
                     LabeledContent("Low Power Mode", value: ProcessInfo.processInfo.isLowPowerModeEnabled ? "On" : "Off")
                 }
+                .harnessListRow()
                 if PerfSharing.available {
                     Section {
                         Toggle("Share anonymous performance data", isOn: $share)
@@ -60,6 +64,7 @@ struct PerformanceView: View {
                     } footer: {
                         Text("Off until you choose to share. Sends how long things took, grouped into ranges, your device model, refresh rate and the app and OS versions, under a random id that changes on every launch. No chat content, account or persistent device identifiers. Reports are retained for 90 days. You can turn this off at any time.")
                     }
+                    .harnessListRow()
                 }
                 Section {
                     Button("Copy report") { UIPasteboard.general.string = perf.report(version: version) }
@@ -71,7 +76,9 @@ struct PerformanceView: View {
                          ? "Operation columns are median, 95th and worst."
                          : "Measured on this device only and never sent anywhere. Operation columns are median, 95th and worst.")
                 }
+                .harnessListRow()
             }
+            .harnessGroupedList()
         }
         .navigationTitle("Performance")
         .navigationBarTitleDisplayMode(.inline)

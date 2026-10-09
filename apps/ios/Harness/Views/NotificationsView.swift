@@ -24,6 +24,7 @@ struct NotificationsView: View {
             } footer: {
                 Text(footer)
             }
+            .harnessListRow()
 
             if enabled {
                 Section("Notify me when") {
@@ -37,6 +38,7 @@ struct NotificationsView: View {
                         .accessibilityIdentifier("settings-notifications-\(kind.rawValue)")
                     }
                 }
+                .harnessListRow()
             }
 
             if enabled && status == .denied {
@@ -47,8 +49,10 @@ struct NotificationsView: View {
                         }
                     }
                 }
+                .harnessListRow()
             }
         }
+        .harnessGroupedList()
         .navigationTitle("Notifications")
         .navigationBarTitleDisplayMode(.inline)
         .task { await askIfNeeded() }

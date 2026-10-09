@@ -22,6 +22,7 @@ struct HomeView: View {
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
     @State private var showSettings = false
+    @State private var showProfile = false
     // "" = All. Sticky across launches; falls back to All if the space is gone.
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     // Start with Time each launch; a saved grouping can hide recent sessions
@@ -348,18 +349,33 @@ struct HomeView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 newButton
             }
+            // Settings and the account are separate destinations: the person
+            // button read as "profile", so it opens Profile, and the gear
+            // opens Settings.
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showSettings = true
                 } label: {
-                    Label("Settings", systemImage: "person.circle")
+                    Label("Settings", systemImage: "gearshape")
                 }
                 .accessibilityLabel("Settings")
                 .accessibilityIdentifier("home-settings")
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showProfile = true
+                } label: {
+                    Label("Profile", systemImage: "person.circle")
+                }
+                .accessibilityLabel("Profile")
+                .accessibilityIdentifier("home-profile")
+            }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showProfile) {
+            ProfileView()
         }
         .sheet(isPresented: $showNewSpace) {
             NewSpaceSheet { spaceId in
@@ -399,6 +415,9 @@ struct HomeView: View {
             } else if model.launchSheet == "settings" {
                 model.launchSheet = nil
                 showSettings = true
+            } else if model.launchSheet == "profile" {
+                model.launchSheet = nil
+                showProfile = true
             }
         }
     }
@@ -523,7 +542,10 @@ struct HomeView: View {
                     open(.newSession(spaceId: space.id))
                 }
             } else if !model.spaces.isEmpty {
-                Section("New session in…") {
+                // Untitled: a titled menu section left a tall gap above the
+                // first project. Opened from "+", the rows read as new
+                // sessions on their own.
+                Section {
                     ForEach(model.spaces) { space in
                         Button {
                             open(.newSession(spaceId: space.id))
