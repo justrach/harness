@@ -1810,6 +1810,8 @@ pub struct Shell {
     /// at `chat_tab` is stale; the active tab lives in the fields above.
     chat_tabs: Vec<chat_tabs::ChatTab>,
     chat_tab: usize,
+    /// Open tab indices from least to most recently visited.
+    chat_tab_history: Vec<usize>,
     /// Live read-only transcripts for unfocused panes, keyed by chat id.
     peer_chat_views: std::collections::HashMap<String, chat_split::PeerChatView>,
     /// A split divider being dragged, and the split root's measured bounds.
@@ -2331,6 +2333,7 @@ impl Shell {
             chat_split_selected: None,
             chat_tabs: Vec::new(),
             chat_tab: 0,
+            chat_tab_history: Vec::new(),
             peer_chat_views: std::collections::HashMap::new(),
             chat_split_drag: None,
             boot_restored: false,
@@ -5294,7 +5297,7 @@ impl Shell {
         }
     }
 
-    fn delete_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    fn delete_chat(&mut self, chat_id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_confirm = None;
         if let Some(tabs) = self.right_tabs.get(&chat_id) {
             for surface in tabs {
@@ -5307,7 +5310,11 @@ impl Shell {
             }
         }
         if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
-            self.state.update(cx, |s, cx| s.select_chat(None, cx));
+            // Deleting the sole session in a tab returns to the last visited
+            // tab, without also archiving the session being deleted.
+            if self.chat_split.is_some() || !self.close_chat_tab(window, cx) {
+                self.state.update(cx, |s, cx| s.select_chat(None, cx));
+            }
         }
         self.composer
             .update(cx, |composer, cx| composer.purge_chat(&chat_id, cx));
@@ -9591,8 +9598,8 @@ impl Shell {
                         .child(
                             popover::btn_danger(&theme, "Delete")
                                 .id("delete-chat-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_chat(chat_id.clone(), cx)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.delete_chat(chat_id.clone(), window, cx)
                                 })),
                         ),
                 )
