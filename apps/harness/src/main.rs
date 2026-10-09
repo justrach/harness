@@ -241,7 +241,14 @@ fn main() -> anyhow::Result<()> {
             runtime.block_on(async {
                 let engine = harness_engine::Engine::new(engine_config_from_env());
                 engine.run().await
-            })
+            })?;
+            // An update installed while nothing restarts this engine: it has
+            // shut down cleanly, so become the new release in place.
+            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+            match harness_update::reexec() {
+                Some(err) => Err(anyhow::Error::from(err).context("restarting into the update")),
+                None => Ok(()),
+            }
         }
         Some(Command::Login) => {
             let runtime = tokio::runtime::Runtime::new()?;

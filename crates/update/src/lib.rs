@@ -278,6 +278,12 @@ pub enum InstallKind {
 }
 
 impl InstallKind {
+    /// Whether the engine's background checker runs for this install,
+    /// signed in or not.
+    pub fn checks_releases(&self) -> bool {
+        matches!(self, Self::MacApp { .. } | Self::Managed { .. })
+    }
+
     pub fn supports_desktop_update(&self) -> bool {
         match self {
             Self::MacApp { .. } => true,
@@ -685,12 +691,69 @@ impl UpdateStatus {
     }
 }
 
-/// `HARNESS_AUTO_UPDATE=1|true|yes` — headless daemons apply updates themselves.
-/// Headless is opt-IN; the desktop app is opt-OUT ([`desktop_auto_update_enabled`]).
+/// Whether a managed headless install applies updates itself. ON by default,
+/// like the desktop app; `HARNESS_AUTO_UPDATE=0|false|no|off` turns it off.
 fn auto_update_enabled() -> bool {
-    std::env::var("HARNESS_AUTO_UPDATE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    desktop_auto_update_from(std::env::var("HARNESS_AUTO_UPDATE").ok().as_deref())
+}
+
+/// The launchd label `harness daemon install` registers (see [`restart_service`]).
+const LAUNCHD_LABEL: &str = "harness.codegraff.app";
+
+/// Is this process the service [`restart_service`] restarts? systemd sets
+/// `INVOCATION_ID` for every unit it runs and launchd sets
+/// `XPC_SERVICE_NAME` to the job label. An engine started by hand (a shell,
+/// tmux, a container without an init) has neither and restarts itself.
+fn supervised_by_service(invocation_id: Option<&str>, xpc_service: Option<&str>) -> bool {
+    invocation_id.is_some_and(|id| !id.is_empty()) || xpc_service == Some(LAUNCHD_LABEL)
+}
+
+fn supervised() -> bool {
+    supervised_by_service(
+        std::env::var("INVOCATION_ID").ok().as_deref(),
+        std::env::var("XPC_SERVICE_NAME").ok().as_deref(),
+    )
+}
+
+fn reexec_tx() -> &'static watch::Sender<bool> {
+    static TX: std::sync::OnceLock<watch::Sender<bool>> = std::sync::OnceLock::new();
+    TX.get_or_init(|| watch::channel(false).0)
+}
+
+/// Resolves once an applied update asks this process to restart itself: it
+/// is not under a service manager, or the service restart failed. The engine
+/// shuts down gracefully on it, and the binary then calls [`reexec`].
+pub async fn reexec_requested() {
+    let mut rx = reexec_tx().subscribe();
+    let _ = rx.wait_for(|requested| *requested).await;
+}
+
+/// Replace this process with the newly installed release, same arguments and
+/// environment — the restart for an engine nothing else would restart. Only
+/// returns on failure. Call after the runtime has shut down.
+pub fn reexec() -> Option<std::io::Error> {
+    if !*reexec_tx().borrow() {
+        return None;
+    }
+    let InstallKind::Managed { app_root } = detect_install() else {
+        return Some(std::io::Error::other("not a managed install"));
+    };
+    let exe = app_root.join("current").join("harness");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        tracing::info!(exe = %exe.display(), "restarting into the updated release");
+        Some(
+            std::process::Command::new(&exe)
+                .args(std::env::args_os().skip(1))
+                .exec(),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = exe;
+        Some(std::io::Error::other("self-restart is not supported here"))
+    }
 }
 
 /// Whether the desktop app stages and installs updates on its own. ON by
@@ -733,9 +796,10 @@ fn check_due(now_ms: i64, due_ms: i64) -> bool {
 
 /// Background release checker: polls `{edge}/releases` hourly, on the wall
 /// clock, and publishes [`UpdateStatus`] over a watch channel (the `UpdateStatus` RPC
-/// stream). Managed installs with `HARNESS_AUTO_UPDATE` set stage + apply + service
-/// restart on their own — but only in a quiet window: while `quiescent` reports
-/// activity, the apply defers and re-probes every [`IDLE_RECHECK`].
+/// stream). Managed installs stage + apply + restart on their own unless
+/// `HARNESS_AUTO_UPDATE` turns it off — but only in a quiet window: while
+/// `quiescent` reports activity, the apply defers and re-probes every
+/// [`IDLE_RECHECK`].
 #[derive(Clone)]
 pub struct Updater {
     edge_url: String,
@@ -799,9 +863,9 @@ impl Updater {
     }
 
     async fn check_loop(&self) {
-        // The installed app has a dedicated Harness release feed. Managed
-        // legacy installs retain their existing manual update behavior.
-        if !cfg!(test) && !matches!(detect_install(), InstallKind::MacApp { .. }) {
+        // The installed app and managed server installs follow Harness's
+        // release feed; source builds and copied binaries never check.
+        if !cfg!(test) && !detect_install().checks_releases() {
             return;
         }
         let mut shutdown = self.shutdown_tx.subscribe();
@@ -877,7 +941,7 @@ impl Updater {
         }
         match self.apply().await {
             Ok(version) => {
-                tracing::info!(%version, "auto-update applied; service restarting")
+                tracing::info!(%version, "auto-update applied; restarting")
             }
             Err(err) => tracing::warn!(error = %err, "auto-update failed"),
         }
@@ -931,9 +995,15 @@ impl Updater {
         apply_headless(&app_root, &manifest.version)?;
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            if let Err(err) = restart_service() {
-                tracing::warn!(error = %err, "service restart failed — restart the engine to finish the update");
+            if supervised() {
+                match restart_service() {
+                    Ok(()) => return,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "service restart failed — restarting in place")
+                    }
+                }
             }
+            reexec_tx().send_replace(true);
         });
         Ok(manifest.version)
     }
@@ -959,6 +1029,44 @@ mod tests {
         assert!(!desktop_auto_update_from(Some(" OFF ")));
         assert!(!desktop_auto_update_from(Some("false")));
         assert!(!desktop_auto_update_from(Some("no")));
+    }
+
+    #[test]
+    fn servers_and_the_app_check_releases_but_source_builds_never_do() {
+        assert!(
+            InstallKind::Managed {
+                app_root: PathBuf::from("/home/u/.harness/app")
+            }
+            .checks_releases()
+        );
+        assert!(
+            InstallKind::MacApp {
+                bundle: PathBuf::from("/Applications/Harness.app")
+            }
+            .checks_releases()
+        );
+        assert!(!InstallKind::Unmanaged.checks_releases());
+    }
+
+    #[test]
+    fn only_the_installed_service_counts_as_supervised() {
+        // systemd unit
+        assert!(supervised_by_service(Some("3f2a9c"), None));
+        // `harness daemon install` launchd job
+        assert!(supervised_by_service(None, Some("harness.codegraff.app")));
+        // a shell, tmux or a container without an init
+        assert!(!supervised_by_service(None, None));
+        assert!(!supervised_by_service(Some(""), None));
+        // a terminal app's own launchd job is not the Harness service
+        assert!(!supervised_by_service(
+            None,
+            Some("application.com.apple.Terminal")
+        ));
+    }
+
+    #[test]
+    fn nothing_restarts_in_place_unless_an_update_asked_for_it() {
+        assert!(reexec().is_none());
     }
 
     #[test]
