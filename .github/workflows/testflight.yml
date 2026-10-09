@@ -112,7 +112,13 @@ jobs:
             exit 3
           fi
           caps="$RUNNER_TEMP/capabilities.json"
-          api "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_id/bundleIdCapabilities?limit=200" > "$caps"
+          # The capabilities relationship takes no paging parameters (`limit`
+          # made Apple answer 400); print Apple's reply if it still refuses.
+          if ! api "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_id/bundleIdCapabilities" > "$caps"; then
+            echo "::error::Couldn't read the capabilities of harness.codegraff.ios:"
+            jq -r '.errors[]? | "\(.status) \(.code): \(.title) — \(.detail)"' "$caps" 2>/dev/null || cat "$caps"
+            exit 4
+          fi
           if jq -e '.data[] | select(.attributes.capabilityType == "PUSH_NOTIFICATIONS")' "$caps" > /dev/null; then
             echo "Push Notifications already enabled on harness.codegraff.ios."
           else
