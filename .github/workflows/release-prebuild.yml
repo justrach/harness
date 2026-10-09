@@ -35,13 +35,8 @@ jobs:
           endpoint: ${{ secrets.KACHE_S3_ENDPOINT }}
           manifest-key: ${{ github.job }}-${{ strategy.job-index }}
           cache-executables: 'true'
-      - name: build the release binary (as scripts/package-macos.sh)
-        run: cargo build --release -p harness
-      - name: explain misses (temporary diagnostic)
-        if: always()
+      - name: key components for small crates that miss (temporary diagnostic)
         run: |
-          K="${RUSTC_WRAPPER:-kache}"
-          "$K" explain || true
-          for c in gpui gpui_macros util_macros media gpui_base harness_ui harness_mcp harness; do
-            echo "=== $c"; "$K" explain "$c" || true
-          done
+          KACHE_LOG='kache=trace' cargo build --release -p collections -p http_client 2>&1 \
+            | grep -E '\[key:(collections|http_client|serde|libc)\]' | sed -E 's/^.*\[key:/[key:/' > keys.txt || true
+          wc -l keys.txt; cat keys.txt
