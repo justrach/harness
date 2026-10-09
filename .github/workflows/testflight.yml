@@ -102,6 +102,27 @@ jobs:
           latest_build="$(jq -r '[.data[].attributes.version | select(test("^[0-9]+$")) | tonumber] | max // 0' "$builds")"
           build_number="$((latest_build + 1))"
 
+          # Session notifications need the Push capability on the App ID, so
+          # the distribution profile automatic signing makes includes it.
+          bundle_ids="$RUNNER_TEMP/bundle-ids.json"
+          api 'https://api.appstoreconnect.apple.com/v1/bundleIds?filter[identifier]=harness.codegraff.ios&fields[bundleIds]=identifier&limit=10' > "$bundle_ids"
+          bundle_id="$(jq -r '[.data[] | select(.attributes.identifier == "harness.codegraff.ios")][0].id // empty' "$bundle_ids")"
+          if [ -z "$bundle_id" ]; then
+            echo "No App ID for harness.codegraff.ios." >&2
+            exit 3
+          fi
+          caps="$RUNNER_TEMP/capabilities.json"
+          api "https://api.appstoreconnect.apple.com/v1/bundleIds/$bundle_id/bundleIdCapabilities?limit=200" > "$caps"
+          if jq -e '.data[] | select(.attributes.capabilityType == "PUSH_NOTIFICATIONS")' "$caps" > /dev/null; then
+            echo "Push Notifications already enabled on harness.codegraff.ios."
+          else
+            curl --globoff --fail-with-body --silent --show-error -X POST \
+              -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+              'https://api.appstoreconnect.apple.com/v1/bundleIdCapabilities' \
+              --data "$(jq -n --arg id "$bundle_id" '{data: {type: "bundleIdCapabilities", attributes: {capabilityType: "PUSH_NOTIFICATIONS"}, relationships: {bundleId: {data: {type: "bundleIds", id: $id}}}}}')" > /dev/null
+            echo "Enabled Push Notifications on harness.codegraff.ios."
+          fi
+
           echo "AC_KEY_PATH=$key_path" >> "$GITHUB_ENV"
           echo "AC_TOKEN_PATH=$token_path" >> "$GITHUB_ENV"
           echo "ASC_APP_ID=$app_id" >> "$GITHUB_ENV"

@@ -3,9 +3,10 @@
 //! (the sidebar update strip + macOS bundle swap).
 //!
 //! Release layout (see `.github/workflows/release.yml`): the packaged macOS
-//! app reads Harness's latest stable GitHub release. Managed installs still
-//! use `{edge}/releases/*`. `manifest.json` carries the latest version plus a
-//! sha256 per artifact; `latest.txt` remains a fallback for older releases.
+//! app and managed server installs read Harness's latest stable GitHub
+//! release; other installs still check `{edge}/releases/*`. `manifest.json`
+//! carries the latest version plus a sha256 per artifact; `latest.txt`
+//! remains a fallback for older releases.
 //!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.harness/app/<ver>` + `current` symlink — the curl|sh
@@ -245,9 +246,13 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
 }
 
 fn default_release_base(edge_url: &str, install: &InstallKind) -> String {
-    // The installed desktop GUI follows Harness's stable GitHub releases.
-    // Its manifest is attached to the same release as the signed app tarball.
-    if matches!(install, InstallKind::MacApp { .. }) {
+    // The desktop app and managed server installs follow Harness's stable
+    // GitHub releases: the release job attaches the manifest there next to
+    // every artifact, while the edge copy only moves when its upload runs.
+    if matches!(
+        install,
+        InstallKind::MacApp { .. } | InstallKind::Managed { .. }
+    ) {
         return "https://github.com/justrach/harness/releases/latest/download".into();
     }
     format!("{}/releases", edge_url.trim_end_matches('/'))
@@ -1184,13 +1189,20 @@ mod tests {
     }
 
     #[test]
-    fn installed_mac_app_uses_published_stable_manifest() {
+    fn installed_apps_and_servers_use_published_stable_manifest() {
         let app = InstallKind::MacApp {
             bundle: PathBuf::from("/Applications/Harness.app"),
         };
         assert!(app.supports_desktop_update());
         assert_eq!(
             default_release_base("https://example.test", &app),
+            "https://github.com/justrach/harness/releases/latest/download"
+        );
+        let server = InstallKind::Managed {
+            app_root: PathBuf::from("/home/u/.harness/app"),
+        };
+        assert_eq!(
+            default_release_base("https://example.test", &server),
             "https://github.com/justrach/harness/releases/latest/download"
         );
         assert_eq!(

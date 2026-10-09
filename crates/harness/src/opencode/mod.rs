@@ -2893,6 +2893,8 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 header: "Permission".into(),
                 question: format!("Allow this OpenCode request once? {}", props),
                 options: vec!["No".into(), "Yes".into()],
+                prefill: None,
+                multiline: false,
                 multi_select: false,
             };
             tokio::spawn(async move {
@@ -3443,6 +3445,8 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        prefill: None,
+                        multiline: false,
                         multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
                     })
                 })

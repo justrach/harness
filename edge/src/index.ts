@@ -24,6 +24,7 @@
  *   GET  /registry/:orgId/stats       — registry seq/rows/attribution
  *   GET  /registry/:orgId/rows        — registry full-table repair read
  *   POST /registry/:orgId/reset       — registry operator wipe (self-healing)
+ *   POST|DELETE /registry/:orgId/push-target?device= — a phone's APNs token + notification choices
  *   GET  /device/:deviceId/ws?role=   — device-room byte pipe (§8)
  *   GET  /device/:deviceId/sidecar/:name
  *   POST /device/:deviceId/sidecar/:name
@@ -467,6 +468,11 @@ export default {
       // make replays no-ops, so at-least-once delivery is safe).
       if (parts[2] === "push" && request.method === "POST") {
         return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push", url.search);
+      }
+      // A phone's APNs token + notification choices (POST), or removal on
+      // sign-out / turning notifications off (DELETE). `?device=` required.
+      if (parts[2] === "push-target" && (request.method === "POST" || request.method === "DELETE")) {
+        return forward(env.REGISTRY_ROOMS, room, request, auth.userId, "/push-target", url.search);
       }
       // Operator wipe. Unlike the CRDT rooms this needs no recipe: clients
       // detect the seq regression on their next hello and re-seed the table

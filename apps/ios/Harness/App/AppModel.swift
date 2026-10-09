@@ -399,6 +399,7 @@ final class AppModel {
     }
 
     func signOut() {
+        PushNotifications.shared.signingOut(config: demo == nil ? config : nil)
         workspace?.stop()
         workspace = nil
         sessionStores.values.forEach { $0.stop() }
@@ -474,7 +475,11 @@ final class AppModel {
         store.start()
         startConnectivity()
         phase = .ready
+        PushNotifications.shared.signedIn(model: self)
     }
+
+    /// The live sign-in, for the edge calls notifications make (none in demo mode).
+    var pushConfig: AppConfig? { demo == nil ? config : nil }
 
     /// Wire the graced-connectivity recompute over the live stores (the
     /// engine's 1s compute_connectivity, phone edition).
@@ -831,6 +836,9 @@ final class AppModel {
                                    roomGen: 2))
             return id
         }
+        // The first session started from the phone is when "tell me when it's
+        // done" makes sense: ask for notification permission then.
+        PushNotifications.shared.askAfterFirstSession()
         if let space {
             return workspace?.createChat(space: space, config: chatConfig, branch: branch, cwd: cwd)
         }
