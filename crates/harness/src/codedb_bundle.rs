@@ -247,9 +247,49 @@ fn install_bytes(bytes: &[u8], target: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// How often a long-running Harness looks for a newer codedb.
-pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// How often a long-running Harness looks for a newer codedb: graff's cadence.
+pub const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const INITIAL_DELAY: Duration = Duration::from_secs(30);
+
+/// When the last codedb check started; the hourly loop and
+/// [`maybe_check_soon`] share it so they never overlap.
+static LAST_CHECK: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const CHECK_DEBOUNCE: Duration = Duration::from_secs(10 * 60);
+
+fn claim_check() -> bool {
+    let mut last = LAST_CHECK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if last.is_some_and(|when| when.elapsed() < CHECK_DEBOUNCE) {
+        return false;
+    }
+    *last = Some(std::time::Instant::now());
+    true
+}
+
+/// Check for a newer codedb now, as graff's updater does: when a graff
+/// session starts and when graff itself was just updated. At most one check
+/// every ten minutes; never blocks, and does nothing without a tokio runtime.
+pub fn maybe_check_soon() {
+    if !auto_install_enabled() {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    if !claim_check() {
+        return;
+    }
+    handle.spawn(async {
+        match ensure_managed().await {
+            Ok(Outcome::Installed { from, to }) => {
+                tracing::info!(?from, %to, "codedb updated from its GitHub release");
+            }
+            Ok(Outcome::Current { .. }) => {}
+            Err(error) => tracing::warn!(%error, "codedb update check failed"),
+        }
+    });
+}
 
 /// Keep codedb installed and current for the life of the process, on the
 /// current tokio runtime. Never blocks start-up.
@@ -266,6 +306,7 @@ pub async fn keep_current() {
     }
     tokio::time::sleep(INITIAL_DELAY).await;
     loop {
+        claim_check();
         match ensure_managed().await {
             Ok(Outcome::Installed { from, to }) => {
                 tracing::info!(?from, %to, "codedb installed from its GitHub release");
