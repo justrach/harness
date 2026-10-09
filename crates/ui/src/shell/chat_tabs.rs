@@ -19,10 +19,19 @@ pub(super) struct ChatTab {
     pub draft: Option<CanvasDraft>,
 }
 
-/// The tab to show after closing `closed` of `len`: its left neighbor, or the
-/// new first tab when the first one closed.
-pub(super) fn tab_after_close(closed: usize, len: usize) -> usize {
-    closed.saturating_sub(1).min(len.saturating_sub(2))
+/// Remove a closed tab from visit history and reindex the remaining entries.
+/// Return the last visited survivor, falling back to a neighbor without history.
+pub(super) fn tab_after_close(closed: usize, len: usize, history: &mut Vec<usize>) -> usize {
+    history.retain(|&ix| ix != closed && ix < len);
+    for ix in history.iter_mut() {
+        if *ix > closed {
+            *ix -= 1;
+        }
+    }
+    history
+        .last()
+        .copied()
+        .unwrap_or_else(|| closed.saturating_sub(1).min(len.saturating_sub(2)))
 }
 
 /// What closing a pane or tab did to its session ([`Shell::archive_closed_session`]).
@@ -83,6 +92,11 @@ pub(super) struct ChatTabDrag {
 }
 
 impl Shell {
+    fn record_chat_tab_visit(&mut self) {
+        self.chat_tab_history.retain(|&ix| ix != self.chat_tab);
+        self.chat_tab_history.push(self.chat_tab);
+    }
+
     /// The focused pane's live composer picks, for parking or inheriting.
     pub(super) fn current_canvas_draft(&self, cx: &App) -> CanvasDraft {
         let composer = self.composer.read(cx);
@@ -172,6 +186,9 @@ impl Shell {
         let tab = self.chat_tabs.remove(from);
         self.chat_tabs.insert(to, tab);
         self.chat_tab = index_after_move(self.chat_tab, from, to);
+        for ix in &mut self.chat_tab_history {
+            *ix = index_after_move(*ix, from, to);
+        }
         self.persist_chat_tabs(cx);
         cx.notify();
     }
@@ -183,6 +200,7 @@ impl Shell {
         if !matches!(self.route, Route::Chat) {
             return;
         }
+        self.record_chat_tab_visit();
         let parked = self.park_chat_tab(cx);
         let project = parked.project.clone();
         // A fresh canvas starts from the picks of the tab it was opened from,
@@ -213,6 +231,7 @@ impl Shell {
         };
         self.chat_tabs.push(tab.clone());
         self.chat_tab = self.chat_tabs.len() - 1;
+        self.record_chat_tab_visit();
         self.load_chat_tab(tab, window, cx);
     }
 
@@ -220,8 +239,10 @@ impl Shell {
         if ix == self.chat_tab || ix >= self.chat_tabs.len() || !matches!(self.route, Route::Chat) {
             return;
         }
+        self.record_chat_tab_visit();
         self.chat_tabs[self.chat_tab] = self.park_chat_tab(cx);
         self.chat_tab = ix;
+        self.record_chat_tab_visit();
         let tab = self.chat_tabs[ix].clone();
         self.load_chat_tab(tab, window, cx);
     }
@@ -256,14 +277,16 @@ impl Shell {
             return false;
         }
         let closed = self.chat_tab;
-        let next = tab_after_close(closed, self.chat_tabs.len());
+        let next = tab_after_close(closed, self.chat_tabs.len(), &mut self.chat_tab_history);
         tracing::info!(closed, tabs = self.chat_tabs.len(), "closing chat tab");
         self.chat_tabs.remove(closed);
         self.chat_tab = next;
+        self.record_chat_tab_visit();
         let tab = self.chat_tabs[next].clone();
         if self.chat_tabs.len() == 1 {
             self.chat_tabs.clear();
             self.chat_tab = 0;
+            self.chat_tab_history.clear();
         }
         self.load_chat_tab(tab, window, cx);
         true
@@ -831,11 +854,116 @@ mod tests {
         assert!(restore_chat_tabs(&saved, 2, live).is_none());
     }
 
+    #[gpui::test]
+    fn closing_new_tabs_returns_to_last_visited_tab(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["a", "b", "c"].map(archive_test_chat).into();
+                    state.selected_chat = Some("a".into());
+                });
+                shell.new_chat_tab(Some("b".into()), window, cx);
+                shell.switch_chat_tab(0, window, cx);
+
+                // A is last visited, but B is the new canvas's left neighbor.
+                shell.new_chat_tab(None, window, cx);
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.chat_tab, 0);
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+
+                // Nested creates unwind in visit order, including canvas tabs.
+                shell.new_chat_tab(None, window, cx);
+                shell.new_chat_tab(Some("c".into()), window, cx);
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.chat_tab, 2);
+                assert!(shell.state.read(cx).selected_chat.is_none());
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+
+                // Closing a middle tab reindexes history; the last survivor then
+                // becomes implicit, and a fresh create/close still returns to it.
+                shell.new_chat_tab(Some("c".into()), window, cx);
+                shell.switch_chat_tab(1, window, cx);
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.chat_tab, 1);
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("c"));
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+                assert!(shell.chat_tabs.is_empty());
+                assert!(shell.chat_tab_history.is_empty());
+                shell.new_chat_tab(None, window, cx);
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn deleting_new_session_returns_to_last_visited_tab(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["a", "b", "c"].map(archive_test_chat).into();
+                    state.selected_chat = Some("a".into());
+                });
+                shell.new_chat_tab(Some("b".into()), window, cx);
+                shell.switch_chat_tab(0, window, cx);
+                shell.new_chat_tab(Some("c".into()), window, cx);
+                shell.delete_chat("c".into(), window, cx);
+                assert_eq!(shell.chat_tab, 0);
+                assert_eq!(shell.chat_tabs.len(), 2);
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn reordering_tabs_preserves_last_visited_target(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["a", "b", "c"].map(archive_test_chat).into();
+                    state.selected_chat = Some("a".into());
+                });
+                shell.new_chat_tab(Some("b".into()), window, cx);
+                shell.switch_chat_tab(0, window, cx);
+                shell.new_chat_tab(Some("c".into()), window, cx);
+                // A moves behind C: [A, B, C] -> [B, C, A].
+                shell.move_chat_tab(0, 2, cx);
+                assert_eq!(shell.chat_tab, 1);
+                assert!(shell.close_focused_chat_pane(window, cx));
+                assert_eq!(shell.chat_tab, 1);
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("a"));
+            })
+            .unwrap();
+    }
+
     #[test]
-    fn closing_a_tab_lands_on_its_neighbor() {
-        assert_eq!(tab_after_close(0, 3), 0);
-        assert_eq!(tab_after_close(1, 3), 0);
-        assert_eq!(tab_after_close(2, 3), 1);
-        assert_eq!(tab_after_close(1, 2), 0);
+    fn closing_a_tab_reindexes_visit_history() {
+        let mut history = vec![0, 2, 1];
+        assert_eq!(tab_after_close(1, 3, &mut history), 1);
+        assert_eq!(history, [0, 1]);
+        assert_eq!(tab_after_close(1, 2, &mut history), 0);
+        assert_eq!(history, [0]);
+
+        let mut history = vec![2, 1, 0];
+        assert_eq!(tab_after_close(0, 3, &mut history), 0);
+        assert_eq!(history, [1, 0]);
+    }
+
+    #[test]
+    fn closing_a_tab_without_history_lands_on_its_neighbor() {
+        for (closed, len, expected) in [(0, 3, 0), (1, 3, 0), (2, 3, 1), (1, 2, 0)] {
+            assert_eq!(tab_after_close(closed, len, &mut Vec::new()), expected);
+        }
     }
 }
