@@ -409,6 +409,7 @@ pub(crate) fn crash_message(
 
 pub use acp::AcpHarness;
 pub use acp::exo_bridge::serve as serve_exo_acp;
+pub use acp::graff_client::set_device_name as set_graff_device_name;
 pub use acp::graff_login::login_command as graff_login_command;
 pub use acp::graff_worktree::{
     GraffWorktreeAction, GraffWorktreeOutcome, GraffWorktreeResult, run_graff_worktree_action,
