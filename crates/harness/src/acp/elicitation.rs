@@ -152,6 +152,8 @@ pub(super) fn form(params: &Value, new_id: impl Fn() -> String) -> Option<Form> 
                 header: "Agent question".into(),
                 question,
                 options,
+                prefill: None,
+                multiline: false,
                 multi_select: false,
             },
         });

@@ -120,7 +120,7 @@ pub fn executable_override(harness: HarnessId) -> Option<&'static str> {
         HarnessId::Grok => Some("GROK_EXECUTABLE"),
         HarnessId::Hermes => Some("HERMES_EXECUTABLE"),
         HarnessId::Graff => Some("GRAFF_EXECUTABLE"),
-        HarnessId::Pi => Some("PI_ACP_EXECUTABLE"),
+        HarnessId::Pi => Some("PI_EXECUTABLE"),
         HarnessId::Opencode => Some("OPENCODE_EXECUTABLE"),
         HarnessId::Antigravity => Some("ANTIGRAVITY_ACP_EXECUTABLE"),
         HarnessId::Exo => Some("EXO_ACP_EXECUTABLE"),
