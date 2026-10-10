@@ -34,6 +34,21 @@ pub(super) fn tab_after_close(closed: usize, len: usize, history: &mut Vec<usize
         .unwrap_or_else(|| closed.saturating_sub(1).min(len.saturating_sub(2)))
 }
 
+/// The ninth tab key: always the last tab, however many are open.
+pub(super) const LAST_TAB_SLOT: usize = 8;
+
+/// The tab a number key shows: its own slot, or the last tab for
+/// [`LAST_TAB_SLOT`]. None with no tab there, or fewer than two tabs.
+pub(super) fn tab_for_slot(slot: usize, len: usize) -> Option<usize> {
+    if len < 2 {
+        return None;
+    }
+    if slot == LAST_TAB_SLOT {
+        return Some(len - 1);
+    }
+    (slot < len).then_some(slot)
+}
+
 /// What closing a pane or tab did to its session ([`Shell::archive_closed_session`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CloseArchive {
@@ -254,6 +269,13 @@ impl Shell {
             self.cycle_chat_tab(forward, window, cx);
         } else {
             self.cycle_session(forward, cx);
+        }
+    }
+
+    /// ⌃1–⌃9 (Alt+digit off macOS).
+    pub(super) fn select_chat_tab(&mut self, slot: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = tab_for_slot(slot, self.chat_tabs.len()) {
+            self.switch_chat_tab(ix, window, cx);
         }
     }
 
@@ -965,5 +987,17 @@ mod tests {
         for (closed, len, expected) in [(0, 3, 0), (1, 3, 0), (2, 3, 1), (1, 2, 0)] {
             assert_eq!(tab_after_close(closed, len, &mut Vec::new()), expected);
         }
+    }
+
+    #[test]
+    fn number_keys_pick_their_tab_and_nine_picks_the_last() {
+        assert_eq!(tab_for_slot(0, 3), Some(0));
+        assert_eq!(tab_for_slot(2, 3), Some(2));
+        assert_eq!(tab_for_slot(3, 3), None, "no fourth tab");
+        assert_eq!(tab_for_slot(LAST_TAB_SLOT, 3), Some(2));
+        assert_eq!(tab_for_slot(LAST_TAB_SLOT, 12), Some(11));
+        // One tab is no tab strip: the keys do nothing.
+        assert_eq!(tab_for_slot(0, 1), None);
+        assert_eq!(tab_for_slot(LAST_TAB_SLOT, 0), None);
     }
 }
