@@ -191,6 +191,8 @@ class AppModel(
     private val tickMs: Long? = null,
     /** A live sync to drive instead of the demo; null falls back to [liveFactory], then to the demo. */
     liveSync: LiveSync? = null,
+    /** The CodeGraff sign-in behind [liveSync]; null falls back to [accountFactory]. */
+    accountApi: AccountApi? = null,
 ) : ViewModel() {
     private val _workspace: MutableStateFlow<WorkspaceState>
     private val _entries: MutableStateFlow<Map<String, List<MessageEntry>>>
@@ -205,10 +207,17 @@ class AppModel(
         /** Opens the live sync for a new model; null runs the demo. Set by the activity before the model exists. */
         @Volatile
         var liveFactory: (() -> LiveSync)? = null
+
+        /** The CodeGraff sign-in a live model runs under (none for the demo or a dev edge). Set with [liveFactory]. */
+        @Volatile
+        var accountFactory: (() -> AccountApi)? = null
     }
 
     /** The live sync this model drives, or null for the demo. */
     val live: LiveSync? = liveSync ?: liveFactory?.invoke()
+
+    /** The CodeGraff account this model is signed in with, for account deletion. */
+    val account: AccountApi? = accountApi ?: if (live != null) accountFactory?.invoke() else null
 
     /** Live sync with an edge, rather than the offline demo. */
     val isLive: Boolean get() = live != null
@@ -580,7 +589,7 @@ class AppModel(
     val accountDeletion: StateFlow<AccountDeletionState> get() = _accountDeletion
 
     /** Only a real CodeGraff sign-in has an account to delete; the offline demo has none, as on iOS. */
-    val canDeleteAccount: Boolean get() = false
+    val canDeleteAccount: Boolean get() = account != null
 
     /**
      * Delete the signed-in account. Success signs out; a refusal keeps the session but stores the tokens the

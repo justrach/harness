@@ -153,6 +153,14 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
         row("New chat tab", Box::new(NewChatTab)),
         row("Next chat tab", Box::new(NextChatTab)),
         row("Previous chat tab", Box::new(PrevChatTab)),
+        row(
+            "First chat tab (2–8 for the next ones)",
+            Box::new(SelectChatTab(0)),
+        ),
+        row(
+            "Last chat tab",
+            Box::new(SelectChatTab(chat_tabs::LAST_TAB_SLOT)),
+        ),
         row("Jump to the message box", Box::new(FocusComposer)),
         row("Command palette", Box::new(ToggleCommandPalette)),
         row("Settings", Box::new(OpenSettings)),
@@ -324,6 +332,12 @@ fn titlebar_new_session_alpha(is_chat_route: bool, has_selected_chat: bool) -> f
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
+
+/// Show the chat tab at `slot` (zero-based); the last slot goes to the last
+/// tab, as in browsers.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = shell, no_json)]
+pub struct SelectChatTab(pub usize);
 
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
@@ -12332,6 +12346,11 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &NextChatTab, window, cx| this.cycle_chat_tab(true, window, cx)))
             .on_action(cx.listener(|this, _: &PrevChatTab, window, cx| this.cycle_chat_tab(false, window, cx)))
+            .on_action(cx.listener(|this, tab: &SelectChatTab, window, cx| {
+                if !this.overlay_owns_keyboard(cx) {
+                    this.select_chat_tab(tab.0, window, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseSplit, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.close_terminal_split(window, cx);

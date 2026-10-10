@@ -54,8 +54,8 @@ use sha2::{Digest, Sha256};
 
 use harness_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode,
-    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, GraffLoginProvider,
-    HarnessId,
+    AgentLoginPoll, AgentLoginStart, AgentLoginStatus, AgentUsageWindow, CHATGPT_PLAN_CONFIRMATION,
+    CHATGPT_PLAN_OFF, GraffLoginProvider, HarnessId,
 };
 
 use crate::graff_logins;
@@ -244,6 +244,9 @@ enum LoginFlow {
         exit: Arc<Mutex<Option<Option<i32>>>>,
         /// The credential's stamp when the login started.
         before: Option<SystemTime>,
+        /// ChatGPT: graff had not registered in the account yet, so this
+        /// sign-in is the first (and shows the one-time plan confirmation).
+        first_registration: bool,
         /// A ChatGPT sign-in being finished on another device: the only
         /// callback the host will deliver for it.
         relay: Option<graff_logins::ChatgptRelay>,
@@ -1049,15 +1052,61 @@ impl AgentAccounts {
     /// Sign out of one graff provider by removing its credential file. A
     /// sign-in still waiting on that provider is dropped first, so it can't
     /// write the credential back after the user asked for it gone.
-    pub fn sign_out_graff_login(
+    ///
+    /// ChatGPT signs out through `graff logout chatgpt-new` instead: graff
+    /// revokes the session and keeps its app registration and account, so the
+    /// next sign-in on this device skips the consent screen. Deleting the
+    /// record would leave the session live and register graff again.
+    pub async fn sign_out_graff_login(
         &self,
         provider: &str,
     ) -> Result<Vec<GraffLoginProvider>, EngineError> {
         self.reap_graff_flows(provider);
+        if provider == "chatgpt-new" {
+            self.graff_logout(provider).await?;
+            return Ok(self.list_graff_logins());
+        }
         graff_logins::sign_out(&self.inner.config.graff_home, provider).map_err(|err| {
             EngineError::Other(format!("Could not sign out of {provider}: {err}"))
         })?;
         Ok(self.list_graff_logins())
+    }
+
+    /// Run `graff logout <provider>` against this service's graff home.
+    async fn graff_logout(&self, provider: &str) -> Result<(), EngineError> {
+        let mut command = harness_adapters::graff_logout_command(provider)
+            .await
+            .map_err(|err| {
+                EngineError::Other(match err {
+                    harness_adapters::HarnessError::NotInstalled(_) => {
+                        "The `graff` CLI was not found on this device.".to_string()
+                    }
+                    other => format!("Could not resolve the graff CLI to sign out: {other}"),
+                })
+            })?;
+        command.stdin(harness_adapters::process::Stdio::null());
+        #[cfg(unix)]
+        command.env("HOME", &self.inner.config.graff_home);
+        // Revoking is one request to OpenAI; don't hold the RPC forever.
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+            .await
+            .map_err(|_| EngineError::Other("graff did not finish signing out.".into()))?
+            .map_err(|err| EngineError::Other(format!("Could not run graff logout: {err}")))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let signed_out = graff_logins::chatgpt_record(&self.inner.config.graff_home)
+            .is_none_or(|record| !record.signed_in);
+        if output.status.success() && signed_out {
+            Ok(())
+        } else {
+            Err(EngineError::Other(format!(
+                "Could not sign out of ChatGPT: {}",
+                graff_logins::failure_message(&text)
+            )))
+        }
     }
 
     /// Drop a pending sign-in for one graff provider: two children racing to
@@ -1146,6 +1195,8 @@ impl AgentAccounts {
         #[cfg(unix)]
         command.env("HOME", &home);
         let before = graff_logins::credential_stamp(&home, provider);
+        let first_registration = provider == "chatgpt-new"
+            && !graff_logins::chatgpt_record(&home).is_some_and(|record| record.registered);
         let child = command.spawn().map_err(|err| {
             EngineError::Other(if err.kind() == std::io::ErrorKind::NotFound {
                 "The `graff` CLI was not found on this device — install it first.".into()
@@ -1164,6 +1215,7 @@ impl AgentAccounts {
                 output: output.clone(),
                 exit: exit.clone(),
                 before,
+                first_registration,
                 relay: None,
             },
         );
@@ -1255,16 +1307,24 @@ impl AgentAccounts {
 
     /// poll a graff sign-in; `None` when `login_id` isn't one.
     fn poll_graff_login(&self, login_id: &str) -> Option<AgentLoginPoll> {
-        let (provider, exit, output, before) = match lock(&self.inner.flows).get(login_id) {
-            Some(LoginFlow::Graff {
-                provider,
-                exit,
-                output,
-                before,
-                ..
-            }) => (provider.clone(), exit.clone(), output.clone(), *before),
-            _ => return None,
-        };
+        let (provider, exit, output, before, first_registration) =
+            match lock(&self.inner.flows).get(login_id) {
+                Some(LoginFlow::Graff {
+                    provider,
+                    exit,
+                    output,
+                    before,
+                    first_registration,
+                    ..
+                }) => (
+                    provider.clone(),
+                    exit.clone(),
+                    output.clone(),
+                    *before,
+                    *first_registration,
+                ),
+                _ => return None,
+            };
         let exited = *lock(&exit);
         let Some(code) = exited else {
             return Some(AgentLoginPoll {
@@ -1287,15 +1347,21 @@ impl AgentAccounts {
         Some(if landed {
             AgentLoginPoll {
                 status: AgentLoginStatus::Done,
-                message: None,
+                // The one-time confirmation OpenAI's guidelines ask for after
+                // the first sign-in; returning sign-ins finish quietly.
+                message: (provider == "chatgpt-new" && first_registration)
+                    .then(|| CHATGPT_PLAN_CONFIRMATION.to_string()),
                 url: None,
             }
         } else {
             AgentLoginPoll {
                 status: AgentLoginStatus::Error,
                 message: Some(if provider == "chatgpt-new" {
-                    "ChatGPT sign-in did not grant plan access. Sign in again and allow plan usage."
-                        .into()
+                    if graff_logins::chatgpt_plan_denied(&output) {
+                        CHATGPT_PLAN_OFF.into()
+                    } else {
+                        "ChatGPT sign-in did not grant plan access. Sign in again and allow plan usage.".into()
+                    }
                 } else {
                     graff_logins::failure_message(&output)
                 }),

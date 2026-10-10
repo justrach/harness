@@ -48,7 +48,6 @@ import harness.codegraff.android.ui.session.SessionScreen
 import harness.codegraff.android.ui.settings.SettingsSheet
 import harness.codegraff.android.ui.sheets.NewSpaceSheet
 import harness.codegraff.android.ui.sheets.SessionHostPickerSheet
-import harness.codegraff.android.ui.signin.SignInScreen
 
 /** iPad-style regular width: the session list becomes a sidebar next to the open session, like the desktop. */
 private val SplitBreakpoint = 600.dp
@@ -60,15 +59,10 @@ private val SidebarWidth = 380.dp
  * replaces the detail instead of stacking behind it. When a hinge splits the screen, the sidebar ends at the fold.
  */
 @Composable
-fun HarnessApp(model: AppModel) {
+fun HarnessApp(model: AppModel, onSignOut: () -> Unit = {}) {
     val state by model.workspace.collectAsState()
     // Keeps relative times and stale-session checks moving without tying them to every write.
     LaunchedEffect(model) { model.runClock() }
-    var signedIn by rememberSaveable { mutableStateOf(true) }
-    if (!signedIn) {
-        SignInScreen(onDemo = { signedIn = true })
-        return
-    }
 
     var path by rememberSaveable(stateSaver = Route.PathSaver) { mutableStateOf(listOf<Route>()) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
@@ -158,11 +152,12 @@ fun HarnessApp(model: AppModel) {
         val scope = rememberCoroutineScope()
         SettingsSheet(
             onDismiss = { showSettings = false },
-            onSignOut = { signedIn = false; path = emptyList() },
+            onSignOut = { showSettings = false; path = emptyList(); onSignOut() },
             canDeleteAccount = model.canDeleteAccount,
             deletion = deletion,
-            // No live account backend yet: the row is hidden in the offline demo, so this is only the seam.
-            onDeleteAccount = { scope.launch { model.deleteAccount(api = null) } },
+            onDeleteAccount = {
+                scope.launch { model.deleteAccount(api = model.account, onSignedOut = { showSettings = false; onSignOut() }) }
+            },
             onDismissDeletionError = model::dismissAccountDeletionError,
             workspace = state,
             loadCompactAt = model::graffCompactAt,

@@ -339,7 +339,7 @@ impl ChatSplit {
 /// (Ctrl+Shift/Super combos, so bare Ctrl+letter stays with text inputs).
 pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
     let b = |mac_combo: &str, other: &str| if mac { mac_combo.to_owned() } else { other.to_owned() };
-    vec![
+    let mut bindings = vec![
         KeyBinding::new(&b("cmd-d", "ctrl-shift-o"), SplitChatRight, None),
         KeyBinding::new(&b("cmd-shift-d", "ctrl-shift-e"), SplitChatDown, None),
         KeyBinding::new(&b("cmd-]", "ctrl-super-]"), FocusNextChatPane, None),
@@ -360,7 +360,18 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         // Chat tabs (`chat_tabs.rs`): Safari/Terminal's keys on macOS.
         KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
         KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
-    ]
+    ];
+    // ⌃1–⌃9 pick a tab on macOS, where ⌘1–⌘9 jump to sidebar sessions;
+    // elsewhere Ctrl+digit is that jump, so tabs take Alt+digit.
+    bindings.extend((0..=chat_tabs::LAST_TAB_SLOT).map(|slot| {
+        let digit = slot + 1;
+        KeyBinding::new(
+            &b(&format!("ctrl-{digit}"), &format!("alt-{digit}")),
+            SelectChatTab(slot),
+            None,
+        )
+    }));
+    bindings
 }
 
 /// An in-progress divider drag: which divider, where the pointer went down
@@ -1323,6 +1334,24 @@ mod chat_split_tests {
         assert_eq!(resolve(&["Shell", "Terminal"]), Some(SplitRight.name()));
         assert_eq!(resolve(&["Shell", "Composer"]), Some(SplitChatRight.name()));
         assert_eq!(resolve(&["Shell"]), Some(SplitChatRight.name()));
+    }
+
+    #[test]
+    fn number_keys_pick_tabs_without_taking_the_session_jumps() {
+        for (mac, tab_key, jump_key) in [(true, "ctrl-3", "cmd-3"), (false, "alt-3", "ctrl-3")] {
+            let keymap = gpui::Keymap::new(chat_split_bindings(mac));
+            let stack = [gpui::KeyContext::parse("Shell").unwrap()];
+            let bound = |key: &str| {
+                let (matched, _) =
+                    keymap.bindings_for_input(&[gpui::Keystroke::parse(key).unwrap()], &stack);
+                matched.first().map(|b| b.action().boxed_clone())
+            };
+            let tab = bound(tab_key).expect("tab key bound");
+            assert!(tab.partial_eq(&SelectChatTab(2)), "{tab_key} → third tab");
+            let last = bound(if mac { "ctrl-9" } else { "alt-9" }).expect("nine bound");
+            assert!(last.partial_eq(&SelectChatTab(chat_tabs::LAST_TAB_SLOT)));
+            assert!(bound(jump_key).is_none(), "{jump_key} stays the session jump");
+        }
     }
 
     #[test]
