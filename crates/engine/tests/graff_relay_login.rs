@@ -50,7 +50,7 @@ server.handle_request()
 if outcome.get("ok"):
     os.makedirs(os.path.join(home, ".graff", "credentials"), exist_ok=True)
     with open(os.path.join(home, ".graff", "credentials", "chatgpt-new.json"), "w") as f:
-        f.write('{"access_token":"fixture"}')
+        f.write('{"access_token":"fixture","scopes":["chatgpt.tokens.use.direct"]}')
     print("✓ signed in to ChatGPT as fixture; plan usage is on.", flush=True)
 else:
     print("✗ ChatGPT sign-in failed: rejected", flush=True)

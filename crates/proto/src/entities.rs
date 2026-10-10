@@ -1010,13 +1010,34 @@ pub const GRAFF_LOGIN_PROVIDERS: &[(&str, &str)] = &[
     ("chatgpt-new", "ChatGPT"),
 ];
 
+/// Where a person manages their ChatGPT plan's usage (OpenAI's UI guidelines
+/// for Sign in with ChatGPT link here from every plan-usage surface).
+pub const CHATGPT_MANAGE_USAGE_URL: &str = "https://chatgpt.com/settings/usage";
+
+/// The one-time confirmation after graff's first ChatGPT sign-in on a device,
+/// carried as the `Done` poll's message.
+pub const CHATGPT_PLAN_CONFIRMATION: &str = "You're using your ChatGPT plan";
+
+/// A ChatGPT sign-in that succeeded without plan usage (the `Error` poll's
+/// message): it can't run requests on the plan.
+pub const CHATGPT_PLAN_OFF: &str = "Signed in to ChatGPT, but plan usage is off. Continue with ChatGPT again and allow plan usage, or use an API key.";
+
 /// One graff sign-in provider on a device (`ListGraffLogins` row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraffLoginProvider {
     pub id: String,
     pub name: String,
+    /// Ready to use. For ChatGPT that means signed in with plan usage granted.
     pub signed_in: bool,
+    /// ChatGPT: the signed-in account, when graff's record names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// ChatGPT: whether the stored sign-in was granted plan usage. `None` when
+    /// signed out (and for other providers); `Some(false)` is signed in with
+    /// plan usage off, which can't run requests on the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_usage: Option<bool>,
 }
 
 /// CLI plan rate-limit window (accounts settings meters) — NOT app token accounting.

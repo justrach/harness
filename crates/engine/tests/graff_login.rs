@@ -37,6 +37,14 @@ fn fake_graff(dir: &Path) -> PathBuf {
         &path,
         r#"#!/bin/sh
 [ "$1" = "--version" ] && { echo "graff 0.0.302.6"; exit 0; }
+RECORD="$HOME/.graff/credentials/chatgpt-new.json"
+if [ "$1" = logout ]; then
+  [ "$2" = chatgpt-new ] || exit 64
+  # Like graff: revoke, clear the tokens, keep the registration and account.
+  printf '{"email":"fixture@example.com","client_id":"oaiapp_fixture","access_token":"","refresh_token":"","scopes":[]}' > "$RECORD"
+  printf '✓ signed out of ChatGPT on this computer\n'
+  exit 0
+fi
 [ "$1" = login ] || exit 64
 case "$2" in
 xai)
@@ -60,10 +68,11 @@ chatgpt-new)
   printf 'waiting for the sign-in on the execution device …\n'
   sleep 1
   mkdir -p "$HOME/.graff/credentials"
-  printf '{"access_token":"fixture"}' > "$HOME/.graff/credentials/chatgpt-new.json"
   if [ -f "$HOME/deny-plan" ]; then
+    printf '{"email":"fixture@example.com","client_id":"oaiapp_fixture","access_token":"fixture","scopes":["email","openid"]}' > "$RECORD"
     printf '✓ signed in to ChatGPT as fixture, but plan usage was not allowed.\n'
   else
+    printf '{"email":"fixture@example.com","client_id":"oaiapp_fixture","access_token":"fixture","scopes":["chatgpt.tokens.use.direct","email","openid"]}' > "$RECORD"
     printf '✓ signed in to ChatGPT as fixture; plan usage is on. Use it with /model chatgpt-new or `graff --model chatgpt-new/gpt-6.1-sol`. Manage usage: https://chatgpt.com/settings/usage\n'
   fi
   ;;
@@ -175,9 +184,28 @@ async fn graff_provider_sign_ins_end_to_end() {
     assert_eq!(start.code, None);
     let poll = settle(&accounts, &start.login_id).await;
     assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
-    assert!(signed_in(&accounts)[3].1);
+    // The first sign-in registers graff in the account: the one-time
+    // confirmation rides the Done poll.
+    assert_eq!(
+        poll.message.as_deref(),
+        Some(harness_proto::CHATGPT_PLAN_CONFIRMATION)
+    );
+    let chatgpt = accounts.list_graff_logins().pop().unwrap();
+    assert!(chatgpt.signed_in);
+    assert_eq!(chatgpt.plan_usage, Some(true));
+    assert_eq!(chatgpt.account.as_deref(), Some("fixture@example.com"));
 
-    // A credential rewrite and zero exit without plan access remain failures.
+    // A returning sign-in finishes without the confirmation.
+    let start = accounts
+        .start_graff_login("chatgpt-new")
+        .await
+        .expect("restart ChatGPT");
+    let poll = settle(&accounts, &start.login_id).await;
+    assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+    assert_eq!(poll.message, None);
+
+    // A credential rewrite and zero exit without plan access remain failures,
+    // and the listing says plan usage is off rather than signed in.
     std::fs::write(home.join("deny-plan"), "denied").unwrap();
     let start = accounts
         .start_graff_login("chatgpt-new")
@@ -185,9 +213,22 @@ async fn graff_provider_sign_ins_end_to_end() {
         .expect("start denied ChatGPT");
     let poll = settle(&accounts, &start.login_id).await;
     assert_eq!(poll.status, AgentLoginStatus::Error);
-    assert!(poll.message.unwrap().contains("did not grant plan access"));
-    let rows = accounts.sign_out_graff_login("chatgpt-new").unwrap();
+    assert_eq!(
+        poll.message.as_deref(),
+        Some(harness_proto::CHATGPT_PLAN_OFF)
+    );
+    let chatgpt = accounts.list_graff_logins().pop().unwrap();
+    assert!(!chatgpt.signed_in);
+    assert_eq!(chatgpt.plan_usage, Some(false));
+
+    // Signing out runs `graff logout`: the session is cleared but graff keeps
+    // its registration, so the next sign-in skips consent.
+    let rows = accounts.sign_out_graff_login("chatgpt-new").await.unwrap();
     assert!(!rows[3].signed_in);
+    assert_eq!(rows[3].plan_usage, None);
+    let record = std::fs::read_to_string(home.join(".graff/credentials/chatgpt-new.json"))
+        .expect("graff keeps the record");
+    assert!(record.contains("oaiapp_fixture"), "{record}");
 
     // Z.AI prints no code. Cancelling kills graff and leaves the login that
     // was already there exactly as it was.
@@ -210,13 +251,19 @@ async fn graff_provider_sign_ins_end_to_end() {
         .start_graff_login("zai")
         .await
         .expect("restart zai");
-    let rows = accounts.sign_out_graff_login("zai").expect("sign out zai");
+    let rows = accounts
+        .sign_out_graff_login("zai")
+        .await
+        .expect("sign out zai");
     assert!(!rows[2].signed_in);
     assert!(!zai_credential.exists());
     assert!(accounts.poll_login(&start.login_id).await.is_err());
 
     // Sign out of xAI: gone, and the others are untouched.
-    let rows = accounts.sign_out_graff_login("xai").expect("sign out xai");
+    let rows = accounts
+        .sign_out_graff_login("xai")
+        .await
+        .expect("sign out xai");
     assert!(rows.iter().all(|row| !row.signed_in));
     assert!(!home.join(".xai/credentials/graff-oauth.json").exists());
 
@@ -226,6 +273,9 @@ async fn graff_provider_sign_ins_end_to_end() {
             accounts.start_graff_login(other).await.is_err(),
             "{other:?}"
         );
-        assert!(accounts.sign_out_graff_login(other).is_err(), "{other:?}");
+        assert!(
+            accounts.sign_out_graff_login(other).await.is_err(),
+            "{other:?}"
+        );
     }
 }

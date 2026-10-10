@@ -1291,6 +1291,11 @@ pub enum RowKind {
         message: SharedString,
         provider: ReauthProvider,
     },
+    /// The ChatGPT plan's usage limit stopped the run: Manage usage is the
+    /// way forward (OpenAI's UI guidelines).
+    PlanUsageLimit {
+        message: SharedString,
+    },
     /// A resumed graff chat restored a model other than the picked one. The
     /// run can't go on, but the chat can: a card offers both ways forward.
     ModelMismatch {
@@ -1912,6 +1917,11 @@ pub fn rows_for_entry(
                                         requested: mismatch.requested.into(),
                                         restored: mismatch.restored.map(Into::into),
                                     },
+                                    None if crate::chatgpt_plan::is_usage_limit_error(message) => {
+                                        RowKind::PlanUsageLimit {
+                                            message: single_line(message).into(),
+                                        }
+                                    }
                                     None => RowKind::ErrorChip {
                                         // Harness-generated; the chip is one line.
                                         message: single_line(message).into(),
@@ -7481,6 +7491,7 @@ impl Transcript {
                 requested,
                 restored,
             } => self.render_model_mismatch(&row.id, requested, restored.as_ref(), &theme, cx),
+            RowKind::PlanUsageLimit { message } => plan_usage_limit_card(&row.id, message, &theme),
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -8669,6 +8680,58 @@ pub(crate) fn live_step_lines(items: &[harness_proto::ToolProgressItem]) -> Vec<
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// The plan's usage limit stopped the run. The card leads with Manage usage
+/// and keeps graff's own error text below it.
+fn plan_usage_limit_card(
+    row_id: &SharedString,
+    message: &SharedString,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .py(px(4.0))
+        .w_full()
+        .child(
+            div()
+                .w_full()
+                .p(px(10.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .text_color(theme.text)
+                        .child(SharedString::from(
+                            "You've reached your ChatGPT plan's usage limit.",
+                        )),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(11.5))
+                        .text_color(theme.text_muted)
+                        .truncate()
+                        .child(message.clone()),
+                )
+                .child(
+                    div().flex().flex_row().child(
+                        crate::popover::btn_primary(theme, "Manage usage")
+                            .id(SharedString::from(format!("{row_id}-manage-usage")))
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(px(7.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .on_click(|_, _, cx| {
+                                cx.open_url(harness_proto::CHATGPT_MANAGE_USAGE_URL)
+                            }),
+                    ),
+                ),
+        )
+        .into_any_element()
 }
 
 fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
@@ -13299,6 +13362,43 @@ mod tests {
             ]
         );
         assert!(live_step_lines(&[]).is_empty());
+    }
+
+    #[test]
+    fn plan_usage_limit_renders_as_a_manage_usage_card() {
+        let limit = "chatgpt-new api error [subscription_sharing_usage_limit_exceeded]: \
+                     Usage limit reached. — ChatGPT plan usage limit; manage usage at \
+                     https://chatgpt.com/settings/usage";
+        let entry = assistant(
+            "a1",
+            MessageStatus::Aborted,
+            vec![
+                MessagePart::Error {
+                    id: "e1".into(),
+                    message: limit.into(),
+                    reauth: None,
+                },
+                MessagePart::Error {
+                    id: "e2".into(),
+                    message: "boom".into(),
+                    reauth: None,
+                },
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let visible = compact_visible(&rows);
+        assert!(
+            visible.iter().any(
+                |row| matches!(&row.kind, RowKind::PlanUsageLimit { message } if message.as_ref() == limit)
+            ),
+            "the usage limit is a card with Manage usage"
+        );
+        assert!(
+            visible
+                .iter()
+                .any(|row| matches!(&row.kind, RowKind::ErrorChip { message } if message.as_ref() == "boom")),
+            "other errors stay plain chips"
+        );
     }
 
     #[test]

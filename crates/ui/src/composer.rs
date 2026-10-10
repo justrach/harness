@@ -10505,6 +10505,10 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let usage = self.state.read(cx).context_usage;
+            // OpenAI's guidelines: say so while requests run on the plan.
+            let plan = (session_chrome_opacity > 0.0
+                && self.pickers.read(cx).uses_chatgpt_plan(cx))
+            .then(|| crate::chatgpt_plan::using_plan_chip(&theme));
             container.child(
                 div()
                     .w_full()
@@ -10535,6 +10539,9 @@ impl Render for Composer {
                                 .items_center()
                                 .opacity(session_chrome_opacity)
                                 .child(div().flex_1().min_w_0().children(footer.flatten()))
+                                .children(
+                                    plan.map(|chip| div().flex_none().pr(px(10.0)).child(chip)),
+                                )
                                 .children(crate::context_usage::has_window(usage).then(|| {
                                     div().flex_none().pr(px(10.0)).child(
                                         crate::context_usage::render(
