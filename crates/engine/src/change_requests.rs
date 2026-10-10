@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use harness_proto::{ChangeRequestState, CheckoutChangeRequestStatus};
+use harness_proto::{ChangeRequestMergeResult, ChangeRequestState, CheckoutChangeRequestStatus};
 
 use crate::repos::{CheckoutIdentity, Repos};
 use crate::source_control::{
@@ -87,6 +87,8 @@ struct Inner {
     /// Serializes this service's `git`/`gh` subprocesses: however many chats
     /// are watched, at most one poller process runs at a time.
     process_gate: AsyncMutex<()>,
+    /// Wakes sleeping watches after a merge so badges update at once.
+    refreshed: Notify,
     timing: Timing,
     shutdown: CancellationToken,
 }
@@ -125,6 +127,7 @@ impl CheckoutChangeRequests {
                 entries: Mutex::new(HashMap::new()),
                 inspections: Mutex::new(HashMap::new()),
                 process_gate: AsyncMutex::new(()),
+                refreshed: Notify::new(),
                 timing,
                 shutdown: CancellationToken::new(),
             }),
@@ -162,6 +165,63 @@ impl CheckoutChangeRequests {
         identity: CheckoutIdentity,
     ) -> BoxStream<'static, CheckoutChangeRequestStatus> {
         self.watch_checkout_for_branch(cwd, identity, None)
+    }
+
+    /// Merge the pull request the watched branch has, on this host. The
+    /// branch override matches `watch_for_branch`, so the merged PR is the one
+    /// the chat's badge shows.
+    pub async fn merge(
+        &self,
+        cwd: &Path,
+        branch: Option<&str>,
+        number: u64,
+    ) -> Result<ChangeRequestMergeResult, ChangeRequestError> {
+        let mut source = {
+            let _gate = self.inner.process_gate.lock().await;
+            self.inner.lookup.inspect_checkout(cwd).await?
+        };
+        if let Some(branch) = branch
+            && source.branch.local_branch != branch
+        {
+            source.branch = BranchHeadContext::resolve(
+                branch,
+                None,
+                source.branch.remote_name.as_deref(),
+                source.branch.remote_url.as_deref(),
+            );
+        }
+        let result = {
+            let _gate = self.inner.process_gate.lock().await;
+            self.inner
+                .lookup
+                .merge_github_source(&source, number)
+                .await?
+        };
+        if result.merged {
+            self.refresh_now().await;
+        }
+        Ok(result)
+    }
+
+    /// Expire every cached lookup and wake the watches that hold them.
+    async fn refresh_now(&self) {
+        let entries: Vec<Arc<CacheEntry>> = self
+            .inner
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for entry in entries {
+            entry.state.lock().await.next_refresh = Instant::now();
+        }
+        self.inner
+            .inspections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.inner.refreshed.notify_waiters();
     }
 
     fn watch_checkout_for_branch(
@@ -403,6 +463,7 @@ impl SubscriptionState {
     async fn sleep(&self, duration: Duration) -> bool {
         tokio::select! {
             _ = self.service.inner.shutdown.cancelled() => false,
+            _ = self.service.inner.refreshed.notified() => true,
             _ = tokio::time::sleep(duration) => true,
         }
     }
@@ -474,6 +535,7 @@ mod tests {
         results: Mutex<VecDeque<Result<Option<ChangeRequestSummary>, ChangeRequestError>>>,
         resolves: AtomicUsize,
         inspects: AtomicUsize,
+        merged_branch: Mutex<Option<String>>,
     }
 
     impl FakeLookup {
@@ -486,6 +548,7 @@ mod tests {
                 results: Mutex::new(results.into_iter().collect()),
                 resolves: AtomicUsize::new(0),
                 inspects: AtomicUsize::new(0),
+                merged_branch: Mutex::new(None),
             })
         }
 
@@ -518,6 +581,18 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .expect("missing fake lookup result")
+        }
+
+        async fn merge_github_source(
+            &self,
+            source: &CheckoutSourceContext,
+            number: u64,
+        ) -> Result<ChangeRequestMergeResult, ChangeRequestError> {
+            *self.merged_branch.lock().unwrap() = Some(source.branch.local_branch.clone());
+            Ok(ChangeRequestMergeResult {
+                merged: true,
+                message: format!("Merged #{number}"),
+            })
         }
     }
 
@@ -586,6 +661,43 @@ mod tests {
         );
         let snapshot = stream.next().await.expect("opening snapshot");
         assert_eq!(snapshot.branch, "feature/sidebar");
+    }
+
+    #[tokio::test]
+    async fn a_merge_wakes_watches_instead_of_waiting_out_the_ttl() {
+        let mut merged = pull_request(90);
+        merged.state = ChangeRequestState::Merged;
+        let lookup = FakeLookup::new(
+            source("main"),
+            [Ok(Some(pull_request(90))), Ok(Some(merged))],
+        );
+        let service = service(lookup.clone(), Timing::default());
+        let mut stream = service.watch_checkout_for_branch(
+            PathBuf::from("/checkout"),
+            identity(),
+            Some("feature/status".into()),
+        );
+        let opening = stream.next().await.unwrap();
+        assert_eq!(
+            opening.change_request.unwrap().state,
+            ChangeRequestState::Open
+        );
+
+        let (next, result) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(2), stream.next()),
+            service.merge(Path::new("/checkout"), Some("feature/status"), 90),
+        );
+
+        assert!(result.unwrap().merged);
+        assert_eq!(
+            lookup.merged_branch.lock().unwrap().as_deref(),
+            Some("feature/status")
+        );
+        let next = next.expect("woken before the TTL").unwrap();
+        assert_eq!(
+            next.change_request.unwrap().state,
+            ChangeRequestState::Merged
+        );
     }
 
     #[tokio::test]

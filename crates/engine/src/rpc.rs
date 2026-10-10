@@ -245,6 +245,15 @@ struct CheckoutChangeRequestParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct MergeChangeRequestParams {
+    cwd: String,
+    #[serde(default)]
+    branch: Option<String>,
+    number: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SwitchRefParams {
     /// The checkout to switch — a session's cwd (main folder or worktree).
     repo_path: String,
@@ -815,6 +824,24 @@ impl EngineRpc {
         self.file_search_root(p).await
     }
 
+    /// Kept off the dispatcher's stack: `gh` runs three subprocesses here.
+    #[inline(never)]
+    fn merge_change_request(
+        &self,
+        params: serde_json::Value,
+    ) -> futures::future::BoxFuture<'_, Result<RpcReply, RpcError>> {
+        Box::pin(async move {
+            let p: MergeChangeRequestParams = parse_params(params)?;
+            let cwd = self.change_request_root(&p.cwd).await?;
+            let result = self
+                .change_requests
+                .merge(&cwd, p.branch.as_deref(), p.number)
+                .await
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+            RpcReply::value(&result)
+        })
+    }
+
     /// Accept only a checkout already named by a local chat or contained in a
     /// local space. Remote clients must not turn this RPC into an arbitrary path probe.
     async fn change_request_root(&self, cwd: &str) -> Result<std::path::PathBuf, RpcError> {
@@ -1309,6 +1336,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
+            | methods::MERGE_CHANGE_REQUEST
             | methods::GET_CHECKOUT_DIFF
             | methods::DISCARD_WORKING_TREE
             | methods::GET_CHECKOUT_FILE_DIFF_TEXT
@@ -1614,6 +1642,9 @@ impl RpcService for EngineRpc {
             return AuthRpc::new(self.auth()?.clone())
                 .handle(method, params)
                 .await;
+        }
+        if method == methods::MERGE_CHANGE_REQUEST {
+            return self.merge_change_request(params).await;
         }
         match method {
             methods::CODEGRAFF_SIGN_IN => {

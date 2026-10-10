@@ -603,6 +603,13 @@ enum GraffWorktreeOutcome {
     Failed,
 }
 
+/// The last pull-request merge result for a chat, shown beside its badge.
+struct ChangeRequestMergeStatus {
+    chat_id: String,
+    merged: bool,
+    message: SharedString,
+}
+
 // ---- cloud sandbox row in the device picker ----------------------------------------------------
 //
 // The engine's `CodegraffSandboxes` / `CodegraffCreateSandbox` / `CodegraffSandboxAction` calls (names
@@ -824,6 +831,11 @@ pub struct Pickers {
     graff_worktree_busy: Option<String>,
     graff_worktree_status: Option<GraffWorktreeStatus>,
     graff_worktree_task: Option<Task<()>>,
+    /// First click on Merge arms it for this chat and PR number; the second merges.
+    change_request_merge_armed: Option<(String, u64)>,
+    change_request_merge_busy: Option<String>,
+    change_request_merge_status: Option<ChangeRequestMergeStatus>,
+    change_request_merge_task: Option<Task<()>>,
     /// The device popover's cloud sandbox row (see [`cloud_row`]).
     cloud: CloudState,
     /// Create / wake, then wait for the device to come online. Own slot: a list refresh must not cancel it.
@@ -997,6 +1009,10 @@ impl Pickers {
             graff_worktree_busy: None,
             graff_worktree_status: None,
             graff_worktree_task: None,
+            change_request_merge_armed: None,
+            change_request_merge_busy: None,
+            change_request_merge_status: None,
+            change_request_merge_task: None,
             cloud: CloudState::default(),
             cloud_task: None,
             cloud_list_task: None,
@@ -3333,6 +3349,171 @@ impl Pickers {
         }));
     }
 
+    /// Merge the chat's pull request on the checkout's host. The host merges
+    /// only while `number` is still the branch's open PR.
+    fn run_change_request_merge(
+        &mut self,
+        chat: &harness_proto::Chat,
+        number: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.change_request_merge_busy.is_some() {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let local = self.state.read(cx).local_device_id.clone();
+        let Some(params) = crate::change_requests::merge_params(chat, number, local.as_deref())
+        else {
+            return;
+        };
+        let chat_id = chat.id.clone();
+        self.change_request_merge_armed = None;
+        self.change_request_merge_busy = Some(chat_id.clone());
+        self.change_request_merge_status = None;
+        cx.notify();
+        self.change_request_merge_task = Some(cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call(methods::MERGE_CHANGE_REQUEST, params)
+                .await;
+            this.update(cx, |pickers, cx| {
+                pickers.change_request_merge_busy = None;
+                let (merged, message) = match reply {
+                    Ok(value) => match serde_json::from_value::<
+                        harness_proto::ChangeRequestMergeResult,
+                    >(value)
+                    {
+                        Ok(result) => (result.merged, result.message),
+                        Err(_) => (false, "The host sent an unreadable merge result".to_owned()),
+                    },
+                    Err(err) => (false, err.to_string()),
+                };
+                pickers.change_request_merge_status = Some(ChangeRequestMergeStatus {
+                    chat_id,
+                    merged,
+                    message: message.into(),
+                });
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Merge controls beside an open PR badge: Merge → "Merge #N?" → merged,
+    /// plus the host's last answer (GitHub's own reason when it refused).
+    fn render_change_request_merge(
+        &self,
+        chat: &harness_proto::Chat,
+        summary: &harness_proto::ChangeRequestSummary,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let busy = self.change_request_merge_busy.as_deref() == Some(chat.id.as_str());
+        let status = self
+            .change_request_merge_status
+            .as_ref()
+            .filter(|status| status.chat_id == chat.id);
+        let open = summary.state == harness_proto::ChangeRequestState::Open;
+        if !open && !busy && status.is_none() {
+            return None;
+        }
+        let number = summary.number;
+        let armed = self.change_request_merge_armed.as_ref() == Some(&(chat.id.clone(), number));
+        let chip = |id: &'static str,
+                    label: SharedString,
+                    color: gpui::Hsla,
+                    cx: &mut Context<Self>,
+                    on_click: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
+            div()
+                .id(id)
+                .h(px(20.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .px(px(7.0))
+                .rounded(px(FOOTER_CHIP_RADIUS))
+                .text_size(crate::typography::ui_rems(12.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(motion::hover_blend(id, color.opacity(0.75), color))
+                .bg(motion::hover_blend(
+                    id,
+                    gpui::transparent_black(),
+                    theme.element_hover,
+                ))
+                .on_hover(motion::hover_listener(id))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
+                .child(label)
+        };
+        let mut cluster = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(2.0))
+            .min_w_0();
+        if busy {
+            cluster = cluster.child(
+                div()
+                    .px(px(6.0))
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(theme.text_muted.opacity(0.7))
+                    .child(SharedString::from(format!("Merging #{number}…"))),
+            );
+        } else if open && armed {
+            let target = chat.clone();
+            cluster = cluster
+                .child(chip(
+                    "change-request-merge-confirm",
+                    format!("Merge #{number}?").into(),
+                    theme.success,
+                    cx,
+                    Box::new(move |this, cx| this.run_change_request_merge(&target, number, cx)),
+                ))
+                .child(chip(
+                    "change-request-merge-cancel",
+                    "Cancel".into(),
+                    theme.text_muted,
+                    cx,
+                    Box::new(|this, cx| {
+                        this.change_request_merge_armed = None;
+                        cx.notify();
+                    }),
+                ));
+        } else if open {
+            let chat_id = chat.id.clone();
+            cluster = cluster.child(chip(
+                "change-request-merge",
+                "Merge".into(),
+                theme.text_muted,
+                cx,
+                Box::new(move |this, cx| {
+                    this.change_request_merge_armed = Some((chat_id.clone(), number));
+                    this.change_request_merge_status = None;
+                    cx.notify();
+                }),
+            ));
+        }
+        if let Some(status) = status.filter(|_| !busy) {
+            cluster = cluster.child(
+                div()
+                    .min_w_0()
+                    .max_w(px(320.0))
+                    .px(px(6.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.5))
+                    .text_color(if status.merged {
+                        theme.success
+                    } else {
+                        theme.danger
+                    })
+                    .child(status.message.clone()),
+            );
+        }
+        Some(cluster.into_any_element())
+    }
+
     /// The Graff worktree card's actions: land it back (`graff worktree
     /// merge`), archive it (removed only if its work exists elsewhere), or
     /// remove it — plus Graff's last verdict, and "Discard" once Graff has
@@ -3742,14 +3923,17 @@ impl Pickers {
                     .when_some(graff_card, |el, card| el.child(card))
                     .child(div().flex_1().min_w_0())
                     .when_some(change_request, |el, summary| {
-                        el.child(div().flex_none().child(
-                            crate::change_requests::pull_request_badge(
-                                "composer-pull-request".into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Composer,
-                                &theme,
-                            ),
-                        ))
+                        let merge = self.render_change_request_merge(chat, &summary, &theme, cx);
+                        el.when_some(merge, |el, merge| el.child(merge)).child(
+                            div()
+                                .flex_none()
+                                .child(crate::change_requests::pull_request_badge(
+                                    "composer-pull-request".into(),
+                                    summary,
+                                    crate::change_requests::ChangeRequestBadgeSurface::Composer,
+                                    &theme,
+                                )),
+                        )
                     })
                     .into_any_element(),
             );
