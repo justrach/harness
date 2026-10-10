@@ -21,10 +21,22 @@
             android:exported="true"
             android:resizeableActivity="true"
             android:configChanges="keyboardHidden|uiMode"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!--
+              CodeGraff sign-in comes back here: the edge's app callback forwards the code to
+              harness://callback, as for the iOS app. singleTask returns the browser to this
+              task instead of starting a second copy of the app.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="harness" android:host="callback" />
             </intent-filter>
         </activity>
     </application>
