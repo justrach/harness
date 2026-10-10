@@ -35,11 +35,17 @@ import harness.codegraff.android.core.SessionStatusRecord
 import harness.codegraff.android.core.SpaceRecord
 import harness.codegraff.android.core.TaskItemRecord
 import harness.codegraff.android.core.ToolFieldRecord
+import harness.codegraff.android.core.UserInputAnswerRecord
 import harness.codegraff.android.core.WorkspaceSnapshot
 import harness.codegraff.android.model.ChatConfig
 import harness.codegraff.android.model.ChatIndicator
 import harness.codegraff.android.model.MessagePart
+import harness.codegraff.android.model.QueueAction
 import harness.codegraff.android.model.QueueDeliveryGate
+import harness.codegraff.android.model.QueueEditFinishResult
+import harness.codegraff.android.model.QueueEditLease
+import harness.codegraff.android.model.QueueEditStartResult
+import harness.codegraff.android.model.UserInputAnswer
 import harness.codegraff.android.model.SessionStatus
 import harness.codegraff.android.sync.LiveFeed
 import harness.codegraff.android.sync.LiveSync
@@ -61,7 +67,8 @@ import org.junit.Test
 
 /** Records the calls the model makes into the native core, and answers them like it would. */
 private class FakeCore : MobileCoreInterface {
-    val calls = mutableListOf<String>()
+    /** Opening a session runs on an IO thread, so the record is shared with it. */
+    val calls: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
     var started = false
     override fun start() { started = true }
     override fun workspace(): WorkspaceSnapshot = error("not used")
@@ -111,6 +118,22 @@ private class FakeCore : MobileCoreInterface {
     override fun foregrounded() { calls += "foreground" }
     override fun flush() { calls += "flush" }
     override fun stop() {}
+    override fun sendRun(chatId: String, prompt: String, attachments: List<String>) = "m-run".also { calls += "run $chatId $prompt" }
+    override fun sendSteer(chatId: String, prompt: String) = "m-steer".also { calls += "steer $chatId $prompt" }
+    override fun interrupt(chatId: String) { calls += "interrupt $chatId" }
+    override fun respondInput(chatId: String, requestId: String, answers: List<UserInputAnswerRecord>) {
+        calls += "answer $chatId $requestId ${answers.map { "${it.questionId}=${it.labels}" }}"
+    }
+    override fun enqueueMessage(chatId: String, text: String, attachments: List<String>, holdForTurnEnd: Boolean) =
+        "row-new".also { calls += "enqueue $chatId $text $holdForTurnEnd" }
+    override fun moveQueued(chatId: String, id: String, to: UInt) = true.also { calls += "move $chatId $id $to" }
+    override fun removeQueued(chatId: String, id: String) = true.also { calls += "remove $chatId $id" }
+    /** The computer's answers, by method. */
+    val hostReplies = mutableMapOf<String, String>()
+    override suspend fun callHost(deviceId: String, method: String, paramsJson: String): String {
+        calls += "host $deviceId $method"
+        return hostReplies[method] ?: throw RelayException.HostOffline()
+    }
 }
 
 private fun chatRecord(id: String, lastMessageAt: Long? = null, seen: Long? = null) = ChatRecord(
@@ -149,8 +172,53 @@ class LiveSyncTest {
     private fun live(): Triple<AppModel, FakeCore, LiveFeed> {
         val core = FakeCore()
         val feed = LiveFeed()
-        val model = AppModel(clock = { 1_000_000L }, tickMs = 1, liveSync = LiveSync(core, feed))
+        val model = AppModel(clock = { 1_000_000L }, tickMs = 1, liveSync = LiveSync(core, feed, "android-1"), writes = dispatcher)
         return Triple(model, core, feed)
+    }
+
+    @Test
+    fun sendsAndQueueChangesAreWritesToTheChatsDoc() = runTest(dispatcher) {
+        val (model, core, feed) = live()
+        // a is working on the computer; b is idle.
+        feed.workspaceChanged(workspace(listOf(chatRecord("a"), chatRecord("b"))))
+        val row = QueuedMessageRecord("r1", "later", emptyList(), "android-1", 1, null, true, null)
+        val other = QueuedMessageRecord("r2", "after", emptyList(), "android-1", 2, null, true, null)
+        feed.sessionChanged(SessionSnapshot("a", emptyList(), listOf(row, other), true, null, false, true))
+        advanceUntilIdle()
+        core.calls.clear()
+
+        model.send("b", "Port it")
+        model.send("a", "Next")
+        model.interrupt("a")
+        model.respondInput("b", "req-1", listOf(UserInputAnswer("q1", listOf("Yes"))))
+        model.moveQueued("a", "r2", 0)
+        advanceUntilIdle()
+        assertEquals(
+            listOf("run b Port it", "enqueue a Next true", "interrupt a", "answer b req-1 [q1=[Yes]]", "move a r2 0"),
+            core.calls,
+        )
+        // Nothing is faked locally: the transcript and queue change when the doc does.
+        assertTrue(model.entries("b").isEmpty())
+        assertEquals(listOf("r1", "r2"), model.queue("a").rows.map { it.id })
+
+        // Removal asks the computer, and only an acknowledged one edits the doc.
+        core.calls.clear()
+        assertFalse(model.performQueueAction("a", "r1", QueueAction.Remove))
+        assertEquals("Couldn't complete remove. Check the connection to the chat host and the queue before retrying.", model.queue("a").error)
+        core.hostReplies["RemoveQueuedMessage"] = "{\"removed\":true}"
+        assertTrue(model.performQueueAction("a", "r1", QueueAction.Remove))
+        advanceUntilIdle()
+        assertEquals(listOf("host mac RemoveQueuedMessage", "host mac RemoveQueuedMessage", "remove a r1"), core.calls)
+
+        // An edit lease comes from the computer too.
+        core.hostReplies["BeginQueuedMessageEdit"] =
+            "{\"outcome\":\"acquired\",\"leaseId\":\"l1\",\"text\":\"after\",\"baseTextHash\":\"h\",\"expiresAtMs\":5}"
+        val started = model.beginQueuedEdit("a", "r2", "screen-1") as QueueEditStartResult.Acquired
+        assertEquals(QueueEditLease("r2", "l1", "after", "h", 5), started.lease)
+        core.hostReplies["FinishQueuedMessageEdit"] = "{\"outcome\":\"conflict\"}"
+        assertEquals(QueueEditFinishResult.Conflict, model.finishQueuedEdit("a", started.lease, "commit", "changed"))
+        core.hostReplies["RenewQueuedMessageEdit"] = "{\"outcome\":\"renewed\"}"
+        assertTrue(model.renewQueuedEdit("a", started.lease))
     }
 
     @Test

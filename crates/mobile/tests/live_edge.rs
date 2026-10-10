@@ -275,11 +275,7 @@ async fn the_phone_mirrors_a_host_and_writes_back_as_a_viewer() {
 
     // A reply streams in on the host: the phone sees the new entry.
     {
-        let streaming = SessionDoc::from_doc(loro::LoroDoc::new());
-        streaming
-            .doc()
-            .import(&host_chat_doc.export(loro::ExportMode::Snapshot).unwrap())
-            .unwrap();
+        let streaming = SessionDoc::from_doc(host_chat_doc.as_ref().clone());
         let before = streaming.doc().oplog_vv();
         streaming
             .push_message(&text_entry("m3", MessageRole::Assistant, "One more thing."))
@@ -367,6 +363,28 @@ async fn the_phone_mirrors_a_host_and_writes_back_as_a_viewer() {
             .filter(|w| w.pinned_session_ids == vec![chat_id.clone()])
     })
     .await;
+
+    // ── the phone sends: the command and the queue row reach the host's copy, and the outbox empties ────────────
+    let message_id = core.send_run(chat_id.clone(), "Next step".into(), vec![]);
+    let row_id = core
+        .enqueue_message(chat_id.clone(), "After that".into(), vec![], true)
+        .unwrap();
+    eventually("the host to receive the run and the queued row", || {
+        let host = SessionDoc::from_doc(host_chat_doc.as_ref().clone());
+        let run = host.read_commands().ok()?.into_iter().any(|c| {
+            matches!(&c.payload, harness_doc::SessionCommandPayload::Run { message_id: id, request }
+                if id == &message_id && request.prompt == "Next step" && request.model.as_deref() == Some("m1"))
+        });
+        let queued = host.read_queue().ok()?.iter().any(|row| row.id == row_id);
+        (run && queued).then_some(())
+    })
+    .await;
+    let store = harness_sync::DocsStore::open(data.path()).unwrap();
+    eventually("the room to acknowledge the phone's edits", || {
+        (!store.has_pending_chat_updates(&chat_id).unwrap()).then_some(())
+    })
+    .await;
+    drop(store);
 
     // ── local-first: with the edge unreachable, the cached copy renders at once ─────────────────────────────────
     tokio::task::block_in_place(|| core.stop());

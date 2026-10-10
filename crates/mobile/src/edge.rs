@@ -112,6 +112,26 @@ impl Edge {
         })
     }
 
+    /// POST /device/{deviceId}/nudge {chatId}: wake a host that is not in the room so it opens the chat and drains
+    /// its commands. Best effort: the command is durable in the doc either way.
+    pub async fn nudge(&self, device_id: &str, chat_id: &str) {
+        let Ok(bearer) = self.bearer().await else {
+            return;
+        };
+        let sent = self
+            .http
+            .post(format!("{}/device/{}/nudge", self.base, encode(device_id)))
+            .bearer_auth(bearer)
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "chatId": chat_id }).to_string())
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await;
+        if let Err(err) = sent {
+            tracing::debug!(error = %transport_error(err), "host nudge failed");
+        }
+    }
+
     pub fn checkpoint_fetcher(&self, chat_id: &str) -> Arc<dyn CheckpointFetcher> {
         Arc::new(CheckpointHttp {
             edge: self.clone(),

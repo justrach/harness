@@ -175,6 +175,13 @@ pub struct UserInputQuestionRecord {
     pub multi_select: Option<bool>,
 }
 
+/// The labels picked (or typed) for one question of an input request.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct UserInputAnswerRecord {
+    pub question_id: String,
+    pub labels: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum MessagePartRecord {
     Text {

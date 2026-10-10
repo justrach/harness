@@ -418,7 +418,8 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
             },
             onStop = { model.interrupt(chat.id) },
             attachments = if (editingId == null) attachments else emptyList(),
-            onAttach = if (editingId == null) ({ picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) else null,
+            // A live send can't carry photos until they upload to the computer; the demo keeps the picker.
+            onAttach = if (editingId == null && !model.isLive) ({ picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) else null,
             onRemoveAttachment = { id -> attachments = attachments.filterNot { it.id == id } },
         ) {
             state.changeRequest(chat)?.let { PullRequestBadge(it, surface = PullRequestBadgeSurface.Composer) }
