@@ -12,6 +12,7 @@
 uniffi::setup_scaffolding!();
 
 mod change_requests;
+mod commands;
 mod connectivity;
 mod decode;
 mod edge;
@@ -229,10 +230,20 @@ impl MobileCore {
         }))
     }
 
-    /// Publish the cached workspace, then join the registry room and start watching connectivity.
+    /// Publish the cached workspace, then join the registry room and start watching connectivity. Chats with sends
+    /// still in the outbox (the app was killed or offline) open so they go out.
     pub fn start(&self) {
         let _guard = self.runtime.enter();
         self.workspace.start();
+        for chat in self.workspace.chats() {
+            if self
+                .store
+                .has_pending_chat_updates(&chat.id)
+                .unwrap_or(false)
+            {
+                self.session(&chat.id);
+            }
+        }
         self.runtime.spawn(connectivity_loop(
             self.workspace.clone(),
             self.sessions.clone(),
@@ -359,6 +370,127 @@ impl MobileCore {
             writes::delete_space(doc, &space_id);
             true
         });
+    }
+
+    // ── session writes: the command plane and the queue ─────────────────────────────────────────────────────────
+    // Each is a local edit to the chat's doc, kept in the outbox until the room acknowledges it: a send made offline
+    // goes when the phone reconnects, even after a restart.
+
+    /// Send to a chat that is not running: a `run` with the chat's picks. Returns the id the host gives the user's
+    /// message.
+    pub fn send_run(&self, chat_id: String, prompt: String, attachments: Vec<String>) -> String {
+        let message_id = commands::new_id();
+        let request = commands::run_request(self.chat(&chat_id).as_ref(), prompt, attachments);
+        self.command(
+            &chat_id,
+            harness_doc::SessionCommandPayload::Run {
+                request,
+                message_id: message_id.clone(),
+            },
+        );
+        message_id
+    }
+
+    /// Send into the running turn. Returns the id the host gives the user's message.
+    pub fn send_steer(&self, chat_id: String, prompt: String) -> String {
+        let message_id = commands::new_id();
+        self.command(
+            &chat_id,
+            harness_doc::SessionCommandPayload::Steer {
+                prompt,
+                message_id: Some(message_id.clone()),
+            },
+        );
+        message_id
+    }
+
+    /// Stop the running turn.
+    pub fn interrupt(&self, chat_id: String) {
+        self.command(&chat_id, harness_doc::SessionCommandPayload::Interrupt {});
+    }
+
+    /// Answer the agent's question.
+    pub fn respond_input(
+        &self,
+        chat_id: String,
+        request_id: String,
+        answers: Vec<records::UserInputAnswerRecord>,
+    ) {
+        self.command(
+            &chat_id,
+            harness_doc::SessionCommandPayload::RespondInput {
+                request_id,
+                answers: commands::answers(answers),
+            },
+        );
+    }
+
+    /// Park a message on the chat's queue; the host sends it when the turn allows. Returns the row's id, or None for
+    /// an empty message.
+    pub fn enqueue_message(
+        &self,
+        chat_id: String,
+        text: String,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+    ) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        let _guard = self.runtime.enter();
+        let row = commands::queued(
+            &self.edge.device_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+            now_ms(),
+        );
+        let session = self.session(&chat_id);
+        let id = session
+            .write(|doc| doc.push_queued(&row))
+            .ok()
+            .map(|()| row.id);
+        self.nudge_host(&chat_id);
+        self.evict_cold();
+        id
+    }
+
+    /// Move a queued row to `to` (clamped). False when it is gone or already there.
+    pub fn move_queued(&self, chat_id: String, id: String, to: u32) -> bool {
+        let _guard = self.runtime.enter();
+        self.session(&chat_id)
+            .write(|doc| doc.move_queued(&id, to as usize))
+            .unwrap_or(false)
+    }
+
+    /// Drop a queued row locally, after the host acknowledged its removal.
+    pub fn remove_queued(&self, chat_id: String, id: String) -> bool {
+        let _guard = self.runtime.enter();
+        self.session(&chat_id)
+            .write(|doc| doc.remove_queued(&id))
+            .unwrap_or(false)
+    }
+
+    /// One request to a computer's engine over its device room (the queue's actions and edit leases): JSON params
+    /// in, the JSON reply out.
+    pub async fn call_host(
+        &self,
+        device_id: String,
+        method: String,
+        params_json: String,
+    ) -> Result<String, relay::RelayError> {
+        let params: serde_json::Value =
+            serde_json::from_str(&params_json).map_err(|e| relay::RelayError::Rpc {
+                reason: e.to_string(),
+            })?;
+        let relay = self.relay.clone();
+        self.on_runtime(async move {
+            relay
+                .call(&device_id, &method, params, relay::CALL_TIMEOUT)
+                .await
+                .map(|reply| reply.to_string())
+        })
+        .await
     }
 
     // ── lifecycle ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -560,6 +692,43 @@ impl MobileCore {
             .unwrap_or(Err(relay::RelayError::NotConnected))
     }
 
+    fn chat(&self, chat_id: &str) -> Option<records::ChatRecord> {
+        self.workspace
+            .chats()
+            .into_iter()
+            .find(|chat| chat.id == chat_id)
+    }
+
+    /// Append a command from this device and wake the chat's host.
+    fn command(&self, chat_id: &str, payload: harness_doc::SessionCommandPayload) {
+        let _guard = self.runtime.enter();
+        let session = self.session(chat_id);
+        let entry = commands::entry(
+            &self.edge.device_id,
+            payload,
+            session.last_entry_id(),
+            now_ms(),
+        );
+        session.write(|doc| {
+            if let Err(error) = doc.queue_command(&entry) {
+                tracing::error!(chat = %chat_id, %error, "command not written");
+            }
+        });
+        self.nudge_host(chat_id);
+        self.evict_cold();
+    }
+
+    /// Wake the chat's host so a cold one opens the chat and drains (iOS `nudgeHost`).
+    fn nudge_host(&self, chat_id: &str) {
+        let Some(device_id) = self.chat(chat_id).map(|chat| chat.device_id) else {
+            return;
+        };
+        let edge = self.edge.clone();
+        let chat_id = chat_id.to_owned();
+        self.runtime
+            .spawn(async move { edge.nudge(&device_id, &chat_id).await });
+    }
+
     /// Registry first and at once; chat rooms after it (each probes if joined, redials if not).
     fn kick_rooms(&self) {
         self.workspace.kick();
@@ -603,10 +772,9 @@ impl MobileCore {
             let mut index = 0;
             while sessions.open.len() > WARM_SESSION_CAP && index < sessions.order.len() {
                 let id = sessions.order[index].clone();
-                let protected = sessions
-                    .open
-                    .get(&id)
-                    .is_some_and(|session| session.is_attached() || session.is_streaming());
+                let protected = sessions.open.get(&id).is_some_and(|session| {
+                    session.is_attached() || session.is_streaming() || session.has_unsent_writes()
+                });
                 if protected {
                     index += 1;
                     continue;

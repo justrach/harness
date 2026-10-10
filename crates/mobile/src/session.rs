@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use harness_doc::SessionDoc;
 use harness_sync::chat_client::{ChatDocSink, RowImportOutcome};
 use harness_sync::{ChatClient, ChatEvent, DocsStore};
 use loro::{LoroDoc, ToJson};
@@ -115,6 +116,33 @@ impl ChatDocSink for MobileSink {
         self.verified
     }
 
+    // The outbox: the phone's own edits (commands, queue rows) stay on disk until the room acknowledges them, so a
+    // send made offline or just before the app is killed still reaches the host.
+
+    fn pending_updates(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        self.store
+            .pending_chat_updates(&self.chat_id)
+            .map_err(|e| e.to_string())
+    }
+
+    fn persist_update(&self, batch_id: &str, bytes: &[u8]) -> Result<(), String> {
+        self.store
+            .enqueue_chat_update(&self.chat_id, batch_id, bytes)
+            .map_err(|e| e.to_string())
+    }
+
+    fn acknowledge_update(&self, batch_id: &str) -> Result<(), String> {
+        self.store
+            .acknowledge_chat_update(&self.chat_id, batch_id)
+            .map_err(|e| e.to_string())
+    }
+
+    fn reject_update(&self, batch_id: &str) -> Result<(), String> {
+        self.store
+            .reject_chat_update(&self.chat_id, batch_id)
+            .map_err(|e| e.to_string())
+    }
+
     fn reset_cursor(&self, cursor: u64) {
         if self.cursor.swap(cursor, Ordering::AcqRel) != cursor {
             self.dirty(true);
@@ -172,6 +200,8 @@ pub(crate) struct Session {
     tasks: Mutex<Vec<JoinHandle<()>>>,
     subscription: Mutex<Option<loro::Subscription>>,
     last: Mutex<Option<SessionSnapshot>>,
+    /// One local edit at a time, so each batch holds exactly that edit's ops.
+    local: Mutex<()>,
 }
 
 impl Session {
@@ -216,6 +246,7 @@ impl Session {
             tasks: Mutex::new(Vec::new()),
             subscription: Mutex::new(None),
             last: Mutex::new(None),
+            local: Mutex::new(()),
         });
         // Every change to the doc, remote or local, re-decodes the transcript.
         let project = session.project.clone();
@@ -349,6 +380,16 @@ impl Session {
         if self.stopped.load(Ordering::Relaxed) {
             return;
         }
+        // The client loaded the outbox when it started; an edit made while it was connecting is journaled but was
+        // not in that read. Batch ids dedupe the rest.
+        match self.sink.pending_updates() {
+            Ok(pending) => {
+                for (batch_id, bytes) in pending {
+                    client.enqueue_persisted_batch(batch_id, bytes, true);
+                }
+            }
+            Err(error) => tracing::warn!(chat = %self.chat_id, %error, "chat2: outbox read failed"),
+        }
         *lock(&self.client) = Some(client);
         loop {
             match events.recv().await {
@@ -414,6 +455,60 @@ impl Session {
 
     pub fn flush(&self) {
         self.sink.flush();
+    }
+
+    /// A local edit (a command or a queue change): committed, written to the outbox before anything is sent, saved
+    /// with the snapshot, and pushed now if the room is joined (otherwise when it next joins).
+    pub fn write<T>(&self, edit: impl FnOnce(&SessionDoc) -> T) -> T {
+        let _local = lock(&self.local);
+        let before = self.doc.oplog_vv();
+        let doc = SessionDoc::from_doc((*self.doc).clone());
+        let out = edit(&doc);
+        self.doc.commit();
+        if self.doc.oplog_vv() == before {
+            return out;
+        }
+        let bytes = match self.doc.export(loro::ExportMode::updates(&before)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::error!(chat = %self.chat_id, %error, "chat2: local edit export failed");
+                return out;
+            }
+        };
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        let durable = match self.sink.persist_update(&batch_id, &bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(chat = %self.chat_id, %error, "chat2: outbox write failed");
+                false
+            }
+        };
+        self.sink.dirty(true);
+        if let Some(client) = lock(&self.client).as_ref() {
+            client.enqueue_persisted_batch(batch_id, bytes, durable);
+        }
+        out
+    }
+
+    /// The id of the transcript's last entry: what a command was based on.
+    pub fn last_entry_id(&self) -> Option<String> {
+        let messages = self.doc.get_list("messages");
+        let last = messages.len().checked_sub(1)?;
+        match messages.get(last)? {
+            loro::ValueOrContainer::Container(loro::Container::Map(map)) => match map.get("id")? {
+                loro::ValueOrContainer::Value(loro::LoroValue::String(id)) => Some(id.to_string()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Edits the room has not acknowledged yet.
+    pub fn has_unsent_writes(&self) -> bool {
+        self.sink
+            .store
+            .has_pending_chat_updates(&self.chat_id)
+            .unwrap_or(true)
     }
 
     pub async fn stop(&self) {
