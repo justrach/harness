@@ -5514,7 +5514,8 @@ pub struct Composer {
     /// at most one flip can happen per layout pass.
     flip_epoch: u64,
     /// Compact-mode input capacity, learned while compact (layout-stable).
-    compact_capacity: f32,
+    /// Negative when the compact row left the input no width at all.
+    compact_capacity: Option<f32>,
     /// Input width first measured after expanding — container-width deltas
     /// while expanded shift `compact_capacity` by the same amount.
     expanded_anchor: f32,
@@ -5754,7 +5755,7 @@ impl Composer {
             queue_shortcut_revealed: false,
             expanded_mode: false,
             flip_epoch: 0,
-            compact_capacity: 0.0,
+            compact_capacity: None,
             expanded_anchor: 0.0,
             last_seen_width: 0.0,
             last_available_width: None,
@@ -9572,9 +9573,17 @@ impl Render for Composer {
             )
         };
         let now = Instant::now();
+        // A zero-width input inside a laid-out pill is a measurement: the
+        // compact row's buttons took all of a narrow pane. Read as "not laid
+        // out yet", it kept the composer on one row with nowhere to type.
+        let pill_laid_out = self
+            .surface_bounds
+            .get()
+            .is_some_and(|bounds| f32::from(bounds.size.width) > 0.0);
+        let measured = last_width > 0.0 || (epoch > 0 && pill_laid_out);
         // Only measurements taken *after* the last flip may drive the next one
         // (at most one flip per layout pass — a flip invalidates the widths).
-        let measured_since_flip = epoch > self.flip_epoch && last_width > 0.0;
+        let measured_since_flip = epoch > self.flip_epoch && measured;
         if measured_since_flip {
             // A same-mode width change is an interactive window/pane resize:
             // defer collapse until sizes settle for RESIZE_SETTLE_MS. Expansion
@@ -9590,7 +9599,7 @@ impl Render for Composer {
             } else {
                 // The compact pill's content box is the layout-stable capacity
                 // both thresholds measure against.
-                self.compact_capacity = last_width - 8.0;
+                self.compact_capacity = Some(last_width - 8.0);
             }
         }
         let resizing = self
@@ -9613,16 +9622,16 @@ impl Render for Composer {
         // while expanded, the learned value shifted by any container resize
         // (the expanded input width tracks the container 1:1).
         let capacity = if !self.expanded_mode {
-            if last_width > 0.0 {
+            if measured {
                 last_width - 8.0
             } else {
                 f32::MAX // before first measure default to compact
             }
-        } else if self.compact_capacity > 0.0 {
+        } else if let Some(compact_capacity) = self.compact_capacity {
             if self.expanded_anchor > 0.0 && last_width > 0.0 {
-                self.compact_capacity + (last_width - self.expanded_anchor)
+                compact_capacity + (last_width - self.expanded_anchor)
             } else {
-                self.compact_capacity
+                compact_capacity
             }
         } else {
             f32::MAX
@@ -11400,6 +11409,83 @@ mod tests {
     }
 
     #[gpui::test]
+    fn narrow_pane_with_the_mic_gives_the_draft_its_own_row(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let resize = |cx: &mut gpui::TestAppContext, width: f32| {
+            handle
+                .update(cx, |composer, window, cx| {
+                    composer.set_available_width(width, cx);
+                    window.resize(size(px(width), px(800.0)));
+                })
+                .unwrap();
+        };
+        let draw = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..4 {
+                cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+            }
+        };
+        handle
+            .update(cx, |composer, _, cx| {
+                composer
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("chat".into()));
+                composer.on_state_changed(cx);
+                composer.route_snap_until = None;
+                // Attach and the mic leave a narrow pane's compact row no
+                // room for the input at all.
+                composer.dictation = Some(ComposerDictation {
+                    controls: None,
+                    listening: false,
+                    finishing: false,
+                    level: 0.0,
+                    partial: String::new(),
+                    _task: Task::ready(()),
+                });
+                composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
+            })
+            .unwrap();
+        resize(cx, 224.0);
+        draw(cx);
+        let flip_epoch = handle
+            .read_with(cx, |composer, cx| {
+                assert!(composer.expanded_mode, "a narrow pane must use two rows");
+                assert!(
+                    composer.input.read(cx).last_width > 120.0,
+                    "the draft needs room to type: {}",
+                    composer.input.read(cx).last_width
+                );
+                composer.flip_epoch
+            })
+            .unwrap();
+        draw(cx);
+        handle
+            .read_with(cx, |composer, _| {
+                assert!(composer.expanded_mode);
+                assert_eq!(
+                    composer.flip_epoch, flip_epoch,
+                    "the layout must not flicker"
+                );
+            })
+            .unwrap();
+
+        resize(cx, 900.0);
+        draw(cx);
+        handle
+            .update(cx, |composer, _, _| {
+                composer.width_changed_at =
+                    Some(Instant::now() - Duration::from_millis(RESIZE_SETTLE_MS + 1));
+            })
+            .unwrap();
+        draw(cx);
+        handle
+            .read_with(cx, |composer, _| {
+                assert!(!composer.expanded_mode, "a wide pane goes back to one row");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn conversation_resize_reflows_the_live_draft_and_preserves_the_flip(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -11444,11 +11530,14 @@ mod tests {
             .read_with(cx, |composer, cx| {
                 assert!(
                     !composer.expanded_mode,
-                    "draft must fit the wide compact input: text={}, capacity={}",
+                    "draft must fit the wide compact input: text={}, capacity={:?}",
                     composer.input.read(cx).measured_text_width(),
                     composer.compact_capacity,
                 );
-                assert!(composer.input.read(cx).measured_text_width() < composer.compact_capacity);
+                assert!(
+                    composer.input.read(cx).measured_text_width()
+                        < composer.compact_capacity.unwrap()
+                );
                 composer.input.clone()
             })
             .unwrap();
