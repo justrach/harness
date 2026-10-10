@@ -2,7 +2,7 @@
 //! packaged WebRTC voice helper ([`super::voice_host`]) capture the microphone,
 //! and Codex's realtime session transcribes what the user says. Only the
 //! user's own transcript is used; the realtime model is told to stay silent,
-//! answers in text if at all (never audio), and its output is ignored.
+//! the helper never plays its audio, and its output is ignored.
 //!
 //! The session runs on a private, ephemeral `codex app-server` thread with
 //! every tool disabled, a read-only sandbox, no project docs and no startup
@@ -231,12 +231,15 @@ fn thread_params(cwd: &Path) -> Value {
     })
 }
 
+/// Codex runs WebRTC sessions only on realtime v1 or v3, and text-only output
+/// only on v2, so the session asks for audio output; the helper's speaker
+/// stays suppressed. Initial items need v3.
 fn realtime_params(thread: &str, offer: &str, session: &str) -> Value {
     json!({
         "threadId": thread,
         "transport": {"type": "webrtc", "sdp": offer},
         "version": "v3",
-        "outputModality": "text",
+        "outputModality": "audio",
         "realtimeSessionId": session,
         "clientManagedHandoffs": false,
         "includeStartupContext": false,
@@ -510,9 +513,11 @@ mod tests {
     }
 
     #[test]
-    fn the_session_is_text_only_with_no_context_and_no_tools() {
+    fn the_session_is_a_v3_webrtc_call_with_no_context_and_no_tools() {
         let p = realtime_params("thr", "offer", "sess");
-        assert_eq!(p["outputModality"], "text");
+        // Codex rejects text output on anything but v2, and WebRTC on v2.
+        assert_eq!(p["version"], "v3");
+        assert_eq!(p["outputModality"], "audio");
         assert_eq!(p["includeStartupContext"], false);
         assert_eq!(p["transport"], json!({"type": "webrtc", "sdp": "offer"}));
         let t = thread_params(Path::new("/tmp"));

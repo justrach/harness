@@ -23,6 +23,25 @@ for line in sys.stdin:
         if mode == "fail-start":
             out({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": "not signed in"}})
             continue
+        # The start rules real Codex enforces (core/src/realtime_conversation.rs).
+        p = msg["params"]
+        version = p.get("version", "v1")
+        # A missing field fails the request; the rest is accepted, then refused
+        # as a realtime error.
+        if "outputModality" not in p:
+            out({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32600, "message": "Invalid request: missing field `outputModality`"}})
+            continue
+        refusal = None
+        if p.get("transport", {}).get("type") == "webrtc" and version == "v2":
+            refusal = "AVAS realtime calls require realtime v1 or v3"
+        elif p.get("initialItems") and version != "v3":
+            refusal = "initial realtime items require realtime v3"
+        elif p["outputModality"] == "text" and version != "v2":
+            refusal = "text realtime output modality requires realtime v2"
+        if refusal:
+            reply({})
+            note("thread/realtime/error", message=refusal)
+            continue
         reply({})
         note("thread/realtime/started", version="v3", realtimeSessionId=msg["params"]["realtimeSessionId"])
         note("thread/realtime/sdp", sdp="fixture-answer")
