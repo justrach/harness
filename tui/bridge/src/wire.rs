@@ -98,6 +98,8 @@ pub struct Conn {
     out: mpsc::UnboundedSender<Value>,
     pub registry: Arc<HarnessRegistry>,
     pub threads: Mutex<HashMap<String, ThreadState>>,
+    /// Realtime voice, relayed to a private Codex app-server on first use.
+    pub voice: crate::voice::Voice,
 }
 
 impl Conn {
@@ -108,6 +110,7 @@ impl Conn {
             out,
             registry,
             threads: Mutex::new(HashMap::new()),
+            voice: Default::default(),
         });
         (conn, rx)
     }
@@ -138,6 +141,7 @@ pub async fn serve(stream: TcpStream, registry: Arc<HarnessRegistry>) -> Result<
         out,
         registry,
         threads: Mutex::new(HashMap::new()),
+        voice: Default::default(),
     });
 
     let writer = tokio::spawn(async move {

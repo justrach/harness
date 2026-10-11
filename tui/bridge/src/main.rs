@@ -10,6 +10,7 @@ mod methods;
 mod models;
 mod tools;
 mod turn;
+mod voice;
 mod wire;
 
 use std::sync::Arc;
