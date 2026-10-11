@@ -14,7 +14,11 @@ diffy = "0.4"
 harness-proto = { path = "../../crates/proto" }
 harness-adapters = { path = "../../crates/harness" }
 harness-engine = { path = "../../crates/engine" }
+harness-mcp = { path = "../../crates/mcp" }
+harness-doc = { path = "../../crates/doc" }
+harness-rpc = { path = "../../crates/rpc" }
 anyhow = "1"
+chrono = "0.4"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

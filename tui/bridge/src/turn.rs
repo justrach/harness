@@ -19,7 +19,7 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
-fn turn_json(id: &str, status: &str, error: Option<&str>) -> Value {
+pub(crate) fn turn_json(id: &str, status: &str, error: Option<&str>) -> Value {
     json!({
         "id": id,
         "items": [],
@@ -112,7 +112,7 @@ pub fn start(conn: &Arc<Conn>, params: Value) -> (Result<Value, RpcError>, After
 const STEER_MAILBOX: usize = 16;
 
 /// Text items joined into the prompt, and the local image paths.
-fn prompt_and_attachments(input: &Value) -> (String, Vec<String>) {
+pub(crate) fn prompt_and_attachments(input: &Value) -> (String, Vec<String>) {
     let items = input.as_array().cloned().unwrap_or_default();
     let prompt = items
         .iter()
@@ -212,7 +212,7 @@ struct Tool {
     started: std::time::Instant,
 }
 
-struct Turn {
+pub(crate) struct Turn {
     conn: Arc<Conn>,
     thread_id: String,
     turn_id: String,
@@ -224,7 +224,33 @@ struct Turn {
 }
 
 impl Turn {
-    fn item_started(&self, item: Value) {
+    pub(crate) fn new(conn: Arc<Conn>, thread_id: String, turn_id: String, cwd: String) -> Self {
+        Self {
+            conn,
+            thread_id,
+            turn_id,
+            message: None,
+            reasoning: None,
+            tools: HashMap::new(),
+            cwd,
+        }
+    }
+
+    pub(crate) fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    /// Close what is still open and report the turn's end to the TUI.
+    pub(crate) fn complete(mut self, status: &str, error: Option<&str>) {
+        self.close_reasoning();
+        self.close_message();
+        self.conn.notify(
+            "turn/completed",
+            json!({ "threadId": self.thread_id, "turn": turn_json(&self.turn_id, status, error) }),
+        );
+    }
+
+    pub(crate) fn item_started(&self, item: Value) {
         self.conn.notify(
             "item/started",
             json!({
@@ -234,7 +260,7 @@ impl Turn {
         );
     }
 
-    fn item_completed(&self, item: Value) {
+    pub(crate) fn item_completed(&self, item: Value) {
         self.conn.notify(
             "item/completed",
             json!({
@@ -255,7 +281,7 @@ impl Turn {
         self.conn.notify(method, params);
     }
 
-    fn close_reasoning(&mut self) {
+    pub(crate) fn close_reasoning(&mut self) {
         if let Some(open) = self.reasoning.take() {
             self.item_completed(
                 json!({ "type": "reasoning", "id": open.id, "summary": [], "content": [open.text] }),
@@ -263,7 +289,7 @@ impl Turn {
         }
     }
 
-    fn close_message(&mut self) {
+    pub(crate) fn close_message(&mut self) {
         if let Some(open) = self.message.take() {
             self.item_completed(
                 json!({ "type": "agentMessage", "id": open.id, "text": open.text }),
@@ -303,7 +329,7 @@ impl Turn {
         !thread.steers.is_empty()
     }
 
-    fn on_event(&mut self, event: AgentEvent) {
+    pub(crate) fn on_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::TextDelta { text } => {
                 self.close_reasoning();
@@ -557,17 +583,7 @@ mod tests {
     use harness_proto::HarnessId;
 
     fn thread() -> ThreadState {
-        ThreadState {
-            cwd: "/tmp".into(),
-            harness: HarnessId::Graff,
-            model: None,
-            resume: None,
-            interrupt: None,
-            turn_id: None,
-            steer: None,
-            steers: Default::default(),
-            steerable: false,
-        }
+        ThreadState::new("/tmp".into(), HarnessId::Graff, None)
     }
 
     fn conn_with(state: ThreadState) -> Arc<Conn> {
