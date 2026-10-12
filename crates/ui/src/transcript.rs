@@ -1159,6 +1159,29 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
     })
 }
 
+/// Longest single-line invocation treated as already shown by the header.
+const HEADER_ECHO_MAX_CHARS: usize = 60;
+
+/// The row's invocation block, unless it only repeats the header (#309): a
+/// short single line equal to the header's detail adds nothing when expanded,
+/// and the block alone made the row expandable. A row with a full-output or
+/// diff fetch link keeps it, so it stays expandable and the link reachable.
+fn invocation_block(call: &ToolCall, has_fetch_link: bool) -> Option<ToolDetail> {
+    let block = call_block(call)?;
+    if !has_fetch_link
+        && let ToolDetail::Output {
+            lines,
+            truncated_by: 0,
+        } = &block
+        && let [only] = lines.as_slice()
+        && only.chars().count() <= HEADER_ECHO_MAX_CHARS
+        && only.trim() == tool_chip_content(call).1.trim()
+    {
+        return None;
+    }
+    Some(block)
+}
+
 /// Reduce an inline [`harness_proto::ToolDiff`] to the changes pane's
 /// [`crate::changes::FileDiff`]: hunks grouped with 3 context lines, dual
 /// 1-based line numbers, unified-diff hunk headers, and add/del counts.
@@ -1673,7 +1696,8 @@ pub fn rows_for_entry(
                     resolved: *resolved,
                     detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
                         .map(Arc::new),
-                    invocation: call_block(call).map(Arc::new),
+                    invocation: invocation_block(call, output_ref.is_some() || diff_ref.is_some())
+                        .map(Arc::new),
                     output_ref: output_ref.clone().map(SharedString::from),
                     output_bytes: *output_bytes,
                     diff_ref: diff_ref.clone().map(SharedString::from),
@@ -16470,6 +16494,69 @@ mod tests {
         let lone = ToolCall::Unknown { name: "Wait for agent 7".into(), input: None };
         assert_eq!(tool_chip_content(&lone), ("Waiting on", "agent 7".to_string()));
         assert!(is_agent_wait(&lone));
+    }
+
+    #[test]
+    fn short_calls_that_repeat_their_header_get_no_dropdown() {
+        // Echoes the header: nothing to expand.
+        for call in [
+            ToolCall::Exec {
+                command: "cargo test".into(),
+            },
+            ToolCall::ReadFile {
+                path: "src/main.rs".into(),
+            },
+            ToolCall::Search {
+                pattern: "foo".into(),
+                path: Some("src".into()),
+            },
+        ] {
+            assert!(invocation_block(&call, false).is_none(), "{call:?}");
+        }
+        // Real extra content keeps the block.
+        assert!(
+            invocation_block(
+                &ToolCall::Exec {
+                    command: "set -e\ncargo test".into()
+                },
+                false
+            )
+            .is_some(),
+            "multi-line"
+        );
+        assert!(
+            invocation_block(
+                &ToolCall::Exec {
+                    command: "x".repeat(HEADER_ECHO_MAX_CHARS + 1)
+                },
+                false
+            )
+            .is_some(),
+            "long"
+        );
+        assert!(
+            invocation_block(
+                &ToolCall::Mcp {
+                    server: "gh".into(),
+                    tool: "issues".into(),
+                    input: Some(serde_json::json!({"state": "open"})),
+                },
+                false
+            )
+            .is_some(),
+            "additional input"
+        );
+        // A fetchable full output keeps the row expandable.
+        assert!(
+            invocation_block(
+                &ToolCall::Exec {
+                    command: "cargo test".into()
+                },
+                true
+            )
+            .is_some(),
+            "fetch link"
+        );
     }
 
     #[test]
