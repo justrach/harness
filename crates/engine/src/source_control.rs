@@ -14,10 +14,13 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use harness_proto::{ChangeRequestState, ChangeRequestSummary};
+use harness_proto::{ChangeRequestMergeResult, ChangeRequestState, ChangeRequestSummary};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(20);
+// A merge waits on GitHub's own mergeability checks.
+const GITHUB_MERGE_TIMEOUT: Duration = Duration::from_secs(60);
+const MERGE_MESSAGE_LIMIT: usize = 240;
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
@@ -104,6 +107,15 @@ pub trait CheckoutChangeRequestLookup: Send + Sync {
         &self,
         source: &CheckoutSourceContext,
     ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError>;
+
+    /// Merge `number` if it is still this branch's open pull request.
+    async fn merge_github_source(
+        &self,
+        _source: &CheckoutSourceContext,
+        _number: u64,
+    ) -> Result<ChangeRequestMergeResult, ChangeRequestError> {
+        Err(ChangeRequestError::UnsupportedRepository)
+    }
 }
 
 /// Host-side resolver. All subprocesses run on the device that owns `cwd`.
@@ -177,6 +189,14 @@ impl CheckoutChangeRequestLookup for ChangeRequestResolver {
         source: &CheckoutSourceContext,
     ) -> Result<Option<ChangeRequestSummary>, ChangeRequestError> {
         ChangeRequestResolver::resolve_github_source(self, source).await
+    }
+
+    async fn merge_github_source(
+        &self,
+        source: &CheckoutSourceContext,
+        number: u64,
+    ) -> Result<ChangeRequestMergeResult, ChangeRequestError> {
+        self.github.merge(source, number).await
     }
 }
 
@@ -264,6 +284,144 @@ impl GitHubCli {
             .map(|reference| reference.name)
             .filter(|name| !name.is_empty())
     }
+}
+
+impl GitHubCli {
+    /// Merge `number` only while it is still the branch's open pull request,
+    /// so a stale client view can never merge a different or closed one.
+    pub async fn merge(
+        &self,
+        source: &CheckoutSourceContext,
+        number: u64,
+    ) -> Result<ChangeRequestMergeResult, ChangeRequestError> {
+        let refused = |message: String| {
+            Ok(ChangeRequestMergeResult {
+                merged: false,
+                message,
+            })
+        };
+        let Some(current) = self
+            .find_for_branch(source)
+            .await?
+            .filter(|summary| summary.number == number)
+        else {
+            return refused(format!("#{number} is no longer this branch's pull request"));
+        };
+        match current.state {
+            ChangeRequestState::Open => {}
+            ChangeRequestState::Merged => return refused(format!("#{number} is already merged")),
+            ChangeRequestState::Closed => return refused(format!("#{number} is closed")),
+        }
+        let repository =
+            repository_slug(source).ok_or(ChangeRequestError::UnsupportedRepository)?;
+        let Some(method) = self.merge_method(source, &repository).await? else {
+            return refused("This repository allows no merge method".into());
+        };
+        let request = ProcessRequest {
+            program: "gh".into(),
+            args: vec![
+                "pr".into(),
+                "merge".into(),
+                number.to_string(),
+                "--repo".into(),
+                repository,
+                method.into(),
+            ],
+            cwd: source.checkout_root.clone(),
+            env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+            timeout: GITHUB_MERGE_TIMEOUT,
+            output_limit: GITHUB_OUTPUT_LIMIT,
+        };
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if output.success {
+            return Ok(ChangeRequestMergeResult {
+                merged: true,
+                message: format!("Merged #{number}"),
+            });
+        }
+        match classify_github_failure(&output.stderr) {
+            error @ (ChangeRequestError::Authentication | ChangeRequestError::RateLimited) => {
+                Err(error)
+            }
+            _ => refused(merge_refusal(&output.stderr, number)),
+        }
+    }
+
+    /// The first method the repository allows, in GitHub's button order.
+    async fn merge_method(
+        &self,
+        source: &CheckoutSourceContext,
+        repository: &str,
+    ) -> Result<Option<&'static str>, ChangeRequestError> {
+        let request = ProcessRequest {
+            program: "gh".into(),
+            args: vec![
+                "repo".into(),
+                "view".into(),
+                repository.into(),
+                "--json".into(),
+                "mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed".into(),
+            ],
+            cwd: source.checkout_root.clone(),
+            env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+            timeout: GITHUB_TIMEOUT,
+            output_limit: GITHUB_OUTPUT_LIMIT,
+        };
+        let output = self.runner.run(request).await.map_err(classify_run_error)?;
+        if !output.success {
+            return Err(classify_github_failure(&output.stderr));
+        }
+        let settings: GhMergeSettings =
+            serde_json::from_slice(&output.stdout).map_err(|_| ChangeRequestError::Decode)?;
+        Ok([
+            (settings.merge_commit_allowed, "--merge"),
+            (settings.squash_merge_allowed, "--squash"),
+            (settings.rebase_merge_allowed, "--rebase"),
+        ]
+        .into_iter()
+        .find_map(|(allowed, flag)| allowed.then_some(flag)))
+    }
+}
+
+fn repository_slug(source: &CheckoutSourceContext) -> Option<String> {
+    Some(format!(
+        "{}/{}/{}",
+        source.branch.host.as_deref()?,
+        source.branch.owner.as_deref()?,
+        source.branch.repository.as_deref()?
+    ))
+}
+
+/// GitHub's own reason, one line: "Pull request … is not mergeable: …".
+fn merge_refusal(stderr: &[u8], number: u64) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let line = stderr
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            ["X ", "! ", "✗ "]
+                .iter()
+                .find_map(|glyph| line.strip_prefix(glyph))
+                .unwrap_or(line)
+                .trim()
+        })
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.is_empty() {
+        return format!("GitHub did not merge #{number}");
+    }
+    line.chars().take(MERGE_MESSAGE_LIMIT).collect()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhMergeSettings {
+    #[serde(default)]
+    merge_commit_allowed: bool,
+    #[serde(default)]
+    squash_merge_allowed: bool,
+    #[serde(default)]
+    rebase_merge_allowed: bool,
 }
 
 impl Default for GitHubCli {
@@ -1638,5 +1796,155 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             context.head_selectors,
             ["acme:feature/shared", "feature/shared"]
         );
+    }
+
+    fn listed(number: u64, state: &str) -> Result<ProcessOutput, ProcessRunError> {
+        command_success(
+            serde_json::to_vec(&vec![pull_request(
+                number,
+                state,
+                "acme",
+                "feature/status",
+                "2026-08-15T12:00:00Z",
+            )])
+            .unwrap(),
+        )
+    }
+
+    fn merge_settings(
+        merge: bool,
+        squash: bool,
+        rebase: bool,
+    ) -> Result<ProcessOutput, ProcessRunError> {
+        command_success(
+            serde_json::to_vec(&serde_json::json!({
+                "mergeCommitAllowed": merge,
+                "squashMergeAllowed": squash,
+                "rebaseMergeAllowed": rebase,
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn merge_uses_the_first_allowed_method_on_the_branch_pull_request() {
+        let source = source("feature/status", "acme", Some("main"));
+        let runner = FakeProcessRunner::with_responses([
+            listed(90, "OPEN"),
+            merge_settings(false, true, true),
+            command_success(Vec::new()),
+        ]);
+        let result = GitHubCli::with_runner(runner.clone())
+            .merge(&source, 90)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            ChangeRequestMergeResult {
+                merged: true,
+                message: "Merged #90".into()
+            }
+        );
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[2].args,
+            [
+                "pr",
+                "merge",
+                "90",
+                "--repo",
+                "github.com/acme/harness",
+                "--squash"
+            ]
+        );
+        assert_eq!(requests[2].cwd, PathBuf::from("/checkout"));
+        assert!(
+            requests[2]
+                .env
+                .contains(&("GH_PROMPT_DISABLED".into(), "1".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_refuses_a_pull_request_the_branch_no_longer_has() {
+        let source = source("feature/status", "acme", Some("main"));
+        let runner = FakeProcessRunner::with_responses([listed(90, "OPEN")]);
+        let result = GitHubCli::with_runner(runner.clone())
+            .merge(&source, 91)
+            .await
+            .unwrap();
+        assert!(!result.merged);
+        assert_eq!(
+            result.message,
+            "#91 is no longer this branch's pull request"
+        );
+        assert_eq!(runner.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn merge_never_runs_for_a_merged_or_closed_pull_request() {
+        for (state, message) in [
+            ("MERGED", "#90 is already merged"),
+            ("CLOSED", "#90 is closed"),
+        ] {
+            let source = source("feature/status", "acme", Some("main"));
+            let runner = FakeProcessRunner::with_responses([listed(90, state)]);
+            let result = GitHubCli::with_runner(runner.clone())
+                .merge(&source, 90)
+                .await
+                .unwrap();
+            assert!(!result.merged);
+            assert_eq!(result.message, message);
+            assert_eq!(runner.requests().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_reports_github_refusal_and_auth_failures() {
+        let source = source("feature/status", "acme", Some("main"));
+        let runner = FakeProcessRunner::with_responses([
+            listed(90, "OPEN"),
+            merge_settings(true, false, false),
+            command_failure(
+                "X Pull request acme/harness#90 is not mergeable: the base branch policy prohibits the merge.\nTo have the pull request merged after all the requirements have been met, add the `--auto` flag.\n",
+            ),
+        ]);
+        let result = GitHubCli::with_runner(runner.clone())
+            .merge(&source, 90)
+            .await
+            .unwrap();
+        assert!(!result.merged);
+        assert_eq!(
+            result.message,
+            "Pull request acme/harness#90 is not mergeable: the base branch policy prohibits the merge."
+        );
+        assert_eq!(runner.requests()[2].args.last().unwrap(), "--merge");
+
+        let runner = FakeProcessRunner::with_responses([
+            listed(90, "OPEN"),
+            merge_settings(true, false, false),
+            command_failure("gh auth login required"),
+        ]);
+        let error = GitHubCli::with_runner(runner)
+            .merge(&source, 90)
+            .await
+            .unwrap_err();
+        assert_eq!(error, ChangeRequestError::Authentication);
+    }
+
+    #[tokio::test]
+    async fn merge_needs_an_allowed_method() {
+        let source = source("feature/status", "acme", Some("main"));
+        let runner = FakeProcessRunner::with_responses([
+            listed(90, "OPEN"),
+            merge_settings(false, false, false),
+        ]);
+        let result = GitHubCli::with_runner(runner.clone())
+            .merge(&source, 90)
+            .await
+            .unwrap();
+        assert!(!result.merged);
+        assert_eq!(runner.requests().len(), 2);
     }
 }

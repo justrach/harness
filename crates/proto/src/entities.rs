@@ -811,6 +811,15 @@ pub struct ChangeRequestSummary {
     pub head_ref: String,
 }
 
+/// Result of merging a checkout's change request on its host. `merged: false`
+/// carries the provider's own reason (checks pending, review required, …).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestMergeResult {
+    pub merged: bool,
+    pub message: String,
+}
+
 /// Latest successful change request resolution for one checkout and branch.
 ///
 /// `change_request: None` is an authoritative successful lookup with no match;

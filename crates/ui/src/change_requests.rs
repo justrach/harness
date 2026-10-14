@@ -312,6 +312,29 @@ pub(crate) fn watch_params(
     params
 }
 
+/// `MergeChangeRequest` params: the checkout and branch this chat's badge
+/// watches, routed to the chat's device. The host re-resolves the branch and
+/// merges only while `number` is still its open pull request.
+pub(crate) fn merge_params(
+    chat: &Chat,
+    number: u64,
+    local_device_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    let source = chat.source_context.as_ref()?;
+    if source.branch.trim().is_empty() {
+        return None;
+    }
+    let target = ChangeRequestWatchKey {
+        device_id: chat.device_id.clone(),
+        cwd: source.repo_root.clone(),
+        branch: source.branch.clone(),
+        checkout_id: None,
+    };
+    let mut params = watch_params(&target, local_device_id);
+    params["number"] = number.into();
+    Some(params)
+}
+
 /// Resolve a snapshot for a row without trusting the cache key alone.
 ///
 /// Only conversation-owned source context is trusted. Legacy scalar metadata
@@ -447,6 +470,28 @@ mod tests {
             Some(90)
         );
         assert!(change_request_for_chat(&second, &[], [&first_snapshot]).is_none());
+    }
+
+    #[test]
+    fn merge_targets_the_badge_checkout_and_routes_to_the_chat_device() {
+        let local = with_source(chat("chat", "local", Some("/repo/wt"), None), "feature/pr");
+        assert_eq!(
+            merge_params(&local, 90, Some("local")),
+            Some(serde_json::json!({ "cwd": "/repo", "branch": "feature/pr", "number": 90 }))
+        );
+        let remote = with_source(chat("chat", "remote", Some("/repo"), None), "feature/pr");
+        assert_eq!(
+            merge_params(&remote, 90, Some("local")).unwrap()["targetDeviceId"],
+            "remote"
+        );
+        assert!(
+            merge_params(
+                &chat("chat", "local", Some("/repo"), None),
+                90,
+                Some("local")
+            )
+            .is_none()
+        );
     }
 
     #[test]
