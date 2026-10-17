@@ -1110,9 +1110,8 @@ impl AgentAccounts {
         }
         let mut command = harness_adapters::graff_login_command(
             provider,
-            // The ChatGPT sign-in opens the host's browser unless another
-            // device is finishing it.
-            if provider == "chatgpt-new" && !relay_browser {
+            // PKCE sign-ins open the host browser unless explicitly relayed.
+            if graff_logins::uses_host_browser(provider) && !relay_browser {
                 None
             } else {
                 no_open.as_deref()
@@ -1188,18 +1187,17 @@ impl AgentAccounts {
                 code: None,
             });
         }
-        if provider == "chatgpt-new" {
+        if graff_logins::uses_host_browser(provider) {
             loop {
-                let waiting = lock(&output).contains("waiting for the sign-in on ");
+                let waiting = graff_logins::host_browser_ready(provider, &lock(&output));
                 if waiting || lock(&exit).is_some() {
                     break;
                 }
                 if Instant::now() > deadline {
                     self.cancel_login(&login_id);
-                    return Err(EngineError::Other(
-                        "ChatGPT sign-in did not start on the execution device. Try again there."
-                            .into(),
-                    ));
+                    return Err(EngineError::Other(format!(
+                        "{provider} sign-in did not start on the execution device. Try again there."
+                    )));
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -1270,6 +1268,8 @@ impl AgentAccounts {
         let landed = code == Some(0)
             && if provider == "chatgpt-new" {
                 stamp.is_some() && stamp != before && graff_logins::chatgpt_plan_granted(&output)
+            } else if provider == "anthropic" {
+                stamp.is_some() && stamp != before
             } else {
                 (stamp.is_some() && stamp != before) || graff_logins::saw_success(&output)
             };
@@ -1286,6 +1286,8 @@ impl AgentAccounts {
                 message: Some(if provider == "chatgpt-new" {
                     "ChatGPT sign-in did not grant plan access. Sign in again and allow plan usage."
                         .into()
+                } else if provider == "anthropic" {
+                    "Anthropic sign-in did not finish. Try again on the execution device.".into()
                 } else {
                     graff_logins::failure_message(&output)
                 }),

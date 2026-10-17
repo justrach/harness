@@ -40,7 +40,7 @@ use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
-use crate::settings::harnesses::HarnessesPage;
+use crate::settings::harnesses::{GraffProviderLoginRequested, HarnessesPage};
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
@@ -1796,6 +1796,7 @@ pub struct Shell {
     shortcuts_page: Option<Entity<ShortcutsPage>>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    harnesses_sub: Option<Subscription>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -2011,9 +2012,10 @@ impl Shell {
             cx.notify();
         });
         // Phones follow the desktop's theme choice through the registry.
-        let appearance_observation = cx.observe_global::<crate::appearance::AppearanceState>(
-            |this: &mut Shell, cx| this.publish_appearance(cx),
-        );
+        let appearance_observation =
+            cx.observe_global::<crate::appearance::AppearanceState>(|this: &mut Shell, cx| {
+                this.publish_appearance(cx)
+            });
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
@@ -2231,6 +2233,7 @@ impl Shell {
             shortcuts_page: None,
             accounts_page: None,
             harnesses_page: None,
+            harnesses_sub: None,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -2477,7 +2480,12 @@ impl Shell {
                 };
                 for device_id in &device_ids {
                     if let Some(image) = att.image.clone() {
-                        crate::attachments::seed_attachment(device_id, &pending_path, &att.name, image);
+                        crate::attachments::seed_attachment(
+                            device_id,
+                            &pending_path,
+                            &att.name,
+                            image,
+                        );
                     }
                 }
                 let text = crate::attachments::with_attachments(
@@ -3322,7 +3330,9 @@ impl Shell {
     fn view_opener(cx: &Context<Self>) -> crate::transcript::ViewOpener {
         let shell = cx.weak_entity();
         std::rc::Rc::new(move |chat_id, view, window, cx| {
-            let _ = shell.update(cx, |shell, cx| shell.open_tool_view(chat_id, view, window, cx));
+            let _ = shell.update(cx, |shell, cx| {
+                shell.open_tool_view(chat_id, view, window, cx)
+            });
         })
     }
 
@@ -3349,7 +3359,12 @@ impl Shell {
             state
                 .selected_chat_row()
                 .filter(|chat| Some(chat.device_id.as_str()) != state.local_device_id.as_deref())
-                .map(|chat| state.device_name(&chat.device_id).unwrap_or("another computer").to_owned())
+                .map(|chat| {
+                    state
+                        .device_name(&chat.device_id)
+                        .unwrap_or("another computer")
+                        .to_owned()
+                })
         };
         if let Some(host) = host {
             self.sidebar_notice = Some(format!("This view is saved on {host}. Open it there.").into());
@@ -4108,12 +4123,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn split_terminal(
-        &mut self,
-        axis: SplitAxis,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn split_terminal(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
         if !self.terminal_open(cx) {
             self.toggle_terminal(window, cx);
         }
@@ -4513,7 +4523,30 @@ impl Shell {
             SettingsSection::Harnesses => {
                 if self.harnesses_page.is_none() {
                     let state = self.state.clone();
-                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
+                    let page = cx.new(|cx| HarnessesPage::new(state, cx));
+                    self.harnesses_sub = Some(cx.subscribe(
+                        &page,
+                        |this, _, event: &GraffProviderLoginRequested, cx| {
+                            let accounts = match &this.accounts_page {
+                                Some(page) => page.clone(),
+                                None => {
+                                    let state = this.state.clone();
+                                    let page = cx.new(|cx| AccountsPage::new(state, cx));
+                                    this.accounts_page = Some(page.clone());
+                                    page
+                                }
+                            };
+                            accounts.update(cx, |page, cx| {
+                                page.open_graff_provider_login(
+                                    event.provider,
+                                    event.target_device.clone(),
+                                    cx,
+                                );
+                            });
+                            this.open_settings(SettingsSection::Agents, cx);
+                        },
+                    ));
+                    self.harnesses_page = Some(page);
                 }
                 match &self.harnesses_page {
                     Some(page) => page.clone().into_any_element(),
@@ -9179,12 +9212,18 @@ impl Shell {
             // existing folder is one card among them, not a gate.
             let _ = faint;
             let starter_cards = crate::starters::available(false).map(|starter| {
-                crate::starters::card(starter.id, starter.icon, starter.title, starter.blurb, &theme_owned)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.composer
-                            .update(cx, |composer, cx| composer.apply_starter(starter, cx));
-                    }))
-                    .into_any_element()
+                crate::starters::card(
+                    starter.id,
+                    starter.icon,
+                    starter.title,
+                    starter.blurb,
+                    &theme_owned,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.composer
+                        .update(cx, |composer, cx| composer.apply_starter(starter, cx));
+                }))
+                .into_any_element()
             });
             let existing_code = crate::starters::card(
                 "existing",
@@ -11565,23 +11604,31 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ResizeChatPaneDown, _, cx| {
                 this.resize_chat_pane(chat_split::PaneDirection::Down, cx)
             }))
-            .on_action(cx.listener(|this, _: &EqualizeChatPanes, _, cx| this.equalize_chat_panes(cx)))
+            .on_action(
+                cx.listener(|this, _: &EqualizeChatPanes, _, cx| this.equalize_chat_panes(cx)),
+            )
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     window.focus(&this.composer.focus_handle(cx), cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| {
-                this.toggle_chat_pane_zoom(cx)
-            }))
-            .on_action(cx.listener(|this, _: &NewChatTab, window, cx| this.new_chat_tab(None, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| this.toggle_chat_pane_zoom(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &NewChatTab, window, cx| this.new_chat_tab(None, window, cx)),
+            )
             .on_action(cx.listener(|this, _: &StartAppUpdate, _, cx| {
                 if matches!(this.update_flow, UpdateFlow::Idle | UpdateFlow::Failed(_)) {
                     this.on_update_strip_click(cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &NextChatTab, window, cx| this.cycle_chat_tab(true, window, cx)))
-            .on_action(cx.listener(|this, _: &PrevChatTab, window, cx| this.cycle_chat_tab(false, window, cx)))
+            .on_action(cx.listener(|this, _: &NextChatTab, window, cx| {
+                this.cycle_chat_tab(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevChatTab, window, cx| {
+                this.cycle_chat_tab(false, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CloseSplit, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.close_terminal_split(window, cx);
@@ -14263,9 +14310,9 @@ mod exit_regressions {
         window
             .update(cx, |shell, window, cx| {
                 let text = |shell: &Shell, cx: &App| shell.composer.read(cx).canvas_input(cx).text;
-                shell
-                    .composer
-                    .update(cx, |composer, cx| composer.prefill("unsent idea".into(), cx));
+                shell.composer.update(cx, |composer, cx| {
+                    composer.prefill("unsent idea".into(), cx)
+                });
                 assert_eq!(text(shell, cx), "unsent idea");
                 shell.split_chat(SplitAxis::Horizontal, window, cx);
                 assert_eq!(text(shell, cx), "", "a ⌘D pane opened with the draft (#28)");
@@ -15688,7 +15735,12 @@ impl Shell {
         }
     }
     /// Onboarding QA: ⌘D, or close the focused pane.
-    pub fn fixture_onboarding_split(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn fixture_onboarding_split(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if open {
             self.split_chat(SplitAxis::Horizontal, window, cx);
         } else {
@@ -15696,14 +15748,24 @@ impl Shell {
         }
     }
     /// Tabs QA: ⌘T (`None`), or switch to tab `ix`.
-    pub fn fixture_chat_tab(&mut self, switch_to: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn fixture_chat_tab(
+        &mut self,
+        switch_to: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match switch_to {
             None => self.new_chat_tab(None, window, cx),
             Some(ix) => self.switch_chat_tab(ix, window, cx),
         }
     }
     /// Pane-search QA: open ⌘K with `query` typed, or press Enter in it.
-    pub fn fixture_command_palette(&mut self, query: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn fixture_command_palette(
+        &mut self,
+        query: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match query {
             Some(query) => {
                 if self.command_palette.is_none() {
@@ -15717,7 +15779,12 @@ impl Shell {
         }
     }
     /// Onboarding QA: an agent in `chat_id` was refused a screenshot.
-    pub fn fixture_screen_access_notice(&mut self, chat_id: &str, requested: bool, cx: &mut Context<Self>) {
+    pub fn fixture_screen_access_notice(
+        &mut self,
+        chat_id: &str,
+        requested: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.state.update(cx, |state, cx| {
             state.screen_access_notice = Some(crate::screen_access::Notice {
                 chat_id: chat_id.into(),

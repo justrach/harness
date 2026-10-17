@@ -141,6 +141,15 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
+/// Reuse Accounts' sign-in UI without losing the execution device selected here.
+#[derive(Clone, Debug)]
+pub struct GraffProviderLoginRequested {
+    pub provider: &'static str,
+    pub target_device: Option<String>,
+}
+
+impl gpui::EventEmitter<GraffProviderLoginRequested> for HarnessesPage {}
+
 pub struct HarnessesPage {
     graff_draft_subagents: Loadable<bool>,
     graff_draft_subagents_task: Option<Task<()>>,
@@ -248,6 +257,13 @@ impl HarnessesPage {
         };
         page.load(cx);
         page
+    }
+
+    fn request_anthropic_login(&self, cx: &mut Context<Self>) {
+        cx.emit(GraffProviderLoginRequested {
+            provider: "anthropic",
+            target_device: self.target_device.clone(),
+        });
     }
 
     /// Params with the `targetDeviceId` passthrough merged in.
@@ -474,15 +490,18 @@ impl HarnessesPage {
             .flex_wrap()
             .items_center()
             .gap(px(8.0))
-            .child(widgets::badge(theme, if granted { "Allowed" } else { "Off" }));
+            .child(widgets::badge(
+                theme,
+                if granted { "Allowed" } else { "Off" },
+            ));
         if !granted && !self.screen_access_requested {
             controls = controls.child(action("screen-access-allow", "Allow").on_click(cx.listener(
                 |page, _, _, cx| {
                     crate::screen_access::request();
                     page.screen_access_requested = true;
                     cx.notify();
-                },
-            )));
+                }),
+            ));
         } else if !granted {
             controls = controls
                 .children(crate::screen_access::SETTINGS_URL_OPT.map(|url| {
@@ -1261,7 +1280,25 @@ impl HarnessesPage {
                             .flex()
                             .flex_col()
                             .child(widgets::row_title(&theme, descriptor.name.clone()))
-                            .child(widgets::meta_line(&theme, meta)),
+                            .child(widgets::meta_line(&theme, meta))
+                            .when(
+                                harness == HarnessId::Graff
+                                    && installed
+                                    && self.installing != Some(harness),
+                                |el| {
+                                    el.child(
+                                        div().flex().mt(px(6.0)).child(
+                                            widgets::ghost_action(&theme)
+                                                .id("graff-anthropic-sign-in")
+                                                .hover(|s| widgets::ghost_hover(&theme, s))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.request_anthropic_login(cx);
+                                                }))
+                                                .child("Sign in with Anthropic"),
+                                        ),
+                                    )
+                                },
+                            ),
                     )
                     .when(
                         offers_install(harness, installed, descriptor.can_install)
@@ -1503,6 +1540,36 @@ impl Render for HarnessesPage {
 #[cfg(test)]
 mod tests {
     use super::SignInPhase;
+
+    #[gpui::test]
+    fn graff_provider_shortcut_preserves_the_agents_device(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use std::{cell::RefCell, rc::Rc};
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| HarnessesPage::new(state, cx));
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let captured = requests.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&page, move |_, event: &GraffProviderLoginRequested, _| {
+                captured.borrow_mut().push(event.clone());
+            })
+        });
+        for target in [None, Some("execution-device".to_string())] {
+            page.update(cx, |page, cx| {
+                page.target_device = target.clone();
+                page.request_anthropic_login(cx);
+            });
+        }
+        let requests = requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].provider, "anthropic");
+        assert_eq!(requests[0].target_device, None);
+        assert_eq!(requests[1].provider, "anthropic");
+        assert_eq!(
+            requests[1].target_device.as_deref(),
+            Some("execution-device")
+        );
+    }
 
     #[test]
     fn custom_build_override_is_advertised_for_bring_your_own_agents() {

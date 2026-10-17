@@ -56,6 +56,19 @@ zai)
   printf '\nTo log in to Z.AI Coding Plan, open this URL (browser should open automatically):\n\n  https://chat.z.ai/cli/authorize?flow=f1\n\nwaiting for authorization…\n'
   exec sleep 30
   ;;
+anthropic)
+  [ -z "${GRAFF_NO_BROWSER+x}" ] || exit 65
+  command -v open > "$HOME/anthropic-open-resolved"
+  printf 'Sign in with Anthropic (your browser should open it):\n\nhttps://claude.ai/oauth/authorize?state=fixture-private-state\n\nWaiting for sign-in…\n'
+  sleep 1
+  if [ -f "$HOME/deny-anthropic" ]; then
+    printf '✓ misleading marker\nhttps://claude.ai/oauth/authorize?state=fixture-private-state\n'
+    exit 0
+  fi
+  mkdir -p "$HOME/.anthropic/credentials"
+  printf '{"access_token":"fixture"}' > "$HOME/.anthropic/credentials/graff-oauth.json"
+  printf 'Signed in to Anthropic.\n'
+  ;;
 chatgpt-new)
   printf 'waiting for the sign-in on the execution device …\n'
   sleep 1
@@ -110,7 +123,8 @@ async fn graff_provider_sign_ins_end_to_end() {
             ("xai".into(), false),
             ("kimi".into(), false),
             ("zai".into(), false),
-            ("chatgpt-new".into(), false)
+            ("chatgpt-new".into(), false),
+            ("anthropic".into(), false)
         ]
     );
     let names: Vec<_> = accounts
@@ -118,7 +132,7 @@ async fn graff_provider_sign_ins_end_to_end() {
         .into_iter()
         .map(|r| r.name)
         .collect();
-    assert_eq!(names, ["xAI", "Kimi", "Z.AI", "ChatGPT"]);
+    assert_eq!(names, ["xAI", "Kimi", "Z.AI", "ChatGPT", "Anthropic"]);
 
     // xAI: the link and code come back, graff's own opener is muted, and the
     // sign-in finishes once graff has written the credential.
@@ -137,7 +151,8 @@ async fn graff_provider_sign_ins_end_to_end() {
             ("xai".into(), true),
             ("kimi".into(), false),
             ("zai".into(), false),
-            ("chatgpt-new".into(), false)
+            ("chatgpt-new".into(), false),
+            ("anthropic".into(), false)
         ]
     );
     let opener =
@@ -188,6 +203,44 @@ async fn graff_provider_sign_ins_end_to_end() {
     assert!(poll.message.unwrap().contains("did not grant plan access"));
     let rows = accounts.sign_out_graff_login("chatgpt-new").unwrap();
     assert!(!rows[3].signed_in);
+
+    // Anthropic is a distinct native Graff login, never a Claude Code account.
+    let claude = home.join(".claude/.credentials.json");
+    std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+    std::fs::write(&claude, "untouched Claude Code credential").unwrap();
+    let start = accounts
+        .start_graff_login("anthropic")
+        .await
+        .expect("start Anthropic");
+    assert_eq!(start.mode, AgentLoginMode::HostBrowser);
+    assert!(start.url.is_empty());
+    assert_eq!(start.code, None);
+    let poll = settle(&accounts, &start.login_id).await;
+    assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+    assert!(signed_in(&accounts)[4].1);
+    let opener = std::fs::read_to_string(home.join("anthropic-open-resolved")).unwrap();
+    assert!(
+        !opener.contains(".noop-open"),
+        "host browser must not be muted"
+    );
+
+    // An existing login and a misleading success marker cannot mask denial.
+    std::fs::write(home.join("deny-anthropic"), "denied").unwrap();
+    let start = accounts
+        .start_graff_login("anthropic")
+        .await
+        .expect("start denied Anthropic");
+    let poll = settle(&accounts, &start.login_id).await;
+    assert_eq!(poll.status, AgentLoginStatus::Error);
+    let message = poll.message.unwrap();
+    assert!(!message.contains("https://"));
+    assert!(!message.contains("fixture-private-state"));
+    let rows = accounts.sign_out_graff_login("anthropic").unwrap();
+    assert!(!rows[4].signed_in);
+    assert_eq!(
+        std::fs::read_to_string(claude).unwrap(),
+        "untouched Claude Code credential"
+    );
 
     // Z.AI prints no code. Cancelling kills graff and leaves the login that
     // was already there exactly as it was.

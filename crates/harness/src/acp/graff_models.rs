@@ -188,7 +188,11 @@ pub fn parse_model_mismatch(message: &str) -> Option<ModelMismatch> {
         }
         None => (None, rest),
     };
-    let requested = rest.strip_prefix("; ")?.split(MISMATCH_SUFFIX).next()?.trim();
+    let requested = rest
+        .strip_prefix("; ")?
+        .split(MISMATCH_SUFFIX)
+        .next()?
+        .trim();
     (!requested.is_empty()).then(|| ModelMismatch {
         requested: requested.to_owned(),
         restored,
@@ -670,7 +674,9 @@ mod tests {
     fn resumed_model_mismatch_names_both_models_and_parses_back() {
         let catalog = json!({"current": {"provider": "codex", "model": "gpt-6-sol"}});
         assert!(verify_resumed_model(&catalog, "codex/gpt-6-sol").is_ok());
-        let error = verify_resumed_model(&catalog, "kimi/k3").unwrap_err().to_string();
+        let error = verify_resumed_model(&catalog, "kimi/k3")
+            .unwrap_err()
+            .to_string();
         assert_eq!(
             parse_model_mismatch(&error),
             Some(ModelMismatch {
@@ -688,7 +694,10 @@ mod tests {
                 restored: None,
             })
         );
-        assert_eq!(parse_model_mismatch("graff did not apply thought level high"), None);
+        assert_eq!(
+            parse_model_mismatch("graff did not apply thought level high"),
+            None
+        );
     }
 
     #[test]
@@ -881,7 +890,9 @@ openrouter:\n\
              "cost": "plan", "maker": "openai"},
             {"provider": "codegraff", "name": "mimo-v2.6-flash", "authenticated": true,
              "cost": "credits"},
-            {"provider": "lmstudio", "name": "local", "authenticated": true, "cost": ""}
+            {"provider": "lmstudio", "name": "local", "authenticated": true, "cost": ""},
+            {"provider": "anthropic", "name": "claude-sonnet-4-6", "authenticated": true,
+             "cost": "plan", "maker": "anthropic"}
         ]});
         let models = models_from_acp(&catalog).unwrap();
         let meta: Vec<_> = models
@@ -894,7 +905,8 @@ openrouter:\n\
             [
                 (Some("plan"), Some("openai")),
                 (Some("credits"), None),
-                (None, None)
+                (None, None),
+                (Some("plan"), Some("anthropic"))
             ]
         );
     }

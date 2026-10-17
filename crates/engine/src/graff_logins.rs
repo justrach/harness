@@ -1,4 +1,4 @@
-//! graff's own provider sign-ins (xAI, Kimi, Z.AI) as the accounts screen sees
+//! graff's own provider sign-ins as the accounts screen sees
 //! them: which are signed in, sign-out, and reading `graff login <id>`'s output.
 //!
 //! graff keeps each of these as one file, `<home>/.<id>/credentials/graff-oauth.json`
@@ -113,6 +113,22 @@ fn strip_ansi(line: &str) -> String {
         }
     }
     out
+}
+
+/// PKCE callbacks must complete in the browser on the execution host. Never
+/// relay their authorization URLs or raw output to another device.
+pub fn uses_host_browser(provider: &str) -> bool {
+    matches!(provider, "chatgpt-new" | "anthropic")
+}
+
+pub fn host_browser_ready(provider: &str, output: &str) -> bool {
+    match provider {
+        "chatgpt-new" => output.contains("waiting for the sign-in on "),
+        "anthropic" => output
+            .lines()
+            .any(|line| strip_ansi(line).trim() == "Waiting for sign-in…"),
+        _ => false,
+    }
 }
 
 /// The sign-in page graff prints after "open this URL". Only a complete line
@@ -367,6 +383,10 @@ mod tests {
             credential_path(home, "chatgpt-new"),
             Some(PathBuf::from("/h/.graff/credentials/chatgpt-new.json"))
         );
+        assert_eq!(
+            credential_path(home, "anthropic"),
+            Some(PathBuf::from("/h/.anthropic/credentials/graff-oauth.json"))
+        );
     }
 
     #[test]
@@ -396,7 +416,8 @@ mod tests {
                 ("xai", false),
                 ("kimi", false),
                 ("zai", false),
-                ("chatgpt-new", false)
+                ("chatgpt-new", false),
+                ("anthropic", false)
             ]
         );
         let path = credential_path(dir.path(), "kimi").unwrap();
@@ -411,7 +432,8 @@ mod tests {
                 ("xAI", false),
                 ("Kimi", true),
                 ("Z.AI", false),
-                ("ChatGPT", false)
+                ("ChatGPT", false),
+                ("Anthropic", false)
             ]
         );
     }
@@ -464,6 +486,23 @@ mod tests {
             Some("https://chat.z.ai/cli/authorize?flow=f1")
         );
         assert_eq!(scan_device_code(ZAI), None);
+    }
+
+    #[test]
+    fn anthropic_waits_for_its_host_callback_without_returning_the_pkce_url() {
+        let page = "Sign in with Anthropic (your browser should open it):\n\nhttps://claude.ai/oauth/authorize?state=fixture\n\n";
+        assert!(uses_host_browser("anthropic"));
+        assert!(!host_browser_ready("anthropic", page));
+        assert!(host_browser_ready(
+            "anthropic",
+            &format!("{page}Waiting for sign-in…\n")
+        ));
+        assert!(!host_browser_ready("xai", "Waiting for sign-in…\n"));
+        assert!(!host_browser_ready(
+            "anthropic",
+            "waiting for the sign-in on localhost"
+        ));
+        assert_eq!(scan_login_url(page), None);
     }
 
     #[test]

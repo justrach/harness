@@ -1008,6 +1008,7 @@ pub const GRAFF_LOGIN_PROVIDERS: &[(&str, &str)] = &[
     ("kimi", "Kimi"),
     ("zai", "Z.AI"),
     ("chatgpt-new", "ChatGPT"),
+    ("anthropic", "Anthropic"),
 ];
 
 /// One graff sign-in provider on a device (`ListGraffLogins` row).

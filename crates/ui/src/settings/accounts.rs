@@ -1143,7 +1143,19 @@ impl AccountsPage {
         self.begin_login(harness, None, false, cx);
     }
 
-    /// graff's own sign-in for one provider (`xai`, `kimi`, `zai`).
+    /// Entry from Settings → Agents; use the same device-aware login and dialog.
+    pub(crate) fn open_graff_provider_login(
+        &mut self,
+        provider: &str,
+        target_device: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_login(cx);
+        self.set_target_device(target_device, cx);
+        self.start_graff_login(provider, cx);
+    }
+
+    /// graff's own sign-in for one provider.
     fn start_graff_login(&mut self, provider: &str, cx: &mut Context<Self>) {
         self.begin_login(HarnessId::Graff, Some(provider.to_string()), false, cx);
     }
@@ -1777,7 +1789,11 @@ impl AccountsPage {
                         (
                             Some(p.id.as_str()),
                             p.name.as_str(),
-                            status.to_string(),
+                            if p.id == "anthropic" {
+                                format!("{status} · Claude subscription through graff")
+                            } else {
+                                status.to_string()
+                            },
                             p.signed_in,
                         )
                     })
@@ -2206,9 +2222,9 @@ impl AccountsPage {
                             .id("login-copy-url")
                             .flex_none()
                             .py(px(3.0))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.copy_login_url(copy_url.clone(), cx)
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.copy_login_url(copy_url.clone(), cx),
+                            )),
                         ),
                 )
         };
@@ -2306,7 +2322,7 @@ impl AccountsPage {
                         .into()
                 } else if start.mode == AgentLoginMode::HostBrowser {
                     "Complete sign-in in the browser on the execution device shown above. \
-                     ChatGPT's local callback must finish on that desktop. Your failed turn \
+                     The local callback must finish on that desktop. Your failed turn \
                      will not be sent again automatically."
                         .into()
                 } else {
@@ -3032,6 +3048,25 @@ mod tests {
         assert_eq!(openai_login(&anonymous), (true, None));
     }
 
+    #[gpui::test]
+    fn graff_provider_entry_retargets_the_existing_account_flow(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| AccountsPage::new(state, cx));
+        for target in [Some("execution-device".to_string()), None] {
+            page.update(cx, |page, cx| {
+                page.open_graff_provider_login("anthropic", target.clone(), cx);
+                assert_eq!(page.target_device, target);
+                let params = page.login_params(HarnessId::Graff, Some("anthropic"), false);
+                assert_eq!(params["harness"], "graff");
+                assert_eq!(params["provider"], "anthropic");
+                assert_eq!(
+                    params.get("targetDeviceId").and_then(|v| v.as_str()),
+                    target.as_deref()
+                );
+            });
+        }
+    }
+
     #[test]
     fn login_dialog_titles_name_the_graff_provider() {
         let graff = |provider: Option<&str>| LoginFlow::Starting {
@@ -3042,6 +3077,7 @@ mod tests {
         assert_eq!(graff(Some("xai")).title(), "Sign in to xAI");
         assert_eq!(graff(Some("kimi")).title(), "Sign in to Kimi");
         assert_eq!(graff(Some("zai")).title(), "Sign in to Z.AI");
+        assert_eq!(graff(Some("anthropic")).title(), "Sign in to Anthropic");
         assert_eq!(graff(Some("chatgpt-new")).title(), "Sign in to ChatGPT");
         assert_eq!(graff(None).title(), "Sign in to graff");
         assert_eq!(graff(Some("nope")).title(), "Sign in to graff");
