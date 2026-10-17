@@ -26,6 +26,9 @@ struct SessionView: View {
     /// Follow intent belongs to the session, independent of composer focus.
     @State private var scroll = ScrollState()
     @State private var hostLink: HostLink?
+    @State private var renamingSession = false
+    @State private var renameChatId: String?
+    @State private var renameTitle = ""
 
 
     /// On a Max (split screen available) every session draws its own compact header strip and the navigation
@@ -36,22 +39,30 @@ struct SessionView: View {
 
     /// Title, project and the pager hint; one element for accessibility.
     private func headerTitle(_ chat: Chat) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 8) {
-                Text(chat.displayTitle)
-                    .font(Theme.sans(15, weight: .medium))
-                    .foregroundStyle(Theme.text)
+        Button {
+            renameChatId = chat.id
+            renameTitle = chat.displayTitle
+            renamingSession = true
+        } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 8) {
+                    Text(chat.displayTitle)
+                        .font(Theme.sans(15, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    pagerHint(for: chat)
+                }
+                projectLocation(chat: chat, model: model)
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textMuted.opacity(0.6))
                     .lineLimit(1)
-                    .truncationMode(.tail)
-                pagerHint(for: chat)
+                    .truncationMode(.middle)
             }
-            projectLocation(chat: chat, model: model)
-                .font(Theme.sans(12))
-                .foregroundStyle(Theme.textMuted.opacity(0.6))
-                .lineLimit(1)
-                .truncationMode(.middle)
         }
+        .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
+        .accessibilityHint("Rename session")
         .accessibilityIdentifier("session-header")
     }
 
@@ -154,7 +165,7 @@ struct SessionView: View {
         .toolbar(paneChrome ? .hidden : .automatic, for: .navigationBar)  // a Max draws its own header
         .toolbar {
             if let chat {
-                // Static, left-aligned session header — model/effort changes
+                // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarLeading) {
                     headerTitle(chat)
@@ -170,6 +181,19 @@ struct SessionView: View {
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
             }
+        }
+        .alert("Rename session", isPresented: $renamingSession) {
+            TextField("Session name", text: $renameTitle)
+                .accessibilityIdentifier("session-rename-title")
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                if let renameChatId {
+                    model.rename(chatId: renameChatId, title: renameTitle)
+                }
+            }
+            .disabled(renameTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("This name is shared across your devices.")
         }
         .onAppear {
             model.attachSessionView(chatId: chatId)
