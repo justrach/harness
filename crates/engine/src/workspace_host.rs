@@ -161,6 +161,13 @@ struct WorkspaceHostInner {
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
     sidebar_preferences_tx: watch::Sender<SidebarPreferencesState>,
+    /// Held by `publish_lists` from reading the registry snapshot until the
+    /// last list is published, so an older snapshot can never land after a
+    /// newer one (#346). Taken before `reg`, never while holding it.
+    publish_gate: Mutex<()>,
+    /// Test hook: runs once, after the next publication sampled the registry.
+    #[cfg(test)]
+    after_sample: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     room: Mutex<Option<Arc<RegistryClient>>>,
     /// Bumped on every registry change (local mutation or applied server
     /// frame) — drives republish + the snapshot debounce in `workspace_task`.
@@ -308,6 +315,9 @@ impl WorkspaceHost {
                 sessions_tx,
                 spaces_tx,
                 sidebar_preferences_tx,
+                publish_gate: Mutex::new(()),
+                #[cfg(test)]
+                after_sample: Mutex::new(None),
                 room: Mutex::new(None),
                 changed_tx,
                 presence_seen: Mutex::new(std::collections::HashMap::new()),
@@ -1215,6 +1225,10 @@ impl WorkspaceHostInner {
     }
 
     fn publish_lists(&self, clock_tick: bool) {
+        // Presence, relay-probe and registry-change tasks all publish. Without
+        // the gate, one that sampled revision N could publish after another
+        // published N+1, re-archiving a restored chat or dropping a project.
+        let _gate = lock(&self.publish_gate);
         let registry_synced = lock(&self.room)
             .as_ref()
             .is_some_and(|room| room.stats().synced);
@@ -1234,6 +1248,10 @@ impl WorkspaceHostInner {
             self.publish_sidebar_preferences(&doc, registry_synced);
             doc.read_all()
         };
+        #[cfg(test)]
+        if let Some(hook) = lock(&self.after_sample).take() {
+            hook();
+        }
         match snapshot {
             Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
@@ -1806,6 +1824,67 @@ mod tests {
         assert_eq!(
             host.watch_spaces().borrow()[0].name.as_deref(),
             Some("Renamed")
+        );
+    }
+
+    // Current-thread runtime: the body never yields, so the host's own
+    // republish task can't run and mask a stale publication.
+    #[tokio::test]
+    async fn an_older_list_publication_cannot_overwrite_a_newer_one() {
+        use super::*;
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "macos".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+            },
+        )
+        .unwrap();
+        host.create_space("old", "test-device", "/old", None, false)
+            .unwrap();
+
+        // Publisher A samples the registry, then waits to be released.
+        let (sampled_tx, sampled_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        *lock(&host.inner.after_sample) = Some(Box::new(move || {
+            sampled_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        }));
+        let older = std::thread::spawn({
+            let host = host.clone();
+            move || host.inner.publish()
+        });
+        sampled_rx.recv().unwrap();
+
+        // The registry moves on and publisher B starts from the newer state.
+        host.create_space("new", "test-device", "/new", None, false)
+            .unwrap();
+        let newer = std::thread::spawn({
+            let host = host.clone();
+            move || host.inner.publish()
+        });
+        // Ungated, B finishes here and A's release below overwrites it.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        older.join().unwrap();
+        newer.join().unwrap();
+
+        let spaces = host.watch_spaces();
+        let ids: Vec<_> = spaces
+            .borrow()
+            .iter()
+            .map(|space| space.id.clone())
+            .collect();
+        assert!(
+            ids.contains(&"new".to_string()),
+            "stale publication won: {ids:?}"
         );
     }
 
