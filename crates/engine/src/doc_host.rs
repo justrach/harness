@@ -1534,6 +1534,12 @@ impl DocHost {
                                     handle.publication_failed.store(true, Ordering::Release);
                                     lock(&handle.chat2_pending_local).push((batch_id.clone(), bytes.clone()));
                                     tracing::error!(chat = %publication_chat, %err, "chat2: durable outbox write failed");
+                                    // The snapshot is now this edit's only
+                                    // durable copy: stop spacing saves out.
+                                    if let Some(persistence) = &handle.persistence {
+                                        persistence.set_outbox_backed(false);
+                                        persistence.dirty(true);
+                                    }
                                     false
                                 }
                             };
@@ -1545,6 +1551,9 @@ impl DocHost {
                         true
                     }));
                 *lock(&handle.chat2_local_sub) = Some(sub);
+                if let Some(persistence) = &handle.persistence {
+                    persistence.set_outbox_backed(true);
+                }
                 // Re-queue survives the adopt: our own pending commands
                 // become fresh entries in the new lineage (the
                 // processed_commands ledger still guards double execution).

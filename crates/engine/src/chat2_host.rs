@@ -227,7 +227,12 @@ impl ChatDocSink for EngineChatSink {
     }
 
     fn advance_cursor(&self, cursor: u64) {
-        self.persist_with_cursor(cursor);
+        // An own-write ack lands for every pushed batch, several times a
+        // second while a reply streams; saving on each rewrote the whole
+        // snapshot that often (#343). Debounced like rows instead: if the
+        // engine dies first, the restored cursor is older and the first
+        // backfill after restart redownloads own rows (`Actor::resumed`).
+        self.persistence.applied(cursor, false);
     }
 }
 
@@ -572,6 +577,42 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A streaming reply is acked once per pushed batch. Each ack used to
+    /// rewrite the chat's whole snapshot immediately (#343).
+    #[tokio::test]
+    async fn own_write_acks_share_one_debounced_snapshot() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let doc = Arc::new(SessionDoc::init("chat").unwrap());
+        let sink = EngineChatSink::new(&doc, store.clone(), "chat");
+        let text = doc.doc().get_text("body");
+        for cursor in 1..=8 {
+            text.insert(text.len_unicode(), "token ").unwrap();
+            doc.doc().commit();
+            sink.advance_cursor(cursor);
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            sink.persistence.writes(),
+            0,
+            "acks must not save one by one"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while sink.persistence.writes() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the debounced save should land");
+        assert_eq!(sink.persistence.writes(), 1);
+        let (snapshot, cursor, _) = store.load_snapshot_with_cursor("chat").unwrap().unwrap();
+        assert_eq!(cursor, 8);
+        let restored = loro::LoroDoc::new();
+        restored.import(&snapshot).unwrap();
+        assert_eq!(restored.get_text("body").to_string(), "token ".repeat(8));
     }
 }
 

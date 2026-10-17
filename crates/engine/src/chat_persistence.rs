@@ -8,6 +8,13 @@ use harness_doc::SessionDoc;
 use harness_sync::DocsStore;
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+/// Every save rewrites the WHOLE snapshot (twice, through SQLite's WAL), so a
+/// streaming chat with a long history dirtied hundreds of KB per second
+/// (#343). Once the outbox holds each local edit durably, the snapshot only
+/// compacts: space saves out toward this snapshot-byte budget (before WAL
+/// overhead, with the maximum interval below still bounding the delay).
+const SNAPSHOT_BYTES_PER_SEC: usize = 32 * 1024;
+const MAX_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct ChatPersistence {
     doc: Weak<SessionDoc>,
@@ -18,6 +25,9 @@ pub(crate) struct ChatPersistence {
     saved: AtomicU64,
     snapshot_bytes: AtomicUsize,
     urgent: AtomicBool,
+    /// Local edits are written to the durable chat2 outbox as they commit,
+    /// so a crash between saves loses none of them.
+    outbox_backed: AtomicBool,
     write: Mutex<()>,
     wake: Option<mpsc::Sender<()>>,
     pub(crate) initial_cursor_verified: bool,
@@ -48,6 +58,7 @@ impl ChatPersistence {
             saved: AtomicU64::new(0),
             snapshot_bytes: AtomicUsize::new(0),
             urgent: AtomicBool::new(false),
+            outbox_backed: AtomicBool::new(false),
             write: Mutex::new(()),
             wake: runtime.as_ref().map(|_| tx),
             initial_cursor_verified: verified,
@@ -72,6 +83,27 @@ impl ChatPersistence {
 
     pub(crate) fn snapshot_bytes(&self) -> usize {
         self.snapshot_bytes.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn writes(&self) -> usize {
+        self.writes.load(Ordering::Relaxed)
+    }
+
+    /// The doc's local commits now reach the durable outbox (or `false`
+    /// after an outbox write failed, when the snapshot is their only copy).
+    pub(crate) fn set_outbox_backed(&self, backed: bool) {
+        self.outbox_backed.store(backed, Ordering::Release);
+    }
+
+    /// How long a save waits for further changes. Without the outbox the
+    /// snapshot is the only durable copy, so it keeps the short interval.
+    fn save_interval(&self) -> Duration {
+        if !self.outbox_backed.load(Ordering::Acquire) {
+            return SAVE_INTERVAL;
+        }
+        let secs = (self.snapshot_bytes() / SNAPSHOT_BYTES_PER_SEC) as u64;
+        Duration::from_secs(secs).clamp(SAVE_INTERVAL, MAX_SAVE_INTERVAL)
     }
 
     pub(crate) fn applied(&self, cursor: u64, immediate: bool) {
@@ -100,7 +132,9 @@ impl ChatPersistence {
 
     async fn run(weak: Weak<Self>, mut rx: mpsc::Receiver<()>) {
         while rx.recv().await.is_some() {
-            let deadline = tokio::time::Instant::now() + SAVE_INTERVAL;
+            let Some(this) = weak.upgrade() else { return };
+            let deadline = tokio::time::Instant::now() + this.save_interval();
+            drop(this);
             loop {
                 let Some(this) = weak.upgrade() else { return };
                 let urgent = this.urgent.swap(false, Ordering::AcqRel);
@@ -276,6 +310,31 @@ mod tests {
         let doc = Arc::new(SessionDoc::init("whale").unwrap());
         let persistence = ChatPersistence::new(&doc, store.clone(), "whale".into(), 0);
         (dir, doc, store, persistence)
+    }
+
+    #[test]
+    fn save_interval_scales_with_snapshot_size_only_behind_the_outbox() {
+        let (_dir, _doc, _store, persistence) = fixture();
+        persistence
+            .snapshot_bytes
+            .store(640 * 1024, Ordering::Relaxed);
+        assert_eq!(
+            persistence.save_interval(),
+            SAVE_INTERVAL,
+            "without the outbox the snapshot is the only copy"
+        );
+        persistence.set_outbox_backed(true);
+        assert_eq!(persistence.save_interval(), Duration::from_secs(20));
+        persistence
+            .snapshot_bytes
+            .store(4 * 1024, Ordering::Relaxed);
+        assert_eq!(persistence.save_interval(), SAVE_INTERVAL);
+        persistence
+            .snapshot_bytes
+            .store(64 << 20, Ordering::Relaxed);
+        assert_eq!(persistence.save_interval(), MAX_SAVE_INTERVAL);
+        persistence.set_outbox_backed(false);
+        assert_eq!(persistence.save_interval(), SAVE_INTERVAL);
     }
 
     #[tokio::test]

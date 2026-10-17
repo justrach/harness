@@ -181,6 +181,8 @@ struct WorkspaceHostInner {
     /// warm-up clock (`peer_liveness`): a just-joined room hasn't heard
     /// anyone's heartbeat yet, and that silence must not read as "offline".
     room_joined_at: std::sync::atomic::AtomicI64,
+    /// Size of the last saved snapshot — spaces out saves (`save_interval`).
+    snapshot_bytes: std::sync::atomic::AtomicUsize,
 }
 
 /// "This peer is alive" callback (device id) — see `WorkspaceHost::set_peer_alive_hook`.
@@ -314,6 +316,7 @@ impl WorkspaceHost {
                 peer_alive: Mutex::new(None),
                 presence_watch: Mutex::new(PresenceWatch::default()),
                 room_joined_at: std::sync::atomic::AtomicI64::new(0),
+                snapshot_bytes: std::sync::atomic::AtomicUsize::new(0),
             }),
         };
         // Persist immediately: after this boot the migration source is never
@@ -434,7 +437,10 @@ impl WorkspaceHost {
                                         let Some(inner) = weak.upgrade() else { return };
                                         inner.publish();
                                     }
-                                    Ok(harness_sync::RegistryEvent::Disconnected) => {}
+                                    Ok(harness_sync::RegistryEvent::Disconnected) => {
+                                        let Some(inner) = weak.upgrade() else { return };
+                                        inner.bump_changed();
+                                    }
                                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 },
@@ -1403,9 +1409,29 @@ impl WorkspaceHostInner {
         // must not overwrite an acknowledged migration's durable snapshot.
         let doc = lock(&self.reg);
         let bytes = doc.to_bytes()?;
+        self.snapshot_bytes
+            .store(bytes.len(), std::sync::atomic::Ordering::Relaxed);
         self.store
             .save_snapshot(REGISTRY_DOC_ID, &bytes)
             .map_err(|error| EngineError::Other(format!("registry snapshot save failed: {error}")))
+    }
+
+    /// Debounce before the next save. Each save rewrites the whole registry
+    /// (about 1 MB on a long-lived account), and session heartbeats and other
+    /// devices' rows change it every few seconds (#343). Only acknowledged
+    /// edits can wait longer: disconnected rooms and unacknowledged local
+    /// edits keep the short window, even with an edge configured.
+    fn save_interval(&self) -> std::time::Duration {
+        let connected = lock(&self.room)
+            .as_ref()
+            .is_some_and(|room| room.stats().connected);
+        let pending = lock(&self.reg).pending_len();
+        registry_save_interval(
+            connected,
+            pending,
+            self.snapshot_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Presence heartbeat — a memory-only frame on the room, never a row write.
@@ -1560,12 +1586,10 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
                 }
                 let Some(inner) = weak.upgrade() else { break };
                 inner.publish();
-                if save_deadline.is_none() {
-                    save_deadline = Some(
-                        tokio::time::Instant::now()
-                            + std::time::Duration::from_millis(SNAPSHOT_DEBOUNCE_MS),
-                    );
-                }
+                let deadline = tokio::time::Instant::now() + inner.save_interval();
+                // An offline/local edit arriving during a longer wait must
+                // bring the save forward, never extend the dirty window.
+                save_deadline = Some(save_deadline.map_or(deadline, |current| current.min(deadline)));
             }
             _ = tokio::time::sleep_until(sleep_until), if save_deadline.is_some() => {
                 save_deadline = None;
@@ -1584,6 +1608,20 @@ async fn workspace_task(weak: Weak<WorkspaceHostInner>, mut changed_rx: watch::R
             }
         }
     }
+}
+
+fn registry_save_interval(
+    connected: bool,
+    pending: usize,
+    snapshot_bytes: usize,
+) -> std::time::Duration {
+    const BYTES_PER_SEC: usize = 64 * 1024;
+    const MAX: std::time::Duration = std::time::Duration::from_secs(10);
+    let min = std::time::Duration::from_millis(SNAPSHOT_DEBOUNCE_MS);
+    if !connected || pending > 0 {
+        return min;
+    }
+    std::time::Duration::from_secs((snapshot_bytes / BYTES_PER_SEC) as u64).clamp(min, MAX)
 }
 
 fn publish_if_changed<T: PartialEq>(sender: &watch::Sender<T>, value: T) {
@@ -1751,6 +1789,33 @@ mod tests {
             assert!(message.contains("injected DNS lookup failure"), "{message}");
             assert!(!message.contains("token-secret"), "{message}");
         }
+    }
+
+    #[test]
+    fn registry_saves_space_out_only_after_local_edits_are_acknowledged() {
+        use super::*;
+        use std::time::Duration;
+
+        assert_eq!(
+            registry_save_interval(false, 0, 1 << 20),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            registry_save_interval(true, 1, 1 << 20),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            registry_save_interval(true, 0, 16 * 1024),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            registry_save_interval(true, 0, 320 * 1024),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            registry_save_interval(true, 0, 983 * 1024),
+            Duration::from_secs(10)
+        );
     }
 
     #[tokio::test]
