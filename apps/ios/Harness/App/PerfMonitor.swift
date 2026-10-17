@@ -163,6 +163,10 @@ final class Perf: @unchecked Sendable {
 
     let recorder = PerfRecorder()
     let turns = MainThreadTally()
+    // Local diagnostics only: deliberately excluded from anonymous upload histograms.
+    let resources = ResourceTally()
+    let fileWrites = FileWriteTally()
+    let cadence = CadenceTally()
 
     /// Samples since the last upload, in the ranges the server merges. Fed by `record` and every run loop turn.
     let histograms = PerfHistograms()
@@ -301,14 +305,7 @@ final class Perf: @unchecked Sendable {
     // MARK: Device
 
     func memory() -> MemorySnapshot {
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        return MemorySnapshot(footprintMb: result == KERN_SUCCESS ? Int(info.phys_footprint >> 20) : 0)
+        MemorySnapshot(footprintMb: Int((ProcessResourceSample.footprint() ?? 0) >> 20))
     }
 
     static var thermalLabel: String {
@@ -324,19 +321,40 @@ final class Perf: @unchecked Sendable {
     func reset() {
         recorder.reset()
         turns.reset()
+        resources.reset()
+        fileWrites.reset()
+        cadence.reset()
     }
 
     /// Plain text a user can paste into an issue: numbers only, no chat content, names or identifiers.
     func report(version: String) -> String {
         let t = turns.snapshot()
         let stats = recorder.stats()
+        let resource = resources.snapshot()
+        let writes = fileWrites.snapshot()
         var lines = [
             "Harness performance · iOS \(version) · \(UIDevice.current.model) · \(UIDevice.current.systemVersion)",
             "Startup: \(startupMs.map { "\($0) ms to first frame" } ?? "not measured this run")",
             String(format: "Main thread: %d turns, slow %d (%.1f%%), frozen %d; median %.1f ms, 95th %.1f ms, worst %.0f ms",
                    t.turns, t.slow, t.slowPercent, t.frozen, t.p50, t.p95, t.worst),
-            "Memory: \(memory().footprintMb) MB footprint · thermal \(Self.thermalLabel)"
+            "Memory: \(PerfFormat.bytes(ProcessResourceSample.footprint())) footprint · thermal \(Self.thermalLabel)"
                 + (ProcessInfo.processInfo.isLowPowerModeEnabled ? " · Low Power Mode" : ""),
+            "CPU: \(PerfFormat.percent(resource.cpuPercent)) current, \(PerfFormat.percent(resource.peakCPUPercent)) peak (100% = one core)",
+            "Sampled memory: \(PerfFormat.bytes(resource.footprintBytes)) current, \(PerfFormat.bytes(resource.peakFootprintBytes)) peak",
+            "Tracked file writes: \(PerfFormat.bytes(writes.bytes)), \(writes.writes) writes, \(writes.failures) failures; \(PerfFormat.rate(writes.bytesPerSecond))",
+            "Tracked writes are logical payloads: snapshots, registry, model cache, attachments. Excludes OS/physical writes, preferences, and other caches.",
+        ]
+        for kind in PerfFileKind.allCases {
+            lines.append("  \(kind.rawValue): \(PerfFormat.bytes(writes.byKind[kind] ?? 0))")
+        }
+        for activity in PerfActivity.allCases {
+            let s = cadence.snapshot(activity)
+            let hz = s.averageHz.map { String(format: "%.1f Hz", $0) } ?? "Not measured"
+            let p95 = s.p95Ms.map { String(format: "%.1f ms", $0) } ?? "Not measured"
+            lines.append("\(activity.rawValue) callback cadence: \(hz) average, \(p95) p95 interval, \(s.missedRefreshes) estimated missed refreshes (not GPU FPS)")
+        }
+        lines += [
+            "CPU, sampled memory, tracked file writes, and callback cadence stay on this device; not included in anonymous uploads.",
             "Operations (median / 95th / worst ms, over budget):",
         ]
         for s in stats {

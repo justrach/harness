@@ -204,6 +204,7 @@ jobs:
             -destination "platform=iOS Simulator,id=$simulator_id" \
             -only-testing:HarnessTests/ParityTests \
             -only-testing:HarnessTests/PerfMonitorTests \
+            -only-testing:HarnessTests/LivePerfTests \
             -only-testing:HarnessTests/BrandMarkTests \
             CODE_SIGNING_ALLOWED=NO test
 

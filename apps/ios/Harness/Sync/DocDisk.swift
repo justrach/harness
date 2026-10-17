@@ -60,7 +60,7 @@ enum DocDisk {
     @discardableResult
     static func save(doc: LoroDoc, id: String) -> Bool {
         guard let data = try? doc.export(mode: .snapshot) else { return false }
-        return saveRegistry(data: data, to: url(for: id))
+        return saveRegistry(data: data, to: url(for: id), kind: .snapshots)
     }
 
     /// The workspace registry's persisted blob ({rows, cursor, gcFloor,
@@ -199,7 +199,7 @@ enum DocDisk {
             data.append(push.bytes)
         }
         data.append(snapshot)
-        return saveRegistryReturningBytes(data: data, to: chat2URL(for: id))
+        return saveRegistryReturningBytes(data: data, to: chat2URL(for: id), kind: .snapshots)
     }
 
     static func chat2SnapshotSize(id: String) -> Int {
@@ -238,13 +238,13 @@ enum DocDisk {
     }
 
     @discardableResult
-    static func saveRegistry(data: Data, to url: URL) -> Bool {
-        saveRegistryReturningBytes(data: data, to: url) != nil
+    static func saveRegistry(data: Data, to url: URL, kind: PerfFileKind = .registry) -> Bool {
+        saveRegistryReturningBytes(data: data, to: url, kind: kind) != nil
     }
 
-    static func saveRegistryReturningBytes(data: Data, to url: URL) -> Int? {
+    static func saveRegistryReturningBytes(data: Data, to url: URL, kind: PerfFileKind = .registry) -> Int? {
         do {
-            try data.write(to: url, options: .atomic)
+            try PerfFileWriter.write(data, to: url, kind: kind)
             return data.count
         } catch {
             return nil
@@ -291,7 +291,7 @@ enum DocDisk {
                         })
         }
         guard let data = try? JSONEncoder().encode(cached) else { return false }
-        return saveRegistry(data: data, to: modelsURL(deviceId: deviceId, harness: harness))
+        return saveRegistry(data: data, to: modelsURL(deviceId: deviceId, harness: harness), kind: .models)
     }
 
     static func loadModels(deviceId: String, harness: String) -> [ModelInfo]? {

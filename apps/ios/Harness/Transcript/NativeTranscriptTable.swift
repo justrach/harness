@@ -7,6 +7,7 @@ struct NativeTranscriptTable: UIViewRepresentable {
     let rows: [TranscriptRow]
     /// Rows held back above the tail window; scrolling near the top grows it.
     var hiddenRows: Int = 0
+    var streaming = false
     let scroll: ScrollState
     let runwayID: String?
     let expansionHeight: CGFloat
@@ -21,6 +22,10 @@ struct NativeTranscriptTable: UIViewRepresentable {
 
     func updateUIView(_ viewport: TranscriptViewport, context: Context) {
         viewport.table.update(self)
+    }
+
+    static func dismantleUIView(_ viewport: TranscriptViewport, coordinator: ()) {
+        viewport.table.stopPerformanceMonitoring()
     }
 }
 
@@ -120,6 +125,8 @@ final class TranscriptViewport: UIView {
 @MainActor
 final class TranscriptTableView: UITableView, UITableViewDataSource, UITableViewDelegate {
     private let follow: ScrollState
+    private let performanceID = UUID()
+    private var streaming = false
     private var rows: [TranscriptRow] = []
     private var hiddenRows = 0
     private var topGrowScheduled = false
@@ -247,8 +254,24 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         window?.endEditing(true)
     }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updatePerformanceInterest()
+    }
+
+    func stopPerformanceMonitoring() {
+        PerfLiveMonitor.shared.remove(performanceID)
+    }
+
+    private func updatePerformanceInterest() {
+        PerfLiveMonitor.shared.transcript(performanceID, visible: window != nil,
+                                          scrolling: follow.userScrolling, streaming: streaming)
+    }
+
     func update(_ input: NativeTranscriptTable) {
         reconcileGesture()
+        streaming = input.streaming
+        updatePerformanceInterest()
         render = input.render
         let previous = rows
         let previousIDs = previous.map(\.id)
@@ -571,6 +594,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         follow.interactionEpoch &+= 1
         follow.userScrolling = true
         follow.userDragging = true
+        updatePerformanceInterest()
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -647,6 +671,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
 
     private func finishGesture() {
         follow.endGesture()
+        updatePerformanceInterest()
         if follow.pinned {
             follow.resetRowLimit()
             goToLatest(animated: false)

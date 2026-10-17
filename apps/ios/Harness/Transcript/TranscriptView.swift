@@ -38,6 +38,7 @@ struct TranscriptView: View {
         let runway = store.lastSubmittedMessageId
         let earlierErrors = Self.earlierReauthRows(rows)
         NativeTranscriptTable(rows: rows, hiddenRows: allRows.count - rows.count,
+            streaming: store.entries.last?.status == .streaming,
             scroll: scroll, runwayID: runway,
             expansionHeight: runway.flatMap { userExpansionHeights[$0] } ?? 0,
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,

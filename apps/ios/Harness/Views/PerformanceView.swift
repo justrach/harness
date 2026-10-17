@@ -6,6 +6,7 @@ import SwiftUI
 
 struct PerformanceView: View {
     @AppStorage(PerfSharing.key) private var share = PerfSharing.defaultEnabled
+    @State private var inspectionID = UUID()
 
     private var version: String {
         let info = Bundle.main.infoDictionary
@@ -20,6 +21,8 @@ struct PerformanceView: View {
             let perf = Perf.shared
             let turns = perf.turns.snapshot()
             let stats = perf.recorder.stats()
+            let resources = perf.resources.snapshot()
+            let writes = perf.fileWrites.snapshot()
             List {
                 Section("Startup") {
                     LabeledContent("First frame", value: perf.startupMs.map { "\($0) ms" } ?? "Not measured this run")
@@ -51,8 +54,46 @@ struct PerformanceView: View {
                     }
                 }
                 .harnessListRow()
+                Section {
+                    LabeledContent("CPU · current", value: PerfFormat.percent(resources.cpuPercent))
+                    LabeledContent("CPU · sampled peak", value: PerfFormat.percent(resources.peakCPUPercent))
+                    LabeledContent("Memory footprint", value: PerfFormat.bytes(resources.footprintBytes))
+                    LabeledContent("Memory · sampled peak", value: PerfFormat.bytes(resources.peakFootprintBytes))
+                } header: {
+                    Text("App resources")
+                } footer: {
+                    Text("100% CPU means one fully occupied core. Sampled once a second while this page is open or a visible transcript is scrolling or receiving a live reply. No background sampling.")
+                }
+                .harnessListRow()
+                Section {
+                    LabeledContent("Written since reset", value: PerfFormat.bytes(writes.bytes))
+                    LabeledContent("Latest interval", value: PerfFormat.rate(writes.bytesPerSecond))
+                    LabeledContent("Writes · failures", value: "\(writes.writes) · \(writes.failures)")
+                    ForEach(PerfFileKind.allCases, id: \.rawValue) { kind in
+                        LabeledContent(kind.rawValue, value: PerfFormat.bytes(writes.byKind[kind] ?? 0))
+                    }
+                } header: {
+                    Text("Tracked file writes")
+                } footer: {
+                    Text("Successful logical payload bytes in snapshots, registry, model cache and staged attachments. Not physical disk I/O or total process writes; excludes preferences and other caches.")
+                }
+                .harnessListRow()
+                ForEach(PerfActivity.allCases, id: \.rawValue) { activity in
+                    let cadence = perf.cadence.snapshot(activity)
+                    Section {
+                        LabeledContent("Average cadence", value: cadence.averageHz.map { String(format: "%.1f Hz", $0) } ?? "Not measured")
+                        LabeledContent("95th interval", value: cadence.p95Ms.map { String(format: "%.1f ms", $0) } ?? "Not measured")
+                        LabeledContent("Worst interval", value: cadence.worstMs.map { String(format: "%.1f ms", $0) } ?? "Not measured")
+                        LabeledContent("Observed intervals", value: "\(cadence.intervals)")
+                        LabeledContent("Estimated missed refreshes", value: "\(cadence.missedRefreshes)")
+                    } header: {
+                        Text(activity.rawValue)
+                    } footer: {
+                        Text("Display-link callback cadence, not GPU-rendered FPS. Missed refreshes are estimated from the display link's target interval; idle and background time are excluded.")
+                    }
+                    .harnessListRow()
+                }
                 Section("Device") {
-                    LabeledContent("Memory", value: "\(perf.memory().footprintMb) MB")
                     LabeledContent("Thermal state", value: Perf.thermalLabel)
                     LabeledContent("Low Power Mode", value: ProcessInfo.processInfo.isLowPowerModeEnabled ? "On" : "Off")
                 }
@@ -73,13 +114,15 @@ struct PerformanceView: View {
                     Text("Report")
                 } footer: {
                     Text(PerfSharing.available
-                         ? "Operation columns are median, 95th and worst."
+                         ? "New resource, write and cadence counters stay on this device even when sharing is on. Operation columns are median, 95th and worst."
                          : "Measured on this device only and never sent anywhere. Operation columns are median, 95th and worst.")
                 }
                 .harnessListRow()
             }
             .harnessGroupedList()
         }
+        .onAppear { PerfLiveMonitor.shared.inspect(inspectionID, visible: true) }
+        .onDisappear { PerfLiveMonitor.shared.remove(inspectionID) }
         .navigationTitle("Performance")
         .navigationBarTitleDisplayMode(.inline)
     }

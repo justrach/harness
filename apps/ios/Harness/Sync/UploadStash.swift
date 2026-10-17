@@ -42,7 +42,7 @@ enum UploadStash {
     }
 
     static func save(uploadId: String, data: Data) {
-        try? data.write(to: url(uploadId: uploadId), options: .atomic)
+        try? PerfFileWriter.write(data, to: url(uploadId: uploadId), kind: .attachments)
     }
 
     static func load(uploadId: String) -> Data? {
