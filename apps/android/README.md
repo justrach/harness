@@ -29,9 +29,11 @@ Not built yet, in the order they are needed for a real connection:
 
 1. Connectivity states on screen (offline, reconnecting), presence by iOS's rule, and the device relay
    (folders, agents, models, refs, change requests).
-2. The durable command queue (sending, steering, stopping, answering questions). CodeGraff sign-in is
-   built (`auth/`): the tokens are sealed with an Android Keystore key and refreshed by iOS's rules.
-3. Real attachment upload, the queued-message panel, notifications, launcher icon, Live Activity analogue.
+2. A "Sending…" state for a message the computer has not picked up yet. Sending, queueing, stopping and
+   answering questions are built (see Live sync), as is CodeGraff sign-in (`auth/`): the tokens are sealed
+   with an Android Keystore key and refreshed by iOS's rules.
+3. Real attachment upload (live sessions hide the photo button until then), notifications, launcher icon,
+   Live Activity analogue.
 
 ## Staying in step with iOS
 
@@ -54,6 +56,10 @@ The sync protocol is the desktop's own Rust code (`crates/doc`, `crates/sync`), 
 - mirrors each open **session doc** (Loro): hydrated from disk, joined to its chat2 room once the registry
   says the chat is on room generation 2, saved together with its room cursor, and decoded into the
   transcript and queue the way `SessionStore` decodes them;
+- writes to a session doc the way iOS does: run, steer, interrupt and answer commands, and queue rows
+  (add, move, remove after the computer confirms). Each edit is journaled in the chat's outbox before it is
+  sent and leaves it when the room acknowledges it, so a send made offline goes out on reconnect, even after
+  the app is killed. The queue's actions and edit leases are requests to the computer over the device relay;
 - publishes snapshots to `sync/LiveSync.kt`, which maps them onto the same `AppState` flows the demo
   drives, so the screens do not know which one they are showing.
 

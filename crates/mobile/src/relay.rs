@@ -16,7 +16,7 @@ use crate::edge::Edge;
 use crate::presence::PeerLivenessRecord;
 
 /// `DeviceRelayClient.call`'s default deadline.
-const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What went wrong with a request to a device. The messages are the iOS app's (`RelayError`).
 #[derive(Debug, Clone, PartialEq, thiserror::Error, uniffi::Error)]

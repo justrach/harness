@@ -40,6 +40,7 @@ import harness.codegraff.android.model.effectiveStatus
 import harness.codegraff.android.model.sortActive
 import harness.codegraff.android.model.sortPinnedFirst
 import harness.codegraff.android.core.SessionSnapshot
+import harness.codegraff.android.core.UserInputAnswerRecord
 import harness.codegraff.android.sync.LiveSync
 import harness.codegraff.android.sync.toModel
 import harness.codegraff.android.sync.toNative
@@ -51,6 +52,7 @@ import harness.codegraff.android.model.HarnessInfo
 import harness.codegraff.android.model.HostNotice
 import harness.codegraff.android.model.ModelInfo
 import harness.codegraff.android.model.RepoRef
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -60,6 +62,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import org.json.JSONObject
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import java.security.MessageDigest
@@ -193,6 +196,8 @@ class AppModel(
     liveSync: LiveSync? = null,
     /** The CodeGraff sign-in behind [liveSync]; null falls back to [accountFactory]. */
     accountApi: AccountApi? = null,
+    /** Where live writes run: off the main thread, one at a time, so they reach the doc in the order they were made. */
+    private val writes: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
 ) : ViewModel() {
     private val _workspace: MutableStateFlow<WorkspaceState>
     private val _entries: MutableStateFlow<Map<String, List<MessageEntry>>>
@@ -343,9 +348,19 @@ class AppModel(
     fun send(chatId: String, text: String, attachments: List<String> = emptyList()) {
         if (text.isBlank() && attachments.isEmpty()) return
         val body = text.ifBlank { ATTACHMENT_ONLY_TEXT }
-        Perf.measure(PerfSpan.SendApply) {
-            if (isRunLive(chatId)) enqueueMessage(chatId, body, attachments) else deliver(chatId, body)
+        val running = isRunLive(chatId)
+        live?.let { live ->
+            // Live: a durable write to the chat's doc that the computer drains, queued when the turn is running.
+            write { if (running) live.core.enqueueMessage(chatId, body, attachments, true) else live.core.sendRun(chatId, body, attachments) }
+            return
         }
+        Perf.measure(PerfSpan.SendApply) {
+            if (running) enqueueMessage(chatId, body, attachments) else deliver(chatId, body)
+        }
+    }
+
+    private fun write(block: () -> Unit) {
+        viewModelScope.launch(writes) { block() }
     }
 
     fun isRunLive(chatId: String): Boolean {
@@ -405,6 +420,7 @@ class AppModel(
 
     /** Stop: cancel the live reply and settle the entry as aborted. */
     fun interrupt(chatId: String) {
+        live?.let { live -> write { live.core.interrupt(chatId) }; return }
         streamJob?.cancel()
         setEntries(chatId) { entries -> entries.map { e -> if (e.status == MessageStatus.Streaming) e.copy(status = MessageStatus.Aborted) else e } }
         update { s ->
@@ -416,7 +432,11 @@ class AppModel(
     }
 
     /** Answer an open input request: the chip resolves and the session stops waiting on you. */
-    fun respondInput(chatId: String, requestId: String, @Suppress("UNUSED_PARAMETER") answers: List<UserInputAnswer>) {
+    fun respondInput(chatId: String, requestId: String, answers: List<UserInputAnswer>) {
+        live?.let { live ->
+            write { live.core.respondInput(chatId, requestId, answers.map { UserInputAnswerRecord(it.questionId, it.labels) }) }
+            return
+        }
         setEntries(chatId) { entries ->
             entries.map { e ->
                 e.copy(parts = e.parts.map { p -> if (p is MessagePart.Input && p.requestId == requestId) p.copy(resolved = true) else p })
@@ -425,8 +445,9 @@ class AppModel(
         update { s -> s.copy(sessions = s.sessions - chatId) }
     }
 
-    // MARK: queue (SessionQueue.swift). The demo stands in for the chat host: it acknowledges actions, takes the
-    // front of the queue when a turn settles, and hands out edit leases. Live sync will replace it behind the same calls.
+    // MARK: queue (SessionQueue.swift). Live, rows are doc edits and the chat's computer serializes actions and edit
+    // leases with delivery. The demo stands in for that computer: it acknowledges actions, takes the front of the
+    // queue when a turn settles, and hands out edit leases.
 
     private val _queues = MutableStateFlow<Map<String, QueueState>>(emptyMap())
     private val editLeases = HashMap<String, String>()
@@ -451,6 +472,7 @@ class AppModel(
     /** Park a message on the queue. The host decides where it goes: the front of the next turn. */
     fun enqueueMessage(chatId: String, text: String, attachments: List<String> = emptyList(), holdForTurnEnd: Boolean = true): String? {
         if (text.trim().isEmpty()) return null
+        live?.let { return it.core.enqueueMessage(chatId, text, attachments, holdForTurnEnd) }
         val id = UUID.randomUUID().toString().lowercase()
         val row = QueuedMessage(id, text, attachments, issuedBy = LOCAL_DEVICE_ID, issuedAt = clock(), holdForTurnEnd = holdForTurnEnd)
         setQueue(chatId) { it.copy(rows = it.rows + row) }
@@ -465,6 +487,7 @@ class AppModel(
         if (from < 0 || q.rows[from].deliveryGate != null) return
         val target = to.coerceIn(0, q.rows.size - 1)
         if (from == target) return
+        live?.let { live -> write { live.core.moveQueued(chatId, id, target.toUInt()) }; return }
         setQueue(chatId) { s ->
             val rows = s.rows.toMutableList()
             rows.add(target, rows.removeAt(from))
@@ -496,12 +519,22 @@ class AppModel(
         if (action != QueueAction.Remove && row.deliveryGate != null) return false
         setQueue(chatId) { it.copy(pending = it.pending + id, error = null) }
         try {
-            val reply = call?.invoke(action.method, mapOf("chatId" to chatId, "id" to id)) ?: demoHost(chatId, row, action)
+            val params = mapOf("chatId" to chatId, "id" to id)
+            val reply = call?.invoke(action.method, params)
+                ?: live?.let { live ->
+                    val answer = callHost(live, chatId, action.method, params)
+                    QueueActionReply(sent = answer.optFlag("sent"), removed = answer.optFlag("removed"))
+                }
+                ?: demoHost(chatId, row, action)
             if (!reply.acknowledged(action)) {
                 setQueue(chatId) { it.copy(error = "The host did not confirm the action. The message may have already left the queue.") }
                 return false
             }
-            if (action == QueueAction.Remove) dropRow(chatId, id)
+            // Apply only a confirmed removal; a send leaves the queue with the next sync.
+            if (action == QueueAction.Remove) {
+                val live = live
+                if (live != null) write { live.core.removeQueued(chatId, id) } else dropRow(chatId, id)
+            }
             return true
         } catch (e: CancellationException) {
             throw e
@@ -540,6 +573,28 @@ class AppModel(
         val q = queue(chatId)
         if (id in q.pending) return QueueEditStartResult.Unavailable
         val row = q.rows.firstOrNull { it.id == id } ?: return QueueEditStartResult.Unavailable
+        live?.let { live ->
+            val reply = try {
+                callHost(
+                    live, chatId, "BeginQueuedMessageEdit",
+                    mapOf("chatId" to chatId, "id" to id, "editorDeviceId" to live.deviceId, "editorInstanceId" to instanceId),
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return QueueEditStartResult.Unavailable
+            }
+            return when (reply.optString("outcome")) {
+                "acquired" -> {
+                    val leaseId = reply.optString("leaseId").ifEmpty { null }
+                    val hash = reply.optString("baseTextHash").ifEmpty { null }
+                    if (leaseId == null || hash == null || !reply.has("expiresAtMs")) QueueEditStartResult.Unavailable
+                    else QueueEditStartResult.Acquired(QueueEditLease(id, leaseId, reply.optString("text"), hash, reply.getLong("expiresAtMs")))
+                }
+                "locked" -> QueueEditStartResult.Locked
+                else -> QueueEditStartResult.Missing
+            }
+        }
         val gate = row.deliveryGate
         if (gate is QueueDeliveryGate.Editing && gate.expiresAtMs > clock() && editLeases[id]?.substringBefore('|') != instanceId) {
             return QueueEditStartResult.Locked
@@ -552,6 +607,16 @@ class AppModel(
     }
 
     suspend fun renewQueuedEdit(chatId: String, lease: QueueEditLease): Boolean {
+        live?.let { live ->
+            return try {
+                callHost(live, chatId, "RenewQueuedMessageEdit", mapOf("chatId" to chatId, "id" to lease.rowId, "leaseId" to lease.leaseId))
+                    .optString("outcome") == "renewed"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                false
+            }
+        }
         if (queue(chatId).rows.none { it.id == lease.rowId } || editLeases[lease.rowId]?.substringAfter('|') != lease.leaseId) return false
         val expires = clock() + EDIT_LEASE_MS
         mapRow(chatId, lease.rowId) { it.copy(deliveryGate = QueueDeliveryGate.Editing(LOCAL_DEVICE_ID, expires)) }
@@ -559,6 +624,26 @@ class AppModel(
     }
 
     suspend fun finishQueuedEdit(chatId: String, lease: QueueEditLease, action: String, text: String? = null): QueueEditFinishResult {
+        live?.let { live ->
+            val params = mutableMapOf<String, Any?>(
+                "chatId" to chatId, "id" to lease.rowId, "leaseId" to lease.leaseId, "action" to action,
+                "expectedTextHash" to lease.baseTextHash,
+            )
+            text?.let { params["text"] = it }
+            val outcome = try {
+                callHost(live, chatId, "FinishQueuedMessageEdit", params).optString("outcome")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return QueueEditFinishResult.Unavailable
+            }
+            return when (outcome) {
+                "committed", "cancelled", "discarded", "released" -> QueueEditFinishResult.Finished
+                "conflict" -> QueueEditFinishResult.Conflict
+                "missing" -> QueueEditFinishResult.Missing
+                else -> QueueEditFinishResult.Lost
+            }
+        }
         val row = queue(chatId).rows.firstOrNull { it.id == lease.rowId } ?: return QueueEditFinishResult.Missing
         if (editLeases[lease.rowId]?.substringAfter('|') != lease.leaseId) return QueueEditFinishResult.Lost
         if (textHash(row.text) != lease.baseTextHash) return QueueEditFinishResult.Conflict
@@ -579,6 +664,14 @@ class AppModel(
     fun cancelQueuedEditInBackground(chatId: String, lease: QueueEditLease) {
         viewModelScope.launch { finishQueuedEdit(chatId, lease, "cancel") }
     }
+
+    /** One request to the chat's computer over its device room; throws when it can't be reached. */
+    private suspend fun callHost(live: LiveSync, chatId: String, method: String, params: Map<String, Any?>): JSONObject {
+        val deviceId = _workspace.value.chat(chatId)?.deviceId ?: throw IllegalStateException("No computer for this chat")
+        return JSONObject(live.core.callHost(deviceId, method, JSONObject(params).toString()))
+    }
+
+    private fun JSONObject.optFlag(key: String): Boolean? = if (has(key) && !isNull(key)) optBoolean(key) else null
 
     private fun textHash(text: String): String =
         MessageDigest.getInstance("SHA-256").digest(text.toByteArray()).joinToString("") { "%02x".format(it) }

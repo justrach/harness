@@ -67,8 +67,11 @@ class LiveFeed : CoreListener {
     }
 }
 
-/** A running live sync: the core (behind its interface, so tests can stand one in) and what it publishes. */
-class LiveSync(val core: MobileCoreInterface, val feed: LiveFeed) {
+/**
+ * A running live sync: the core (behind its interface, so tests can stand one in), what it publishes, and this phone's
+ * device id (who holds a queue edit).
+ */
+class LiveSync(val core: MobileCoreInterface, val feed: LiveFeed, val deviceId: String = "") {
     companion object {
         private const val TAG = "HarnessSync"
 
@@ -88,15 +91,16 @@ class LiveSync(val core: MobileCoreInterface, val feed: LiveFeed) {
             })
             val dir = File(context.filesDir, "sync/${safe(connection.userId)}-${safe(connection.orgId)}").apply { mkdirs() }
             val feed = LiveFeed()
+            val device = deviceId(context)
             val core = MobileCore(
-                CoreConfig(connection.edgeUrl, connection.orgId, connection.userId, deviceId(context), dir.path),
+                CoreConfig(connection.edgeUrl, connection.orgId, connection.userId, device, dir.path),
                 object : TokenSource {
                     override fun bearer(): String? = connection.bearer()
                 },
                 feed,
             )
             NetworkMonitor.start(context, core)
-            return LiveSync(core, feed)
+            return LiveSync(core, feed, device)
         }
 
         /** This phone's id: minted once and kept, like iOS's `ios-` prefixed id. */
