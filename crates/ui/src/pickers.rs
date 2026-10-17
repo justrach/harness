@@ -11,6 +11,9 @@
 //! in free functions with unit tests; RPC results land in [`Loadable`] slots
 //! rendered as skeletons / inline errors with Retry.
 
+#[path = "pickers/harness_tabs.rs"]
+mod harness_tabs;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -780,6 +783,7 @@ pub struct Pickers {
     /// catalogs must scroll smoothly), and this is its handle; the plain
     /// base handle inside serves the floating scrollbar's metrics.
     model_scroll: gpui::UniformListScrollHandle,
+    harness_scroll: gpui::ScrollHandle,
     /// Flattened rows the list/keyboard/⌘N all walk, cached per
     /// [`ModelRowsKey`]: a 7k-model catalog rebuilt+ranked on every
     /// keystroke, arrow press AND render was the picker's open/scroll lag.
@@ -976,6 +980,7 @@ impl Pickers {
             refs_space: None,
             active: 0,
             model_scroll: gpui::UniformListScrollHandle::new(),
+            harness_scroll: gpui::ScrollHandle::new(),
             model_rows_cache: std::cell::RefCell::new(None),
             catalog_rev: 0,
             menu_bar: popover::MenuScrollbarState::default(),
@@ -1419,8 +1424,13 @@ impl Pickers {
             }
             PickerKind::HarnessModel => {
                 let handle = self.search.read(cx).focus_handle(cx);
+                let placeholder = if self.harness_locked(cx) {
+                    "Search models…"
+                } else {
+                    "Search models… · Ctrl+Tab agents"
+                };
                 self.search.update(cx, |input, cx| {
-                    input.set_placeholder("Search models…", cx);
+                    input.set_placeholder(placeholder, cx);
                 });
                 window.focus(&handle, cx);
             }
@@ -2973,6 +2983,15 @@ impl Pickers {
             cx.notify();
             return;
         }
+        // Ctrl-Tab switches agents without stealing Tab from search input.
+        if event.keystroke.key == "tab"
+            && event.keystroke.modifiers.control
+            && self.open_kind() == Some(PickerKind::HarnessModel)
+        {
+            self.cycle_harness(event.keystroke.modifiers.shift, cx);
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key == "right"
             && self.open_kind() == Some(PickerKind::HarnessModel)
             && self.active >= self.model_rows_len(cx)
@@ -3357,7 +3376,11 @@ impl Pickers {
                 } else {
                     motion::hover_blend(id, theme.text_muted.opacity(0.7), theme.text.opacity(0.85))
                 })
-                .bg(motion::hover_blend(id, gpui::transparent_black(), theme.element_hover))
+                .bg(motion::hover_blend(
+                    id,
+                    gpui::transparent_black(),
+                    theme.element_hover,
+                ))
                 .on_hover(motion::hover_listener(id))
                 .when(busy, |el| el.opacity(0.45))
                 .when(!busy, |el| {
@@ -3377,14 +3400,41 @@ impl Pickers {
             .pl(px(6.0))
             .border_l_1()
             .border_color(theme.border.opacity(0.6))
-            .child(button("graff-worktree-merge", "Merge back", "merge", false, cx))
-            .child(button("graff-worktree-archive", "Archive", "archive", false, cx))
-            .child(button("graff-worktree-remove", "Remove", "remove", false, cx));
+            .child(button(
+                "graff-worktree-merge",
+                "Merge back",
+                "merge",
+                false,
+                cx,
+            ))
+            .child(button(
+                "graff-worktree-archive",
+                "Archive",
+                "archive",
+                false,
+                cx,
+            ))
+            .child(button(
+                "graff-worktree-remove",
+                "Remove",
+                "remove",
+                false,
+                cx,
+            ));
         if status.is_some_and(|status| status.can_discard) {
-            card = card.child(button("graff-worktree-discard", "Discard anyway", "discard", true, cx));
+            card = card.child(button(
+                "graff-worktree-discard",
+                "Discard anyway",
+                "discard",
+                true,
+                cx,
+            ));
         }
         let verdict: Option<(SharedString, gpui::Hsla)> = if busy {
-            Some((format!("Asking Graff about {}…", tree.name).into(), theme.text_muted.opacity(0.7)))
+            Some((
+                format!("Asking Graff about {}…", tree.name).into(),
+                theme.text_muted.opacity(0.7),
+            ))
         } else {
             status.map(|status| {
                 let color = match status.outcome {
@@ -4267,90 +4317,7 @@ impl Pickers {
         }
         let rows = self.model_rows(cx);
 
-        // ── tabs: the favorites star, then one brand icon per harness —
-        //    ACROSS THE TOP (user request; was a left rail). The
-        //    viewed tab wears a 2px accent bar sitting on the row's bottom
-        //    hairline. Tabs never hide: a live search only filters the
-        //    viewed tab's list, so switching tabs re-scopes the same query.
-        let mut tabs = div()
-            .flex_none()
-            .h(px(40.0))
-            .px(px(popover::CARD_INSET))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0));
-        tabs = tabs.child(
-            div()
-                .id("model-tab-favorites")
-                .relative()
-                .w(px(32.0))
-                .h(px(32.0))
-                .rounded(px(popover::MENU_ITEM_RADIUS))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .when(!favorites_view, |el| {
-                    el.hover(|s| s.bg(crate::theme::ink(0.06)))
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.setting_menu = None;
-                    this.model_rail = ModelRail::Favorites;
-                    // Anchor on the selected row when it's starred, else
-                    // the top — never a stray second highlight.
-                    this.active = this.selected_model_index(cx);
-                    this.model_scroll_base().set_offset(gpui::Point::default());
-                    this.model_scroll
-                        .scroll_to_item(this.active, gpui::ScrollStrategy::Nearest);
-                    cx.notify();
-                }))
-                .child(
-                    crate::icons::icon(crate::icons::STAR_BOLD)
-                        .size(px(15.0))
-                        .text_color(if favorites_view {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        }),
-                )
-                .when(favorites_view, |el| el.child(tab_indicator(theme.accent))),
-        );
-        for (ix, descriptor) in descriptors.iter().enumerate() {
-            let harness = descriptor.id;
-            let is_viewed = !favorites_view && effective == Some(harness);
-            let (icon_path, tint) = harness_brand_icon(harness);
-            tabs =
-                tabs.child(
-                    div()
-                        .id(("harness-tab", ix))
-                        .relative()
-                        .w(px(32.0))
-                        .h(px(32.0))
-                        .rounded(px(popover::MENU_ITEM_RADIUS))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.setting_menu = None;
-                            this.model_rail = ModelRail::Harness;
-                            this.pick_harness(harness, cx);
-                            cx.notify();
-                        }))
-                        .child(crate::icons::icon(icon_path).size(px(16.0)).text_color(
-                            tint.unwrap_or(if is_viewed {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            }),
-                        ))
-                        .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
-                );
-        }
+        let tabs = self.render_harness_tabs(&descriptors, effective, favorites_view, &theme, cx);
 
         // ── search row: icon + borderless input over a full-bleed hairline.
         //    The placeholder names the scope — the query never leaves the
