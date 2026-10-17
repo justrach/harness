@@ -70,6 +70,9 @@ struct Identity {
     email: Option<String>,
     user_id: Option<i64>,
     signed_in_at: i64,
+    /// The key came from a Harness sign-in, so Harness's Sign out removes it.
+    #[serde(default)]
+    from_harness_sign_in: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -262,6 +265,8 @@ impl CodegraffAuth {
                         email: me.email,
                         user_id: me.user_id,
                         signed_in_at: chrono::Utc::now().timestamp(),
+                        // Found on disk (`graff login`): not Harness's to remove.
+                        from_harness_sign_in: false,
                     });
                 }
                 // Older gateways have no /v1/me: stay signed in, just nameless.
@@ -390,6 +395,20 @@ impl CodegraffAuth {
         let _ = std::fs::remove_file(&self.identity);
     }
 
+    /// Harness's Sign out: sign graff out too, but only of a key a Harness
+    /// sign-in put there. A key from `graff login` or the Codegraff card stays.
+    pub async fn sign_out_harness_key(&self) {
+        let Some(key) = self.key_file.as_deref().and_then(read_key_file) else {
+            return;
+        };
+        let ours = self.load_identity().is_some_and(|identity| {
+            identity.from_harness_sign_in && identity.key_fingerprint == fingerprint(&key)
+        });
+        if ours {
+            self.sign_out().await;
+        }
+    }
+
     /// Start a device sign-in: returns the approval URL for the caller to open
     /// and polls for the key in the background.
     pub async fn start_sign_in(self: &Arc<Self>) -> Result<String, String> {
@@ -451,7 +470,7 @@ impl CodegraffAuth {
                 "pending" => interval = poll.interval.unwrap_or(interval).clamp(1, 30),
                 "ok" => {
                     let key = poll.api_key.ok_or("Codegraff approved without a key")?;
-                    return self.finish(&key, poll.email, poll.user_id).await;
+                    return self.finish(&key, poll.email, poll.user_id, false).await;
                 }
                 "denied" => return Err("Sign-in was denied in the browser.".into()),
                 "expired" => return Err("The sign-in link expired. Try again.".into()),
@@ -478,7 +497,7 @@ impl CodegraffAuth {
         if self.has_key() {
             return Ok(());
         }
-        self.finish(key, Some(email), None).await
+        self.finish(key, Some(email), None, true).await
     }
 
     async fn finish(
@@ -486,6 +505,7 @@ impl CodegraffAuth {
         key: &str,
         email: Option<String>,
         user_id: Option<i64>,
+        from_harness_sign_in: bool,
     ) -> Result<(), String> {
         let path = self.key_file.as_ref().ok_or("no home directory")?;
         let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "api_key": key }))
@@ -504,6 +524,7 @@ impl CodegraffAuth {
             email,
             user_id,
             signed_in_at: chrono::Utc::now().timestamp(),
+            from_harness_sign_in,
         });
         Ok(())
     }
