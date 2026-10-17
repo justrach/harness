@@ -1121,8 +1121,11 @@ impl SessionsEngine {
                     )
                     .await
                 {
-                    Ok(_) => {
+                    Ok(Some(_)) => {
                         tracing::info!(chat = %chat_id, attempt, "auto-resumed crashed run")
+                    }
+                    Ok(None) => {
+                        tracing::info!(chat = %chat_id, "auto-resume held: the checkout changed branch")
                     }
                     Err(err) => {
                         tracing::warn!(chat = %chat_id, error = %err, "auto-resume dispatch failed")

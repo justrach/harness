@@ -300,6 +300,14 @@ impl Repos {
         })
     }
 
+    /// No staged, unstaged or untracked changes at `path`.
+    pub async fn is_clean(&self, path: &Path) -> Result<bool, EngineError> {
+        Ok(self
+            .git(&["status", "--porcelain"], Some(path))
+            .await?
+            .is_empty())
+    }
+
     /// Fetch every configured remote without pruning or integrating anything
     /// into the active branch. This intentionally updates refs only.
     pub async fn fetch_all(&self, repo_path: &Path) -> Result<(), EngineError> {
