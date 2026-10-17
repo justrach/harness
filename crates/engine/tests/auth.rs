@@ -60,6 +60,8 @@ struct StubState {
     refreshes: AtomicUsize,
     drop_refresh: AtomicBool,
     refresh_status: AtomicUsize,
+    /// When set, /auth/refresh answers 401 with this `{error}`.
+    refresh_rejection: Mutex<Option<String>>,
     block_refresh: AtomicBool,
     refresh_started: tokio::sync::Notify,
     release_refresh: tokio::sync::Notify,
@@ -212,6 +214,13 @@ async fn handle(mut stream: tokio::net::TcpStream, state: Arc<StubState>) {
             if status != 0 {
                 state.refreshes.fetch_add(1, Ordering::SeqCst);
                 respond(&mut stream, &format!("{status} Unavailable"), "{}").await;
+                return;
+            }
+            let rejection = state.refresh_rejection.lock().expect("lock").clone();
+            if let Some(error) = rejection {
+                state.refreshes.fetch_add(1, Ordering::SeqCst);
+                let body = serde_json::json!({ "error": error }).to_string();
+                respond(&mut stream, "401 Unauthorized", &body).await;
                 return;
             }
             if refresh_token == "harness_rt_dead" {
@@ -605,6 +614,71 @@ async fn transient_http_statuses_do_not_revoke_the_session() {
         );
         assert!(auth.state().is_signed_in());
         assert!(dir.path().join("session.json").exists());
+    }
+}
+
+/// A refresh whose answer never arrived, then a rejection of the token it
+/// rotated (#331): the shape of a lost answer, not of a revoked session.
+async fn rejected_after_unanswered(edge: &StubEdge, auth: &Auth, error: &str) {
+    edge.state.drop_refresh.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        auth.access_token().await,
+        Err(TokenError::TemporarilyUnavailable(_))
+    ));
+    edge.state.drop_refresh.store(false, Ordering::SeqCst);
+    *edge.state.refresh_rejection.lock().expect("lock") = Some(error.into());
+    auth.retry_refresh();
+}
+
+#[tokio::test]
+async fn a_rejection_right_after_unanswered_refreshes_is_retried_once() {
+    for recovers in [true, false] {
+        let edge = StubEdge::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = persisted_auth(&edge, dir.path());
+        rejected_after_unanswered(&edge, &auth, "CodeGraff rejected the grant (400)").await;
+
+        // First strike: the session survives and the refresh stays retryable.
+        assert!(matches!(
+            auth.access_token().await,
+            Err(TokenError::TemporarilyUnavailable(_))
+        ));
+        assert!(auth.state().is_signed_in());
+        assert!(dir.path().join("session.json").exists());
+        assert!(!harness_engine::lost_session_marker(dir.path()).exists());
+
+        if recovers {
+            *edge.state.refresh_rejection.lock().expect("lock") = None;
+        }
+        auth.retry_refresh();
+        if recovers {
+            assert!(auth.access_token().await.is_ok());
+            assert!(auth.state().is_signed_in());
+        } else {
+            // A second rejection is believed.
+            assert_eq!(auth.access_token().await, Err(TokenError::SignedOut));
+            assert!(!dir.path().join("session.json").exists());
+            assert!(harness_engine::lost_session_marker(dir.path()).exists());
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_definite_rejection_signs_out_even_after_unanswered_refreshes() {
+    for error in [
+        "invalid refresh credential",
+        "workspace does not belong to this account",
+    ] {
+        let edge = StubEdge::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let auth = persisted_auth(&edge, dir.path());
+        rejected_after_unanswered(&edge, &auth, error).await;
+        assert_eq!(
+            auth.access_token().await,
+            Err(TokenError::SignedOut),
+            "{error}"
+        );
+        assert!(!dir.path().join("session.json").exists());
     }
 }
 
