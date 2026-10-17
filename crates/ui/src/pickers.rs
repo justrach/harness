@@ -1327,6 +1327,24 @@ impl Pickers {
         }
     }
 
+    /// Whether the project popover is up and interactive. The shell asks so a
+    /// second project-switcher press can dismiss it (⌘K's toggle) while every
+    /// other overlay keeps its quiet-underneath rule.
+    pub fn project_menu_open(&self) -> bool {
+        self.open_kind() == Some(PickerKind::Space)
+    }
+
+    /// Keyboard entry to the project popover. Trigger clicks keep `toggle`'s
+    /// press-was-open handling; a key press that finds the menu up dismisses
+    /// it instead of sitting idempotent.
+    pub fn toggle_project_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_menu_open() {
+            self.close(cx);
+        } else {
+            self.toggle(PickerKind::Space, window, cx);
+        }
+    }
+
     pub fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open_kind() != Some(PickerKind::HarnessModel) {
             self.toggle(PickerKind::HarnessModel, window, cx);

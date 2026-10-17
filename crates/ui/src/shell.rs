@@ -91,6 +91,7 @@ actions!(
         AddSpacePalette,
         ToggleCommandPalette,
         OpenModelPicker,
+        OpenProjectPicker,
         OpenSettings,
         /// Quit and reopen (a new Screen Recording grant applies only then).
         RestartHarness,
@@ -540,6 +541,14 @@ pub fn apply_keymap(
         KeyBinding::new(
             &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
             AddSpacePalette,
+            None,
+        ),
+        KeyBinding::new(
+            &valid_or_default(
+                &keymap.open_project_picker,
+                ShortcutId::OpenProjectPicker.default_combo(),
+            ),
+            OpenProjectPicker,
             None,
         ),
         // Fixed: ⌘K summons the command palette.
@@ -12548,6 +12557,26 @@ impl Render for Shell {
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                 }
             }))
+            // The project switcher: a keyboard path to the popover the
+            // new-session canvas's project chip opens. A press that finds the
+            // menu up dismisses it (⌘K's toggle); any other overlay keeps the
+            // quiet-underneath rule instead of being swapped out from under
+            // the pointer. The popover re-homes the NEW session, so it only
+            // opens where that destination is visible — the canvas.
+            .on_action(cx.listener(|this, _: &OpenProjectPicker, window, cx| {
+                if !matches!(this.route, Route::Chat) {
+                    return;
+                }
+                let pickers = this.composer.read(cx).pickers().clone();
+                let dismiss = pickers.read(cx).project_menu_open();
+                if !dismiss
+                    && (this.overlay_owns_keyboard(cx)
+                        || this.state.read(cx).selected_chat.is_some())
+                {
+                    return;
+                }
+                pickers.update(cx, |pickers, cx| pickers.toggle_project_menu(window, cx));
+            }))
             .on_action(cx.listener(|this, _: &RestartHarness, _, cx| this.relaunch(cx)))
             .on_action(cx.listener(|this, _: &AddSpacePalette, _, cx| {
                 if this.add_space.is_some() {
@@ -14798,6 +14827,103 @@ mod exit_regressions {
             })
             .unwrap();
         }
+    }
+
+    /// The project switcher shortcut (⌘⇧P by default) opens the project
+    /// popover on the new-session canvas, a second press dismisses it, and a
+    /// running chat keeps its keyboard — it has no destination to re-home.
+    #[gpui::test]
+    fn project_switcher_shortcut_opens_and_dismisses_the_project_menu(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, window, cx| {
+                window.activate_window();
+                shell.route = Route::Chat;
+                shell.open_new_session(cx);
+            })
+            .unwrap();
+        press_shortcut(cx, window);
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(
+                    shell.composer.read(cx).pickers().read(cx).project_menu_open(),
+                    "the switcher shortcut opens the project menu"
+                );
+            })
+            .unwrap();
+        press_shortcut(cx, window);
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(
+                    !shell.composer.read(cx).pickers().read(cx).project_menu_open(),
+                    "a second press dismisses it"
+                );
+                shell
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("existing".into()));
+            })
+            .unwrap();
+        press_shortcut(cx, window);
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(
+                    !shell.composer.read(cx).pickers().read(cx).project_menu_open(),
+                    "a running chat keeps its keyboard"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Press the project switcher's stored combo the way the platform spells
+    /// it (`mod` is ⌘ on macOS, ⌃ elsewhere), through real key events so the
+    /// registered binding and its action dispatch are covered too.
+    fn press_shortcut(cx: &mut TestAppContext, window: gpui::WindowHandle<Shell>) {
+        let combo = platform_combo(ShortcutId::OpenProjectPicker.default_combo());
+        let keystroke = gpui::Keystroke::parse(&combo).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.draw(cx).clear();
+            w.dispatch_event(
+                gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                    keystroke: keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }),
+                cx,
+            );
+            w.dispatch_event(gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }), cx);
+        })
+        .unwrap();
     }
 
     #[gpui::test]
