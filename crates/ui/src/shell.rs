@@ -1838,6 +1838,10 @@ pub struct Shell {
     /// at `chat_tab` is stale; the active tab lives in the fields above.
     chat_tabs: Vec<chat_tabs::ChatTab>,
     chat_tab: usize,
+    /// The sidebar tab list scrolls once it hits its height cap; the tab it
+    /// last scrolled into view, so a switch reveals the new one exactly once.
+    chat_tab_scroll: gpui::ScrollHandle,
+    chat_tab_revealed: Option<usize>,
     /// Open tab indices from least to most recently visited.
     chat_tab_history: Vec<usize>,
     /// Live read-only transcripts for unfocused panes, keyed by chat id.
@@ -2366,6 +2370,8 @@ impl Shell {
             chat_split_selected: None,
             chat_tabs: Vec::new(),
             chat_tab: 0,
+            chat_tab_scroll: gpui::ScrollHandle::new(),
+            chat_tab_revealed: None,
             chat_tab_history: Vec::new(),
             peer_chat_views: std::collections::HashMap::new(),
             chat_split_drag: None,

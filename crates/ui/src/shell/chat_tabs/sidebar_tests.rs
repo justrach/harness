@@ -182,3 +182,94 @@ fn sidebar_click_reveals_existing_tab_and_pane(cx: &mut gpui::TestAppContext) {
         }
     }
 }
+
+/// The real chat sidebar at a fixed window height.
+struct ChatSidebar(Entity<Shell>);
+
+impl Render for ChatSidebar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0.update(cx, |shell, cx| {
+            div()
+                .w(px(280.0))
+                .h(px(600.0))
+                .child(shell.render_chat_sidebar(&Theme::default(), cx))
+        })
+    }
+}
+
+#[gpui::test]
+fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        crate::history::init(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+    });
+    let (host, cx) = cx.add_window_view(|_, cx| {
+        ChatSidebar(cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            shell.route = Route::Chat;
+            shell.chat_tabs = vec![Default::default(); 25];
+            shell.chat_tab = 24;
+            shell
+        }))
+    });
+    let shell = host.read_with(cx, |host, _| host.0.clone());
+    // A scroll request resolves against the previous frame's row bounds, so
+    // the restored active tab comes into view on the next frame.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let sidebar_bottom = px(600.0);
+    // The project filter stays on screen, below the capped tab list.
+    let filter = cx
+        .debug_bounds("spaces-filter")
+        .expect("project filter rendered");
+    assert!(
+        filter.bottom() <= sidebar_bottom,
+        "filter pushed off: {filter:?}"
+    );
+    assert!(
+        filter.top() <= sidebar_bottom * MAX_SIDEBAR_SHARE + px(40.0),
+        "{filter:?}"
+    );
+    // The active (last) tab was scrolled into view above the filter.
+    let last = cx.debug_bounds("chat-tab-24").unwrap();
+    assert!(
+        last.top() >= px(0.0) && last.bottom() <= filter.top(),
+        "{last:?} vs {filter:?}"
+    );
+    let first = cx.debug_bounds("chat-tab-0").unwrap();
+    assert!(
+        first.bottom() <= px(26.0),
+        "first tab should be scrolled out: {first:?}"
+    );
+    let rows = cx.debug_bounds("chat-tab-1").unwrap();
+    assert_eq!(rows.size.height, px(26.0), "rows scroll rather than shrink");
+
+    // Switching back to the first tab scrolls it into view.
+    shell.update_in(cx, |shell, window, cx| shell.switch_chat_tab(0, window, cx));
+    cx.run_until_parked();
+    let first = cx.debug_bounds("chat-tab-0").unwrap();
+    assert!(first.top() >= px(0.0), "{first:?}");
+}

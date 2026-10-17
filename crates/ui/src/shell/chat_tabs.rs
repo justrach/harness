@@ -16,6 +16,9 @@ mod header_tests;
 #[cfg(test)]
 mod shortcut_tests;
 
+/// The most of the sidebar's height the tab list may take before it scrolls.
+const MAX_SIDEBAR_SHARE: f32 = 0.4;
+
 /// A tab's layout while it isn't the active one.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct ChatTab {
@@ -489,10 +492,33 @@ impl Shell {
         let multiple = labels.len() > 1;
         let active = self.chat_tab;
         let accent = theme.accent;
+        if self.chat_tab_revealed != Some(active) {
+            self.chat_tab_scroll.scroll_to_item(active);
+            // Before the list's first paint the handle has no viewport and
+            // drops the request, so keep asking until one was measured.
+            if self.chat_tab_scroll.bounds().size.height > px(0.0) {
+                self.chat_tab_revealed = Some(active);
+            }
+        }
+        // The rows are the scroll container's children in tab order (a lit
+        // tab's strip follows its row), so `scroll_to_item(active)` finds the
+        // active row.
+        let rows = div()
+            .id("chat-tab-rows")
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.chat_tab_scroll)
+            .flex()
+            .flex_col()
+            .gap(px(2.0));
         Some(
             div()
                 .id("chat-tabs")
                 .flex_none()
+                // Many tabs would otherwise push the project filter and the
+                // session list out of the sidebar (user report). Past this
+                // share of the column the rows scroll; the header stays.
+                .max_h(gpui::relative(MAX_SIDEBAR_SHARE))
                 .mx(px(10.0))
                 .mt(px(4.0))
                 .mb(px(6.0))
@@ -512,12 +538,13 @@ impl Shell {
                             .child(SharedString::from(format!("Tabs · {}", labels.len()))),
                     )
                 })
-                .children(labels.into_iter().enumerate().flat_map(|(ix, title)| {
+                .child(rows.children(labels.into_iter().enumerate().flat_map(|(ix, title)| {
                     let lit = ix == active;
                     let key: SharedString = format!("chat-tab-{ix}").into();
                     let row = div()
                         .id(("chat-tab", ix))
                         .debug_selector(move || format!("chat-tab-{ix}"))
+                        .flex_none()
                         .h(px(26.0))
                         .px(px(8.0))
                         .flex()
@@ -571,9 +598,9 @@ impl Shell {
                     // The strip owns its sidebar gutters. Cancel the tab list's
                     // inset so grouping cards under a header does not narrow them.
                     let strip = if lit { pane_strip.take() } else { None }
-                        .map(|strip| div().mx(px(-10.0)).child(strip).into_any_element());
+                        .map(|strip| div().flex_none().mx(px(-10.0)).child(strip).into_any_element());
                     std::iter::once(row).chain(strip)
-                }))
+                })))
                 .into_any_element(),
         )
     }

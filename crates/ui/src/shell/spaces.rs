@@ -3663,6 +3663,7 @@ impl Shell {
 
         let trigger = div()
             .id("spaces-filter")
+            .debug_selector(|| "spaces-filter".into())
             .flex_1()
             .min_w_0()
             .h(px(29.0))
