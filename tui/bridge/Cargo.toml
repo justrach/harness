@@ -31,3 +31,7 @@ libc = "0.2"
 
 # Own workspace: Harness and Codex pin different toolchains and dependency graphs.
 [workspace]
+
+[dev-dependencies]
+async-trait = "0.1"
+tempfile = "3"

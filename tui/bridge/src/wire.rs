@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 /// JSON-RPC error a handler can return.
+#[derive(Debug)]
 pub struct RpcError {
     pub code: i64,
     pub message: String,
@@ -65,7 +66,6 @@ impl RpcError {
             message,
         }
     }
-
 }
 
 /// Work that must run only after the response has been written, so a client
@@ -73,6 +73,7 @@ impl RpcError {
 pub type After = Option<BoxFuture<'static, ()>>;
 
 pub struct ThreadState {
+    pub history: crate::session_store::History,
     pub cwd: String,
     pub harness: HarnessId,
     pub model: Option<String>,
@@ -97,6 +98,7 @@ pub struct ThreadState {
 pub struct Conn {
     out: mpsc::UnboundedSender<Value>,
     pub registry: Arc<HarnessRegistry>,
+    pub sessions: crate::session_store::SessionStore,
     pub threads: Mutex<HashMap<String, ThreadState>>,
 }
 
@@ -107,6 +109,7 @@ impl Conn {
         let conn = Arc::new(Self {
             out,
             registry,
+            sessions: crate::session_store::SessionStore::memory(),
             threads: Mutex::new(HashMap::new()),
         });
         (conn, rx)
@@ -137,6 +140,9 @@ pub async fn serve(stream: TcpStream, registry: Arc<HarnessRegistry>) -> Result<
     let conn = Arc::new(Conn {
         out,
         registry,
+        sessions: crate::session_store::SessionStore::new(
+            crate::config::codex_home().join("sessions"),
+        ),
         threads: Mutex::new(HashMap::new()),
     });
 
@@ -158,7 +164,10 @@ pub async fn serve(stream: TcpStream, registry: Arc<HarnessRegistry>) -> Result<
             tracing::warn!("dropping non-JSON frame");
             continue;
         };
-        let method = message.get("method").and_then(Value::as_str).map(str::to_owned);
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         match (method, message.get("id").cloned()) {
             (Some(method), Some(id)) => {
                 let params = message.get("params").cloned().unwrap_or(Value::Null);

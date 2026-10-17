@@ -49,15 +49,15 @@ pub async fn handle(conn: &std::sync::Arc<Conn>, method: &str, params: Value) ->
         "thread/settings/update" => thread_settings_update(conn, &params),
         "hooks/list" | "skills/list" => ok(json!({ "data": [] })),
         "plugin/list" => ok(json!({ "marketplaces": [] })),
-        // Session history is not bridged yet; every thread is new.
-        "thread/list" => ok(json!({ "data": [], "nextCursor": null, "backwardsCursor": null })),
+        "thread/list" => wrap(crate::sessions::list(conn, &params)),
+        "thread/resume" => wrap(crate::sessions::resume(conn, &params)),
         "thread/loaded/list" => ok(json!({ "data": loaded_threads(conn), "nextCursor": null })),
-        "model/list" => ok(json!({ "data": crate::models::list(&conn.registry).await, "nextCursor": null })),
-        "thread/start" => thread_start(conn, params).await,
-        "thread/read" => thread_read(conn, params),
-        "thread/turns/list" => {
-            ok(json!({ "data": [], "nextCursor": null, "backwardsCursor": null }))
+        "model/list" => {
+            ok(json!({ "data": crate::models::list(&conn.registry).await, "nextCursor": null }))
         }
+        "thread/start" => thread_start(conn, params).await,
+        "thread/read" => wrap(crate::sessions::read(conn, &params)),
+        "thread/turns/list" => wrap(crate::sessions::turns(conn, &params)),
         "turn/start" => crate::turn::start(conn, params),
         "turn/steer" => crate::turn::steer(conn, params),
         "turn/interrupt" => turn_interrupt(conn, params),
@@ -94,11 +94,19 @@ fn thread_settings_update(conn: &std::sync::Arc<Conn>, params: &Value) -> Reply 
         .and_then(Value::as_str)
         .and_then(split_model)
     {
+        if thread.resume.is_some() && harness != thread.harness {
+            return err(RpcError::invalid_params(
+                "cannot resume a session with a different agent",
+            ));
+        }
         thread.harness = harness;
         thread.model = Some(model);
     }
     if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
         thread.cwd = cwd.to_owned();
+    }
+    if let Err(error) = crate::sessions::checkpoint(conn, thread_id, thread) {
+        return err(error);
     }
     ok(json!({}))
 }
@@ -133,38 +141,16 @@ pub async fn harness_ids(registry: &Arc<HarnessRegistry>) -> Vec<HarnessId> {
     ids
 }
 
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_default()
-}
-
-fn thread_json(id: &str, cwd: &str, model: Option<&str>) -> Value {
-    json!({
-        "id": id,
-        "sessionId": id,
-        "cliVersion": env!("CARGO_PKG_VERSION"),
-        "createdAt": now_secs(),
-        "updatedAt": now_secs(),
-        "cwd": cwd,
-        "ephemeral": false,
-        "model": model,
-        "modelProvider": "harness",
-        "preview": "",
-        "projectId": null,
-        "source": "appServer",
-        "status": { "type": "idle" },
-        "turns": [],
-    })
-}
-
 async fn thread_start(conn: &std::sync::Arc<Conn>, params: Value) -> Reply {
     let cwd = params
         .get("cwd")
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        })
         .unwrap_or_else(|| "/".into());
     let requested = params.get("model").and_then(Value::as_str);
     tracing::info!(?requested, "thread/start model");
@@ -187,21 +173,23 @@ async fn thread_start(conn: &std::sync::Arc<Conn>, params: Value) -> Reply {
     };
     let id = Uuid::new_v4().to_string();
     let shown_model = model.as_ref().map(|m| qualified(harness, m));
-    let thread = thread_json(&id, &cwd, shown_model.as_deref());
-    conn.threads.lock().expect("threads lock").insert(
-        id.clone(),
-        ThreadState {
-            cwd: cwd.clone(),
-            harness,
-            model: model.clone(),
-            resume: None,
-            interrupt: None,
-            turn_id: None,
-            steer: None,
-            steers: Default::default(),
-            steerable: false,
-        },
-    );
+    let state = ThreadState {
+        history: crate::session_store::History::default(),
+        cwd: cwd.clone(),
+        harness,
+        model: model.clone(),
+        resume: None,
+        interrupt: None,
+        turn_id: None,
+        steer: None,
+        steers: Default::default(),
+        steerable: false,
+    };
+    let thread = crate::sessions::thread_json(&id, &state, false);
+    conn.threads
+        .lock()
+        .expect("threads lock")
+        .insert(id.clone(), state);
     let response = json!({
         "thread": thread.clone(),
         "model": shown_model.clone().unwrap_or_default(),
@@ -210,6 +198,8 @@ async fn thread_start(conn: &std::sync::Arc<Conn>, params: Value) -> Reply {
         "approvalPolicy": "on-request",
         "approvalsReviewer": "user",
         "sandbox": { "type": "workspaceWrite" },
+        "disabledPluginIds": [],
+        "instructionSources": [],
     });
     let conn = conn.clone();
     let after: After = Some(Box::pin(async move {
@@ -218,20 +208,13 @@ async fn thread_start(conn: &std::sync::Arc<Conn>, params: Value) -> Reply {
     (Ok(response), after)
 }
 
-fn thread_read(conn: &std::sync::Arc<Conn>, params: Value) -> Reply {
-    let Some(id) = params.get("threadId").and_then(Value::as_str) else {
-        return err(RpcError::invalid_params("missing threadId"));
-    };
-    let threads = conn.threads.lock().expect("threads lock");
-    let Some(thread) = threads.get(id) else {
-        return err(RpcError::invalid_params("unknown threadId"));
-    };
-    let model = thread.model.as_ref().map(|m| qualified(thread.harness, m));
-    ok(json!({ "thread": thread_json(id, &thread.cwd, model.as_deref()) }))
-}
-
 fn loaded_threads(conn: &std::sync::Arc<Conn>) -> Vec<String> {
-    conn.threads.lock().expect("threads lock").keys().cloned().collect()
+    conn.threads
+        .lock()
+        .expect("threads lock")
+        .keys()
+        .cloned()
+        .collect()
 }
 
 fn turn_interrupt(conn: &std::sync::Arc<Conn>, params: Value) -> Reply {

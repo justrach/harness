@@ -9,6 +9,8 @@ mod config;
 mod mcp;
 mod methods;
 mod models;
+mod session_store;
+mod sessions;
 mod tools;
 mod turn;
 mod wire;

@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "harness-adapters"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "harness-doc"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "chrono",
  "harness-proto",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "harness-preview"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "harness-proto"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "harness-rpc"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "harness-sync"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "block2",
  "futures",
@@ -1397,6 +1397,7 @@ name = "harness-tui-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "diffy",
  "futures",
  "harness-adapters",
@@ -1405,6 +1406,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -1416,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "harness-update"
-version = "0.2.114"
+version = "0.2.121"
 dependencies = [
  "anyhow",
  "futures",
