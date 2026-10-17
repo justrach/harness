@@ -297,6 +297,14 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
         branch.starts_with("harness/"),
         "stamped branch is the worktree's own: {branch}"
     );
+    let context = chat.source_context.expect("host worktree source context");
+    let identity = core.repos.checkout_identity(&first).await.unwrap();
+    assert_eq!(context.cwd, first_cwd);
+    assert_eq!(context.repo_root, first_cwd);
+    assert_eq!(context.branch, branch);
+    assert_eq!(context.checkout_id, identity.id);
+    assert_eq!(chat.checkout_id.as_deref(), Some(identity.id.as_str()));
+    assert_eq!(context.head_sha, core.repos.head_sha(&first).await.unwrap());
 
     // A duplicate spec-carrying Run (client retry) REUSES the checkout.
     let second_command = core
@@ -323,6 +331,14 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     assert!(reused.setup_action.is_none(), "setup must not run on reuse");
     assert!(reused.setup_error.is_none());
     assert!(!first.join("setup-marker").exists());
+    let resumed = core.workspace.chat(CHAT).unwrap().unwrap();
+    let resumed_context = resumed.source_context.unwrap();
+    assert_eq!(resumed_context.cwd, context.cwd);
+    assert_eq!(resumed_context.repo_root, context.repo_root);
+    assert_eq!(resumed_context.branch, context.branch);
+    assert_eq!(resumed_context.checkout_id, context.checkout_id);
+    assert_eq!(resumed_context.head_sha, context.head_sha);
+    assert_eq!(resumed.checkout_id.as_deref(), Some(identity.id.as_str()));
 
     core.shutdown().await;
 }

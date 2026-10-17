@@ -69,7 +69,12 @@ impl Harness for FakeGraff {
         let cwd = match &agent_name {
             Some(name) => {
                 let tree = GraffWorktree::path_in(&request.cwd, name);
-                std::fs::create_dir_all(&tree).unwrap();
+                if !std::path::Path::new(&tree).exists() {
+                    git(
+                        &request.cwd,
+                        &["worktree", "add", "-b", &format!("actual-{name}"), &tree],
+                    );
+                }
                 tree
             }
             None => request.cwd.clone(),
@@ -93,6 +98,40 @@ impl Harness for FakeGraff {
         ];
         Ok(futures::stream::iter(events).boxed())
     }
+}
+
+fn git(cwd: &str, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn init_repo(path: &std::path::Path) -> String {
+    std::fs::create_dir_all(path).unwrap();
+    let cwd = path.to_string_lossy().into_owned();
+    git(&cwd, &["init", "-b", "main"]);
+    git(
+        &cwd,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    );
+    cwd
 }
 
 async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
@@ -140,8 +179,7 @@ async fn graff_chats_run_and_resume_in_graffs_own_worktree() {
     let harness_trees = tmp_path.join("harness-worktrees");
     unsafe { std::env::set_var("HARNESS_WORKTREES_DIR", &harness_trees) };
     let repo = tmp_path.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let repo_path = repo.to_string_lossy().to_string();
+    let repo_path = init_repo(&repo);
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let registry = HarnessRegistry::new();
@@ -178,7 +216,31 @@ async fn graff_chats_run_and_resume_in_graffs_own_worktree() {
 
     let chat = core.workspace.chat(CHAT).unwrap().expect("chat row");
     assert_eq!(chat.cwd.as_deref(), Some(tree.as_str()), "the chat moved into Graff's tree");
-    assert_eq!(chat.branch.as_deref(), Some(format!("worktree-{name}").as_str()));
+    assert_eq!(chat.branch.as_deref(), Some(format!("actual-{name}").as_str()));
+    let context = chat.source_context.as_ref().expect("runtime source context");
+    assert_eq!(context.cwd, tree);
+    assert_eq!(context.repo_root, tree);
+    assert_eq!(
+        context.branch,
+        format!("actual-{name}"),
+        "read Git, not the path-derived branch"
+    );
+    assert_eq!(
+        context.head_sha.as_deref(),
+        Some(git(&tree, &["rev-parse", "HEAD"]).as_str())
+    );
+    let identity = core
+        .repos
+        .checkout_identity(std::path::Path::new(&tree))
+        .await
+        .unwrap();
+    let parent_identity = core.repos.checkout_identity(&repo).await.unwrap();
+    assert_eq!(context.checkout_id, identity.id);
+    assert_eq!(chat.checkout_id.as_deref(), Some(identity.id.as_str()));
+    assert_ne!(
+        context.checkout_id, parent_identity.id,
+        "never retain the parent PR identity"
+    );
 
     // The composer's next send carries the chat's cwd: the tree itself.
     core.doc_host
@@ -194,5 +256,54 @@ async fn graff_chats_run_and_resume_in_graffs_own_worktree() {
         "the session recorded in the tree resumes there"
     );
 
+    let resumed = core.workspace.chat(CHAT).unwrap().unwrap();
+    let resumed_context = resumed.source_context.as_ref().unwrap();
+    assert_eq!(resumed_context.cwd, context.cwd);
+    assert_eq!(resumed_context.repo_root, context.repo_root);
+    assert_eq!(resumed_context.branch, context.branch);
+    assert_eq!(resumed_context.checkout_id, context.checkout_id);
+    assert_eq!(resumed_context.head_sha, context.head_sha);
+
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unchanged_checkout_keeps_its_complete_source_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().canonicalize().unwrap().join("repo");
+    let cwd = init_repo(&repo);
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(FakeGraff {
+        seen: Arc::new(Mutex::new(Vec::new())),
+    }));
+    let core = EngineCore::assemble(
+        &tmp.path().join("data"),
+        Arc::new(registry),
+        HarnessId::Graff,
+        None,
+    )
+    .unwrap();
+    core.workspace
+        .create_chat(CHAT, None, Some(&core.device_id), None, Some(cwd.clone()))
+        .unwrap();
+    core.workspace.rename_chat(CHAT, "Pre-titled").unwrap();
+    core.doc_host
+        .queue_command(CHAT, run("msg-local", &cwd, None))
+        .unwrap();
+    wait_for(|| completed_turns(&core) == 1, "local turn").await;
+    let chat = core.workspace.chat(CHAT).unwrap().unwrap();
+    let context = chat.source_context.as_ref().unwrap();
+    let identity = core.repos.checkout_identity(&repo).await.unwrap();
+    assert_eq!(chat.cwd.as_deref(), Some(cwd.as_str()));
+    assert_eq!(chat.branch.as_deref(), Some("main"));
+    assert_eq!(chat.checkout_id.as_deref(), Some(identity.id.as_str()));
+    assert_eq!(context.cwd, cwd);
+    assert_eq!(context.repo_root, cwd);
+    assert_eq!(context.branch, "main");
+    assert_eq!(context.checkout_id, identity.id);
+    assert_eq!(
+        context.head_sha.as_deref(),
+        Some(git(&cwd, &["rev-parse", "HEAD"]).as_str())
+    );
     core.shutdown().await;
 }

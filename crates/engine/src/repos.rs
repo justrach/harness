@@ -282,6 +282,24 @@ impl Repos {
         }
     }
 
+    /// Capture the complete source identity after dispatch or an owned checkout change.
+    pub(crate) async fn capture_source_context(
+        &self,
+        path: &Path,
+    ) -> Result<harness_proto::ConversationSourceContext, EngineError> {
+        let identity = self.checkout_identity(path).await?;
+        let branch = self.current_branch(path).await?;
+        let head_sha = self.head_sha(path).await?;
+        Ok(harness_proto::ConversationSourceContext {
+            checkout_id: identity.id,
+            repo_root: identity.root.to_string_lossy().into_owned(),
+            cwd: path.to_string_lossy().into_owned(),
+            branch,
+            head_sha,
+            observed_at: chrono::Utc::now(),
+        })
+    }
+
     /// Fetch every configured remote without pruning or integrating anything
     /// into the active branch. This intentionally updates refs only.
     pub async fn fetch_all(&self, repo_path: &Path) -> Result<(), EngineError> {

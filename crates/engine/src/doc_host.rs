@@ -5526,20 +5526,16 @@ impl DocHost {
         Ok(())
     }
 
-    async fn capture_source_context(&self, cwd: &str) -> Option<ConversationSourceContext> {
-        let repos = self.inner.repos.get()?;
-        let path = Path::new(cwd);
-        let identity = repos.checkout_identity(path).await.ok()?;
-        let branch = repos.current_branch(path).await.ok()?;
-        let head_sha = repos.head_sha(path).await.ok().flatten();
-        Some(ConversationSourceContext {
-            checkout_id: identity.id,
-            repo_root: identity.root.to_string_lossy().into_owned(),
-            cwd: cwd.to_string(),
-            branch,
-            head_sha,
-            observed_at: chrono::Utc::now(),
-        })
+    pub(crate) async fn capture_source_context(
+        &self,
+        cwd: &str,
+    ) -> Option<ConversationSourceContext> {
+        self.inner
+            .repos
+            .get()?
+            .capture_source_context(Path::new(cwd))
+            .await
+            .ok()
     }
 
     /// Every fresh harness dispatch crosses this boundary, including

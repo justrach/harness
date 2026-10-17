@@ -3268,7 +3268,17 @@ async fn drive_run(
                         if let Err(err) = ws.set_chat_cwd(&chat_id, &tree.path) {
                             tracing::warn!(chat = %chat_id, error = %err, "graff worktree cwd stamp failed");
                         }
-                        if let Err(err) = ws.set_chat_branch(&chat_id, &tree.branch()) {
+                        // The launch checkout's source identity must not follow
+                        // the chat into the adapter's tree (or retain its PR).
+                        let context = match inner.doc_host() {
+                            Some(host) => host.capture_source_context(&tree.path).await,
+                            None => None,
+                        };
+                        if let Some(context) = context {
+                            if let Err(err) = ws.set_chat_source_context(&chat_id, &context) {
+                                tracing::warn!(chat = %chat_id, error = %err, "graff worktree source stamp failed");
+                            }
+                        } else if let Err(err) = ws.set_chat_branch(&chat_id, &tree.branch()) {
                             tracing::warn!(chat = %chat_id, error = %err, "graff worktree branch stamp failed");
                         }
                     }
