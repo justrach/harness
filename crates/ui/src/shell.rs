@@ -2326,6 +2326,13 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        // Only a cold start waits for the engine. A window reopened from the
+        // Dock (or a notification) around a ready engine must not replay the
+        // setup splash and look like a restart (#369).
+        let splash = match state.read(cx).connection {
+            ConnectionStatus::Connecting => SplashPhase::Visible,
+            ConnectionStatus::Ready | ConnectionStatus::Failed(_) => SplashPhase::Gone,
+        };
         Self {
             state,
             sidebar_pane,
@@ -2504,7 +2511,7 @@ impl Shell {
             reduced_motion: false,
             motion_active: std::cell::Cell::new(false),
             render_time: None,
-            splash: SplashPhase::Visible,
+            splash,
             splash_task: None,
             focus_sub: None,
             shortcut_focus: cx.focus_handle(),
@@ -14151,6 +14158,56 @@ mod tests {
 mod exit_regressions {
     use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    #[gpui::test]
+    fn only_a_cold_start_shows_the_setup_splash(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        // The Dock reopen hands the new window the retained app state.
+        let state = cx.new(|_| AppState::new());
+        let open = |cx: &mut TestAppContext| {
+            let state = state.clone();
+            let window = cx.add_window(|_, cx| {
+                Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        codegraff_client_id: None,
+                        default_harness: harness_proto::HarnessId::Mock,
+                    },
+                    cx,
+                )
+            });
+            window.read_with(cx, |shell, _| shell.splash).unwrap()
+        };
+        assert_eq!(
+            open(cx),
+            SplashPhase::Visible,
+            "cold start waits for the engine"
+        );
+        state.update(cx, |state, _| state.connection = ConnectionStatus::Ready);
+        assert_eq!(
+            open(cx),
+            SplashPhase::Gone,
+            "warm reopen skips the setup splash"
+        );
+    }
 
     #[gpui::test]
     fn settings_search_opens_the_matching_section_and_clears(cx: &mut TestAppContext) {
