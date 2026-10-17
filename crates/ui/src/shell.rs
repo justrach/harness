@@ -2584,6 +2584,9 @@ impl Shell {
         self.prune_file_explorers(cx);
         self.chat_split_on_state_changed(cx);
         self.maybe_auto_download_update(cx);
+        if let Some(chat_id) = state.update(cx, |state, _| state.take_linked_chat()) {
+            self.open_chat_preserving_tabs(chat_id, cx);
+        }
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
@@ -4210,7 +4213,15 @@ impl Shell {
                 panel.changes_open = true;
                 panel.right_active = surface;
             });
-            self.apply_nav(NavEntry::Chat(key), cx);
+            if key.is_empty() {
+                // A blank-canvas editor belongs in the current tab/pane.
+                self.apply_nav(NavEntry::Chat(key), cx);
+            } else {
+                self.suspend_file_images(cx);
+                self.open_chat_preserving_tabs(key, cx);
+                self.close_user_menu(cx);
+                self.close_chat_menu(cx);
+            }
         }
     }
 
@@ -16170,9 +16181,20 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
+            // This fixture exercises exit/save gating, not navigation between
+            // chats; the dirty editor belongs to the already-selected chat.
+            state.update(cx, |state, cx| state.select_chat(Some("test".into()), cx));
             Shell::new(
                 state,
                 EngineBootConfig {

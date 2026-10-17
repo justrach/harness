@@ -164,7 +164,7 @@ impl Shell {
         }
     }
 
-    /// Open a session from the sidebar: select it, the main area follows.
+    /// Replace the current tab/pane's session, as `/resume` requests.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.command_palette = None;
         self.route = Route::Chat;

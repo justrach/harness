@@ -407,11 +407,9 @@ impl Shell {
             Entry::External(source, id) => self.import_external(vec![(source, id)], cx),
             Entry::ImportAll => self.import_external(Vec::new(), cx),
             Entry::Pane(ix) => self.focus_chat_pane(ix, window, cx),
-            Entry::Chat(id) => {
-                if !self.reveal_chat_in_tabs(&id, window, cx) {
-                    self.open_chat(id, cx)
-                }
-            }
+            // `/resume` intentionally replaces the current tab/pane, even
+            // when the chosen conversation is already open elsewhere.
+            Entry::Chat(id) => self.open_chat(id, cx),
         }
     }
 
@@ -997,6 +995,28 @@ mod tests {
         .unwrap();
         assert_eq!(row.source_label(), "Codex");
         assert_eq!(row.folder(), "app");
+    }
+
+    #[gpui::test]
+    fn resume_replaces_current_tab_even_when_target_is_open_elsewhere(cx: &mut gpui::TestAppContext) {
+        for split in [false, true] {
+            for parked in [None, Some(false), Some(true)] {
+                let (_dir, window) = chat_tabs::navigation_tests::fixture(cx, split, parked);
+                window.update(cx, |shell, window, cx| {
+                    let tabs = shell.chat_tabs.clone();
+                    let pane_count = shell.chat_split.as_ref().map(|split| split.panes.len());
+                    shell.pending_workspace_command = Some(crate::composer::WorkspaceCommand::Resume);
+                    let _ = shell.render(window, cx);
+                    assert!(shell.command_palette.is_some());
+                    shell.activate_command(Entry::Chat("target".into()), window, cx);
+                    assert!(shell.command_palette.is_none());
+                    assert_eq!(shell.chat_tab, 0, "/resume must not switch tabs");
+                    assert_eq!(shell.chat_tabs, tabs, "/resume must not create or modify parked tabs");
+                    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("target"));
+                    assert_eq!(shell.chat_split.as_ref().map(|split| split.panes.len()), pane_count);
+                }).unwrap();
+            }
+        }
     }
 
     #[gpui::test]

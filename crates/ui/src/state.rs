@@ -722,6 +722,8 @@ pub struct AppState {
     pub chats_synced: bool,
     pub spaces_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
+    /// Validated conversation link; the shell owns tab-preserving navigation.
+    pending_linked_chat: Option<String>,
     deep_link_notice: Option<String>,
     /// The selected chat when a chats frame arrived without it. A later frame
     /// that lists it again re-selects it, unless something else was picked.
@@ -804,6 +806,9 @@ pub(crate) struct TranscriptTextChanged {
 
 impl gpui::EventEmitter<TranscriptTextChanged> for AppState {}
 
+#[cfg(test)]
+mod deep_link_tests;
+
 fn is_text_append(frame: &TranscriptFrame) -> bool {
     matches!(frame, TranscriptFrame::Delta { upsert, append, remove, .. }
         if upsert.is_empty() && remove.is_empty() && !append.is_empty())
@@ -870,6 +875,7 @@ impl AppState {
             chats_synced: false,
             spaces_synced: false,
             pending_deep_link: None,
+            pending_linked_chat: None,
             deep_link_notice: None,
             vanished_selection: None,
             pending_open_folder: None,
@@ -2248,11 +2254,16 @@ impl AppState {
         }
         if self.chats.iter().any(|chat| chat.id == link.chat_id) {
             self.pending_deep_link = None;
-            self.select_chat(Some(link.chat_id), cx);
+            self.pending_linked_chat = Some(link.chat_id);
+            cx.notify();
         } else if self.chats_synced {
             self.pending_deep_link = None;
             self.deep_link_notice = Some("The linked conversation was not found".into());
         }
+    }
+
+    pub(crate) fn take_linked_chat(&mut self) -> Option<String> {
+        self.pending_linked_chat.take()
     }
 
     /// Re-select a chat that dropped out of an earlier chats frame once a

@@ -303,7 +303,7 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
                 window.activate_window();
-                shell.open_chat(chat_id, cx);
+                shell.open_chat_preserving_tabs(chat_id, cx);
             });
         }
         None => state.update(cx, |state, cx| state.select_chat(Some(chat_id), cx)),

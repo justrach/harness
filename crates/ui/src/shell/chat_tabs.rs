@@ -15,6 +15,8 @@ mod sidebar_tests;
 mod header_tests;
 #[cfg(test)]
 mod shortcut_tests;
+#[cfg(test)]
+pub(super) mod navigation_tests;
 
 /// A tab's layout while it isn't the active one.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -149,6 +151,11 @@ impl Shell {
     }
 
     fn load_chat_tab(&mut self, tab: ChatTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_chat_tab_without_window(tab, cx);
+        window.focus(&self.composer.focus_handle(cx), cx);
+    }
+
+    fn load_chat_tab_without_window(&mut self, tab: ChatTab, cx: &mut Context<Self>) {
         self.chat_split = tab.split;
         self.chat_split_selected = tab.selected.clone();
         let draft = tab.draft.filter(|_| tab.selected.is_none());
@@ -158,7 +165,7 @@ impl Shell {
         self.adopt_canvas_draft(draft, cx);
         self.sync_chat_panes(cx);
         self.persist_chat_tabs(cx);
-        window.focus(&self.composer.focus_handle(cx), cx);
+        self.focus_composer(cx);
         cx.notify();
     }
 
@@ -219,6 +226,11 @@ impl Shell {
     /// new-session canvas in the current project). The layout you were in
     /// stays whole in its own tab.
     pub(super) fn new_chat_tab(&mut self, open: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_chat_tab(open, cx);
+        window.focus(&self.composer.focus_handle(cx), cx);
+    }
+
+    fn create_chat_tab(&mut self, open: Option<String>, cx: &mut Context<Self>) {
         if !matches!(self.route, Route::Chat) {
             self.close_settings(cx);
         }
@@ -254,19 +266,26 @@ impl Shell {
         self.chat_tabs.push(tab.clone());
         self.chat_tab = self.chat_tabs.len() - 1;
         self.record_chat_tab_visit();
-        self.load_chat_tab(tab, window, cx);
+        self.load_chat_tab_without_window(tab, cx);
     }
 
     pub(super) fn switch_chat_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activate_chat_tab(ix, cx) {
+            window.focus(&self.composer.focus_handle(cx), cx);
+        }
+    }
+
+    fn activate_chat_tab(&mut self, ix: usize, cx: &mut Context<Self>) -> bool {
         if ix == self.chat_tab || ix >= self.chat_tabs.len() || !matches!(self.route, Route::Chat) {
-            return;
+            return false;
         }
         self.record_chat_tab_visit();
         self.chat_tabs[self.chat_tab] = self.park_chat_tab(cx);
         self.chat_tab = ix;
         self.record_chat_tab_visit();
         let tab = self.chat_tabs[ix].clone();
-        self.load_chat_tab(tab, window, cx);
+        self.load_chat_tab_without_window(tab, cx);
+        true
     }
 
     /// ⌃Tab / ⌃⇧Tab: browser-style tab cycling once two or more tabs are
@@ -409,13 +428,13 @@ impl Shell {
     /// Opening a chat that already lives in another tab goes THERE (its
     /// tab, then its pane) instead of showing it twice. False when it isn't
     /// open in another tab.
-    pub(super) fn reveal_chat_in_tabs(&mut self, chat_id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn reveal_chat_in_tabs(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
         let Some((tab, pane)) = self.chat_in_other_tab(chat_id) else {
             return false;
         };
-        self.switch_chat_tab(tab, window, cx);
+        self.activate_chat_tab(tab, cx);
         if let Some(pane) = pane {
-            self.focus_chat_pane(pane, window, cx);
+            self.select_chat_pane(pane, cx);
         }
         true
     }
@@ -423,6 +442,13 @@ impl Shell {
     /// Sidebar navigation preserves the current tab: reveal an open chat in
     /// its tab/pane, or give a previously unopened chat its own new tab.
     pub(super) fn open_chat_in_tab(&mut self, chat_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_chat_preserving_tabs(chat_id, cx);
+        window.focus(&self.composer.focus_handle(cx), cx);
+    }
+
+    /// External navigation preserves tabs; explicit replacement (`/resume`)
+    /// continues using `open_chat` instead.
+    pub(crate) fn open_chat_preserving_tabs(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.command_palette = None;
         self.route = Route::Chat;
         if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
@@ -435,11 +461,11 @@ impl Shell {
                 ix != split.focus && id.as_deref() == Some(chat_id.as_str())
             })
         }) {
-            self.focus_chat_pane(pane, window, cx);
+            self.select_chat_pane(pane, cx);
             return;
         }
-        if !self.reveal_chat_in_tabs(&chat_id, window, cx) {
-            self.new_chat_tab(Some(chat_id), window, cx);
+        if !self.reveal_chat_in_tabs(&chat_id, cx) {
+            self.create_chat_tab(Some(chat_id), cx);
         }
     }
 

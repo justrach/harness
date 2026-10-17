@@ -408,14 +408,20 @@ impl Shell {
     }
 
     pub(super) fn focus_chat_pane(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.select_chat_pane(ix, cx) {
+            window.focus(&self.composer.focus_handle(cx), cx);
+        }
+    }
+
+    pub(super) fn select_chat_pane(&mut self, ix: usize, cx: &mut Context<Self>) -> bool {
         let selected = self.state.read(cx).selected_chat.clone();
         let draft = self.current_canvas_draft(cx);
         let Some(split) = self.chat_split.as_mut() else {
-            return;
+            return false;
         };
         let from = split.focus;
         let Some(target) = split.focus_pane(ix, selected) else {
-            return;
+            return false;
         };
         // Each pane keeps its own workspace and composer picks: park the
         // live ones in the pane being left and bring the target pane's back.
@@ -430,8 +436,9 @@ impl Shell {
         self.set_space_filter(project, cx);
         self.adopt_canvas_draft(target_draft, cx);
         self.sync_chat_panes(cx);
-        window.focus(&self.composer.focus_handle(cx), cx);
+        self.focus_composer(cx);
         cx.notify();
+        true
     }
 
     /// A press released on an unfocused pane: a plain click focuses it, but
