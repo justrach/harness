@@ -531,6 +531,29 @@ fn push_text_autolinked(runs: &mut Vec<InlineRun>, text: &str, style: &InlineSty
     push(runs, rest, style.clone());
 }
 
+/// Byte ranges of the bare `http(s)://` URLs in plain text, by the same rules
+/// as the Markdown autolinker, for verbatim surfaces like tool output.
+pub fn bare_url_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = find_url_start(&text[from..]) {
+        let at = from + rel;
+        let scheme = if text[at..].starts_with("https://") {
+            "https://".len()
+        } else {
+            "http://".len()
+        };
+        let len = bare_url_len(&text[at..]);
+        if len > scheme {
+            ranges.push(at..at + len);
+            from = at + len;
+        } else {
+            from = at + scheme;
+        }
+    }
+    ranges
+}
+
 /// First viable `http(s)://` occurrence: not glued to a preceding
 /// alphanumeric (`foohttps://…` stays text, per GFM's boundary rule).
 fn find_url_start(text: &str) -> Option<usize> {
@@ -787,6 +810,24 @@ fn has_link_defs(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bare_url_ranges_follow_the_autolink_rules() {
+        let text = "PR: https://example.com/pr/12. See (https://example.com/a_(b)) and foohttps://x.io, http:// alone, http://b.co/q?x=1";
+        let urls: Vec<&str> = super::bare_url_ranges(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://example.com/pr/12",
+                "https://example.com/a_(b)",
+                "http://b.co/q?x=1",
+            ]
+        );
+        assert!(super::bare_url_ranges("no links here").is_empty());
+    }
+
     use super::*;
 
     #[test]

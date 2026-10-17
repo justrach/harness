@@ -135,6 +135,50 @@ pub struct LinkUi {
     pub handler: Rc<dyn Fn(&LinkActivation, &mut Window, &mut gpui::App) -> LinkOutcome>,
 }
 
+/// Verbatim text whose bare `http(s)://` URLs are links, with the transcript's
+/// usual activation, validation and Open/Copy menu — for surfaces that are
+/// not Markdown, such as expanded tool output (#348). `None` without a URL.
+pub fn autolinked_text(
+    id: SharedString,
+    text: SharedString,
+    ui: Option<LinkUi>,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    let ranges = super::parser::bare_url_ranges(&text);
+    if ranges.is_empty() {
+        return None;
+    }
+    // Monochrome like Markdown links: the text color with an underline.
+    let underline = gpui::HighlightStyle {
+        underline: Some(UnderlineStyle {
+            color: Some(theme.text_muted),
+            thickness: px(1.0),
+            wavy: false,
+        }),
+        ..Default::default()
+    };
+    let styled = StyledText::new(text.clone())
+        .with_highlights(ranges.iter().map(|range| (range.clone(), underline)));
+    let layout = styled.layout().clone();
+    let links = ranges
+        .into_iter()
+        .map(|range| {
+            let url = &text[range.clone()];
+            (range, LinkTarget::new(url, url))
+        })
+        .collect();
+    Some(
+        super::link_interaction::LinkRanges {
+            id,
+            child: styled.into_any_element(),
+            layout,
+            links,
+            ui,
+        }
+        .into_any_element(),
+    )
+}
+
 pub fn activate_link(
     target: LinkTarget,
     action: LinkAction,

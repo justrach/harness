@@ -8494,6 +8494,7 @@ impl Transcript {
                 // Invocation first (what was asked), then output/diff (what
                 // came back), separated by a small gap.
                 if open || animating {
+                    let link_ui = self.link_ui();
                     let mut panel = div()
                         .flex_none()
                         .min_w_0()
@@ -8508,7 +8509,13 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(invocation, None, theme));
+                            .child(detail_body(
+                                invocation,
+                                None,
+                                &format!("{key}#in"),
+                                link_ui.as_ref(),
+                                theme,
+                            ));
                     }
                     if let Some(detail) = detail.as_deref() {
                         panel = panel
@@ -8518,7 +8525,13 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(detail, detail_highlights[ix].clone(), theme));
+                            .child(detail_body(
+                                detail,
+                                detail_highlights[ix].clone(),
+                                &format!("{key}#out"),
+                                link_ui.as_ref(),
+                                theme,
+                            ));
                     }
                     if let Some(ChipAffordance { blob_ref, label }) = affordance {
                         let loading = matches!(
@@ -8942,10 +8955,13 @@ fn file_badge_name(path: &str) -> &str {
 /// hunk headers, dual line-number gutters, accent bars, row washes, and
 /// syntax runs — so an inline tool diff is indistinguishable from the
 /// checkout diff sidebar. Output renders as a code block: verbatim mono
-/// lines, indentation intact, counted-tail truncation.
+/// lines, indentation intact, counted-tail truncation; a printed `http(s)`
+/// URL opens like an assistant link (#348). `key` scopes the link ids.
 fn detail_body(
     detail: &ToolDetail,
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
+    key: &str,
+    link: Option<&render::LinkUi>,
     theme: &Theme,
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
@@ -9008,7 +9024,14 @@ fn detail_body(
             .py(px(6.0))
             .font_family(theme.font_mono.clone())
             .text_size(px(TOOL_TEXT_SIZE))
-            .children(lines.iter().map(|line| {
+            .children(lines.iter().enumerate().map(|(ix, line)| {
+                let text = render::autolinked_text(
+                    format!("{key}:{ix}").into(),
+                    line.clone(),
+                    link.cloned(),
+                    theme,
+                )
+                .unwrap_or_else(|| line.clone().into_any_element());
                 div()
                     .h(px(OUTPUT_LINE_HEIGHT))
                     .w_full()
@@ -9016,7 +9039,7 @@ fn detail_body(
                     .flex()
                     .items_center()
                     .text_color(theme.text_faint)
-                    .child(div().w_full().min_w_0().truncate().child(line.clone()))
+                    .child(div().w_full().min_w_0().truncate().child(text))
             }))
             .when(*truncated_by > 0, |block| {
                 block.child(more_lines_row(*truncated_by, theme))
@@ -10120,6 +10143,65 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn a_url_printed_in_tool_output_opens_through_the_transcript_link(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Output {
+            activated: Rc<RefCell<Vec<render::LinkActivation>>>,
+        }
+        impl Render for Output {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let activated = self.activated.clone();
+                let link = render::LinkUi {
+                    source_session: Some("chat".into()),
+                    handler: Rc::new(move |activation, _, _| {
+                        activated.borrow_mut().push(activation.clone());
+                        render::LinkOutcome::Rejected
+                    }),
+                };
+                let detail = ToolDetail::Output {
+                    lines: vec![
+                        "https://example.com/review/123".into(),
+                        "  plain line".into(),
+                    ],
+                    truncated_by: 0,
+                };
+                div()
+                    .debug_selector(|| "tool-output".into())
+                    .w(px(480.0))
+                    .child(detail_body(
+                        &detail,
+                        None,
+                        "row#out",
+                        Some(&link),
+                        &Theme::of(cx).clone(),
+                    ))
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let activated = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|_, _| Output {
+            activated: activated.clone(),
+        });
+        let bounds = cx.debug_bounds("tool-output").unwrap();
+        // The body's top padding, then the middle of the first line, a few
+        // pixels into the URL that starts it.
+        let first_line = gpui::point(
+            bounds.left() + px(6.0),
+            bounds.top() + px(6.0 + OUTPUT_LINE_HEIGHT / 2.0),
+        );
+        cx.simulate_click(first_line, gpui::Modifiers::default());
+        let seen = activated.borrow();
+        assert_eq!(seen.len(), 1, "one activation");
+        assert_eq!(seen[0].target.original, "https://example.com/review/123");
+        assert_eq!(seen[0].action, render::LinkAction::Primary);
+        assert_eq!(seen[0].source_session.as_deref(), Some("chat"));
+    }
 
     #[test]
     fn side_gutters_narrow_with_the_pane() {
