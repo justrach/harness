@@ -2445,3 +2445,27 @@ async fn http_repairs_socket_gap_without_clearing_a_newer_gap() {
     assert_eq!(client.stats().cursor, 4);
     client.shutdown().await;
 }
+
+#[test]
+fn quota_rejections_back_off_to_the_window_with_jitter() {
+    // #344: a device over its quota re-pushed every 5 s for hours.
+    for (strikes, base) in [
+        (0, 5),
+        (1, 10),
+        (2, 20),
+        (3, 40),
+        (4, 60),
+        (5, 60),
+        (40, 60),
+    ] {
+        let base = Duration::from_secs(base);
+        for _ in 0..50 {
+            let delay = quota_retry_delay(strikes);
+            assert!(
+                delay >= base && delay <= base + base / 4,
+                "{strikes} strikes: {delay:?} outside {base:?}..={:?}",
+                base + base / 4
+            );
+        }
+    }
+}

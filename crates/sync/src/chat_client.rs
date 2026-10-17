@@ -51,6 +51,9 @@ const CHECKPOINT_FETCH_DEADLINE: Duration = Duration::from_secs(300);
 /// Re-push cadence after a `quota` rejection (server window is 60 s; pending
 /// batches must not wait for the next enqueue/probe to retry).
 const QUOTA_RETRY: Duration = Duration::from_secs(5);
+/// The server's per-device push window (`chat-room.ts`): no quota backoff
+/// needs to wait longer than one window.
+const QUOTA_WINDOW: Duration = Duration::from_secs(60);
 /// Client-side push cap: the DO's per-row cap (`chat-log.ts MAX_ROW_BYTES`,
 /// 1 MiB) minus frame-overhead headroom. The headroom matters: the runtime
 /// closes WS messages at 1 MiB BEFORE the DO runs, so a payload within a
@@ -289,6 +292,9 @@ struct Shared {
     /// past N≈25), and each ack immediately re-arms the clock until the
     /// queue empties.
     quota_blocked: bool,
+    /// `quota` rejections since the last ack: the head probe backs off
+    /// ([`quota_retry_delay`]) instead of retrying on a fixed 5 s clock.
+    quota_strikes: u32,
     /// A row/ack arrived with `seq > cursor + 1`: rows exist that this
     /// client never received (live broadcast outran the backfill — the
     /// mid-join race). The cursor must NOT skip the hole (skipped rows'
@@ -437,6 +443,17 @@ pub struct ChatStatsSnapshot {
     /// Times a hello found the server behind our cursor (room reset/wiped).
     /// Nonzero means the host owes the room a re-seed checkpoint.
     pub server_resets: u64,
+}
+
+/// Delay before the next head probe after `strikes` consecutive `quota`
+/// rejections: [`QUOTA_RETRY`], doubling up to [`QUOTA_WINDOW`], plus up to a
+/// quarter of it as jitter. A device over its quota stopped retrying every
+/// 5 s for hours (#344); an ack resets the strikes.
+fn quota_retry_delay(strikes: u32) -> Duration {
+    let base = QUOTA_RETRY
+        .saturating_mul(1 << strikes.min(5))
+        .min(QUOTA_WINDOW);
+    base + retry_jitter(base / 4)
 }
 
 fn retry_jitter(max: Duration) -> Duration {
@@ -1797,6 +1814,8 @@ impl Actor {
                 let mut shared = lock(&self.shared);
                 if self.sink.acknowledge_update(&ack.batch_id).is_ok() {
                     shared.pending.retain(|p| p.batch_id != ack.batch_id);
+                    // The server took a push: the quota window has room again.
+                    shared.quota_strikes = 0;
                 } else {
                     shared.retry_at = Some(tokio::time::Instant::now() + QUOTA_RETRY);
                 }
@@ -1880,11 +1899,14 @@ impl Actor {
                         }
                     }
                     // Transient: the quota window passes on its own — keep
-                    // the batch queued and head-probe on a short clock.
+                    // the batch queued and head-probe, backing off while the
+                    // server keeps refusing.
                     "quota" => {
                         let mut shared = lock(&self.shared);
                         shared.quota_blocked = true;
-                        shared.retry_at = Some(tokio::time::Instant::now() + QUOTA_RETRY);
+                        let delay = quota_retry_delay(shared.quota_strikes);
+                        shared.quota_strikes = shared.quota_strikes.saturating_add(1);
+                        shared.retry_at = Some(tokio::time::Instant::now() + delay);
                     }
                     _ => {}
                 }
