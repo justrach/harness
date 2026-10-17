@@ -125,11 +125,21 @@ impl Shell {
                     )
                 })
             };
-            if let Some((last, layout, tabs)) = restore {
+            if let Some((mut last, mut layout, tabs)) = restore {
                 // The active tab's own layout is the one restored below.
-                if let Some((tabs, active)) = tabs {
-                    self.chat_tabs = tabs;
-                    self.chat_tab = active;
+                if let Some(restored) = tabs {
+                    if restored.tabs.len() >= 2 {
+                        self.chat_tabs = restored.tabs;
+                        self.chat_tab = restored.active;
+                    }
+                    // The saved active tab was empty and dropped: its live
+                    // chat and layout go with it, and the tab that took its
+                    // place loads as the live one.
+                    if let Some(tab) = restored.replace_live {
+                        last = tab.selected;
+                        layout = tab.split;
+                        self.set_space_filter(tab.project, cx);
+                    }
                 }
                 let restored_layout = layout.is_some();
                 self.chat_split = layout;

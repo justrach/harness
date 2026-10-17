@@ -158,3 +158,52 @@ fn sidebar_single_tab_header_survives_split_and_tab_closure(cx: &mut TestAppCont
     });
     assert_single_header(&shell, cx, "First chat");
 }
+
+#[gpui::test]
+fn tab_row_close_button_closes_that_tab(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = setup(cx, dir.path());
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.new_chat_tab(Some("second".into()), window, cx);
+            shell.new_chat_tab(None, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.chat_tab, 2);
+        assert_eq!(
+            shell.chat_tab_labels(cx),
+            vec![
+                SharedString::from("First chat"),
+                "Second chat".into(),
+                "New session".into()
+            ]
+        );
+    });
+    // The ✕ on a parked tab closes that tab; the lit tab stays lit.
+    let close = cx.debug_bounds("chat-tab-close-0").unwrap();
+    cx.simulate_click(close.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.chat_tab, 1);
+        assert_eq!(shell.state.read(cx).selected_chat, None);
+        assert_eq!(
+            shell.chat_tab_labels(cx),
+            vec![SharedString::from("Second chat"), "New session".into()]
+        );
+    });
+    // Closing the lit tab hands off to the last visited one, back to one tab.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            assert!(shell.close_chat_tab_at(1, window, cx))
+        });
+    });
+    assert_single_header(&shell, cx, "Second chat");
+    // A lone tab has nothing to close.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            assert!(!shell.close_chat_tab_at(0, window, cx))
+        });
+    });
+}
