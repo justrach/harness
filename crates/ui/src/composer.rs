@@ -1827,6 +1827,10 @@ pub enum ComposerInputEvent {
     CursorMoved,
     ViewportChanged,
     MentionNavigate(isize),
+    /// Up at the very start / Down at the very end, or either while a
+    /// recalled prompt is shown unedited: step through the session's earlier
+    /// prompts (-1 older, 1 newer). Only from inputs with prompt history.
+    HistoryNavigate(isize),
     MentionAccept,
     MentionDismiss,
     /// Images pasted from the clipboard (screenshots / copied image data) —
@@ -1951,6 +1955,11 @@ pub struct ComposerInput {
     /// mention token is active, keeping input focus and native text editing.
     mention_open: bool,
     mention_has_selection: bool,
+    /// The message composer recalls earlier prompts with Up/Down.
+    prompt_history: bool,
+    /// The recalled prompt on screen. While the text still equals it, Up and
+    /// Down keep stepping through history from any caret position.
+    history_entry: Option<String>,
     /// Last prepainted chip bounds; the paint-phase pointer listener uses
     /// these instead of attempting to infer text geometry from the cursor.
     mention_hits: Vec<MentionHit>,
@@ -2033,6 +2042,8 @@ impl ComposerInput {
             last_edit: None,
             mention_open: false,
             mention_has_selection: false,
+            prompt_history: false,
+            history_entry: None,
             mention_hits: Vec::new(),
             mention_tooltip: MentionTooltipPhase::Hidden,
             mention_tooltip_generation: 0,
@@ -2121,6 +2132,33 @@ impl ComposerInput {
     fn enable_mentions(&mut self) {
         self.mentions_enabled = true;
         self.refresh_projection();
+    }
+
+    fn enable_prompt_history(&mut self) {
+        self.prompt_history = true;
+    }
+
+    /// Show a recalled prompt, or (`recalled == false`) the restored draft.
+    fn show_history_entry(&mut self, text: String, recalled: bool, cx: &mut Context<Self>) {
+        self.set_text(text, cx);
+        self.history_entry = recalled.then(|| self.content.clone());
+    }
+
+    /// Whether this Up (`-1`) or Down (`1`) steps through prompt history
+    /// instead of moving the caret. At the start or end there is nowhere
+    /// left to move, so ordinary editing never loses a keypress to it.
+    fn history_step(&self, delta: isize) -> bool {
+        if !self.prompt_history || !self.selected_range.is_empty() || self.marked_range.is_some() {
+            return false;
+        }
+        if self.history_entry.as_deref() == Some(self.content.as_str()) {
+            return true;
+        }
+        if delta < 0 {
+            self.cursor_offset() == 0
+        } else {
+            self.cursor_offset() == self.content.len()
+        }
     }
 
     fn editing_source_range(&self) -> Range<usize> {
@@ -2332,6 +2370,8 @@ impl ComposerInput {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.last_edit = None;
+        // A new document (sent, draft swapped) ends any prompt recall.
+        self.history_entry = None;
         self.reset_blink();
         self.needs_measure = true;
         cx.emit(ComposerInputEvent::Edited);
@@ -2732,6 +2772,10 @@ impl ComposerInput {
             cx.emit(ComposerInputEvent::MentionNavigate(-1));
             return;
         }
+        if self.history_step(-1) {
+            cx.emit(ComposerInputEvent::HistoryNavigate(-1));
+            return;
+        }
         if let Some((ix, affinity, column)) = self.vertical_target(-1.0) {
             self.move_to(ix, cx);
             self.caret_affinity = affinity;
@@ -2742,6 +2786,10 @@ impl ComposerInput {
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         if self.mention_has_selection {
             cx.emit(ComposerInputEvent::MentionNavigate(1));
+            return;
+        }
+        if self.history_step(1) {
+            cx.emit(ComposerInputEvent::HistoryNavigate(1));
             return;
         }
         if let Some((ix, affinity, column)) = self.vertical_target(1.0) {
@@ -5419,6 +5467,37 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
     }
 }
 
+/// Where Up/Down prompt recall stands: `back` prompts behind the newest.
+struct PromptHistoryNav {
+    back: usize,
+    draft: String,
+}
+
+/// The session's sent prompts, oldest first: user rows' text without
+/// attachment references, skipping attachment-only sends and repeats.
+fn session_prompts(transcript: &[SessionMessageEntry]) -> Vec<String> {
+    let mut prompts: Vec<String> = Vec::new();
+    for entry in transcript
+        .iter()
+        .filter(|entry| entry.role == MessageRole::User)
+    {
+        let raw = entry
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let text = attachments::parse_user_message_images(&raw).text;
+        if !text.trim().is_empty() && prompts.last() != Some(&text) {
+            prompts.push(text);
+        }
+    }
+    prompts
+}
+
 pub struct Composer {
     pub(crate) state: Entity<AppState>,
     pub(crate) input: Entity<ComposerInput>,
@@ -5463,6 +5542,9 @@ pub struct Composer {
     /// they never show at once (mutually exclusive by token shape).
     popup_bar: crate::popover::MenuScrollbarState,
     pub(crate) current_key: String,
+    /// Up/Down prompt recall (#347): the entry shown, counted back from the
+    /// newest prompt, and the unsent draft to restore past the newest.
+    prompt_history: Option<PromptHistoryNav>,
     sending: bool,
     /// Armed immediately before a blank-canvas send selects its minted chat.
     /// The state observer consumes it to distinguish that handoff from normal
@@ -5651,6 +5733,7 @@ impl Composer {
             let mut input =
                 ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
             input.enable_mentions();
+            input.enable_prompt_history();
             input
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
@@ -5686,6 +5769,7 @@ impl Composer {
                     this.move_mention(*delta, cx)
                 }
             }
+            ComposerInputEvent::HistoryNavigate(delta) => this.navigate_prompt_history(*delta, cx),
             ComposerInputEvent::MentionAccept => {
                 if this.slash.token.is_some() {
                     this.accept_slash(cx)
@@ -5739,6 +5823,7 @@ impl Composer {
             mention_scroll: gpui::ScrollHandle::new(),
             popup_bar: crate::popover::MenuScrollbarState::default(),
             current_key,
+            prompt_history: None,
             sending: false,
             launching_new_chat: false,
             failure: None,
@@ -7809,7 +7894,13 @@ impl Composer {
             // A question temporarily borrows the editor. Its answer must never
             // replace the ordinary chat draft saved when the panel opened.
             if self.wizard.is_none() {
-                let old_text = self.input.read(cx).text().to_string();
+                let mut old_text = self.input.read(cx).text().to_string();
+                // Leaving mid-recall keeps the real draft, not the recalled prompt.
+                if let Some(nav) = self.prompt_history.take()
+                    && self.input.read(cx).history_entry.as_deref() == Some(old_text.as_str())
+                {
+                    old_text = nav.draft;
+                }
                 if old_text.is_empty() {
                     self.drafts.remove(&self.current_key);
                 } else {
@@ -8013,6 +8104,51 @@ impl Composer {
         self.failure = None;
         self.failure_key = None;
         cx.emit(ComposerEvent::WorkspaceCommand(command));
+        cx.notify();
+    }
+
+    /// Up (`-1`) / Down (`1`) through this session's earlier prompts. The
+    /// transcript is the history, so it survives reopening the session and
+    /// never mixes sessions. Past the newest prompt the unsent draft returns.
+    fn navigate_prompt_history(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.wizard.is_some() || self.queue_edit_draft.is_some() {
+            return;
+        }
+        // `set_text` (a send, a draft swap) ends recall inside the input.
+        if self.input.read(cx).history_entry.is_none() {
+            self.prompt_history = None;
+        }
+        let prompts = session_prompts(&self.state.read(cx).transcript);
+        let next = match (&self.prompt_history, delta < 0) {
+            (None, true) if !prompts.is_empty() => {
+                self.prompt_history = Some(PromptHistoryNav {
+                    back: 0,
+                    draft: self.input.read(cx).text().to_string(),
+                });
+                Some(0)
+            }
+            (Some(nav), true) if nav.back + 1 < prompts.len() => Some(nav.back + 1),
+            (Some(nav), false) if nav.back > 0 => Some(nav.back - 1),
+            (Some(_), false) => None,
+            _ => return,
+        };
+        let (text, recalled) = match next {
+            Some(back) => {
+                if let Some(nav) = self.prompt_history.as_mut() {
+                    nav.back = back;
+                }
+                (prompts[prompts.len() - 1 - back].clone(), true)
+            }
+            None => (
+                self.prompt_history
+                    .take()
+                    .map(|nav| nav.draft)
+                    .unwrap_or_default(),
+                false,
+            ),
+        };
+        self.input
+            .update(cx, |input, cx| input.show_history_entry(text, recalled, cx));
         cx.notify();
     }
 
@@ -12333,6 +12469,91 @@ mod tests {
                 }
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn up_and_down_recall_this_sessions_prompts_and_restore_the_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let entry = |id: &str, role: MessageRole, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::app_menus::init(cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.transcript = vec![
+                entry("u1", MessageRole::User, "first prompt"),
+                entry("a1", MessageRole::Assistant, "reply"),
+                entry("u2", MessageRole::User, "second\nprompt"),
+                entry("u3", MessageRole::User, "second\nprompt"),
+            ];
+        });
+        let window = cx.add_window(|_, cx| Composer::new(state.clone(), cx));
+        let key = |cx: &mut gpui::TestAppContext, up: bool| {
+            window
+                .update(cx, |composer, window, cx| {
+                    composer.input.update(cx, |input, cx| {
+                        if up {
+                            input.up(&Up, window, cx)
+                        } else {
+                            input.down(&Down, window, cx)
+                        }
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .read_with(cx, |composer, cx| {
+                    composer.input.read(cx).text().to_string()
+                })
+                .unwrap()
+        };
+        window
+            .update(cx, |composer, _, cx| {
+                composer.input.update(cx, |input, cx| {
+                    input.set_text("my draft", cx);
+                    input.move_to(3, cx);
+                })
+            })
+            .unwrap();
+        // Mid-text, Up only moves the caret (to the start of the line).
+        assert_eq!(key(cx, true), "my draft");
+        // At the start it recalls; repeats collapse, assistant rows don't count.
+        assert_eq!(key(cx, true), "second\nprompt");
+        // An unedited recall keeps stepping, even with the caret at its end.
+        assert_eq!(key(cx, true), "first prompt");
+        assert_eq!(key(cx, true), "first prompt", "nothing older");
+        assert_eq!(key(cx, false), "second\nprompt");
+        assert_eq!(
+            key(cx, false),
+            "my draft",
+            "past the newest, the draft returns"
+        );
+        // Back to ordinary editing: Down at the end does nothing more.
+        assert_eq!(key(cx, false), "my draft");
     }
 
     #[gpui::test]

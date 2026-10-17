@@ -872,6 +872,7 @@ impl Pickers {
             }
             // Pasted images/files don't apply to a search box.
             ComposerInputEvent::PastedImages(_)
+            | ComposerInputEvent::HistoryNavigate(_)
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::CursorMoved
