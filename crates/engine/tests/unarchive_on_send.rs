@@ -159,6 +159,16 @@ async fn sending_a_message_unarchives_the_chat() {
         .expect("archive chat");
     assert!(archived(&core), "precondition: chat is archived");
 
+    // Reference viewing and explicit restoration are distinct from sending.
+    let reference = core.doc_host.open(CHAT).expect("open archived reference");
+    reference.doc().read_entries().expect("read archived reference");
+    assert!(archived(&core), "opening a reference must leave it archived");
+    core.workspace.set_chat_archived(CHAT, false).unwrap();
+    assert!(!archived(&core), "explicit Unarchive needs no prompt");
+    core.workspace.set_chat_archived(CHAT, true).unwrap();
+
+    // Capture an older close intent, but delay its RPC until after acceptance.
+    let close_at = chrono::Utc::now().timestamp_millis();
     // A Run command (the composer's send) revives the row synchronously.
     core.doc_host
         .queue_command(CHAT, run_payload("msg-ua-1"))
@@ -168,6 +178,11 @@ async fn sending_a_message_unarchives_the_chat() {
         "sending a message must unarchive the chat"
     );
     wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
+    client.call(harness_rpc::methods::MUTATE, serde_json::json!({
+        "op": "setChatArchived", "chatId": CHAT, "archived": true,
+        "archiveRequestedAt": close_at,
+    })).await.expect("delayed close archive");
+    assert!(!archived(&core), "an older close request must not override the new prompt");
 
     // A non-message command must NOT revive it.
     core.workspace

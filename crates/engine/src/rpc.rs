@@ -617,7 +617,13 @@ enum MutateParams {
     #[serde(rename_all = "camelCase")]
     SetChatHost { chat_id: String, device_id: String },
     #[serde(rename_all = "camelCase")]
-    SetChatArchived { chat_id: String, archived: bool },
+    SetChatArchived {
+        chat_id: String,
+        archived: bool,
+        /// Automatic close requests retain their intent time across RPC delay.
+        #[serde(default)]
+        archive_requested_at: Option<i64>,
+    },
     /// Change one pin without replacing another device's edits.
     #[serde(rename_all = "camelCase")]
     ChangeSidebarPin {
@@ -1103,11 +1109,12 @@ impl EngineRpc {
                 .set_chat_host(&chat_id, &device_id)
                 .map_err(failed)
                 .map(drop),
-            MutateParams::SetChatArchived { chat_id, archived } => self
-                .workspace
-                .set_chat_archived(&chat_id, archived)
-                .map_err(failed)
-                .map(drop),
+            MutateParams::SetChatArchived { chat_id, archived, archive_requested_at } => {
+                match archive_requested_at.filter(|_| archived) {
+                    Some(at) => self.workspace.archive_chat_at(&chat_id, at),
+                    None => self.workspace.set_chat_archived(&chat_id, archived),
+                }.map_err(failed).map(drop)
+            }
             MutateParams::ChangeSidebarPin { change } => {
                 self.workspace.change_sidebar_pin(&change).map_err(failed)
             }

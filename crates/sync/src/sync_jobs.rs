@@ -31,6 +31,37 @@ impl DocsStore {
         })
     }
 
+    /// Durable local work with a small, opaque receipt in the existing cursor.
+    pub fn schedule_sync_job_with_cursor(
+        &self,
+        doc: &str,
+        kind: &str,
+        cursor: &str,
+    ) -> Result<(), StoreError> {
+        store_blocking(|| {
+            let mut conn = self.conn();
+            let tx = conn.transaction()?;
+            tx.execute("UPDATE sync_job_clock SET value=value+1 WHERE id=1", [])?;
+            tx.execute(
+                "INSERT INTO chat_sync_jobs(doc_id,kind,version,cursor) SELECT ?1,?2,value,?3 FROM sync_job_clock WHERE id=1
+                 ON CONFLICT(doc_id,kind) DO UPDATE SET version=excluded.version,cursor=excluded.cursor",
+                params![doc, kind, cursor],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn sync_job(&self, doc: &str, kind: &str) -> Result<Option<(i64, String)>, StoreError> {
+        store_blocking(|| {
+            Ok(self.conn().query_row(
+                "SELECT version,cursor FROM chat_sync_jobs WHERE doc_id=?1 AND kind=?2",
+                params![doc, kind],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional()?)
+        })
+    }
+
     pub fn reconciliation_progress(&self) -> Result<Option<(i64, String)>, StoreError> {
         store_blocking(|| {
             Ok(self.conn().query_row(
@@ -133,6 +164,24 @@ impl DocsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipts_survive_restart_and_stale_completion_preserves_newer_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = {
+            let store = DocsStore::open(dir.path()).unwrap();
+            store.schedule_sync_job_with_cursor("submission", "prompt-restore", "staged").unwrap();
+            store.sync_job("submission", "prompt-restore").unwrap().unwrap().0
+        };
+        let store = DocsStore::open(dir.path()).unwrap();
+        assert_eq!(store.sync_job("submission", "prompt-restore").unwrap(), Some((version, "staged".into())));
+        store.schedule_sync_job_with_cursor("submission", "prompt-restore", "accepted").unwrap();
+        store.complete_sync_job("submission", "prompt-restore", version).unwrap();
+        let (newer, receipt) = store.sync_job("submission", "prompt-restore").unwrap().unwrap();
+        assert!(newer > version);
+        assert_eq!(receipt, "accepted");
+    }
+
     #[test]
     fn reconciliation_resumes_and_new_requests_fence_old_completion() {
         let dir = tempfile::tempdir().unwrap();

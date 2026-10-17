@@ -1122,6 +1122,23 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_appearance(appearance))?)
     }
 
+    pub(crate) fn archive_chat_at(&self, chat_id: &str, requested_at_ms: i64) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| doc.archive_chat_at(chat_id, requested_at_ms))?)
+    }
+
+    pub(crate) fn chat_prompt_clock(&self, chat_id: &str) -> String {
+        self.mutate(|doc| doc.chat_prompt_clock(chat_id))
+    }
+
+    /// Persist before the caller retires its durable restoration receipt.
+    pub(crate) fn restore_chat_on_send(&self, chat_id: &str, clock: &str) -> Result<bool, EngineError> {
+        let restored = self.mutate(|doc| doc.restore_chat_on_send(chat_id, clock))?;
+        if restored {
+            self.inner.persist_snapshot()?;
+        }
+        Ok(restored)
+    }
+
     /// LWW full-config replace on the chat row (harness `SetChatConfig` — the
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.

@@ -16,6 +16,8 @@
 //! another device POSTs a durable nudge to that device's room (§7 cold-chat delivery);
 //! the host's relay receives it and warm-opens the doc, which drains the queue.
 
+mod prompt_restore;
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -241,6 +243,8 @@ struct DocHostInner {
     /// graph only drops once this back-edge is severed.
     sessions: Mutex<Option<SessionsEngine>>,
     workspace: OnceLock<WorkspaceHost>,
+    /// Orders receipt staging, prompt acceptance and restoration retries.
+    prompt_restore: Mutex<()>,
     /// Worktree materialization for Run commands (see `set_repos`).
     repos: OnceLock<crate::repos::Repos>,
     project_action_runtime: OnceLock<(ProjectActionsStore, Terminals)>,
@@ -845,6 +849,7 @@ impl DocHost {
                 config,
                 sessions: Mutex::new(None),
                 workspace: OnceLock::new(),
+                prompt_restore: Mutex::new(()),
                 repos: OnceLock::new(),
                 project_action_runtime: OnceLock::new(),
                 shutdown: CancellationToken::new(),
@@ -1668,6 +1673,7 @@ impl DocHost {
             use futures::{StreamExt, stream::FuturesUnordered};
             let mut turn = 0u64;
             let mut disk_cursor = String::new();
+            let mut restore_cursor = String::new();
             // (winner, fairness turn). Reserve a released slot until teardown
             // ends; a disk-page change must not steal it from the winner.
             let mut handoff: Option<(String, bool)> = None;
@@ -1691,6 +1697,7 @@ impl DocHost {
                 }
                 let Some(inner) = weak.upgrade() else { return };
                 let host = Self { inner };
+                host.retry_prompt_restores(&mut restore_cursor);
                 host.evict_over_budget();
                 if host.inner.edge_disconnected.load(Ordering::Acquire) {
                     continue;
@@ -3421,12 +3428,21 @@ impl DocHost {
             status: SessionCommandStatus::Pending,
             resolution: None,
         };
-        handle.doc.queue_command(&entry)?;
-        // Sending a message revives an archived chat: the user is acting in it
-        // again, so the LWW row flips back to active on every device. Best-
-        // effort — the command itself is durable regardless.
-        if is_message {
-            self.unarchive_on_send(chat_id);
+        {
+            let _restore = lock(&self.inner.prompt_restore);
+            // Stage first: if receipt persistence fails, nothing was accepted.
+            let receipt = if is_message {
+                Some(self.stage_prompt_restore(chat_id, &id)?)
+            } else {
+                None
+            };
+            if let Err(error) = handle.doc.queue_command(&entry) {
+                self.cancel_prompt_restore(&id);
+                return Err(error.into());
+            }
+            if let Some(receipt) = receipt {
+                self.accept_prompt_restore(&id, receipt);
+            }
         }
         // §7 durable delivery: when another device hosts this chat, nudge its device
         // room so a cold host opens the doc and drains the queue. Fire-and-forget —
@@ -3435,21 +3451,6 @@ impl DocHost {
         self.nudge_remote_host(chat_id);
         self.spawn_command_delivery(chat_id, entry, transfers);
         Ok(id)
-    }
-
-    /// A send revives an archived chat on every device (best-effort).
-    fn unarchive_on_send(&self, chat_id: &str) {
-        let Some(workspace) = self.workspace() else {
-            return;
-        };
-        match workspace.chat(chat_id) {
-            Ok(Some(chat)) if chat.archived => {
-                if let Err(err) = workspace.set_chat_archived(chat_id, false) {
-                    tracing::warn!(chat = %chat_id, error = %err, "unarchive on send failed");
-                }
-            }
-            _ => {}
-        }
     }
 
     /// Hold a message for later: append it to the doc's queue. Any device may
@@ -3477,7 +3478,9 @@ impl DocHost {
     ) -> Result<String, EngineError> {
         let handle = self.open(chat_id)?;
         let id = new_id();
-        handle.doc.push_queued(&QueuedMessage {
+        let _restore = lock(&self.inner.prompt_restore);
+        let receipt = self.stage_prompt_restore(chat_id, &id)?;
+        if let Err(error) = handle.doc.push_queued(&QueuedMessage {
             id: id.clone(),
             text: text.to_string(),
             attachments,
@@ -3486,10 +3489,12 @@ impl DocHost {
             issued_at: now_ms(),
             edited_at: None,
             delivery_gate: None,
-        })?;
+        }) {
+            self.cancel_prompt_restore(&id);
+            return Err(error.into());
+        }
+        self.accept_prompt_restore(&id, receipt);
         handle.publish_queue();
-        // Same reasoning as a command: the user is acting in this chat again.
-        self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
         Ok(id)
     }

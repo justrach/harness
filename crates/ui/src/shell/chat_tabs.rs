@@ -372,6 +372,7 @@ impl Shell {
             cx.spawn(async move |this, cx| {
                 if let Err(error) = engine.client().call(methods::MUTATE, serde_json::json!({
                     "op": "setChatArchived", "chatId": chat_id, "archived": true,
+                    "archiveRequestedAt": now.timestamp_millis(),
                 })).await {
                     this.update(cx, |shell, cx| {
                         shell.sidebar_notice = Some(format!("Could not archive closed session: {error}").into());
