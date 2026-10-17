@@ -127,7 +127,12 @@ fn newest_candidate(exe: &str, candidates: Vec<PathBuf>) -> Option<PathBuf> {
         .collect();
     let mut best = candidates.first()?.clone();
     if candidates.len() > 1 {
-        let mut version = binary_version(&best);
+        // A slow probe is not a broken binary: macOS scans a freshly updated
+        // CLI on its first run, which can outlast the probe. Keep the
+        // PATH-preferred binary rather than an older install that answers.
+        let Ok(mut version) = probe_binary_version(&best) else {
+            return Some(best);
+        };
         for path in candidates.iter().skip(1) {
             let next = binary_version(path);
             if next.as_ref().is_some_and(|next| {
@@ -198,12 +203,24 @@ pub(crate) fn invalidate_versions(names: &[&str]) {
     }
 }
 
-/// Probe once per executable identity. Failures are cached too, including timeout.
-/// Keep the lock during the short probe so concurrent descriptor requests coalesce.
 pub fn binary_version(path: &Path) -> Option<semver::Version> {
+    probe_binary_version(path).ok().flatten()
+}
+
+/// The probe did not finish in time; the binary may still be fine.
+struct ProbeTimedOut;
+
+/// Probe once per executable identity. Failures are cached too, but a timeout
+/// is retried on the next call: a first run after an update can be slow.
+/// Keep the lock during the short probe so concurrent descriptor requests coalesce.
+fn probe_binary_version(path: &Path) -> Result<Option<semver::Version>, ProbeTimedOut> {
     use std::time::Duration;
-    let canonical = path.canonicalize().ok()?;
-    let metadata = canonical.metadata().ok()?;
+    let Ok(canonical) = path.canonicalize() else {
+        return Ok(None);
+    };
+    let Ok(metadata) = canonical.metadata() else {
+        return Ok(None);
+    };
     let key = (canonical, metadata.modified().ok(), metadata.len());
     let mut cache = VERSION_CACHE
         .get_or_init(Default::default)
@@ -216,10 +233,10 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         .into_owned();
     if let Some((version, aliases)) = cache.get_mut(&key) {
         aliases.insert(alias);
-        return version.clone();
+        return Ok(version.clone());
     }
     #[cfg(not(windows))]
-    let probe = || -> Option<semver::Version> {
+    let probe = || -> Result<Option<semver::Version>, ProbeTimedOut> {
         use std::io::Read;
         use std::process::{Command, Stdio};
         let mut command = Command::new(path);
@@ -233,7 +250,9 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn().ok()?;
+        let Ok(mut child) = command.spawn() else {
+            return Ok(None);
+        };
         fn reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();
@@ -241,18 +260,25 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
                 bytes
             })
         }
-        let readers = [reader(child.stdout.take()?), reader(child.stderr.take()?)];
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            return Ok(None);
+        };
+        let readers = [reader(stdout), reader(stderr)];
         let start = std::time::Instant::now();
-        let success = loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break status.success(),
+                Ok(Some(status)) => break Ok(status.success()),
                 Ok(None) if start.elapsed() < Duration::from_secs(2) => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
-                _ => {
+                waited => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break false;
+                    break if waited.is_ok() {
+                        Err(ProbeTimedOut)
+                    } else {
+                        Ok(false)
+                    };
                 }
             }
         };
@@ -260,8 +286,8 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
         unsafe {
             libc::kill(-(child.id() as i32), libc::SIGKILL);
         }
-        if !success {
-            return None;
+        if !status? {
+            return Ok(None);
         }
         let mut bytes = Vec::new();
         for reader in readers {
@@ -269,49 +295,55 @@ pub fn binary_version(path: &Path) -> Option<semver::Version> {
                 std::thread::sleep(Duration::from_millis(5));
             }
             if !reader.is_finished() {
-                return None;
+                return Err(ProbeTimedOut);
             }
-            bytes.extend(reader.join().ok()?);
+            let Ok(output) = reader.join() else {
+                return Ok(None);
+            };
+            bytes.extend(output);
             bytes.push(b' ');
         }
-        parse_version(&bytes)
+        Ok(parse_version(&bytes))
     };
     #[cfg(windows)]
-    let probe = || -> Option<semver::Version> {
+    let probe = || -> Result<Option<semver::Version>, ProbeTimedOut> {
         let path = path.to_path_buf();
         // Use the native launcher for npm .cmd/.bat shims and job-tree cleanup.
         // A separate runtime is safe even when descriptors run inside Tokio.
         std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .ok()?
-                .block_on(async {
-                    let mut command = crate::process::Command::new(&path);
-                    command
-                        .arg("--version")
-                        .stdin(crate::process::Stdio::null())
-                        .stdout(crate::process::Stdio::piped())
-                        .stderr(crate::process::Stdio::piped())
-                        .kill_on_drop(true);
-                    let output = tokio::time::timeout(Duration::from_secs(2), command.output())
-                        .await
-                        .ok()?
-                        .ok()?;
-                    if !output.status.success() {
-                        return None;
-                    }
-                    parse_version(&output.stdout).or_else(|| parse_version(&output.stderr))
-                })
+            else {
+                return Ok(None);
+            };
+            runtime.block_on(async {
+                let mut command = crate::process::Command::new(&path);
+                command
+                    .arg("--version")
+                    .stdin(crate::process::Stdio::null())
+                    .stdout(crate::process::Stdio::piped())
+                    .stderr(crate::process::Stdio::piped())
+                    .kill_on_drop(true);
+                let Ok(output) = tokio::time::timeout(Duration::from_secs(2), command.output())
+                    .await
+                    .map_err(|_| ProbeTimedOut)?
+                else {
+                    return Ok(None);
+                };
+                if !output.status.success() {
+                    return Ok(None);
+                }
+                Ok(parse_version(&output.stdout).or_else(|| parse_version(&output.stderr)))
+            })
         })
         .join()
-        .ok()
-        .flatten()
+        .unwrap_or(Ok(None))
     };
-    let version = probe();
+    let version = probe()?;
     cache.retain(|(p, _, _), _| p != &key.0);
     cache.insert(key, (version.clone(), [alias].into_iter().collect()));
-    version
+    Ok(version)
 }
 
 fn parse_version(bytes: &[u8]) -> Option<semver::Version> {
@@ -793,6 +825,35 @@ mod tests {
             assert!(started.elapsed() < std::time::Duration::from_secs(3));
             assert_eq!(newest_candidate("codex", vec![path.clone()]), Some(path));
         }
+
+        // A slow first run (macOS scanning a just-updated CLI) keeps the
+        // PATH-preferred binary over an older install, and is not cached.
+        let fresh = dir.path().join("fresh/claude");
+        let old = dir.path().join("old/claude");
+        let marker = dir.path().join("scanned");
+        for (path, body) in [
+            (
+                &fresh,
+                format!(
+                    "[ -e '{0}' ] || {{ touch '{0}'; sleep 30; }}\necho '2.1.299 (Claude Code)'",
+                    marker.display()
+                ),
+            ),
+            (&old, "echo '1.0.51 (Claude Code)'".to_owned()),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            newest_candidate("claude", vec![fresh.clone(), old.clone()]),
+            Some(fresh.clone())
+        );
+        assert_eq!(binary_version(&fresh).unwrap().to_string(), "2.1.299");
+        assert_eq!(
+            newest_candidate("claude", vec![old, fresh.clone()]),
+            Some(fresh)
+        );
     }
 
     fn env(values: &[(&str, OsString)]) -> impl Fn(&str) -> Option<OsString> + use<> {
