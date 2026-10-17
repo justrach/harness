@@ -1112,6 +1112,16 @@ mod tests {
             ),
             InstallKind::Unmanaged
         );
+        // A distro-packaged install (pacman -U → /usr/bin) is not
+        // symlink-managed: updates are report-only.
+        assert_eq!(
+            detect_install_from_for_os(
+                Path::new("/usr/bin/harness"),
+                Some(Path::new("/home/u")),
+                "linux",
+            ),
+            InstallKind::Unmanaged
+        );
     }
 
     #[test]

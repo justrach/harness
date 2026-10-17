@@ -71,6 +71,14 @@ it for in-app updates. See [Windows development](docs/reference/windows-developm
 The Linux sidebar browser needs the
 [browser runtime](docs/reference/linux-browser.md).
 
+### Arch Linux
+
+Download `harness-VERSION-linux-x86_64.pkg.tar.zst` (or `-aarch64`) from
+[Releases](https://github.com/justrach/harness/releases) and install with
+`sudo pacman -U ./harness-VERSION-linux-x86_64.pkg.tar.zst`. A Vulkan driver is
+required for rendering. Pacman installs are never self-updated — reinstall the
+new `.pkg.tar.zst` on each release.
+
 ## CodeGraff
 
 Harness includes a first-class adapter for

@@ -2,6 +2,7 @@ name: release
 
 # Build release artifacts and publish them:
 #   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
+#   - Arch Linux packages (.pkg.tar.zst, x86_64 + aarch64) via scripts/package-arch.sh
 #   - macOS dmg (Apple silicon) via scripts/package-macos.sh
 #   - Windows portable zip (x86_64) via scripts/package-windows.ps1
 # then create a GitHub Release AND upload everything to the
@@ -49,12 +50,40 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: package
-        run: scripts/package-linux.sh
+        run: |
+          scripts/package-linux.sh
+          scripts/package-arch.sh
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ runner.arch }}
-          path: target/package/*.tar.gz
+          path: |
+            target/package/*.tar.gz
+            target/package/*.pkg.tar.zst
           if-no-files-found: error
+
+  # Real pacman install check on the x86_64 package. aarch64 is not covered:
+  # there is no official Arch Linux ARM container image.
+  arch-install-test:
+    needs: linux
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-X64
+      - name: pacman install
+        run: |
+          pacman -Syu --noconfirm
+          pacman -U --noconfirm ./harness-*-linux-x86_64.pkg.tar.zst
+      - name: verify install
+        run: |
+          pacman -Qi harness
+          pacman -Ql harness
+          test -x /usr/bin/harness
+          if ldd /usr/bin/harness | grep 'not found'; then
+            echo "unresolved shared libraries" >&2
+            exit 1
+          fi
 
   # Every platform must build before publishing the release and updater manifest.
   #
@@ -170,7 +199,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.macos.outputs.signed == 'true'
-    needs: [cursor-compatibility, linux, macos, windows]
+    needs: [cursor-compatibility, linux, arch-install-test, macos, windows]
     runs-on: ubuntu-latest
     env:
       # `secrets` is not a valid context in step `if:` expressions — surface
@@ -190,6 +219,7 @@ jobs:
           ver="${GITHUB_REF_NAME#v}"
           ls dist/
           for platform in linux-x86_64.tar.gz linux-aarch64.tar.gz \
+              linux-x86_64.pkg.tar.zst linux-aarch64.pkg.tar.zst \
               windows-x86_64.zip windows-x86_64.exe; do
             test -f "dist/harness-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
