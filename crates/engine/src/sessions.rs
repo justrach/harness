@@ -2369,6 +2369,33 @@ async fn drive_run(
             None => Some(std::time::Duration::from_secs(300)),
         };
     let mut self_continued_turn = false;
+    // A chain of self-continued turns (parks and resumes since the last Done
+    // or steer) is bounded. An agent that keeps streaming without ever ending
+    // its turn otherwise parks at the watchdog, resumes on its next delta and
+    // parks again forever, minting a segment and journal rows each cycle
+    // (#341). Past either cap the session stays parked and further
+    // self-continued output is dropped until a real turn boundary.
+    // `HARNESS_SELF_RESUME_MAX` / `HARNESS_SELF_CHAIN_MAX_MS`; 0 = no cap.
+    let self_resume_cap: Option<u32> = match std::env::var("HARNESS_SELF_RESUME_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        Some(0) => None,
+        Some(max) => Some(max),
+        None => Some(20),
+    };
+    let self_chain_cap: Option<std::time::Duration> =
+        match std::env::var("HARNESS_SELF_CHAIN_MAX_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(0) => None,
+            Some(ms) => Some(std::time::Duration::from_millis(ms)),
+            None => Some(std::time::Duration::from_secs(30 * 60)),
+        };
+    let mut self_resumes: u32 = 0;
+    let mut self_chain_started: Option<tokio::time::Instant> = None;
+    let mut self_chain_capped = false;
     // Spawn chips that have SETTLED (tagged Done seen). Content events for a
     // settled chip with no live sink are dropped — a straggler frame after
     // the freeze must not mint a new doc entry or wedge the transcript back
@@ -3061,6 +3088,23 @@ async fn drive_run(
                         if id == harness_proto::LIVE_PLAN_TOOL_ID || !seen_tools.contains(id)
                 ));
             if self_continued {
+                let chain_started =
+                    *self_chain_started.get_or_insert_with(tokio::time::Instant::now);
+                if self_resume_cap.is_some_and(|cap| self_resumes >= cap)
+                    || self_chain_cap.is_some_and(|cap| chain_started.elapsed() >= cap)
+                {
+                    if !self_chain_capped {
+                        self_chain_capped = true;
+                        tracing::warn!(
+                            chat = %chat_id,
+                            resumes = self_resumes,
+                            chain_secs = chain_started.elapsed().as_secs(),
+                            "self-continued turn chain capped; staying parked until the next prompt"
+                        );
+                    }
+                    continue;
+                }
+                self_resumes += 1;
                 tracing::info!(
                     chat = %chat_id,
                     "parked session resumed by self-continued agent output"
@@ -3218,6 +3262,9 @@ async fn drive_run(
             // A steer boundary means a real prompt owns the turn again — its
             // Done will come; the short self-continued window stands down.
             self_continued_turn = false;
+            self_resumes = 0;
+            self_chain_started = None;
+            self_chain_capped = false;
             if let Err(err) = finish_segment(
                 doc_ref,
                 writer.take(),
@@ -3456,6 +3503,9 @@ async fn drive_run(
                 saw_session_started = true;
                 idle_since = Some(tokio::time::Instant::now());
                 self_continued_turn = false;
+                self_resumes = 0;
+                self_chain_started = None;
+                self_chain_capped = false;
                 inner.set_status_with_completion(
                     &chat_id,
                     SessionStatus::Idle,
