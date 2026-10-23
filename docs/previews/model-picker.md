@@ -11,7 +11,7 @@ cargo run -p harness-ui --example model-picker-fixture \
   --features model-picker-preview,appshots-fixture
 ```
 
-Fixture switches: `--legacy`, `--dark`, `--narrow` (540 × 680), `--large` (7,000 extra models), `--model=openai/gpt-5.4`, and `--output=/tmp/model-picker.png`. An output run saves its rendered window and exits. The normal fixture is interactive at 860 × 680. Example model names and capabilities are synthetic fixtures, not a claim about today's availability.
+Fixture switches: `--legacy`, `--dark`, `--narrow` (540 × 680), `--large` (7,000 extra models), `--model=openai/gpt-5.4`, `--hover=anthropic/claude-sonnet-4.6`, and `--output=/tmp/model-picker.png`. Combine `--model` with `--record=/tmp/picker-frames` to capture native pointer-driven drag and release frames. An output run saves its rendered window and exits. The normal fixture is interactive at 860 × 680. Example model names and capabilities are synthetic fixtures, not a claim about today's availability.
 
 For integration in a separately configured development app, build `cargo build -p harness --features harness-ui/model-picker-preview` and launch with the preview environment variable plus its own `HARNESS_DATA_DIR` and `HARNESS_IPC_PORT`. Do not reuse the production data directory or an already running development instance.
 
@@ -19,7 +19,8 @@ For integration in a separately configured development app, build `cargo build -
 
 - Provider logos appear once per group. Mixed shortlists and search results carry maker logos per row. The model maker supplies the reasoning accent; the detail card separately names the serving route.
 - All live models remain selectable, including unknown/custom providers. Icons and profile metadata are presentation only; they never whitelist model IDs. Unrated models say so and remain in All.
-- Search, arrow navigation, favorites and model shortcuts share the same cached, virtualized rows. Context appears in details, not model rows.
+- Search, arrow navigation, favorites and model shortcuts share the same cached, virtualized rows. The 356px picker opens without a detail pane. A floating card appears beside a hovered row after 180ms (or on explicit keyboard navigation), with 160ms grace to enter the card. It flips sides when there is room and stays within the window on narrow screens. Context appears in that card, not model rows.
+- The separate reasoning screen uses the app's shared type, surfaces, and buttons. A neutral thumb follows the pointer continuously over the provider-colored track, then eases to the nearest supported stop over 150ms. Keyboard changes use the same settling motion; reduced motion snaps immediately.
 - Choosing a model stages it. The second screen offers only its advertised reasoning ladder and model options. Binary ladders say Off/On; an empty ladder has no slider.
 - Back/Escape from reasoning discards the staged selection. Use model applies model, reasoning and options together. A chat's agent stays fixed. Catalog changes are revalidated before applying.
 - Subscription/local routes do not display fictional API charges. Unknown estimates are not zero.
@@ -77,4 +78,4 @@ Additional provider marks use LobeHub Icons 1.98.0, alongside the existing 1.95.
 
 ## Validation
 
-All 59 picker tests pass, including eight preview tests covering staged cancellation, browsing agents without changing run configuration, atomic existing-chat updates, changed catalog capabilities, binary/fixed reasoning, subscription/local cost labels, pointer drag and keyboard changes, reopening All after a shortlist, and all built-in plus custom routes in a 7,000-model catalog. The default UI library also passes `cargo check` with the feature off. Native fixture captures cover light/dark at 860 × 680 and light at 540 × 680; all use synthetic data. Full-app and other-platform verification remain public merge blockers.
+All 61 picker tests pass, including ten preview tests covering staged cancellation, browsing agents without changing run configuration, atomic existing-chat updates, changed catalog capabilities, binary/fixed reasoning, subscription/local cost labels, pointer drag and keyboard changes, hover-card timing and pointer transfer, intermediate slider settling frames and reduced motion, reopening All after a shortlist, and all built-in plus custom routes in a 7,000-model catalog. The default UI library also passes `cargo check` with the feature off. Native fixture captures cover light/dark at 860 × 680 and light at 540 × 680; all use synthetic data. Full-app and other-platform verification remain public merge blockers.

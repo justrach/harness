@@ -3,9 +3,35 @@
 use super::*;
 use crate::icons;
 use gpui::{relative, rgb};
+use gpui_base::ElementExt;
 use gpui_base::slider::{
     Slider, SliderEvent, SliderIndicator, SliderState, SliderThumb, SliderTrack,
 };
+use std::time::{Duration, Instant};
+
+pub(super) const PICKER_WIDTH: f32 = 356.0;
+const DETAIL_WIDTH: f32 = 276.0;
+const SLIDER_SETTLE: Duration = Duration::from_millis(150);
+
+#[derive(Clone, Copy)]
+struct SliderMotion {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+impl SliderMotion {
+    fn position(self, now: Instant, reduced: bool) -> f32 {
+        if reduced {
+            return self.to;
+        }
+        let progress =
+            now.saturating_duration_since(self.started).as_secs_f32() / SLIDER_SETTLE.as_secs_f32();
+        self.from + (self.to - self.from) * motion::EASE_OUT_EXPO.eval(progress.clamp(0.0, 1.0))
+    }
+    fn active(self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) < SLIDER_SETTLE
+    }
+}
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum TaskKind {
@@ -59,6 +85,15 @@ pub(super) struct Preview {
     category: TaskKind,
     slider: Option<Entity<SliderState>>,
     slider_events: Option<Subscription>,
+    slider_observer: Option<Subscription>,
+    slider_motion: Option<SliderMotion>,
+    slider_dragging: bool,
+    detail: Option<usize>,
+    detail_hovered: bool,
+    hover_target: Option<usize>,
+    detail_task: Option<gpui::Task<()>>,
+    pub detail_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    row_bounds: std::collections::HashMap<usize, gpui::Bounds<gpui::Pixels>>,
     error: Option<String>,
 }
 impl Default for Preview {
@@ -71,6 +106,15 @@ impl Default for Preview {
             category: TaskKind::All,
             slider: None,
             slider_events: None,
+            slider_observer: None,
+            slider_motion: None,
+            slider_dragging: false,
+            detail: None,
+            detail_hovered: false,
+            hover_target: None,
+            detail_task: None,
+            detail_bounds: None,
+            row_bounds: Default::default(),
             error: None,
         }
     }
@@ -81,8 +125,27 @@ impl Preview {
         self.pending = None;
         self.slider = None;
         self.slider_events = None;
+        self.slider_observer = None;
+        self.slider_motion = None;
+        self.slider_dragging = false;
+        self.hide_detail();
         self.category = TaskKind::All;
         self.error = None;
+    }
+    pub(super) fn hide_detail(&mut self) {
+        self.detail = None;
+        self.detail_hovered = false;
+        self.hover_target = None;
+        self.detail_task = None;
+        self.detail_bounds = None;
+    }
+    pub fn preferred_height(&self) -> f32 {
+        self.pending.as_ref().map_or(480.0, |p| {
+            (380.0 + p.model.options.len() as f32 * 60.0).min(480.0)
+        })
+    }
+    pub fn animating(&self, reduced: bool) -> bool {
+        !reduced && self.slider_motion.is_some_and(|m| m.active(Instant::now()))
     }
 }
 
@@ -298,6 +361,8 @@ impl Pickers {
         }
     }
     pub(super) fn preview_reset_rows(&mut self, cx: &mut Context<Self>) {
+        self.preview.hide_detail();
+        self.preview.row_bounds.clear();
         *self.model_rows_cache.borrow_mut() = None;
         self.active = 0;
         self.model_scroll_base().set_offset(gpui::Point::default());
@@ -427,25 +492,62 @@ impl Pickers {
                 .step(1.0)
                 .default_value(index as f32)
         });
-        self.preview.slider_events = Some(cx.subscribe(&slider, |this, _, event, cx| {
-            if let SliderEvent::Change(value) = event
-                && let Some(p) = &mut this.preview.pending
-            {
-                p.reasoning = p
-                    .model
-                    .reasoning_levels
-                    .get(value.end().round() as usize)
-                    .copied();
-                cx.notify();
-            }
-        }));
-        self.preview.slider = Some(slider);
         self.preview.pending = Some(Pending {
             harness: row.harness,
             model: row.model,
             reasoning,
             options,
         });
+        self.preview.hide_detail();
+        self.preview.slider_motion = None;
+        self.preview.slider_dragging = false;
+        self.preview.slider_events = Some(cx.subscribe(&slider, |this, slider, event, cx| {
+            let Some(p) = &mut this.preview.pending else {
+                return;
+            };
+            let value = match event {
+                SliderEvent::Change(value) | SliderEvent::Release(value) => *value,
+            };
+            p.reasoning = p
+                .model
+                .reasoning_levels
+                .get(value.end().round() as usize)
+                .copied();
+            let target = value.end().round()
+                / p.model.reasoning_levels.len().saturating_sub(1).max(1) as f32;
+            match event {
+                SliderEvent::Change(_) => {
+                    this.preview.slider_dragging = true;
+                    this.preview.slider_motion = None;
+                }
+                SliderEvent::Release(_) => {
+                    this.preview.slider_dragging = false;
+                    this.preview.slider_motion = Some(SliderMotion {
+                        from: slider.read(cx).percentage().end,
+                        to: target,
+                        started: Instant::now(),
+                    });
+                }
+            }
+            cx.notify();
+        }));
+        // The shared slider's accessibility actions call set_value, not Change.
+        self.preview.slider_observer = Some(cx.observe(&slider, |this, slider, cx| {
+            let Some(p) = &mut this.preview.pending else {
+                return;
+            };
+            let level = p
+                .model
+                .reasoning_levels
+                .get(slider.read(cx).value().end().round() as usize)
+                .copied();
+            if p.reasoning != level {
+                p.reasoning = level;
+                this.preview.slider_motion = None;
+                cx.notify();
+            }
+        }));
+        self.preview.slider = Some(slider);
         self.preview.error = None;
         self.focus_on_mount = true;
         cx.notify();
@@ -490,12 +592,52 @@ impl Pickers {
         self.preview.pending = None;
         self.preview.slider = None;
         self.preview.slider_events = None;
+        self.preview.slider_observer = None;
+        self.preview.slider_motion = None;
+        self.preview.slider_dragging = false;
         self.preview.error = None;
         self.focus_on_mount = true;
         cx.notify();
     }
-    pub(super) fn preview_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+    pub(super) fn preview_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.open_kind() != Some(PickerKind::HarnessModel) {
+            return false;
+        }
         if self.preview.pending.is_none() {
+            // Details stay absent on open; keyboard navigation is an explicit preview.
+            if matches!(event.keystroke.key.as_str(), "up" | "down") {
+                let delta = if event.keystroke.key == "up" { -1 } else { 1 };
+                let rows = self.model_rows(cx);
+                let eligible: Vec<usize> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.header.is_none())
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(position) = eligible.iter().position(|i| *i == self.active) {
+                    let next =
+                        (position as isize + delta).rem_euclid(eligible.len() as isize) as usize;
+                    self.active = eligible[next];
+                    self.model_scroll
+                        .scroll_to_item(self.active, gpui::ScrollStrategy::Top);
+                    self.preview.detail_task = None;
+                    self.preview.detail = Some(self.active);
+                    cx.notify();
+                    cx.stop_propagation();
+                    return true;
+                }
+            }
+            if event.keystroke.key == "escape" && self.preview.detail.is_some() {
+                self.preview.hide_detail();
+                cx.notify();
+                cx.stop_propagation();
+                return true;
+            }
             return false;
         }
         match event.keystroke.key.as_str() {
@@ -517,28 +659,21 @@ impl Pickers {
                         _ => (current + 1).min(levels.len() - 1),
                     };
                     p.reasoning = Some(levels[index]);
-                    // Recreate state to keep thumb and keyboard selection in sync without a Window.
-                    self.preview.slider = Some(cx.new(|_| {
-                        SliderState::new()
-                            .min(0.0)
-                            .max(levels.len().saturating_sub(1).max(1) as f32)
-                            .step(1.0)
-                            .default_value(index as f32)
-                    }));
-                    let slider = self.preview.slider.as_ref().unwrap().clone();
-                    self.preview.slider_events =
-                        Some(cx.subscribe(&slider, |this, _, event, cx| {
-                            if let SliderEvent::Change(v) = event
-                                && let Some(p) = &mut this.preview.pending
-                            {
-                                p.reasoning = p
-                                    .model
-                                    .reasoning_levels
-                                    .get(v.end().round() as usize)
-                                    .copied();
-                                cx.notify();
-                            }
-                        }));
+                    if let Some(slider) = &self.preview.slider {
+                        let now = Instant::now();
+                        let from = self
+                            .preview
+                            .slider_motion
+                            .map(|m| m.position(now, cx.reduce_motion()))
+                            .unwrap_or(slider.read(cx).percentage().end);
+                        slider.update(cx, |slider, cx| slider.set_value(index as f32, window, cx));
+                        self.preview.slider_motion = Some(SliderMotion {
+                            from,
+                            to: index as f32 / levels.len().saturating_sub(1).max(1) as f32,
+                            started: now,
+                        });
+                        self.preview.slider_dragging = false;
+                    }
                 }
             }
             // Don't let model-slot or agent-tab shortcuts affect a pending choice.
@@ -550,15 +685,58 @@ impl Pickers {
         cx.notify();
         true
     }
+    fn preview_hover_row(&mut self, index: usize, entered: bool, cx: &mut Context<Self>) {
+        if entered {
+            self.active = index;
+            self.preview.hover_target = Some(index);
+            let delay = if self.preview.detail.is_some() {
+                60
+            } else {
+                180
+            };
+            self.preview.detail_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(delay))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.open.is_open()
+                        && this.preview.pending.is_none()
+                        && this.preview.hover_target == Some(index)
+                    {
+                        this.preview.detail = Some(index);
+                        this.preview.detail_bounds = None;
+                        cx.notify();
+                    }
+                });
+            }));
+        } else if self.preview.hover_target == Some(index) {
+            self.preview.hover_target = None;
+            self.preview_hide_detail_soon(cx);
+        }
+        cx.notify();
+    }
+    fn preview_hide_detail_soon(&mut self, cx: &mut Context<Self>) {
+        self.preview.detail_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(160))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if !this.preview.detail_hovered {
+                    this.preview.hide_detail();
+                    cx.notify();
+                }
+            });
+        }));
+    }
     pub(super) fn render_model_preview(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let footer = div()
             .flex_none()
             .px(px(14.0))
             .py(px(8.0))
-            .text_size(px(10.0))
+            .text_size(crate::typography::ui_rems(10.0))
             .text_color(theme.text_muted)
-            .child("Preview · Dummy ratings & costs · Do not merge");
+            .child("Preview · Dummy data · Do not merge");
         if let Some(p) = self.preview.pending.clone() {
             return div()
                 .size_full()
@@ -580,9 +758,9 @@ impl Pickers {
         let categories = div()
             .id("preview-categories")
             .flex_none()
-            .overflow_x_scroll()
             .flex()
-            .gap(px(2.0))
+            .flex_wrap()
+            .gap(px(4.0))
             .p(px(8.0))
             .children(TaskKind::ALL.into_iter().enumerate().map(|(ix, category)| {
                 div()
@@ -591,12 +769,12 @@ impl Pickers {
                     .aria_label(category.label())
                     .flex_none()
                     .h(px(30.0))
-                    .px(px(8.0))
+                    .px(px(10.0))
                     .rounded(px(6.0))
                     .flex()
                     .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(11.0))
+                    .gap(px(6.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .cursor_pointer()
                     .bg(if category == self.preview.category {
                         theme.surface_raised
@@ -617,20 +795,15 @@ impl Pickers {
             }));
         let rows = self.model_rows(cx);
         let grouped = rows.iter().any(|r| r.header.is_some());
-        let focused = rows
-            .get(self.active)
-            .filter(|r| r.header.is_none())
-            .or_else(|| rows.iter().find(|r| r.header.is_none()))
-            .cloned();
         let entity = cx.entity();
         let row_data = rows.clone();
-        let list = gpui::uniform_list("preview-models", rows.len(), move |range, _, app| {
+        let list = gpui::uniform_list("preview-models", rows.len(), move |range, window, app| {
             entity.update(app, |this, cx| {
                 range
                     .filter_map(|ix| {
                         row_data
                             .get(ix)
-                            .map(|row| this.preview_row(ix, row, grouped, cx))
+                            .map(|row| this.preview_row(ix, row, grouped, window, cx))
                     })
                     .collect::<Vec<_>>()
             })
@@ -652,7 +825,6 @@ impl Pickers {
             Some(Loadable::Ready(_)) => empty_list_note(&theme, "No models found"),
             _ => empty_list_note(&theme, "Loading models…"),
         };
-        let detail = focused.map(|row| self.preview_detail(&row, &theme));
         div()
             .size_full()
             .flex()
@@ -676,20 +848,15 @@ impl Pickers {
                     .child(div().flex_1().child(self.search.clone())),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .when(rows.is_empty(), |el| el.child(empty))
-                            .when(!rows.is_empty(), |el| el.child(list)),
-                    )
-                    .when_some(detail, |el, detail| el.child(detail)),
+                div().flex_1().min_h_0().flex().child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .when(rows.is_empty(), |el| el.child(empty))
+                        .when(!rows.is_empty(), |el| el.child(list)),
+                ),
             )
             .child(footer)
             .into_any_element()
@@ -699,6 +866,7 @@ impl Pickers {
         ix: usize,
         row: &ModelRowData,
         grouped: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
@@ -711,7 +879,7 @@ impl Pickers {
             .gap(px(7.0));
         if let Some(title) = &row.header {
             return base
-                .text_size(px(11.0))
+                .text_size(crate::typography::ui_rems(11.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme.text_muted)
                 .child(
@@ -727,89 +895,131 @@ impl Pickers {
         let favorite = self.defaults.is_favorite(row.harness, &row.model.id);
         let harness = row.harness;
         let id = row.model.id.clone();
-        base.id(("preview-model", ix))
-            .role(gpui::Role::Button)
-            .aria_label(row.model.label.clone())
-            .rounded(px(7.0))
-            .text_size(px(12.5))
-            .cursor_pointer()
-            .bg(if self.active == ix {
-                theme.surface_raised
-            } else {
-                theme.surface_overlay.opacity(0.0)
-            })
-            .on_hover(cx.listener(move |this, hovered, _, cx| {
-                if *hovered {
-                    this.active = ix;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| this.preview_stage(ix, cx)))
-            .when(!grouped, |el| {
-                el.child(
-                    icons::icon(model_icon(&row.model))
-                        .size(px(15.0))
-                        .text_color(theme.text),
-                )
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(row.model.label.clone()),
-            )
-            .when(selected, |el| {
-                el.child(
-                    icons::icon(icons::CHECK)
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
-                )
-            })
-            .child(
-                div()
-                    .id(("preview-star", ix))
-                    .role(gpui::Role::Button)
-                    .aria_label(if favorite {
-                        "Unstar model"
+        let detail = if self.preview.detail == Some(ix) {
+            let left = self.preview.row_bounds.get(&ix).is_some_and(|bounds| {
+                f32::from(window.viewport_size().width - bounds.right()) < DETAIL_WIDTH + 16.0
+                    && f32::from(bounds.left()) >= DETAIL_WIDTH + 16.0
+            });
+            let entity = cx.entity();
+            let card = div()
+                .id("preview-hover-card")
+                .on_hover(cx.listener(|this, entered, _, cx| {
+                    this.preview.detail_hovered = *entered;
+                    if *entered {
+                        this.preview.detail_task = None;
                     } else {
-                        "Star model"
-                    })
-                    .size(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.0))
-                    .hover(|s| s.bg(theme.surface_raised_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.toggle_model_favorite(harness, &id, cx);
-                    }))
-                    .child(
-                        icons::icon(if favorite {
-                            icons::STAR_BOLD
-                        } else {
-                            icons::STAR
-                        })
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
-                    ),
+                        this.preview_hide_detail_soon(cx);
+                    }
+                }))
+                .on_prepaint(move |bounds, _, cx| {
+                    entity.update(cx, |this, _| this.preview.detail_bounds = Some(bounds));
+                })
+                .child(self.preview_detail(row, &theme));
+            Some(popover::nested_menu(
+                format!("preview-detail-{ix}"),
+                card.into_any_element(),
+                left,
+            ))
+        } else {
+            None
+        };
+        let entity = cx.entity();
+        let row = popover::menu_row_nav(
+            &theme,
+            selected,
+            self.active == ix,
+            format!("preview-row-{ix}"),
+        )
+        .w_full()
+        .h(px(34.0))
+        .py(px(0.0))
+        .relative()
+        .id(("preview-model", ix))
+        .role(gpui::Role::Button)
+        .aria_label(row.model.label.clone())
+        .on_click(cx.listener(move |this, _, _, cx| this.preview_stage(ix, cx)))
+        .when(!grouped, |el| {
+            el.child(
+                icons::icon(model_icon(&row.model))
+                    .size(px(15.0))
+                    .text_color(theme.text),
             )
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(row.model.label.clone()),
+        )
+        .when(selected, |el| {
+            el.child(
+                icons::icon(icons::CHECK)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
+        })
+        .child(
+            div()
+                .id(("preview-star", ix))
+                .role(gpui::Role::Button)
+                .aria_label(if favorite {
+                    "Unstar model"
+                } else {
+                    "Star model"
+                })
+                .size(px(24.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .hover(|s| s.bg(theme.surface_raised_hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_model_favorite(harness, &id, cx);
+                }))
+                .child(
+                    icons::icon(if favorite {
+                        icons::STAR_BOLD
+                    } else {
+                        icons::STAR
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+                ),
+        )
+        .into_any_element();
+        // The shared row owns its hover fade; the stable wrapper owns disclosure.
+        div()
+            .id(("preview-model-hover", ix))
+            .relative()
+            .w_full()
+            .h(px(34.0))
+            .on_prepaint(move |bounds, _, cx| {
+                entity.update(cx, |this, _| {
+                    this.preview.row_bounds.insert(ix, bounds);
+                });
+            })
+            .on_hover(
+                cx.listener(move |this, hovered, _, cx| this.preview_hover_row(ix, *hovered, cx)),
+            )
+            .child(row)
+            .when_some(detail, |el, detail| el.child(detail))
             .into_any_element()
     }
     fn preview_detail(&self, row: &ModelRowData, theme: &Theme) -> AnyElement {
         let model = &row.model;
-        let mut panel = div()
+        let mut panel = popover::popover_card(theme)
             .id("preview-detail")
-            .w(px(218.0))
+            .w(px(DETAIL_WIDTH))
             .flex_none()
+            .max_h(px(360.0))
             .overflow_y_scroll()
             .p(px(16.0))
             .flex()
             .flex_col()
-            .gap(px(10.0))
-            .bg(theme.surface_raised.opacity(0.35))
-            .text_size(px(11.0))
+            .gap(px(12.0))
+            .text_size(crate::typography::ui_rems(11.0))
             .child(
                 div()
                     .flex()
@@ -841,8 +1051,8 @@ impl Pickers {
                         .child(label)
                         .child(div().flex().gap(px(3.0)).children((0..5).map(|i| {
                             div()
-                                .w(px(14.0))
-                                .h(px(5.0))
+                                .w(px(12.0))
+                                .h(px(4.0))
                                 .rounded(px(2.5))
                                 .bg(if i < value {
                                     theme.text_muted
@@ -871,7 +1081,14 @@ impl Pickers {
                     .child(cost_text(model, None)),
             )
             .when_some(model.description.clone(), |el, description| {
-                el.child(div().text_color(theme.text_muted).child(description))
+                el.child(
+                    div()
+                        .pt(px(12.0))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_color(theme.text_muted)
+                        .child(description),
+                )
             })
             .into_any_element()
     }
@@ -892,10 +1109,10 @@ impl Pickers {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .p(px(24.0))
+            .p(px(16.0))
             .flex()
             .flex_col()
-            .gap(px(20.0))
+            .gap(px(16.0))
             .child(
                 div()
                     .id("preview-back")
@@ -904,7 +1121,7 @@ impl Pickers {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.preview_back(cx)))
                     .child(
@@ -921,7 +1138,7 @@ impl Pickers {
                     .gap(px(12.0))
                     .child(
                         icons::icon(model_icon(&p.model))
-                            .size(px(28.0))
+                            .size(px(20.0))
                             .text_color(theme.text),
                     )
                     .child(
@@ -931,13 +1148,13 @@ impl Pickers {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_size(px(18.0))
+                                    .text_size(crate::typography::ui_rems(16.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(p.model.label.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_size(crate::typography::ui_rems(11.0))
                                     .text_color(theme.text_muted)
                                     .child(format!("via {}", provider(route(&p.model)).0)),
                             ),
@@ -947,40 +1164,52 @@ impl Pickers {
                 div()
                     .flex()
                     .justify_between()
-                    .text_size(px(13.0))
+                    .text_size(crate::typography::ui_rems(13.0))
                     .child(if binary { "Thinking" } else { "Reasoning" })
                     .child(label),
             );
         if p.model.reasoning_levels.len() > 1
             && let Some(slider) = &self.preview.slider
         {
-            let percent = slider.read(cx).percentage().end;
+            let raw = slider.read(cx).percentage().end;
+            let percent = self
+                .preview
+                .slider_motion
+                .map(|m| m.position(Instant::now(), cx.reduce_motion()))
+                .unwrap_or(raw);
             let count = p.model.reasoning_levels.len();
+            let thumb = if self.preview.slider_dragging {
+                30.0
+            } else {
+                28.0
+            };
             let track = SliderTrack::new(slider)
                 .relative()
                 .size_full()
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(5.0))
+                        .left(px(-14.0))
+                        .right(px(-14.0))
+                        .h(px(24.0))
+                        .rounded(px(12.0))
+                        .bg(theme.surface_raised),
+                )
                 .child(
                     SliderIndicator::new(slider)
                         .absolute()
                         .top(px(5.0))
                         .w_full()
                         .h(px(24.0))
-                        .rounded(px(12.0))
-                        .bg(theme.surface_raised)
-                        .child(
-                            div()
-                                .absolute()
-                                .size_full()
-                                .rounded(px(12.0))
-                                .bg(accent.opacity(0.18)),
-                        )
                         .child(
                             div()
                                 .absolute()
                                 .top_0()
                                 .bottom_0()
-                                .left_0()
+                                .left(px(-14.0))
                                 .right(relative(1.0 - percent))
+                                .mr(px(-14.0))
                                 .rounded(px(12.0))
                                 .bg(accent),
                         ),
@@ -993,31 +1222,36 @@ impl Pickers {
                         .ml(px(-2.0))
                         .size(px(4.0))
                         .rounded(px(2.0))
-                        .bg(theme.text.opacity(0.6))
+                        .bg(if i as f32 / (count - 1) as f32 <= percent {
+                            theme.on_solid.opacity(0.55)
+                        } else {
+                            theme.text_muted.opacity(0.4)
+                        })
                 }))
                 .child(
                     SliderThumb::new(slider)
                         .absolute()
-                        .top(px(2.0))
+                        .top(px((34.0 - thumb) / 2.0))
                         .left(relative(percent))
-                        .ml(px(-15.0))
-                        .size(px(30.0))
-                        .rounded(px(15.0))
-                        .bg(accent)
-                        .border_2()
-                        .border_color(theme.surface_overlay),
+                        .ml(px(-thumb / 2.0))
+                        .size(px(thumb))
+                        .rounded(px(thumb / 2.0))
+                        .bg(rgb(0xfffefa))
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow_sm(),
                 );
             body = body
                 .child(
                     div()
-                        .px(px(15.0))
+                        .px(px(14.0))
                         .child(Slider::new(slider).w_full().h(px(34.0)).child(track)),
                 )
                 .child(
                     div()
                         .flex()
                         .justify_between()
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
                         .child(if binary { "Off" } else { "Faster" })
                         .child(if binary { "On" } else { "Deeper" }),
@@ -1025,7 +1259,7 @@ impl Pickers {
         } else {
             body = body.child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child("This model has no adjustable reasoning level."),
             );
@@ -1073,7 +1307,7 @@ impl Pickers {
                 });
             body = body.child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
@@ -1086,14 +1320,14 @@ impl Pickers {
                 div()
                     .flex()
                     .justify_between()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .child("Example task cost")
                     .child(cost_text(&p.model, p.reasoning)),
             )
             .when_some(self.preview.error.clone(), |el, error| {
                 el.child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.danger)
                         .child(error),
                 )
@@ -1106,23 +1340,16 @@ impl Pickers {
             .text_color(theme.text)
             .child(body)
             .child(
-                div().flex_none().px(px(24.0)).pb(px(12.0)).child(
-                    div()
+                div().flex_none().px(px(16.0)).pb(px(12.0)).child(
+                    popover::btn_primary(theme, "Use model")
                         .id("preview-use-model")
                         .role(gpui::Role::Button)
                         .aria_label("Use model")
                         .w_full()
-                        .h(px(36.0))
-                        .rounded(px(8.0))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .bg(theme.text)
-                        .text_color(theme.surface_overlay)
-                        .text_size(px(12.0))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.preview_commit(cx)))
-                        .child("Use model"),
+                        .on_click(cx.listener(|this, _, _, cx| this.preview_commit(cx))),
                 ),
             )
             .into_any_element()
@@ -1273,11 +1500,167 @@ impl Pickers {
             self.preview_stage(index, cx);
         }
     }
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_show_model_details(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Pin the requested synthetic snapshot state at capture time. Native
+        // focus/mouse updates from other desktop windows must not change it.
+        self.preview.detail_task = None;
+        self.preview.hover_target = None;
+        self.preview.detail_hovered = true;
+        self.preview.detail = self
+            .model_rows(cx)
+            .iter()
+            .position(|row| row.header.is_none() && row.model.id == id);
+        cx.notify();
+    }
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_model_position(&self, id: &str, cx: &App) -> Option<gpui::Point<gpui::Pixels>> {
+        let index = self
+            .model_rows(cx)
+            .iter()
+            .position(|r| r.header.is_none() && r.model.id == id)?;
+        self.preview.row_bounds.get(&index).map(|b| b.center())
+    }
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_slider_position(
+        &self,
+        percent: Option<f32>,
+        cx: &App,
+    ) -> Option<gpui::Point<gpui::Pixels>> {
+        let slider = self.preview.slider.as_ref()?.read(cx);
+        let bounds = slider.bounds();
+        Some(gpui::point(
+            bounds.left() + bounds.size.width * percent.unwrap_or(slider.percentage().end),
+            bounds.center().y,
+        ))
+    }
 }
 
 #[cfg(all(test, feature = "appshots-fixture"))]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_slider_settle_has_intermediate_frames_and_respects_reduced_motion() {
+        let now = Instant::now();
+        let motion = SliderMotion {
+            from: 0.42,
+            to: 1.0 / 3.0,
+            started: now,
+        };
+        assert_eq!(motion.position(now, false), motion.from);
+        let mid = motion.position(now + Duration::from_millis(50), false);
+        assert!(mid < motion.from && mid > motion.to);
+        assert!((motion.position(now + SLIDER_SETTLE, false) - motion.to).abs() < 0.0001);
+        assert_eq!(motion.position(now, true), motion.to);
+        assert!(!motion.active(now + SLIDER_SETTLE));
+    }
+
+    #[gpui::test]
+    fn preview_details_only_float_after_hover_and_survive_pointer_transfer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct HoverFixture(Entity<Pickers>);
+        impl Render for HoverFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .p(px(20.0))
+                    .child(self.0.update(cx, |p, cx| {
+                        let content = p.render_model_preview(cx);
+                        p.popover_frame_flush(PICKER_WIDTH, content, cx)
+                    }))
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::light()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let picker = cx.new(|cx| Pickers::model_picker_fixture(state, false, false, cx));
+            picker.update(cx, |p, _| {
+                p.menu_geometry.insert(
+                    PickerKind::HarnessModel,
+                    popover::MenuGeometry {
+                        height: 480.0,
+                        below: false,
+                    },
+                );
+            });
+            HoverFixture(picker)
+        });
+        let picker = handle.read_with(cx, |f, _| f.0.clone()).unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        assert!(picker.read_with(cx, |p, _| p.preview.detail.is_none()));
+        let position = picker.read_with(cx, |p, cx| {
+            p.fixture_model_position("anthropic/claude-sonnet-4.6", cx)
+                .unwrap()
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        assert!(picker.read_with(cx, |p, _| p.preview.detail.is_none()));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let (card, row) = picker.read_with(cx, |p, _| {
+            (
+                p.preview.detail_bounds.unwrap(),
+                p.preview.row_bounds[&p.preview.detail.unwrap()],
+            )
+        });
+        assert!(
+            card.left() >= row.right(),
+            "details must float beside, not occupy the list"
+        );
+        assert!(f32::from(row.size.width) < PICKER_WIDTH);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: card.center(),
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position: card.center(),
+                    button: gpui::MouseButton::Left,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(250));
+        cx.run_until_parked();
+        picker.read_with(cx, |p, _| {
+            assert!(p.open.is_open());
+            assert!(p.preview.detail.is_some());
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: gpui::point(px(0.0), px(0.0)),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(picker.read_with(cx, |p, _| p.preview.detail.is_none()));
+    }
     fn fixture(cx: &mut gpui::TestAppContext, large: bool) -> (Entity<AppState>, Entity<Pickers>) {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let state = cx.new(|_| AppState::new());
@@ -1422,7 +1805,7 @@ mod tests {
                     .p(px(20.0))
                     .child(self.0.update(cx, |p, cx| {
                         let content = p.render_model_preview(cx);
-                        p.popover_frame_flush(640.0, content, cx)
+                        p.popover_frame_flush(PICKER_WIDTH, content, cx)
                     }))
             }
         }

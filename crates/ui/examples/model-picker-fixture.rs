@@ -42,6 +42,12 @@ fn main() -> anyhow::Result<()> {
     let selected = args
         .iter()
         .find_map(|a| a.strip_prefix("--model=").map(str::to_owned));
+    let hovered = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--hover=").map(str::to_owned));
+    let recording = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--record=").map(std::path::PathBuf::from));
     let output = args
         .iter()
         .find_map(|a| a.strip_prefix("--output=").map(std::path::PathBuf::from));
@@ -117,20 +123,130 @@ fn main() -> anyhow::Result<()> {
                 )
                 .unwrap();
             cx.activate(true);
-            if let Some(output) = output {
+            let picker = window.read_with(cx, |f, _| f.picker.clone()).unwrap();
+            if output.is_some() || recording.is_some() || hovered.is_some() {
                 cx.spawn(async move |cx| {
                     cx.background_executor()
-                        .timer(Duration::from_millis(1200))
+                        .timer(Duration::from_millis(500))
                         .await;
                     let handle: gpui::AnyWindowHandle = window.into();
-                    handle
-                        .update(cx, |_, window, cx| {
-                            window.draw(cx).clear();
-                            window.render_to_image().unwrap().save(&output).unwrap();
-                            println!("Saved {}", output.display());
-                        })
-                        .unwrap();
-                    cx.update(|cx| cx.quit());
+                    let exit_after_capture = output.is_some() || recording.is_some();
+                    if let Some(id) = hovered.as_ref() {
+                        handle
+                            .update(cx, |_, window, cx| {
+                                let position = picker
+                                    .read(cx)
+                                    .fixture_model_position(&id, cx)
+                                    .expect("visible fixture model");
+                                window.dispatch_event(
+                                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                        position,
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                            })
+                            .unwrap();
+                    } else {
+                        handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_event(
+                                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                        position: gpui::point(px(0.0), px(0.0)),
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                            })
+                            .unwrap();
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(500))
+                        .await;
+                    if let Some(directory) = recording {
+                        std::fs::create_dir_all(&directory).unwrap();
+                        for frame in 0..60 {
+                            handle
+                                .update(cx, |_, window, cx| {
+                                    let percent = match frame {
+                                        10 => None,
+                                        11..=35 => Some(0.85 - (frame - 11) as f32 / 24.0 * 0.43),
+                                        _ => Some(0.42),
+                                    };
+                                    let position = picker
+                                        .read(cx)
+                                        .fixture_slider_position(percent, cx)
+                                        .expect("reasoning slider");
+                                    if frame == 10 {
+                                        window.dispatch_event(
+                                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                                position,
+                                                ..Default::default()
+                                            }),
+                                            cx,
+                                        );
+                                        window.dispatch_event(
+                                            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                                position,
+                                                button: gpui::MouseButton::Left,
+                                                click_count: 1,
+                                                ..Default::default()
+                                            }),
+                                            cx,
+                                        );
+                                    } else if (11..=35).contains(&frame) {
+                                        window.dispatch_event(
+                                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                                position,
+                                                pressed_button: Some(gpui::MouseButton::Left),
+                                                ..Default::default()
+                                            }),
+                                            cx,
+                                        );
+                                    } else if frame == 36 {
+                                        window.dispatch_event(
+                                            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                                position,
+                                                button: gpui::MouseButton::Left,
+                                                click_count: 1,
+                                                ..Default::default()
+                                            }),
+                                            cx,
+                                        );
+                                    }
+                                    window.draw(cx).clear();
+                                    window
+                                        .render_to_image()
+                                        .unwrap()
+                                        .save(directory.join(format!("{frame:03}.png")))
+                                        .unwrap();
+                                })
+                                .unwrap();
+                            cx.background_executor()
+                                .timer(Duration::from_millis(25))
+                                .await;
+                        }
+                    }
+                    if let Some(output) = output {
+                        if let Some(id) = &hovered {
+                            cx.update(|cx| {
+                                picker.update(cx, |p, cx| p.fixture_show_model_details(id, cx))
+                            });
+                            cx.background_executor()
+                                .timer(Duration::from_millis(200))
+                                .await;
+                        }
+                        handle
+                            .update(cx, |_, window, cx| {
+                                window.draw(cx).clear();
+                                window.render_to_image().unwrap().save(&output).unwrap();
+                                println!("Saved {}", output.display());
+                            })
+                            .unwrap();
+                    }
+                    if exit_after_capture {
+                        cx.update(|cx| cx.quit());
+                    }
                 })
                 .detach();
             }
