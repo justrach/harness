@@ -3738,7 +3738,11 @@ impl Pickers {
             .relative()
             .child(self.measure_trigger(kind, cx))
             .id(id)
-            .h(px(32.0))
+            .h(px(if kind == PickerKind::HarnessModel {
+                24.0
+            } else {
+                32.0
+            }))
             .max_w(px(248.0))
             .when(
                 kind == PickerKind::HarnessModel && self.mounted_kind() == Some(kind),
@@ -3751,9 +3755,8 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            // The model trigger sits immediately beside the attachment.
-            // Its own padding participates in that visible gap; footer and
-            // destination triggers keep their wider independent hit areas.
+            // Keep the model trigger compact in the footer; destination
+            // triggers retain their wider independent hit areas.
             .px(px(if kind == PickerKind::HarnessModel {
                 6.0
             } else {
@@ -6752,7 +6755,7 @@ impl Render for Pickers {
             None => None,
         };
 
-        // The composer places this model chip beside the attachment button.
+        // The composer places this model chip at the footer's leading edge.
         // ONE chip for the whole run identity (user request): brand icon +
         // model name, then the joined traits summary ("Medium", "High · 1M ·
         // Fast", "Agent · Balance") as the chip's muted second tone — the
@@ -6799,7 +6802,7 @@ impl Render for Pickers {
                     ),
                 ))
             });
-        let model_chip = attach_overlay_end(
+        let model_chip = attach_overlay(
             model_chip,
             &mut overlay,
             PickerKind::HarnessModel,
