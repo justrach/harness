@@ -48,20 +48,18 @@ use crate::theme::Theme;
 /// Expanded-mode textarea vertical padding: `pt-4 pb-1` (harness composer.tsx
 /// line 578) = 16 + 4.
 pub const TEXTAREA_PAD_V: f32 = 20.0;
-/// The expanded textarea BOX (content + padding) is clamped by the original's
-/// auto-grow effect: `ta.style.height = Math.min(Math.max(scrollHeight, 76),
-/// 260)` (harness composer.tsx line 235). The 76px floor applies even when
-/// empty — it's what makes the always-expanded new-chat composer tall.
-pub const TEXTAREA_MIN: f32 = 76.0;
+/// Expanded writing area, including padding. Keep a comfortable empty field
+/// without leaving a large gap above the controls.
+pub const TEXTAREA_MIN: f32 = 60.0;
 pub const TEXTAREA_MAX: f32 = 260.0;
 /// Expanded actions row: 2px top + 32px picker + 8px bottom.
 const ACTIONS_BOTTOM_PAD: f32 = 8.0;
 pub const ACTIONS_ROW_HEIGHT: f32 = 2.0 + 32.0 + ACTIONS_BOTTOM_PAD;
-/// The pill's 1px hairline, top + bottom (`rounded-[26px] border`).
+/// The writing surface's 1px hairline, top + bottom.
 pub const PILL_BORDER_V: f32 = 2.0;
 /// Corner radius shared by the composer and the queue tray behind it.
-pub(crate) const COMPOSER_RADIUS: f32 = 26.0;
-/// Expanded composer bounds: 120px when empty, 304px at the content cap.
+pub(crate) const COMPOSER_RADIUS: f32 = 16.0;
+/// Expanded composer bounds: 104px when empty, 304px at the content cap.
 pub const COMPOSER_MIN_HEIGHT: f32 = TEXTAREA_MIN + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
 pub const COMPOSER_MAX_HEIGHT: f32 = TEXTAREA_MAX + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
 /// Compact pill, border-box: one-line textarea `py-3` (24) + one 22.75px line
@@ -2159,6 +2157,10 @@ impl ComposerInput {
         if !focused || !window.is_window_active() {
             self.blink_task = None;
             return false;
+        }
+        if self.mentions_enabled && motion::reduced_motion(cx) {
+            self.blink_task = None;
+            return true;
         }
         if self.blink_task.is_none() {
             self.blink_task = Some(cx.spawn(async move |this, cx| {
@@ -4519,7 +4521,11 @@ impl gpui::Element for ComposerTextElement {
         let scroll = px(input.scroll_top);
         let origin = point(bounds.left() - px(input.scroll_left), bounds.top() - scroll);
         let selection_color = Theme::of(cx).selection;
-        let caret_color = Theme::of(cx).caret;
+        let caret_color = if input.mentions_enabled {
+            Theme::of(cx).accent
+        } else {
+            Theme::of(cx).caret
+        };
         // The inline-code recipe: chips use the spectrum wash like `code` spans.
         let mention_color = Theme::of(cx).code_wash;
 
@@ -4575,18 +4581,29 @@ impl gpui::Element for ComposerTextElement {
         let mut selection_quads = Vec::new();
         let mut cursor = None;
         if input.selected_range.is_empty() || input.display_is_placeholder {
-            if let Some(p) = input.cursor_point() {
-                cursor = Some(fill(
+            let position = input.cursor_point().or_else(|| {
+                input
+                    .display_is_placeholder
+                    .then_some(point(px(0.0), px(0.0)))
+            });
+            if let Some(position) = position {
+                // The message caret is a rounded accent bar, inset from the
+                // line box. Keep native text geometry for selection and IME.
+                let (width, inset, radius) = if input.mentions_enabled {
+                    (3.0, 2.0, 1.5)
+                } else {
+                    (2.0, 0.0, 0.0)
+                };
+                cursor = Some(quad(
                     Bounds::new(
-                        point(origin.x + p.x, origin.y + p.y),
-                        size(px(2.0), input.line_height),
+                        origin + position + point(px(0.0), px(inset)),
+                        size(px(width), input.line_height - px(2.0 * inset)),
                     ),
+                    px(radius),
                     caret_color,
-                ));
-            } else if input.display_is_placeholder {
-                cursor = Some(fill(
-                    Bounds::new(origin, size(px(2.0), input.line_height)),
-                    caret_color,
+                    px(0.0),
+                    gpui::transparent_black(),
+                    BorderStyle::default(),
                 ));
             }
         } else if let (Some(start), Some(end)) = (
@@ -4842,7 +4859,11 @@ impl Render for ComposerInput {
             theme
         };
         let text_color = if self.content.is_empty() {
-            theme.text_faint
+            if self.mentions_enabled {
+                theme.text_muted
+            } else {
+                theme.text_faint
+            }
         } else {
             theme.text
         };
@@ -10019,22 +10040,22 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
-        // Harness composer-actions.tsx: a size-7 filled circle — up-arrow to
-        // send/queue, a dark rounded square on the same light circle to stop.
+        // One accent action anchors the otherwise quiet utility row.
+        let icon_color = theme.on_primary_accent();
         match mode {
             SendButtonMode::Stop => div()
                 .id("composer-stop")
                 .size(px(28.0))
                 .flex_none()
                 .rounded_full()
-                .bg(theme.text)
+                .bg(theme.accent)
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.stop_from_button(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
+                .child(div().size(px(11.0)).rounded(px(3.0)).bg(icon_color))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -10045,7 +10066,7 @@ impl Composer {
                     .size(px(28.0))
                     .flex_none()
                     .rounded_full()
-                    .bg(theme.text)
+                    .bg(theme.accent)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -10058,7 +10079,7 @@ impl Composer {
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
-                            .text_color(theme.bg),
+                            .text_color(icon_color),
                     )
                     .into_any_element()
             }
@@ -10115,7 +10136,7 @@ impl Render for Composer {
                 style.font_family = theme.font_sans.clone();
                 style.font_size = crate::typography::ui_rems(INPUT_TEXT_SIZE).into();
                 style.color = if input.content.is_empty() {
-                    theme.text_faint
+                    theme.text_muted
                 } else {
                     theme.text
                 };
@@ -10638,7 +10659,7 @@ impl Render for Composer {
             morph_t
         };
         let text_pt = morph_text_pad(layout_morph_t);
-        let surface_radius = COMPOSER_RADIUS - 4.0 * dock_amount;
+        let surface_radius = COMPOSER_RADIUS;
         let route_to_single_line =
             self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
@@ -10723,18 +10744,13 @@ impl Render for Composer {
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
 
-        // A translucent cool silver/slate edge sits more naturally on frost
-        // than the general-purpose white/black separator color.
-        let pill_border = if theme.is_frost() {
-            match theme.appearance {
-                crate::theme::Appearance::Dark => gpui::hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
-                crate::theme::Appearance::Light => gpui::hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
-            }
+        let pill_border = if self.input.focus_handle(cx).is_focused(window) {
+            theme.accent.opacity(0.55)
         } else {
             theme.border
         };
-        // Compensate for the transcript canvas beneath the frosted surface.
-        // Keep the opaque fallback when frost is disabled or unsupported.
+        // The writing plane stays opaque even when the surrounding shell is
+        // frosted, so transcript content never competes with a draft.
         let pill = div()
             .on_mouse_down(
                 MouseButton::Left,
@@ -10749,10 +10765,8 @@ impl Render for Composer {
             .rounded(px(surface_radius))
             .border_1()
             .border_color(pill_border)
-            .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
-            .when(!theme.is_frost(), |el| {
-                el.bg(theme.input_glass_bg()).shadow_lg()
-            });
+            .bg(theme.composer_bg())
+            .shadow(theme.composer_shadows());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
@@ -10975,14 +10989,11 @@ impl Render for Composer {
         // The file dropzone lives in the shell (the whole conversation column,
         // not just the pill — shell.rs `chat-dropzone`); drops land back here
         // via `add_paths`.
-        // Frosted: the pill backdrop-blurs the transcript scrolling under it
-        // (the popover glass treatment; radius matches the pill's rounding).
-        // The shell keeps this entity under one parent on both routes. The
-        // surface itself never fades, and frost follows the same morph radius.
+        let body = body.into_any_element();
         let pill_surface = div()
             .relative()
             .id("composer-surface")
-            .child(crate::frost::frosted(surface_radius, 16.0, body))
+            .child(body)
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background
@@ -16259,18 +16270,15 @@ mod tests {
 
     #[test]
     fn auto_grow_math() {
-        // The source heights (harness composer.tsx line 235 clamp, composer-
-        // actions.tsx row, 1px hairlines): 76+46+2 empty … 260+46+2 capped.
-        assert_eq!(COMPOSER_MIN_HEIGHT, 120.0);
+        // Writing area, action row and hairlines: 60+42+2 … 260+42+2.
+        assert_eq!(COMPOSER_MIN_HEIGHT, 104.0);
         assert_eq!(COMPOSER_MAX_HEIGHT, 304.0);
-        // One line sits at the floor: the textarea BOX (content + `pt-4 pb-1`)
-        // clamps UP to 76 exactly like `Math.max(scrollHeight, 76)` — this is
-        // what makes the always-expanded new-chat composer 120px tall.
+        // A single line retains the expanded writing area's minimum height.
         assert_eq!(
             composer_total_height(input_content_height(1)),
             COMPOSER_MIN_HEIGHT
         );
-        // Growth is linear once the textarea box exceeds its 76px floor.
+        // Growth is linear once the textarea box exceeds its 60px floor.
         let h4 = composer_total_height(input_content_height(4));
         assert_eq!(
             h4,
@@ -17799,6 +17807,17 @@ mod appshot_rebase_tests {
 
 #[cfg(feature = "appshots-fixture")]
 impl Composer {
+    pub fn fixture_set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    pub fn fixture_reset_caret(&mut self, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.reset_blink();
+            cx.notify();
+        });
+    }
+
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
         self.appshots.clear();
         cx.notify();
