@@ -54,12 +54,9 @@ pub fn render(
     let percent = fraction
         .map(|f| format!("{:.0}%", f * 100.0))
         .unwrap_or_else(|| "—".into());
-    let label = match saved_label(usage) {
-        Some(saved) => format!("{percent} · {saved}"),
-        None => percent,
-    };
     div()
         .id("context-usage")
+        .debug_selector(|| "context-usage".into())
         .flex_none()
         .flex()
         .items_center()
@@ -71,7 +68,7 @@ pub fn render(
         .text_color(color)
         .hover(|s| s.bg(crate::theme::ink(0.05)))
         .child(ring)
-        .child(SharedString::from(label))
+        .child(SharedString::from(percent))
         .tooltip(move |_, cx| {
             cx.new(|cx| UsageCard {
                 _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
@@ -212,6 +209,12 @@ impl Render for UsageCard {
                         self.state.read(cx).context_usage,
                     ))),
             )
+            .children(saved_label(self.state.read(cx).context_usage).map(|label| {
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(label))
+            }))
             .children(savings_details(self.state.read(cx).context_usage).map(|lines| {
                 div()
                     .flex()

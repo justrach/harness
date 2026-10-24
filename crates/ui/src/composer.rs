@@ -48,20 +48,18 @@ use crate::theme::Theme;
 /// Expanded-mode textarea vertical padding: `pt-4 pb-1` (harness composer.tsx
 /// line 578) = 16 + 4.
 pub const TEXTAREA_PAD_V: f32 = 20.0;
-/// The expanded textarea BOX (content + padding) is clamped by the original's
-/// auto-grow effect: `ta.style.height = Math.min(Math.max(scrollHeight, 76),
-/// 260)` (harness composer.tsx line 235). The 76px floor applies even when
-/// empty — it's what makes the always-expanded new-chat composer tall.
-pub const TEXTAREA_MIN: f32 = 76.0;
+/// Expanded writing area, including padding. Keep a comfortable empty field
+/// without leaving a large gap above the controls.
+pub const TEXTAREA_MIN: f32 = 60.0;
 pub const TEXTAREA_MAX: f32 = 260.0;
-/// Expanded actions row: 2px top + 32px picker + 8px bottom.
+/// Expanded actions row: 2px top + 32px control zone + 8px bottom.
 const ACTIONS_BOTTOM_PAD: f32 = 8.0;
 pub const ACTIONS_ROW_HEIGHT: f32 = 2.0 + 32.0 + ACTIONS_BOTTOM_PAD;
-/// The pill's 1px hairline, top + bottom (`rounded-[26px] border`).
+/// The writing surface's 1px hairline, top + bottom.
 pub const PILL_BORDER_V: f32 = 2.0;
 /// Corner radius shared by the composer and the queue tray behind it.
-pub(crate) const COMPOSER_RADIUS: f32 = 26.0;
-/// Expanded composer bounds: 120px when empty, 304px at the content cap.
+pub(crate) const COMPOSER_RADIUS: f32 = 16.0;
+/// Expanded composer bounds: 104px when empty, 304px at the content cap.
 pub const COMPOSER_MIN_HEIGHT: f32 = TEXTAREA_MIN + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
 pub const COMPOSER_MAX_HEIGHT: f32 = TEXTAREA_MAX + ACTIONS_ROW_HEIGHT + PILL_BORDER_V;
 /// Compact pill, border-box: one-line textarea `py-3` (24) + one 22.75px line
@@ -401,7 +399,7 @@ pub const CLUSTER_Y_DELTA: f32 =
     ACTIONS_BOTTOM_PAD + 16.0 + PILL_BORDER_V / 2.0 - COMPACT_TOTAL_HEIGHT / 2.0;
 
 /// Attachment and Send share an outer inset: compact 8px, expanded 12px.
-/// Glide both edges together while the model picker changes groups.
+/// Glide both edges together while the model picker stays in the footer.
 pub const CLUSTER_X_DELTA: f32 = 4.0;
 /// Optical join between the picker group and the paperclip. This is tighter
 /// than the structural spacing ladder because the narrow paperclip glyph
@@ -411,17 +409,6 @@ pub const ACTION_UTILITY_GAP: f32 = 2.0;
 pub const UTILITY_BUTTON: f32 = 28.0;
 /// Structural separation between utility actions and the primary Send action.
 pub const ACTION_PRIMARY_GAP: f32 = Theme::SPACE_SM;
-
-/// Fade out at the old endpoint, relocate while invisible, then fade in at
-/// the new endpoint. Only a six-pixel nudge is visible; a long label never
-/// sweeps across the prompt. Compact amount is reversible with the shared clock.
-fn model_handoff(compact: f32) -> (f32, f32, f32) {
-    let compact = compact.clamp(0.0, 1.0);
-    let side = if compact < 0.5 { 0.0 } else { 1.0 };
-    let opacity = ((compact - 0.5).abs() - 0.06).max(0.0) / 0.44;
-    let drift = (1.0 - opacity) * if side == 0.0 { 6.0 } else { -6.0 };
-    (side, opacity, drift)
-}
 
 /// The shared outer inset for the in-flight morph: eases from the OLD mode's resting
 /// inset to the committed mode's (compact 8 ↔ expanded 12).
@@ -451,8 +438,7 @@ pub fn collapse_text_glide(from: f32, progress: f32) -> f32 {
 }
 
 /// The decaying [`CLUSTER_Y_DELTA`] offset for the in-flight morph.
-/// Controls share this bottom anchor; the model's horizontal fade is applied
-/// independently so its endpoint matches Attachment and Send.
+/// Attachment and Send share this bottom anchor.
 pub fn morph_cluster_dy(progress: f32) -> f32 {
     CLUSTER_Y_DELTA * (1.0 - progress)
 }
@@ -2117,6 +2103,10 @@ impl ComposerInput {
         if !focused || !window.is_window_active() {
             self.blink_task = None;
             return false;
+        }
+        if self.mentions_enabled && motion::reduced_motion(cx) {
+            self.blink_task = None;
+            return true;
         }
         if self.blink_task.is_none() {
             self.blink_task = Some(cx.spawn(async move |this, cx| {
@@ -4442,7 +4432,11 @@ impl gpui::Element for ComposerTextElement {
         let scroll = px(input.scroll_top);
         let origin = point(bounds.left() - px(input.scroll_left), bounds.top() - scroll);
         let selection_color = Theme::of(cx).selection;
-        let caret_color = Theme::of(cx).caret;
+        let caret_color = if input.mentions_enabled {
+            Theme::of(cx).accent
+        } else {
+            Theme::of(cx).caret
+        };
         // The inline-code recipe: chips use the spectrum wash like `code` spans.
         let mention_color = Theme::of(cx).code_wash;
 
@@ -4498,18 +4492,29 @@ impl gpui::Element for ComposerTextElement {
         let mut selection_quads = Vec::new();
         let mut cursor = None;
         if input.selected_range.is_empty() || input.display_is_placeholder {
-            if let Some(p) = input.cursor_point() {
-                cursor = Some(fill(
+            let position = input.cursor_point().or_else(|| {
+                input
+                    .display_is_placeholder
+                    .then_some(point(px(0.0), px(0.0)))
+            });
+            if let Some(position) = position {
+                // The message caret is a rounded accent bar, inset from the
+                // line box. Keep native text geometry for selection and IME.
+                let (width, inset, radius) = if input.mentions_enabled {
+                    (3.0, 2.0, 1.5)
+                } else {
+                    (2.0, 0.0, 0.0)
+                };
+                cursor = Some(quad(
                     Bounds::new(
-                        point(origin.x + p.x, origin.y + p.y),
-                        size(px(2.0), input.line_height),
+                        origin + position + point(px(0.0), px(inset)),
+                        size(px(width), input.line_height - px(2.0 * inset)),
                     ),
+                    px(radius),
                     caret_color,
-                ));
-            } else if input.display_is_placeholder {
-                cursor = Some(fill(
-                    Bounds::new(origin, size(px(2.0), input.line_height)),
-                    caret_color,
+                    px(0.0),
+                    gpui::transparent_black(),
+                    BorderStyle::default(),
                 ));
             }
         } else if let (Some(start), Some(end)) = (
@@ -4765,7 +4770,11 @@ impl Render for ComposerInput {
             theme
         };
         let text_color = if self.content.is_empty() {
-            theme.text_faint
+            if self.mentions_enabled {
+                theme.text_muted
+            } else {
+                theme.text_faint
+            }
         } else {
             theme.text
         };
@@ -5695,9 +5704,6 @@ pub struct Composer {
     /// Pill height actually rendered last frame — a committed flip morphs
     /// from here, so mid-flight reversals hand off without a jump.
     last_rendered_height: f32,
-    model_handoff_position: f32,
-    model_handoff_from: f32,
-    model_handoff_morph: Option<FlipMorph>,
     model_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     dock_frame: Option<crate::composer_dock::DockFrame>,
     dock_reflow: crate::composer_dock::DockReflow,
@@ -5928,9 +5934,6 @@ impl Composer {
             settle_task: None,
             flip_morph: None,
             last_rendered_height: 0.0,
-            model_handoff_position: 1.0,
-            model_handoff_from: 1.0,
-            model_handoff_morph: None,
             model_bounds: Default::default(),
             dock_frame: None,
             dock_reflow: Default::default(),
@@ -9870,22 +9873,22 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let theme = Theme::of(cx);
-        // Harness composer-actions.tsx: a size-7 filled circle — up-arrow to
-        // send/queue, a dark rounded square on the same light circle to stop.
+        // One accent action anchors the otherwise quiet utility row.
+        let icon_color = theme.on_primary_accent();
         match mode {
             SendButtonMode::Stop => div()
                 .id("composer-stop")
                 .size(px(28.0))
                 .flex_none()
                 .rounded_full()
-                .bg(theme.text)
+                .bg(theme.accent)
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
-                .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
+                .child(div().size(px(11.0)).rounded(px(3.0)).bg(icon_color))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -9896,7 +9899,7 @@ impl Composer {
                     .size(px(28.0))
                     .flex_none()
                     .rounded_full()
-                    .bg(theme.text)
+                    .bg(theme.accent)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -9909,7 +9912,7 @@ impl Composer {
                     .child(
                         crate::icons::icon(crate::icons::ARROW_UP)
                             .size(px(14.0))
-                            .text_color(theme.bg),
+                            .text_color(icon_color),
                     )
                     .into_any_element()
             }
@@ -9966,7 +9969,7 @@ impl Render for Composer {
                 style.font_family = theme.font_sans.clone();
                 style.font_size = crate::typography::ui_rems(INPUT_TEXT_SIZE).into();
                 style.color = if input.content.is_empty() {
-                    theme.text_faint
+                    theme.text_muted
                 } else {
                     theme.text
                 };
@@ -10489,7 +10492,7 @@ impl Render for Composer {
             morph_t
         };
         let text_pt = morph_text_pad(layout_morph_t);
-        let surface_radius = COMPOSER_RADIUS - 4.0 * dock_amount;
+        let surface_radius = COMPOSER_RADIUS;
         let route_to_single_line =
             self.dock_frame.is_some_and(|frame| frame.active) && !session_expanded;
         let textarea_height = (pill_height
@@ -10539,7 +10542,7 @@ impl Render for Composer {
         // Attach button — opens the native image picker (the original's hidden
         // `<input type=file accept="image/*" multiple>`); paste/drop also feed
         // the same strip. The leading utility group owns the spacing between
-        // this button and the model picker.
+        // the attachment and dictation buttons.
         let attach = div()
             .id("composer-attach")
             .size(px(28.0))
@@ -10574,18 +10577,13 @@ impl Render for Composer {
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
         let comments_chip = self.render_comments_chip(&theme, cx);
 
-        // A translucent cool silver/slate edge sits more naturally on frost
-        // than the general-purpose white/black separator color.
-        let pill_border = if theme.is_frost() {
-            match theme.appearance {
-                crate::theme::Appearance::Dark => gpui::hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
-                crate::theme::Appearance::Light => gpui::hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
-            }
+        let pill_border = if self.input.focus_handle(cx).is_focused(window) {
+            theme.accent.opacity(0.55)
         } else {
             theme.border
         };
-        // Compensate for the transcript canvas beneath the frosted surface.
-        // Keep the opaque fallback when frost is disabled or unsupported.
+        // The writing plane stays opaque even when the surrounding shell is
+        // frosted, so transcript content never competes with a draft.
         let pill = div()
             .on_mouse_down(
                 MouseButton::Left,
@@ -10600,70 +10598,19 @@ impl Render for Composer {
             .rounded(px(surface_radius))
             .border_1()
             .border_color(pill_border)
-            .when(theme.is_frost(), |el| el.bg(theme.composer_sidebar_tint()))
-            .when(!theme.is_frost(), |el| {
-                el.bg(theme.input_glass_bg()).shadow_lg()
-            });
+            .bg(theme.composer_bg())
+            .shadow(theme.composer_shadows());
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
-        // controls pin to the bottom and only the text glides with the reveal
-        // (round-9 follow-up: the send/attach/chips must not ride the height,
-        // while the model picker fades between its two horizontal anchors).
+        // controls pin to the bottom and only the text glides with the reveal.
+        // The model picker stays in the footer throughout the transition.
         let cluster_dy = morph_cluster_dy(layout_morph_t);
         let action_inset = morph_cluster_inset(expanded, layout_morph_t);
-        // Share the height/route timeline instead of starting an independent
-        // animation. Reversals continue from the current handoff phase.
-        if self.model_handoff_morph != self.flip_morph {
-            self.model_handoff_from = self.model_handoff_position;
-            self.model_handoff_morph = self.flip_morph;
-        }
-        let compact_target = if expanded { 0.0 } else { 1.0 };
-        self.model_handoff_position = if dock_owns_layout {
-            dock_compact_amount
-        } else {
-            self.flip_morph.map_or(compact_target, |morph| {
-                motion::lerp(
-                    self.model_handoff_from,
-                    compact_target,
-                    motion::EASE_IN_OUT.eval(morph.raw(now_ms)),
-                )
-            })
-        };
-        // The shell supplies this frame's animated width before rendering us.
-        // Measured bounds still belong to the previous frame here; using them
-        // would add the per-frame width delta to the model selector's glide.
-        let surface_width = self.last_available_width.map_or_else(
-            || {
-                self.surface_bounds
-                    .get()
-                    .map_or(strip_width_hint + PILL_BORDER_V, |bounds| {
-                        f32::from(bounds.size.width)
-                    })
-            },
-            |width| (width - 2.0 * Theme::SPACE_LG).max(0.0),
-        );
-        let model_travel = (surface_width
-            - PILL_BORDER_V
-            - action_inset
-            - self.leading_cluster_width()
-            - ACTION_UTILITY_GAP
-            - self
-                .model_bounds
-                .get()
-                .map_or(0.0, |bounds| f32::from(bounds.size.width))
-            - ACTION_PRIMARY_GAP
-            - 28.0
-            - action_inset)
-            .max(0.0);
-        let (model_side, model_opacity, model_drift) = model_handoff(self.model_handoff_position);
-        let model_offset = (model_side - compact_target) * model_travel + model_drift;
         let measured_model_bounds = self.model_bounds.clone();
         let model_picker = div()
             .min_w_0()
-            .max_w(px(surface_width * 0.45))
+            .max_w(px(248.0))
             .relative()
-            .left(px(model_offset))
-            .opacity(model_opacity)
             .child(self.pickers.clone())
             .child(
                 gpui::canvas(
@@ -10681,7 +10628,7 @@ impl Render for Composer {
             // text viewport follows the animated height so it cannot paint
             // over the controls. Its width stays fixed (no tween rewraps);
             // top padding eases 12→16. Attachment and Send stay on the bottom
-            // anchor while the model chip fades between its horizontal slots.
+            // anchor, with the model picker in the footer below.
             pill.h(px(pill_height))
                 .overflow_hidden()
                 .relative()
@@ -10726,19 +10673,18 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(attach)
-                                .children(dictate)
-                                .child(model_picker),
+                                .children(dictate),
                         )
                         .child(send_button),
                 )
         } else {
             // Compact pill: attachment on the left, input in the middle,
-            // then model and Send on the right, all on one 47px line.
+            // then Send on the right, all on one 47px line.
             // The row is BOTTOM-justified: during the collapse morph the pill
             // top sweeps down over a stationary row, the text walks down from
             // its expanded resting place via a decaying relative offset, and
             // attachment/Send hold their spots (the centering delta gliding
-            // in), with the model handoff sharing that same timeline.
+            // in). The footer remains below the writing surface.
             let text_glide = if dock_owns_layout {
                 collapse_text_glide(dock_layout.hero_height, dock_compact_amount)
             } else {
@@ -10784,14 +10730,6 @@ impl Render for Composer {
                         )
                         .child(
                             div()
-                                .min_w_0()
-                                .max_w(px(surface_width * 0.45))
-                                .relative()
-                                .top(px(-cluster_dy))
-                                .child(model_picker),
-                        )
-                        .child(
-                            div()
                                 .flex_none()
                                 .pl(px(ACTION_PRIMARY_GAP))
                                 .pr(px(action_inset))
@@ -10818,22 +10756,14 @@ impl Render for Composer {
         let starter_chips = (new_thread_chrome_opacity > 0.0)
             .then(|| self.render_starter_chips(&theme, cx))
             .flatten();
-        let has_new_thread_git_selectors = self
-            .state
-            .read(cx)
-            .selected_space_row()
-            .is_some_and(|space| space.git_detected);
         // The file dropzone lives in the shell (the whole conversation column,
         // not just the pill — shell.rs `chat-dropzone`); drops land back here
         // via `add_paths`.
-        // Frosted: the pill backdrop-blurs the transcript scrolling under it
-        // (the popover glass treatment; radius matches the pill's rounding).
-        // The shell keeps this entity under one parent on both routes. The
-        // surface itself never fades, and frost follows the same morph radius.
+        let body = body.into_any_element();
         let pill_surface = div()
             .relative()
             .id("composer-surface")
-            .child(crate::frost::frosted(surface_radius, 16.0, body))
+            .child(body)
             .child({
                 let measured = self.surface_bounds.clone();
                 // All prepaint completes before any paint. The background
@@ -10909,88 +10839,77 @@ impl Render for Composer {
         };
         let container = container.child(pill_surface);
 
-        // The lower slot keeps a stable footprint for Git projects while its
-        // old floating checkout/ref controls dissolve into the session footer.
-        // Non-Git sessions grow the slot continuously from zero.
-        let session_chrome = 1.0 - new_thread_chrome;
-        let bottom_slot = if has_new_thread_git_selectors || self.dock_frame.is_some() {
-            1.0
-        } else {
-            session_chrome
-        };
-        let container = if bottom_slot > 0.0 {
-            let footer = (session_chrome_opacity > 0.0).then(|| {
+        // The model picker keeps one stable leading anchor in both draft and
+        // session layouts. Workspace controls yield space before the context
+        // indicator, which always keeps its trailing position.
+        let footer = (session_chrome_opacity > 0.0)
+            .then(|| {
                 self.pickers
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
-            });
-            let usage = self.state.read(cx).context_usage;
-            // OpenAI's guidelines: say so while requests run on the plan.
-            let plan = (session_chrome_opacity > 0.0
-                && self.pickers.read(cx).uses_chatgpt_plan(cx))
+            })
+            .flatten();
+        let usage = self.state.read(cx).context_usage;
+        // OpenAI's guidelines: say so while requests run on the plan.
+        let plan = (session_chrome_opacity > 0.0 && self.pickers.read(cx).uses_chatgpt_plan(cx))
             .then(|| crate::chatgpt_plan::using_plan_chip(&theme));
-            container.child(
-                div()
-                    .w_full()
-                    .h(px(SESSION_FOOTER_HEIGHT * bottom_slot))
-                    .mt(px(-Theme::SPACE_SM * (1.0 - bottom_slot)))
-                    .mb(px(-Theme::SPACE_SM * bottom_slot))
-                    .relative()
-                    .when(new_thread_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .px(px(10.0))
-                                .flex()
-                                .items_center()
-                                .opacity(new_thread_chrome_opacity)
-                                .children(new_thread_git_selectors),
-                        )
-                    })
-                    .when(session_chrome_opacity > 0.0, |slot| {
-                        slot.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .w_full()
-                                .h(px(SESSION_FOOTER_HEIGHT))
-                                .flex()
-                                .items_center()
-                                .opacity(session_chrome_opacity)
-                                .overflow_hidden()
-                                // A narrow pane squeezes the left controls
-                                // first; they clip rather than draw under the
-                                // plan chip, which truncates before the ring.
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .children(footer.flatten()),
-                                )
-                                .children(plan.map(|chip| {
-                                    div()
-                                        .flex_shrink(1.0)
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .pr(px(10.0))
-                                        .child(chip)
-                                }))
-                                .children(crate::context_usage::has_window(usage).then(|| {
-                                    div().flex_none().pr(px(10.0)).child(
-                                        crate::context_usage::render(
-                                            usage,
-                                            self.state.clone(),
-                                            &theme,
-                                        ),
-                                    )
-                                })),
-                        )
-                    }),
-            )
-        } else {
-            container
-        };
+        let container = container.child(
+            div()
+                .id("composer-footer")
+                .w_full()
+                .h(px(SESSION_FOOTER_HEIGHT))
+                .mb(px(-Theme::SPACE_SM))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(model_picker)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .relative()
+                        .overflow_hidden()
+                        .when(new_thread_chrome_opacity > 0.0, |slot| {
+                            slot.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .opacity(new_thread_chrome_opacity)
+                                    .children(new_thread_git_selectors),
+                            )
+                        })
+                        .when(session_chrome_opacity > 0.0, |slot| {
+                            slot.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .opacity(session_chrome_opacity)
+                                    .children(footer),
+                            )
+                        }),
+                )
+                .children(plan.map(|chip| {
+                    div()
+                        .flex_shrink(1.0)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(chip)
+                }))
+                .children(
+                    (session_chrome_opacity > 0.0 && crate::context_usage::has_window(usage)).then(
+                        || {
+                            div().flex_none().opacity(session_chrome_opacity).child(
+                                crate::context_usage::render(usage, self.state.clone(), &theme),
+                            )
+                        },
+                    ),
+                ),
+        );
         // Full-size preview of a staged thumbnail (AttachmentPreviewDialog).
         if let Some(preview) = self.preview.clone() {
             if std::mem::take(&mut self.preview_focus_pending) {
@@ -11040,15 +10959,6 @@ impl Composer {
     /// The mic shows where dictation can run, and while a session is live.
     fn show_dictation(&self) -> bool {
         self.dictation.is_some() || DICTATION_AVAILABLE.get().copied().unwrap_or(false)
-    }
-
-    /// Attach, plus dictate when it shows: the model selector's expanded anchor.
-    fn leading_cluster_width(&self) -> f32 {
-        if self.show_dictation() {
-            UTILITY_BUTTON + ACTION_UTILITY_GAP + UTILITY_BUTTON
-        } else {
-            UTILITY_BUTTON
-        }
     }
 }
 
@@ -11966,14 +11876,10 @@ mod tests {
                     assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
                         "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
                     let model = composer.model_bounds.get().unwrap();
-                    let inset = motion::lerp(12.0, 8.0, amount);
-                    let left = surface.left() + px(1.0 + inset + 28.0 + ACTION_UTILITY_GAP);
-                    let travel = surface.size.width - px(2.0 + inset + 28.0 + ACTION_UTILITY_GAP
-                        + ACTION_PRIMARY_GAP + 28.0 + inset) - model.size.width;
-                    let (side, _, drift) = model_handoff(amount);
-                    let expected_x = left + travel * side + px(drift);
+                    let expected_x = surface.left() + px(10.0);
                     assert!((f32::from(model.left() - expected_x)).abs() <= 1.0,
-                        "model jumped: docked={docked}, amount={amount}, actual={model:?}, expected={expected_x:?}");
+                        "footer model moved: docked={docked}, amount={amount}, actual={model:?}, expected={expected_x:?}");
+                    assert!(model.top() >= surface.bottom(), "model must remain below the writing surface");
                     let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
                     assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
                     assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
@@ -11981,21 +11887,6 @@ mod tests {
                     });
                 }
             }
-        }
-    }
-
-    #[test]
-    fn model_handoff_hides_relocation_and_keeps_visible_motion_local() {
-        assert_eq!(model_handoff(0.0), (0.0, 1.0, 0.0));
-        assert_eq!(model_handoff(1.0), (1.0, 1.0, -0.0));
-        for amount in [0.44, 0.49, 0.50, 0.51, 0.56] {
-            assert!(model_handoff(amount).1 < 0.0001);
-        }
-        for step in 0..=100 {
-            let (side, opacity, drift) = model_handoff(step as f32 / 100.0);
-            assert!((0.0..=1.0).contains(&opacity));
-            assert!(drift.abs() <= 6.0);
-            assert!(side == 0.0 || side == 1.0);
         }
     }
 
@@ -12126,7 +12017,6 @@ mod tests {
                         "text growth jumped from {before} to {}",
                         composer.last_rendered_height
                     );
-                    assert!((composer.model_handoff_position - 0.7).abs() < 0.001);
                     assert!(
                         (f32::from(composer.model_bounds.get().unwrap().left() - model_before))
                             .abs()
@@ -12223,10 +12113,10 @@ mod tests {
             .read_with(cx, |composer, _| {
                 let surface = composer.surface_bounds.get().unwrap();
                 let model = composer.model_bounds.get().unwrap();
-                let left = surface.left() + px(1.0 + 12.0 + 28.0 + ACTION_UTILITY_GAP);
+                let left = surface.left() + px(10.0);
                 assert!(
                     (f32::from(model.left() - left)).abs() <= 1.0,
-                    "expanded controls must finish on the left"
+                    "the model picker must stay at the footer's leading edge"
                 );
             })
             .unwrap();
@@ -12261,6 +12151,92 @@ mod tests {
                 assert_eq!(input.read(cx).selected_range, 2..8);
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn footer_keeps_model_and_context_outside_the_writing_surface(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                composer.pickers.update(cx, |pickers, _| {
+                    pickers.select_for_test(
+                        harness_proto::HarnessId::Graff,
+                        "Graff",
+                        "a-long-model-name-with-reasoning",
+                    );
+                });
+                composer.state.update(cx, |state, _| {
+                    state.context_usage = Some(harness_proto::ContextUsage {
+                        tokens: Some(76_000),
+                        window: Some(200_000),
+                        ..Default::default()
+                    });
+                    state.spaces.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "project", "deviceId": "local", "path": "/project",
+                            "gitDetected": true, "createdAt": "2026-01-01T00:00:00Z"
+                        }))
+                        .unwrap(),
+                    );
+                    state.selected_space = Some("project".into());
+                    state.chats.push(
+                        serde_json::from_value(serde_json::json!({
+                            "id": "chat", "spaceId": "project", "deviceId": "local",
+                            "archived": false, "createdAt": "2026-01-01T00:00:00Z",
+                            "cwd": "/project", "branch": "feature/a-very-long-branch-name"
+                        }))
+                        .unwrap(),
+                    );
+                });
+            })
+            .unwrap();
+        for width in [260.0, 420.0, 840.0] {
+            for session in [false, true] {
+                for draft in ["Hi", "First line\nSecond line\nThird line"] {
+                    handle
+                        .update(cx, |composer, window, cx| {
+                            window.resize(size(px(width), px(600.0)));
+                            composer.set_available_width(width, cx);
+                            composer.state.update(cx, |state, _| {
+                                state.selected_chat = session.then(|| "chat".into())
+                            });
+                            composer.on_state_changed(cx);
+                            composer.set_dock_frame(
+                                crate::composer_dock::DockFrame::settled(session),
+                                cx,
+                            );
+                            composer
+                                .input
+                                .update(cx, |input, cx| input.set_text(draft, cx));
+                        })
+                        .unwrap();
+                    let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+                    visual.update(|window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear();
+                    });
+                    let (surface, model) = handle
+                        .read_with(&visual, |composer, _| {
+                            (
+                                composer.surface_bounds.get().unwrap(),
+                                composer.model_bounds.get().unwrap(),
+                            )
+                        })
+                        .unwrap();
+                    assert!(model.size.width > px(0.0));
+                    assert!((model.left() - surface.left() - px(10.0)).abs() <= px(1.0));
+                    assert!(model.top() >= surface.bottom());
+                    if session {
+                        let usage = visual.debug_bounds("context-usage").unwrap();
+                        assert!(model.right() <= usage.left());
+                        assert!(usage.right() <= surface.right());
+                        assert!(usage.top() >= surface.bottom());
+                    } else {
+                        assert!(visual.debug_bounds("context-usage").is_none());
+                    }
+                }
+            }
+        }
     }
 
     #[gpui::test]
@@ -12300,8 +12276,10 @@ mod tests {
                 .unwrap();
                 handle
                     .update(cx, |composer, _, cx| {
-                        // Let any resize hold expire between frames.
+                        // Settle both the resize hold and height animation.
+                        // The wider input now reaches compact mode in these panes.
                         composer.width_changed_at = None;
+                        composer.morph_clock = Instant::now() - Duration::from_secs(1);
                         trace.push((
                             composer.expanded_mode,
                             composer.last_target_height,
@@ -15840,18 +15818,15 @@ mod tests {
 
     #[test]
     fn auto_grow_math() {
-        // The source heights (harness composer.tsx line 235 clamp, composer-
-        // actions.tsx row, 1px hairlines): 76+46+2 empty … 260+46+2 capped.
-        assert_eq!(COMPOSER_MIN_HEIGHT, 120.0);
+        // Writing area, action row and hairlines: 60+42+2 … 260+42+2.
+        assert_eq!(COMPOSER_MIN_HEIGHT, 104.0);
         assert_eq!(COMPOSER_MAX_HEIGHT, 304.0);
-        // One line sits at the floor: the textarea BOX (content + `pt-4 pb-1`)
-        // clamps UP to 76 exactly like `Math.max(scrollHeight, 76)` — this is
-        // what makes the always-expanded new-chat composer 120px tall.
+        // A single line retains the expanded writing area's minimum height.
         assert_eq!(
             composer_total_height(input_content_height(1)),
             COMPOSER_MIN_HEIGHT
         );
-        // Growth is linear once the textarea box exceeds its 76px floor.
+        // Growth is linear once the textarea box exceeds its 60px floor.
         let h4 = composer_total_height(input_content_height(4));
         assert_eq!(
             h4,
@@ -17188,6 +17163,21 @@ mod appshot_rebase_tests {
 
 #[cfg(feature = "appshots-fixture")]
 impl Composer {
+    pub fn fixture_set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    pub fn fixture_model_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.model_bounds.get()
+    }
+
+    pub fn fixture_reset_caret(&mut self, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.reset_blink();
+            cx.notify();
+        });
+    }
+
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
         self.appshots.clear();
         cx.notify();

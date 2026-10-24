@@ -79,6 +79,10 @@ name = "readme-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "composer-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "markdown-math-fixture"
 required-features = ["appshots-fixture"]
 
