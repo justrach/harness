@@ -6,6 +6,7 @@ license-file.workspace = true
 publish.workspace = true
 
 [features]
+model-picker-preview = []
 project-palette-fixture = []
 
 browser-fixture = []
@@ -13,6 +14,10 @@ windows-render-fixture = []
 stall-watch-fixture = []
 appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
+
+[[example]]
+name = "model-picker-fixture"
+required-features = ["model-picker-preview", "appshots-fixture"]
 
 [[example]]
 name = "macos-resource-profile"

@@ -238,6 +238,16 @@ icon_assets![
     (MAKER_MINIMAX, "maker-minimax"),
     (MAKER_MISTRAL, "maker-mistral"),
     (MAKER_META, "maker-meta"),
+    (PROVIDER_KILO, "provider-kilo"),
+    (PROVIDER_GROQ, "provider-groq"),
+    (PROVIDER_CEREBRAS, "provider-cerebras"),
+    (PROVIDER_VERCEL, "provider-vercel"),
+    (PROVIDER_OPENROUTER, "provider-openrouter"),
+    (PROVIDER_FUGU, "provider-fugu"),
+    (PROVIDER_FIREWORKS, "provider-fireworks"),
+    (PROVIDER_LMSTUDIO, "provider-lmstudio"),
+    (PROVIDER_MLX, "provider-mlx"),
+    (PROVIDER_OMLX, "provider-omlx"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
