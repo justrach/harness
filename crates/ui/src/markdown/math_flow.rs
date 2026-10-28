@@ -27,6 +27,13 @@ fn breakable_space(c: char) -> bool {
     c.is_whitespace() && !matches!(c, '\u{00a0}' | '\u{202f}' | '\u{2007}')
 }
 
+fn hard_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{000b}' | '\u{000c}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
 fn fragments_styled(
     runs: &[InlineRun],
     size: f32,
@@ -117,6 +124,7 @@ fn fragments_styled(
             // adjacent soft-break spaces must not become empty flow rows.
             if word.is_empty()
                 && text.chars().all(breakable_space)
+                && !text.chars().any(hard_line_break)
                 && words
                     .last()
                     .is_some_and(|w: &Vec<Fragment>| w.iter().any(|f| f.display))
@@ -175,6 +183,26 @@ fn flatten_prose(runs: &[InlineRun], theme: &Theme, bold: bool) -> render::FlatT
         shaped_end = end;
     }
     flat.runs.retain(|run| run.len > 0);
+    if flat.text.chars().any(hard_line_break) {
+        let original = flat.text.clone();
+        // Flow supplies the new row. Paint blank substitutes of the same UTF-8
+        // length so font/link/code ranges and identity copy offsets stay valid.
+        // Give blank rows an advance so they also retain selectable geometry.
+        flat.text = original
+            .chars()
+            .map(|c| match c {
+                '\n' | '\r' | '\u{000b}' | '\u{000c}' => ' ',
+                '\u{0085}' => '\u{00a0}',
+                '\u{2028}' | '\u{2029}' => '\u{2002}',
+                _ => c,
+            })
+            .collect::<String>()
+            .into();
+        flat.original = Some(super::link_presentation::OriginalText {
+            text: original,
+            offsets: Default::default(),
+        });
+    }
     flat
 }
 
@@ -242,7 +270,7 @@ pub(super) fn render_aligned(
         let display = word.iter().any(|f| f.display);
         let hard_break = word
             .iter()
-            .any(|f| f.runs.iter().any(|run| run.text.ends_with('\n')));
+            .any(|f| f.runs.iter().any(|run| run.text.ends_with(hard_line_break)));
         if display && has_row {
             column = column.child(row);
             row = flow_row(align);
@@ -331,15 +359,7 @@ pub(super) fn render_aligned(
             } else {
                 // Malformed or unsupported commands stay visibly literal; a
                 // failed typeset must never masquerade as a successful layout.
-                let mut flat = flatten_prose(&fragment.runs, theme, bold);
-                if flat.text.contains('\n') {
-                    let original = flat.text.clone();
-                    flat.text = original.replace('\n', " ").into();
-                    flat.original = Some(super::link_presentation::OriginalText {
-                        text: original,
-                        offsets: Default::default(),
-                    });
-                }
+                let flat = flatten_prose(&fragment.runs, theme, bold);
                 let content = render::flat_text_presented_element_with_key(
                     &flat,
                     fragment_ix,

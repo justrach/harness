@@ -440,6 +440,175 @@ fn native_math_flow_right_aligned_table_keeps_alignment(cx: &mut TestAppContext)
     );
 }
 
+#[test]
+fn inline_math_flow_explicit_breaks_after_display_are_not_soft_padding() {
+    let tree = parse_full("$$x$$\u{2028}\u{2028}Next $y$");
+    let crate::markdown::Block::Paragraph { runs } = &tree.blocks[0].block else {
+        panic!()
+    };
+    let words = word_sources(&fragments(runs, 14., &Theme::dark()));
+    assert_eq!(words.concat(), "\n$$x$$\n\u{2028}\u{2028}Next $y$");
+    assert_eq!(words.iter().filter(|word| *word == "\u{2028}").count(), 2);
+}
+
+#[test]
+fn inline_math_flow_break_paint_preserves_utf8_offsets_styles_and_interactions() {
+    for separator in [
+        "\n", "\r", "\r\n", "\u{000b}", "\u{000c}", "\u{0085}", "\u{2028}", "\u{2029}",
+    ] {
+        let left = format!("left{separator}");
+        let source = format!("{left}right");
+        let runs = [
+            InlineRun {
+                text: left.clone(),
+                style: crate::markdown::parser::InlineStyle {
+                    code: true,
+                    ..Default::default()
+                },
+            },
+            InlineRun {
+                text: "right".into(),
+                style: crate::markdown::parser::InlineStyle {
+                    bold: true,
+                    link: Some("https://example.com".into()),
+                    ..Default::default()
+                },
+            },
+        ];
+        let flat = flatten_prose(&runs, &Theme::dark(), false);
+        assert_eq!(
+            flat.original
+                .as_ref()
+                .map(|original| original.text.as_ref()),
+            Some(source.as_str()),
+            "{separator:?}: keep original copy text"
+        );
+        assert_eq!(flat.text.len(), source.len());
+        assert_eq!(
+            flat.text
+                .char_indices()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            source
+                .char_indices()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            "paint replacement must retain UTF-8 selection boundaries"
+        );
+        assert!(!flat.text.chars().any(|c| matches!(
+            c,
+            '\n' | '\r' | '\u{000b}' | '\u{000c}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+        )));
+        assert_eq!(flat.code_ranges, vec![0..left.len()]);
+        assert_eq!(
+            flat.links,
+            vec![(left.len()..source.len(), "https://example.com".into())]
+        );
+        assert_eq!(
+            flat.runs.last().unwrap().font.weight,
+            gpui::FontWeight::SEMIBOLD
+        );
+    }
+}
+
+#[gpui::test]
+fn native_math_flow_unicode_mandatory_breaks_start_new_rows(cx: &mut TestAppContext) {
+    let _guard = selection::test_state_lock();
+    for separator in ['\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}'] {
+        let source = format!("First $x$ before{separator}Next $y$ after.");
+        let entries = entries(cx, &source, 800.);
+        let first = entries
+            .iter()
+            .find(|(_, text, _)| text == "First ")
+            .unwrap();
+        let next = entries.iter().find(|(_, text, _)| text == "Next ").unwrap();
+        assert!(
+            next.2.top() >= first.2.bottom(),
+            "{separator:?} must force a new row even in a wide pane: {entries:?}"
+        );
+        let copied: String = entries.iter().map(|(_, text, _)| text.as_str()).collect();
+        assert_eq!(copied, source, "mandatory breaks must survive copying");
+    }
+}
+
+#[gpui::test]
+fn native_math_flow_optional_breaks_do_not_force_new_rows(cx: &mut TestAppContext) {
+    let _guard = selection::test_state_lock();
+    for separator in [
+        " ", "\t", "\u{00a0}", "\u{2003}", "\u{200b}", "\u{2060}", "\u{00ad}",
+    ] {
+        let source = format!("First $x${separator}Next $y$");
+        let entries = entries(cx, &source, 800.);
+        let first = entries
+            .iter()
+            .find(|(_, text, _)| text == "First ")
+            .unwrap();
+        let next = entries
+            .iter()
+            .find(|(_, text, _)| text.contains("Next"))
+            .unwrap();
+        assert_eq!(
+            first.2.top(),
+            next.2.top(),
+            "{separator:?}: an optional wrap must not become a forced break"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|(_, text, _)| text.as_str())
+                .collect::<String>(),
+            source
+        );
+    }
+}
+
+#[gpui::test]
+fn native_math_flow_consecutive_unicode_breaks_keep_blank_rows(cx: &mut TestAppContext) {
+    let _guard = selection::test_state_lock();
+    let entries = entries(cx, "First $x$\u{2028}\u{2028}Next $y$", 800.);
+    let first = entries
+        .iter()
+        .find(|(_, text, _)| text == "First ")
+        .unwrap();
+    let next = entries.iter().find(|(_, text, _)| text == "Next ").unwrap();
+    assert!(
+        next.2.top() >= first.2.top() + px(44.),
+        "two forced breaks must retain a blank row: {entries:?}"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|(_, text, _)| text.as_str())
+            .collect::<String>(),
+        "First $x$\u{2028}\u{2028}Next $y$"
+    );
+}
+
+#[gpui::test]
+fn native_math_flow_forced_break_inside_code_keeps_code_style_and_copy(cx: &mut TestAppContext) {
+    let _guard = selection::test_state_lock();
+    let entries = entries(cx, "Before $x$ `left\u{2028}right` after.", 800.);
+    let left = entries
+        .iter()
+        .find(|(_, text, _)| text.contains("left"))
+        .unwrap();
+    let right = entries
+        .iter()
+        .find(|(_, text, _)| text.contains("right"))
+        .unwrap();
+    assert!(
+        right.2.top() >= left.2.bottom(),
+        "semantic tokens must not suppress mandatory breaks: {entries:?}"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|(_, text, _)| text.as_str())
+            .collect::<String>(),
+        "Before $x$ left\u{2028}right after."
+    );
+}
+
 #[gpui::test]
 fn native_math_flow_hard_break_moves_to_next_line(cx: &mut TestAppContext) {
     let _guard = selection::test_state_lock();

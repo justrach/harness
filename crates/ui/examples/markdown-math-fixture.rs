@@ -91,6 +91,16 @@ Combining mark: e**́** beside $w$.
 Nonbreaking controls: long token and narrow space beside $n$.
 "#;
 
+const BREAK_SOURCE: &str = concat!(
+    "# Mandatory line breaks\n\n",
+    "Line separator: first $x$\u{2028}second $y$.\n\n",
+    "Paragraph separator: first $a$\u{2029}second $b$.\n\n",
+    "Next-line control: first $m$\u{0085}second $n$.\n\n",
+    "Code beside $q$: `left\u{2028}right`.\n\n",
+    "Blank row: first $u$\u{2028}\u{2028}second $v$.\n\n",
+    "Nonbreaking control: long\u{00a0}token beside $z$.\n",
+);
+
 struct MathFixture {
     tree: markdown::BlockTree,
 }
@@ -127,7 +137,9 @@ impl Render for MathFixture {
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     std::fs::create_dir_all(&output)?;
-    let source = if std::env::args().any(|arg| arg == "--unicode") {
+    let source = if std::env::args().any(|arg| arg == "--breaks") {
+        BREAK_SOURCE
+    } else if std::env::args().any(|arg| arg == "--unicode") {
         UNICODE_SOURCE
     } else if std::env::args().any(|arg| arg == "--semantics") {
         SEMANTICS_SOURCE
