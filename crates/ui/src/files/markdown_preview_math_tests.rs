@@ -140,6 +140,162 @@ fn file_preview_math_reparse_discards_stale_equations_and_selection(cx: &mut Tes
 }
 
 #[gpui::test]
+fn file_preview_source_byte_limit_preserves_utf8_and_truncation_state(cx: &mut TestAppContext) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let view = cx.new(|cx| MarkdownPreview::new("Boundary.md".into(), Rc::new(|_, _, _| {}), cx));
+    // Parse at the real byte limit without asking the native text shaper to
+    // lay out a multi-megabyte unbroken word.
+    for (source, flag, expected_len, expected_truncated) in [
+        (
+            "a".repeat(MAX_MARKDOWN_BYTES),
+            false,
+            MAX_MARKDOWN_BYTES,
+            false,
+        ),
+        (
+            format!("{}🦀", "a".repeat(MAX_MARKDOWN_BYTES - 1)),
+            false,
+            MAX_MARKDOWN_BYTES - 1,
+            true,
+        ),
+        ("Short $x$.".into(), true, "Short $x$.".len(), true),
+        ("Short $y$.".into(), false, "Short $y$.".len(), false),
+    ] {
+        let expected = source[..expected_len].to_string();
+        view.update(cx, |view, cx| view.set_source(source, flag, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.parsed_source.len(), expected_len);
+            assert!(view.parsed_source.as_ref() == expected);
+            assert_eq!(view.truncated, expected_truncated);
+            assert!(!view.loading);
+            assert_eq!(view.parsed_epoch, view.epoch);
+        });
+    }
+}
+
+#[gpui::test]
+fn file_preview_clipped_math_does_not_invent_a_closing_delimiter(cx: &mut TestAppContext) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let view = cx.new(|cx| MarkdownPreview::new("Boundary.md".into(), Rc::new(|_, _, _| {}), cx));
+    let source = format!("{}\n\n$x^2$", "a".repeat(MAX_MARKDOWN_BYTES - 5));
+    view.update(cx, |view, cx| view.set_source(source, false, cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    view.read_with(cx, |view, _| {
+        assert!(view.truncated);
+        assert_eq!(view.parsed_source.len(), MAX_MARKDOWN_BYTES);
+        assert!(view.parsed_source.ends_with("\n\n$x^"));
+        let Block::Paragraph { runs } = &view.tree.blocks.last().unwrap().block else {
+            panic!("missing clipped paragraph");
+        };
+        assert!(runs.iter().all(|run| run.style.math.is_none()));
+        assert_eq!(
+            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "$x^"
+        );
+    });
+}
+
+#[gpui::test]
+fn file_preview_empty_replacement_resets_scrolled_math_and_can_render_again(
+    cx: &mut TestAppContext,
+) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let source = format!(
+        "# Start\n\n{}## Target\n\n$\\frac{{1}}{{n}}$\n\n{}",
+        "Filler $x$.\n\n".repeat(40),
+        "Tail paragraph.\n\n".repeat(40)
+    );
+    let window = open(cx, &source, 320.);
+    window
+        .update(cx, |view, _, cx| view.request_anchor("target".into(), cx))
+        .unwrap();
+    settle(cx, window);
+    assert!(
+        entries(cx, window)
+            .iter()
+            .any(|(_, text, _)| text == r"$\frac{1}{n}$")
+    );
+    window
+        .update(cx, |view, _, cx| {
+            assert!(view.list.logical_scroll_top().item_ix > 0);
+            view.set_source(String::new(), false, cx);
+        })
+        .unwrap();
+    settle(cx, window);
+    assert!(entries(cx, window).is_empty());
+    window
+        .update(cx, |view, _, cx| {
+            assert!(view.tree.is_empty() && view.anchors.is_empty());
+            assert!(view.parsed_source.is_empty());
+            assert!(!view.loading);
+            view.set_source("# Fresh\n\n$\\frac{7}{q}$".into(), false, cx);
+        })
+        .unwrap();
+    settle(cx, window);
+    assert!(
+        entries(cx, window)
+            .iter()
+            .any(|(_, text, bounds)| text == r"$\frac{7}{q}$" && bounds.size.height > px(20.))
+    );
+}
+
+#[gpui::test]
+fn file_preview_resume_replaces_cancelled_math_and_uses_only_the_new_anchor(
+    cx: &mut TestAppContext,
+) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let window = open(cx, "# Old\n\n$z$", 320.);
+    let source = format!(
+        "# Resume\n\n{}## Final target\n\n$\\frac{{7}}{{q}}$\n\n{}",
+        "Filler $x$.\n\n".repeat(40),
+        "Tail paragraph.\n\n".repeat(40)
+    );
+    window
+        .update(cx, |view, _, cx| {
+            view.set_source("# Cancelled\n\n$\\frac{1}{n}$".into(), false, cx);
+            view.request_anchor("cancelled".into(), cx);
+            view.suspend(cx);
+        })
+        .unwrap();
+    settle(cx, window);
+    assert!(entries(cx, window).is_empty());
+    window
+        .update(cx, |view, _, cx| {
+            assert!(view.suspended && view.pending_anchor.is_none());
+            view.activate(
+                "notes/Week 9 Lecture Notes.md",
+                &(None, "synthetic-checkout".into()),
+                cx,
+            );
+            view.set_source(source, false, cx);
+            view.request_anchor("final-target".into(), cx);
+        })
+        .unwrap();
+    settle(cx, window);
+    let visible = entries(cx, window);
+    assert!(visible.iter().any(|(_, text, _)| text == r"$\frac{7}{q}$"));
+    assert!(
+        !visible
+            .iter()
+            .any(|(_, text, _)| text.contains("Cancelled") || text.contains("frac{1}"))
+    );
+    window
+        .update(cx, |view, _, _| {
+            assert!(!view.suspended && !view.loading);
+            assert!(view.pending_anchor.is_none());
+            assert_eq!(view.parsed_epoch, view.epoch);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 fn file_preview_relative_notes_link_then_cheatsheet_uses_math_preview(cx: &mut TestAppContext) {
     let _guard = crate::markdown::selection::test_state_lock();
     let window = open(
