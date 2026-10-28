@@ -196,6 +196,43 @@ fn file_preview_relative_notes_link_then_cheatsheet_uses_math_preview(cx: &mut T
 }
 
 #[gpui::test]
+fn file_preview_encoded_duplicate_headings_reveal_the_matching_equations(cx: &mut TestAppContext) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let filler = "Filler $x$ paragraph.\n\n".repeat(40);
+    let source = format!(
+        "# Start\n\n{filler}## Café\n\n$\\frac{{1}}{{a}}$\n\n{filler}## Café\n\n$\\frac{{2}}{{b}}$\n\n{filler}## Café-1\n\n$\\frac{{3}}{{c}}$\n\n{filler}"
+    );
+    for width in [220., 480.] {
+        let window = open(cx, &source, width);
+        for (target, equation) in [
+            ("#caf%C3%A9", r"$\frac{1}{a}$"),
+            ("#caf%C3%A9-1", r"$\frac{2}{b}$"),
+            ("#caf%C3%A9-1-1", r"$\frac{3}{c}$"),
+        ] {
+            let ui = window.update(cx, |view, _, cx| view.link_ui(cx)).unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                render::activate_link(
+                    render::LinkTarget::new("Section", target),
+                    render::LinkAction::Primary,
+                    Some(&ui),
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+            settle(cx, window);
+            let visible = entries(cx, window);
+            assert!(
+                visible
+                    .iter()
+                    .any(|(_, text, bounds)| text == equation && bounds.size.height > px(20.)),
+                "{target}, width={width}: {visible:?}"
+            );
+        }
+    }
+}
+
+#[gpui::test]
 fn file_preview_empty_fragment_returns_to_document_top(cx: &mut TestAppContext) {
     let _guard = crate::markdown::selection::test_state_lock();
     let source = format!(
@@ -290,6 +327,12 @@ fn file_preview_pending_anchor_uses_latest_request_and_is_cancelled_on_suspend(
             view.set_source(source, false, cx);
             view.request_anchor("target".into(), cx);
             view.suspend(cx);
+            assert!(view.pending_anchor.is_none());
+            view.rename_path("renamed/Cheatsheet.md", cx);
+            assert!(
+                view.suspended,
+                "renaming a cached document must not resume it"
+            );
             assert!(view.pending_anchor.is_none());
         })
         .unwrap();

@@ -73,7 +73,7 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
     }
     let (path, anchor) = target
         .split_once('#')
-        .map_or((target, None), |(p, a)| (p, Some(a.to_string())));
+        .map_or((target, None), |(p, a)| (p, Some(a)));
     let decode = |s: &str| -> Option<String> {
         let mut bytes = Vec::new();
         let mut chars = s.as_bytes().iter().copied();
@@ -86,14 +86,22 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
                 bytes.push(c);
             }
         }
-        String::from_utf8(bytes).ok()
+        String::from_utf8(bytes)
+            .ok()
+            .filter(|value| !value.chars().any(char::is_control))
     };
     let path = decode(path)?;
+    // A malformed fragment invalidates the whole destination, rather than
+    // silently turning a section link into an unanchored file open.
+    let anchor = match anchor {
+        Some(anchor) => Some(decode(anchor)?),
+        None => None,
+    };
     if path.contains(['\\', ':', '\0']) || path.starts_with('/') {
         return None;
     }
     if path.is_empty() {
-        return Some((document.into(), anchor.and_then(|a| decode(&a))));
+        return Some((document.into(), anchor));
     }
     let mut parts: Vec<&str> = document.split('/').collect();
     parts.pop();
@@ -109,7 +117,7 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
     if parts.is_empty() {
         return None;
     }
-    Some((parts.join("/"), anchor.and_then(|a| decode(&a))))
+    Some((parts.join("/"), anchor))
 }
 
 pub(super) struct MarkdownPreview {
@@ -713,6 +721,21 @@ impl MarkdownPreview {
         }
     }
 
+    pub(super) fn rename_path(&mut self, path: &str, cx: &mut Context<Self>) {
+        // This is still the same buffer: preserve its pending section and
+        // suspension state, but reload relative media against the new path.
+        self.path = path.to_string();
+        self.version = None;
+        self.image_generation = self.image_generation.wrapping_add(1);
+        self.image_task = None;
+        self.close_media_preview(cx);
+        release_media(
+            self.images.drain().filter_map(|(_, result)| result.ok()),
+            cx,
+        );
+        self.media_dirty = true;
+    }
+
     pub fn activate(
         &mut self,
         path: &str,
@@ -720,18 +743,9 @@ impl MarkdownPreview {
         cx: &mut Context<Self>,
     ) {
         if self.path != path || self.media_location.as_ref() != Some(location) {
-            self.path = path.to_string();
             self.pending_anchor = None;
             self.media_location = Some(location.clone());
-            self.version = None;
-            self.image_generation = self.image_generation.wrapping_add(1);
-            self.image_task = None;
-            self.close_media_preview(cx);
-            release_media(
-                self.images.drain().filter_map(|(_, result)| result.ok()),
-                cx,
-            );
-            self.media_dirty = true;
+            self.rename_path(path, cx);
         }
         if self.suspended {
             self.suspended = false;
@@ -1423,6 +1437,71 @@ mod tests {
         assert_eq!(comment_block(&lines, 11), Some(3));
         assert_eq!(comment_block(&[], 1), None);
     }
+    #[test]
+    fn relative_links_decode_once_and_reject_invalid_fragments_atomically() {
+        for (target, path, anchor) in [
+            (
+                "Cheat%73heet.md#caf%C3%A9",
+                "notes/Cheatsheet.md",
+                Some("café"),
+            ),
+            ("a%23b.md#section", "notes/a#b.md", Some("section")),
+            (
+                "a%2520b.md#percent%2520",
+                "notes/a%20b.md",
+                Some("percent%20"),
+            ),
+            ("Cheatsheet.md#", "notes/Cheatsheet.md", Some("")),
+            ("#caf%C3%A9-1", "notes/Week 9.md", Some("café-1")),
+            ("Cheatsheet.md", "notes/Cheatsheet.md", None),
+        ] {
+            assert_eq!(
+                relative_target("notes/Week 9.md", target),
+                Some((path.into(), anchor.map(String::from))),
+                "{target}"
+            );
+        }
+        for target in [
+            "Cheatsheet.md#%",
+            "Cheatsheet.md#%2",
+            "Cheatsheet.md#%GG",
+            "Cheatsheet.md#%FF",
+            "#%C3%28",
+        ] {
+            assert_eq!(
+                relative_target("notes/Week 9.md", target),
+                None,
+                "a malformed fragment must not silently open an unanchored file: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_links_reject_raw_and_encoded_control_characters() {
+        for control in [
+            '\0', '\t', '\n', '\r', '\u{b}', '\u{c}', '\u{1f}', '\u{7f}', '\u{85}',
+        ] {
+            let encoded: String = control
+                .to_string()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("%{byte:02X}"))
+                .collect();
+            for suffix in [control.to_string(), encoded] {
+                for target in [
+                    format!("Cheat{suffix}sheet.md"),
+                    format!("Cheatsheet.md#part{suffix}two"),
+                ] {
+                    assert_eq!(
+                        relative_target("notes/Week 9.md", &target),
+                        None,
+                        "control characters must not reach file routing: {target:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn markdown_paths_and_links() {
         assert!(is_markdown("docs/README.MD"));

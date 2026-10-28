@@ -1733,6 +1733,12 @@ impl FilesSurface {
                     .map(|renamed| (path.clone(), renamed))
             })
             .collect::<Vec<_>>();
+        if let Some((path, _)) = self.preview.pending_markdown_anchor.as_mut()
+            && let Some(renamed) = renamed_document_path(path, old_path, &new_path)
+        {
+            *path = renamed;
+            cx.notify();
+        }
         let image_renames: HashSet<_> = renames
             .iter()
             .filter(|(old, new)| {
@@ -1746,6 +1752,9 @@ impl FilesSurface {
             };
             if let Some(view) = document.image.take() {
                 view.update(cx, |view, cx| view.suspend(cx));
+            }
+            if let Some(view) = &document.markdown {
+                view.update(cx, |view, cx| view.rename_path(new_document_path, cx));
             }
             document.generation = document.generation.wrapping_add(1);
             let needs_review =
@@ -4288,6 +4297,76 @@ mod markdown_buffer_tests {
         })
         .unwrap();
         assert_eq!(cx.opened_url().as_deref(), Some("mailto:hello@example.com"));
+    }
+
+    #[gpui::test]
+    fn markdown_pending_anchor_follows_a_directory_rename(cx: &mut TestAppContext) {
+        assert_markdown_anchor_survives_rename(cx, false);
+    }
+
+    #[gpui::test]
+    fn markdown_parsing_anchor_follows_a_directory_rename(cx: &mut TestAppContext) {
+        assert_markdown_anchor_survives_rename(cx, true);
+    }
+
+    fn assert_markdown_anchor_survives_rename(cx: &mut TestAppContext, start_parse: bool) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let preview = window
+            .update(cx, |surface, _, cx| {
+                let old = "notes/Cheatsheet.md";
+                let new = "handouts/Cheatsheet.md";
+                let source = format!(
+                    "# Start\n\n{}## Formulas\n\n$\\frac{{1}}{{n}}$\n\n{}",
+                    "Filler paragraph.\n\n".repeat(40),
+                    "Trailing paragraph.\n\n".repeat(40)
+                );
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "owner".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: old.into(),
+                });
+                document.set_loaded(harness_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: old.into(),
+                    size: source.len() as u64,
+                    text: Some(source),
+                    content_hash: Some("hash".into()),
+                    modified_at: None,
+                    encoding: harness_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(harness_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: None,
+                    truncated: false,
+                });
+                surface.preview.documents.insert(old.into(), document);
+                surface.preview.active = Some(old.into());
+                surface.navigate_markdown_anchor(old.into(), "formulas".into(), cx);
+                if start_parse {
+                    surface.prepare_markdown_preview(old, None, cx).unwrap();
+                    assert!(surface.test_pending_markdown_anchor().is_none());
+                }
+                surface.rename_documents("notes", "handouts".into(), cx);
+                assert_eq!(surface.preview.active.as_deref(), Some(new));
+                if !start_parse {
+                    assert_eq!(
+                        surface.test_pending_markdown_anchor(),
+                        Some((new.into(), "formulas".into())),
+                        "a document rename must carry its queued section request"
+                    );
+                }
+                surface.prepare_markdown_preview(new, None, cx).unwrap()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        preview.read_with(cx, |view, _| assert_eq!(view.test_scroll_top().item_ix, 41));
     }
 
     #[gpui::test]
