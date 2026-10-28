@@ -1,0 +1,84 @@
+[
+  {
+    "mode": "control",
+    "exit_code": 0,
+    "timed_out": false,
+    "measurement": {
+      "mode": "control",
+      "cache_evicted_a": false,
+      "a_renders_before": 6,
+      "a_renders_after": 6,
+      "cached_a_replayed": true,
+      "pressure_pane_rendered": 1,
+      "red_before": 262144,
+      "blue_before": 0,
+      "red_after": 262144,
+      "blue_after": 0,
+      "replacement_pixels_in_a": false,
+      "partial_image_in_a": false
+    },
+    "baseline_present": true,
+    "real_budget_eviction_logged": false,
+    "atlas_none_panic": false,
+    "wrong_pixels_reproduced": false,
+    "verified_original_pixels": true
+  },
+  {
+    "mode": "empty",
+    "exit_code": -6,
+    "timed_out": false,
+    "baseline_present": true,
+    "real_budget_eviction_logged": true,
+    "atlas_none_panic": true,
+    "wrong_pixels_reproduced": false,
+    "verified_original_pixels": false
+  },
+  {
+    "mode": "reuse",
+    "exit_code": 1,
+    "timed_out": false,
+    "measurement": {
+      "mode": "reuse",
+      "cache_evicted_a": true,
+      "a_renders_before": 3,
+      "a_renders_after": 3,
+      "cached_a_replayed": true,
+      "pressure_pane_rendered": 1,
+      "red_before": 262144,
+      "blue_before": 0,
+      "red_after": 0,
+      "blue_after": 262144,
+      "replacement_pixels_in_a": true,
+      "partial_image_in_a": false
+    },
+    "baseline_present": true,
+    "real_budget_eviction_logged": true,
+    "atlas_none_panic": false,
+    "wrong_pixels_reproduced": true,
+    "verified_original_pixels": false
+  },
+  {
+    "mode": "partial",
+    "exit_code": 1,
+    "timed_out": false,
+    "measurement": {
+      "mode": "partial",
+      "cache_evicted_a": true,
+      "a_renders_before": 4,
+      "a_renders_after": 4,
+      "cached_a_replayed": true,
+      "pressure_pane_rendered": 1,
+      "red_before": 262144,
+      "blue_before": 0,
+      "red_after": 0,
+      "blue_after": 4096,
+      "replacement_pixels_in_a": false,
+      "partial_image_in_a": true
+    },
+    "baseline_present": true,
+    "real_budget_eviction_logged": true,
+    "atlas_none_panic": false,
+    "wrong_pixels_reproduced": true,
+    "verified_original_pixels": false
+  }
+]
