@@ -131,6 +131,8 @@ pub(super) struct MarkdownPreview {
     anchors: HashMap<String, usize>,
     parse_task: Option<Task<()>>,
     epoch: u64,
+    parsed_epoch: u64,
+    pending_anchor: Option<String>,
     loading: bool,
     truncated: bool,
     pub media_client: Option<(super::client::WorkspaceFilesClient, String)>,
@@ -159,7 +161,7 @@ pub(super) struct MarkdownPreview {
     zoom_source: Option<crate::image_media::MediaImage>,
     zoom_render: Option<crate::image_media::MediaImage>,
     preview_focus: FocusHandle,
-    open_file: Rc<dyn Fn(String, &mut gpui::App)>,
+    open_file: Rc<dyn Fn(String, Option<String>, &mut gpui::App)>,
     open_web_link: Option<WebLinkHandler>,
 }
 
@@ -330,7 +332,7 @@ impl MarkdownPreview {
 
     pub fn new(
         path: String,
-        open_file: Rc<dyn Fn(String, &mut gpui::App)>,
+        open_file: Rc<dyn Fn(String, Option<String>, &mut gpui::App)>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.on_release(|view, cx| {
@@ -389,6 +391,8 @@ impl MarkdownPreview {
             anchors: HashMap::new(),
             parse_task: None,
             epoch: 0,
+            parsed_epoch: 0,
+            pending_anchor: None,
             loading: false,
             truncated: false,
             open_file,
@@ -492,6 +496,8 @@ impl MarkdownPreview {
                 view.block_lines = block_lines;
                 view.highlights = highlights;
                 view.anchors = anchors;
+                view.parsed_epoch = epoch;
+                view.apply_pending_anchor();
                 view.cache.borrow_mut().clear();
                 view.loading = false;
                 view.load_images(cx);
@@ -679,6 +685,34 @@ impl MarkdownPreview {
         })
     }
 
+    pub(super) fn request_anchor(&mut self, anchor: String, cx: &mut Context<Self>) {
+        self.pending_anchor = Some(anchor);
+        self.apply_pending_anchor();
+        cx.notify();
+    }
+
+    fn apply_pending_anchor(&mut self) {
+        // The old tree stays visible during debounce, but navigation belongs to
+        // the requested source version, not its retired heading map.
+        if self.parsed_epoch != self.epoch {
+            return;
+        }
+        let Some(anchor) = self.pending_anchor.take() else {
+            return;
+        };
+        let ix = if anchor.is_empty() {
+            Some(0)
+        } else {
+            self.anchors.get(&anchor).copied()
+        };
+        if let Some(ix) = ix.filter(|ix| *ix < self.tree.len()) {
+            self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.0),
+            });
+        }
+    }
+
     pub fn activate(
         &mut self,
         path: &str,
@@ -687,6 +721,7 @@ impl MarkdownPreview {
     ) {
         if self.path != path || self.media_location.as_ref() != Some(location) {
             self.path = path.to_string();
+            self.pending_anchor = None;
             self.media_location = Some(location.clone());
             self.version = None;
             self.image_generation = self.image_generation.wrapping_add(1);
@@ -710,6 +745,7 @@ impl MarkdownPreview {
             return;
         }
         self.suspended = true;
+        self.pending_anchor = None;
         self.media_dirty = true;
         self.epoch = self.epoch.wrapping_add(1);
         self.parse_task = None;
@@ -937,6 +973,11 @@ impl MarkdownPreview {
     }
 
     #[cfg(test)]
+    pub(super) fn test_scroll_top(&self) -> ListOffset {
+        self.list.logical_scroll_top()
+    }
+
+    #[cfg(test)]
     pub(super) fn test_block_bounds(&self, ix: usize) -> gpui::Bounds<gpui::Pixels> {
         let mut bounds = self.list.bounds_for_item(ix).unwrap();
         // GPUI's bounds_for_item omits the list padding applied during paint.
@@ -977,15 +1018,11 @@ impl MarkdownPreview {
                         return preview_link_outcome(activation);
                     };
                     if path == view.path {
-                        if let Some(ix) = anchor.as_ref().and_then(|a| view.anchors.get(a)) {
-                            view.list.scroll_to(ListOffset {
-                                item_ix: *ix,
-                                offset_in_item: px(0.0),
-                            });
-                            cx.notify();
+                        if let Some(anchor) = anchor {
+                            view.request_anchor(anchor, cx);
                         }
                     } else {
-                        (view.open_file)(path, cx);
+                        (view.open_file)(path, anchor, cx);
                     }
                     render::LinkOutcome::Internal
                 })
@@ -1456,7 +1493,7 @@ mod layout_tests {
                     |_, cx| {
                         cx.new(|cx| {
                             let mut view =
-                                MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                                MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                             view.tree = parser::parse_full(&code);
                             view.list.reset(1);
                             view.diagram_style = crate::theme::style_generation();
@@ -1533,7 +1570,7 @@ mod layout_tests {
                 "changing the persistent mode resets ephemeral offsets"
             );
             let second =
-                cx.new(|cx| MarkdownPreview::new("SECOND.md".into(), Rc::new(|_, _| {}), cx));
+                cx.new(|cx| MarkdownPreview::new("SECOND.md".into(), Rc::new(|_, _, _| {}), cx));
             let second_row: SharedString = format!("{}0", second.read(cx).scope).into();
             assert!(
                 second
@@ -1557,7 +1594,7 @@ mod layout_tests {
                     });
                     let preview = cx.new(|cx| {
                         let mut view =
-                            MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                            MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                         view.tree = parser::parse_full(source);
                         view.parsed_source = Arc::from(source);
                         view.editor = Some(editor.downgrade());
@@ -1681,7 +1718,8 @@ mod layout_tests {
             cx.set_global(Theme::dark());
             let make = |text: &str, cx: &mut gpui::App| {
                 cx.new(|cx| {
-                    let mut view = MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                    let mut view =
+                        MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                     view.tree = parser::parse_full(text);
                     view.list.reset(view.tree.len());
                     view.diagram_style = crate::theme::style_generation();
@@ -1735,7 +1773,7 @@ mod layout_tests {
             cx.set_global(Theme::dark());
             let window = cx.open_window(gpui::WindowOptions { window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(Point::default(), gpui::size(px(1200.0), px(600.0))))), ..Default::default() }, |_, cx| {
                 cx.new(|cx| {
-                    let mut view = MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                    let mut view = MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                     view.tree = parser::parse_full("![Example](example.svg)"); view.list.reset(1);
                     view.diagram_style = crate::theme::style_generation();
                     let media = crate::image_media::decode_image("image/svg+xml", br##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#468"/></svg>"##.to_vec()).unwrap();
@@ -1783,7 +1821,7 @@ mod layout_tests {
                         cx.new(|cx| {
                             let mut view = MarkdownPreview::new(
                                 "README.md".into(),
-                                Rc::new(|_, _| {}),
+                                Rc::new(|_, _, _| {}),
                                 cx,
                             );
                             view.tree = parser::parse_full(
@@ -1897,7 +1935,7 @@ mod async_tests {
     #[gpui::test]
     fn edits_and_suspension_cancel_obsolete_preview_work(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx));
         view.update(cx, |view, cx| {
             view.set_source("# Old".into(), false, cx);
             view.set_source("# Current".into(), false, cx);
@@ -1932,7 +1970,7 @@ mod async_tests {
     #[gpui::test]
     fn raster_admission_accounts_for_cpu_pixels_and_gpu_texture(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx));
         // The compressed source and one pixel buffer fit, but retaining both
         // decoded CPU pixels and the GPU texture exceeds the document budget.
         let raster = image::RgbaImage::new(3000, 3000);
@@ -1949,7 +1987,7 @@ mod async_tests {
     fn referenced_image_change_invalidates_cache_and_memory_is_bounded(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let view =
-            cx.new(|cx| MarkdownPreview::new("docs/README.md".into(), Rc::new(|_, _| {}), cx));
+            cx.new(|cx| MarkdownPreview::new("docs/README.md".into(), Rc::new(|_, _, _| {}), cx));
         view.update(cx, |view, cx| {
             view.tree = parser::parse_full("![a](../image.png)");
             let mut media = crate::image_media::decode_image(

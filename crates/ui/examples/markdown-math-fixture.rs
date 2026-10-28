@@ -169,7 +169,8 @@ impl Render for MathFixture {
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     std::fs::create_dir_all(&output)?;
-    let file_preview = std::env::args().any(|arg| arg == "--file-preview");
+    let file_jump = std::env::args().any(|arg| arg == "--file-preview-jump");
+    let file_preview = file_jump || std::env::args().any(|arg| arg == "--file-preview");
     let source = if file_preview {
         FILE_SOURCE
     } else if std::env::args().any(|arg| arg == "--breaks") {
@@ -184,6 +185,14 @@ fn main() -> anyhow::Result<()> {
         EDGE_SOURCE
     } else {
         SOURCE
+    };
+    let source = if file_jump {
+        format!(
+            "# Contents\n\n[Jump to formulas](#formulas)\n\n{}\n{source}",
+            "Synthetic filler paragraph.\n\n".repeat(30)
+        )
+    } else {
+        source.to_owned()
     };
     let data = tempfile::tempdir()?;
     let runtime = tokio::runtime::Runtime::new()?;
@@ -231,12 +240,17 @@ fn main() -> anyhow::Result<()> {
                                     ))),
                                     ..Default::default()
                                 },
-                                |_, cx| {
+                                |window, cx| {
                                     let preview = file_preview.then(|| {
-                                        harness_ui::files::markdown_preview_fixture(source, cx)
+                                        harness_ui::files::markdown_preview_fixture(
+                                            &source,
+                                            file_jump.then_some("formulas"),
+                                            window,
+                                            cx,
+                                        )
                                     });
                                     cx.new(|_| MathFixture {
-                                        tree: markdown::parse_full(source),
+                                        tree: markdown::parse_full(&source),
                                         preview,
                                     })
                                 },

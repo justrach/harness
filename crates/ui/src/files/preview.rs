@@ -100,6 +100,7 @@ pub(super) struct FilePreviewState {
     documents: HashMap<String, FileDocument>,
     document_recency: VecDeque<String>,
     active: Option<String>,
+    pending_markdown_anchor: Option<(String, String)>,
     highlights: HashMap<String, HighlightedFile>,
     syntax_cache: SyntaxHighlightCache,
     list: ListState,
@@ -128,6 +129,7 @@ impl FilePreviewState {
             documents: HashMap::new(),
             document_recency: VecDeque::new(),
             active: None,
+            pending_markdown_anchor: None,
             highlights: HashMap::new(),
             syntax_cache: SyntaxHighlightCache::default(),
             list: ListState::new(0, ListAlignment::Top, px(520.0)),
@@ -149,6 +151,7 @@ impl FilePreviewState {
         self.documents.clear();
         self.document_recency.clear();
         self.active = None;
+        self.pending_markdown_anchor = None;
         self.highlights.clear();
         self.list.reset(0);
         self.reload_confirmation = None;
@@ -215,6 +218,13 @@ impl FilePreviewState {
             return false;
         }
         self.document_recency.retain(|candidate| candidate != path);
+        if self
+            .pending_markdown_anchor
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == path)
+        {
+            self.pending_markdown_anchor = None;
+        }
         self.highlights.remove(path);
         if let Some(anchors) = self.comment_anchors.remove(path)
             && self
@@ -2370,6 +2380,22 @@ impl FilesSurface {
         })
     }
 
+    pub(crate) fn navigate_markdown_anchor(
+        &mut self,
+        path: String,
+        anchor: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !super::markdown_preview::is_markdown(&path) {
+            return;
+        }
+        if let Some(document) = self.preview.documents.get_mut(&path) {
+            document.show_markdown = true;
+        }
+        self.preview.pending_markdown_anchor = Some((path, anchor));
+        cx.notify();
+    }
+
     fn prepare_markdown_preview(
         &mut self,
         path: &str,
@@ -2397,9 +2423,10 @@ impl FilesSurface {
                 cx.new(|cx| {
                     let mut view = super::markdown_preview::MarkdownPreview::new(
                         path.to_string(),
-                        Rc::new(move |path, cx| {
-                            let _ =
-                                owner.update(cx, |surface, cx| surface.open_tree_file(path, cx));
+                        Rc::new(move |path, anchor, cx| {
+                            let _ = owner.update(cx, |surface, cx| {
+                                surface.open_markdown_file(path, anchor, cx)
+                            });
                         }),
                         cx,
                     );
@@ -2444,6 +2471,15 @@ impl FilesSurface {
                 view.version = Some(version);
                 view.set_source(source, truncated, cx);
             });
+        }
+        if self
+            .preview
+            .pending_markdown_anchor
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == path)
+        {
+            let (_, anchor) = self.preview.pending_markdown_anchor.take().unwrap();
+            view.update(cx, |view, cx| view.request_anchor(anchor, cx));
         }
         self.sync_markdown_comments(path, cx);
         Some(view)
@@ -3556,6 +3592,10 @@ impl FilesSurface {
             .clone()
     }
 
+    pub(crate) fn test_pending_markdown_anchor(&self) -> Option<(String, String)> {
+        self.preview.pending_markdown_anchor.clone()
+    }
+
     pub(crate) fn test_document_phase(&self, path: &str) -> Option<String> {
         Some(format!("{:?}", self.preview.documents.get(path)?.phase))
     }
@@ -4248,6 +4288,90 @@ mod markdown_buffer_tests {
         })
         .unwrap();
         assert_eq!(cx.opened_url().as_deref(), Some("mailto:hello@example.com"));
+    }
+
+    #[gpui::test]
+    fn markdown_anchor_waits_for_loading_and_parsing_then_applies_once(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let path = "notes/Cheatsheet.md";
+        let preview = window
+            .update(cx, |surface, _, cx| {
+                surface.navigate_markdown_anchor(path.into(), "obsolete".into(), cx);
+                surface.navigate_markdown_anchor(path.into(), "formulas".into(), cx);
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "owner".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: path.into(),
+                });
+                // An explicit section link also works for a previously source-only tab.
+                document.show_markdown = false;
+                surface.preview.documents.insert(path.into(), document);
+                surface.navigate_markdown_anchor(path.into(), "formulas".into(), cx);
+                assert!(surface.prepare_markdown_preview(path, None, cx).is_none());
+                assert!(
+                    surface
+                        .prepare_markdown_preview("other.md", None, cx)
+                        .is_none()
+                );
+                assert_eq!(
+                    surface.test_pending_markdown_anchor(),
+                    Some((path.into(), "formulas".into()))
+                );
+                let source = format!(
+                    "# Start\n\n{}## Formulas\n\n$\\frac{{a}}{{b}}$",
+                    "Filler paragraph.\n\n".repeat(40)
+                );
+                surface.preview.documents.get_mut(path).unwrap().set_loaded(
+                    harness_proto::WorkspaceFileText {
+                        checkout_id: "checkout".into(),
+                        path: path.into(),
+                        size: source.len() as u64,
+                        text: Some(source),
+                        content_hash: Some("hash".into()),
+                        modified_at: None,
+                        encoding: harness_proto::WorkspaceTextEncoding::Utf8,
+                        line_ending: Some(harness_proto::WorkspaceLineEnding::Lf),
+                        read_only_reason: None,
+                        truncated: false,
+                    },
+                );
+                let preview = surface.prepare_markdown_preview(path, None, cx).unwrap();
+                assert!(surface.test_pending_markdown_anchor().is_none());
+                preview
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        preview.update(cx, |view, cx| {
+            assert_eq!(view.test_scroll_top().item_ix, 41);
+            view.request_anchor(String::new(), cx);
+        });
+        window
+            .update(cx, |surface, _, cx| {
+                assert_eq!(
+                    surface.prepare_markdown_preview(path, None, cx).as_ref(),
+                    Some(&preview)
+                );
+                assert_eq!(
+                    preview.read(cx).test_scroll_top().item_ix,
+                    0,
+                    "ordinary renders must not replay a consumed anchor"
+                );
+                surface.navigate_markdown_anchor("image.png".into(), "ignored".into(), cx);
+                assert!(surface.test_pending_markdown_anchor().is_none());
+                surface.navigate_markdown_anchor(path.into(), "formulas".into(), cx);
+                surface.preview.reset();
+                assert!(surface.test_pending_markdown_anchor().is_none());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

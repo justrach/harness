@@ -33,18 +33,33 @@ pub mod watch;
 
 /// Isolated development capture of the real asynchronous Markdown file preview.
 #[cfg(feature = "appshots-fixture")]
-pub fn markdown_preview_fixture(source: &str, cx: &mut gpui::App) -> gpui::AnyView {
+pub fn markdown_preview_fixture(
+    source: &str,
+    anchor: Option<&str>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> gpui::AnyView {
     use gpui::AppContext as _;
-    cx.new(|cx| {
+    let view = cx.new(|cx| {
         let mut view = markdown_preview::MarkdownPreview::new(
             "notes/Cheatsheet.md".into(),
-            std::rc::Rc::new(|_, _| {}),
+            std::rc::Rc::new(|_, _, _| {}),
             cx,
         );
         view.set_source(source.into(), false, cx);
         view
-    })
-    .into()
+    });
+    if let Some(anchor) = anchor {
+        let ui = view.update(cx, |view, cx| view.link_ui(cx));
+        crate::markdown::render::activate_link(
+            crate::markdown::render::LinkTarget::new("Jump", &format!("#{anchor}")),
+            crate::markdown::render::LinkAction::Primary,
+            Some(&ui),
+            window,
+            cx,
+        );
+    }
+    view.into()
 }
 
 use client::{FilesRequestContext, WorkspaceFilesClient};
@@ -156,6 +171,7 @@ pub(crate) fn workspace_path_drag_ghost(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesEvent {
     OpenFile(String),
+    OpenFileAtAnchor { path: String, anchor: String },
     RevealFile(String),
     OpenWebLink(crate::markdown::render::LinkActivation),
     TitleChanged,
@@ -771,6 +787,19 @@ impl FilesSurface {
 
     pub(super) fn open_tree_file(&mut self, path: String, cx: &mut Context<Self>) {
         cx.emit(FilesEvent::OpenFile(path));
+    }
+
+    pub(super) fn open_markdown_file(
+        &mut self,
+        path: String,
+        anchor: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(anchor) = anchor {
+            cx.emit(FilesEvent::OpenFileAtAnchor { path, anchor });
+        } else {
+            self.open_tree_file(path, cx);
+        }
     }
 
     pub(crate) fn focus_explorer(&self, window: &mut Window, cx: &mut Context<Self>) {

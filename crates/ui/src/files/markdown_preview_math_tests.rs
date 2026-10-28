@@ -21,7 +21,7 @@ fn open(cx: &mut TestAppContext, source: &str, width: f32) -> WindowHandle<Markd
     let window = cx.open_window(size(px(width), px(600.)), |_, cx| {
         MarkdownPreview::new(
             "notes/Week 9 Lecture Notes.md".into(),
-            Rc::new(|_, _| {}),
+            Rc::new(|_, _, _| {}),
             cx,
         )
     });
@@ -151,7 +151,11 @@ fn file_preview_relative_notes_link_then_cheatsheet_uses_math_preview(cx: &mut T
     let ui = window
         .update(cx, |view, _, cx| {
             let observed = opened.clone();
-            view.open_file = Rc::new(move |path, _| observed.borrow_mut().push(path));
+            view.open_file = Rc::new(move |path, anchor, _| {
+                let target =
+                    anchor.map_or_else(|| path.clone(), |anchor| format!("{path}#{anchor}"));
+                observed.borrow_mut().push(target);
+            });
             view.link_ui(cx)
         })
         .unwrap();
@@ -165,7 +169,11 @@ fn file_preview_relative_notes_link_then_cheatsheet_uses_math_preview(cx: &mut T
         );
     })
     .unwrap();
-    assert_eq!(&*opened.borrow(), &["notes/Cheatsheet.md"]);
+    assert_eq!(
+        &*opened.borrow(),
+        &["notes/Cheatsheet.md#fractions"],
+        "cross-file navigation must not discard the requested section"
+    );
     // The file host supplies the loaded buffer through the normal preview API.
     window
         .update(cx, |view, _, cx| {
@@ -185,6 +193,106 @@ fn file_preview_relative_notes_link_then_cheatsheet_uses_math_preview(cx: &mut T
             .any(|(_, text, bounds)| text == r"$\frac{a+b}{n}$" && bounds.size.width < px(80.)),
         "{entries:?}"
     );
+}
+
+#[gpui::test]
+fn file_preview_empty_fragment_returns_to_document_top(cx: &mut TestAppContext) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let source = format!(
+        "# Start\n\n{}\n## Last section\n\n$y$",
+        "Filler $x$ paragraph.\n\n".repeat(40)
+    );
+    let window = open(cx, &source, 320.);
+    for target in ["#last-section", "#"] {
+        let ui = window.update(cx, |view, _, cx| view.link_ui(cx)).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            render::activate_link(
+                render::LinkTarget::new("Jump", target),
+                render::LinkAction::Primary,
+                Some(&ui),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+        settle(cx, window);
+        let offset = window
+            .update(cx, |view, _, _| view.list.logical_scroll_top())
+            .unwrap();
+        if target == "#" {
+            assert_eq!(
+                offset.item_ix, 0,
+                "an explicit empty fragment must return to the top"
+            );
+        } else {
+            assert!(offset.item_ix > 0, "probe must actually scroll first");
+        }
+    }
+}
+
+#[gpui::test]
+fn file_preview_anchor_during_reparse_waits_for_the_new_headings(cx: &mut TestAppContext) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let window = open(cx, "# Old\n\n$z$", 320.);
+    let source = format!(
+        "# Start\n\n{}\n## New target\n\n$\\frac{{7}}{{q}}$",
+        "Filler $x$ paragraph.\n\n".repeat(40)
+    );
+    let ui = window
+        .update(cx, |view, _, cx| {
+            view.set_source(source, false, cx);
+            view.link_ui(cx)
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        render::activate_link(
+            render::LinkTarget::new("Jump", "#new-target"),
+            render::LinkAction::Primary,
+            Some(&ui),
+            window,
+            cx,
+        );
+    })
+    .unwrap();
+    settle(cx, window);
+    assert!(
+        entries(cx, window)
+            .iter()
+            .any(|(_, text, _)| text == r"$\frac{7}{q}$"),
+        "navigation during the parse debounce must not be lost"
+    );
+}
+
+#[gpui::test]
+fn file_preview_pending_anchor_uses_latest_request_and_is_cancelled_on_suspend(
+    cx: &mut TestAppContext,
+) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let window = open(cx, "# Old\n\n$z$", 320.);
+    let source = format!(
+        "# Start\n\n{}## Target\n\n$y$",
+        "Filler $x$.\n\n".repeat(40)
+    );
+    window
+        .update(cx, |view, _, cx| {
+            view.set_source(source.clone(), false, cx);
+            view.request_anchor("target".into(), cx);
+            view.request_anchor(String::new(), cx);
+        })
+        .unwrap();
+    settle(cx, window);
+    window
+        .update(cx, |view, _, cx| {
+            assert_eq!(view.list.logical_scroll_top().item_ix, 0);
+            assert!(view.pending_anchor.is_none());
+            view.request_anchor("missing-heading".into(), cx);
+            assert_eq!(view.list.logical_scroll_top().item_ix, 0);
+            view.set_source(source, false, cx);
+            view.request_anchor("target".into(), cx);
+            view.suspend(cx);
+            assert!(view.pending_anchor.is_none());
+        })
+        .unwrap();
 }
 
 #[gpui::test]

@@ -3981,13 +3981,20 @@ impl Shell {
             &file,
             window,
             move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                if matches!(
+                    event,
+                    FilesEvent::OpenFile(_)
+                        | FilesEvent::OpenFileAtAnchor { .. }
+                        | FilesEvent::RevealFile(_)
+                ) && !this.accepts_file_navigation(&event_panel_key, &source, cx)
                 {
                     return;
                 }
                 match event {
                     FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::OpenFileAtAnchor { path, anchor } => {
+                        this.add_file_surface_at_anchor(path.clone(), anchor.clone(), window, cx)
+                    }
                     FilesEvent::RevealFile(path) => {
                         this.add_files_surface(window, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
@@ -4031,6 +4038,30 @@ impl Shell {
             RightSurface::File(id),
         );
         self.set_right_active(RightSurface::File(id), cx);
+    }
+
+    fn add_file_surface_at_anchor(
+        &mut self,
+        path: String,
+        anchor: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_chat.is_empty() {
+            return;
+        }
+        self.add_file_surface(path.clone(), window, cx);
+        let lookup = (self.panel_key(cx), path.clone());
+        if let Some(file) = self
+            .file_surface_keys
+            .get(&lookup)
+            .and_then(|id| self.file_surfaces.get(id))
+            .cloned()
+        {
+            file.update(cx, |file, cx| {
+                file.navigate_markdown_anchor(path, anchor, cx)
+            });
+        }
     }
 
     fn open_workspace_file_link(
