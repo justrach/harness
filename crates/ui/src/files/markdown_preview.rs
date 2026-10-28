@@ -1408,6 +1408,10 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "markdown_preview_math_tests.rs"]
+mod math_tests;
+
 #[cfg(all(test, target_os = "linux"))]
 mod layout_tests {
     use super::*;

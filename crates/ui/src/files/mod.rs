@@ -31,6 +31,22 @@ pub mod search;
 pub mod tree;
 pub mod watch;
 
+/// Isolated development capture of the real asynchronous Markdown file preview.
+#[cfg(feature = "appshots-fixture")]
+pub fn markdown_preview_fixture(source: &str, cx: &mut gpui::App) -> gpui::AnyView {
+    use gpui::AppContext as _;
+    cx.new(|cx| {
+        let mut view = markdown_preview::MarkdownPreview::new(
+            "notes/Cheatsheet.md".into(),
+            std::rc::Rc::new(|_, _| {}),
+            cx,
+        );
+        view.set_source(source.into(), false, cx);
+        view
+    })
+    .into()
+}
+
 use client::{FilesRequestContext, WorkspaceFilesClient};
 use model::{DirectoryLoadState, FileTreeModel};
 use preview::FilePreviewState;

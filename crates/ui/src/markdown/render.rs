@@ -1698,9 +1698,7 @@ pub(crate) fn clear_selection_surface(prefix: &str) {
         r.borrow_mut()
             .retain(|entry| !entry.key.starts_with(prefix))
     });
-    if let Some(anchor) = super::selection::anchor_key().filter(|key| key.starts_with(prefix)) {
-        super::selection::clear_if_owner(&anchor);
-    }
+    super::selection::cancel_surface(prefix);
 }
 
 pub fn selection_surface_reset(prefix: String) -> impl IntoElement {

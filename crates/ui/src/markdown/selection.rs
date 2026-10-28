@@ -405,6 +405,20 @@ pub fn clear_if_owner(key: &str) -> bool {
     false
 }
 
+/// Invalidate a surface's snapshotted source, including an in-flight drag.
+/// Unlike an outside click, a buffer replacement must not retain old text.
+pub(crate) fn cancel_surface(prefix: &str) -> bool {
+    let mut guard = state().lock().unwrap();
+    if guard
+        .as_ref()
+        .is_some_and(|selection| selection.anchor_key.starts_with(prefix))
+    {
+        *guard = None;
+        return true;
+    }
+    false
+}
+
 /// The wash range for `key` this frame (empty ⇒ nothing to paint).
 pub fn wash_range(key: &str) -> Option<Range<usize>> {
     let guard = state().lock().unwrap();
@@ -598,6 +612,39 @@ mod tests {
         ];
         let spans = resolve_spans(&elements, (0, 4), (2, "print(café)".len()));
         assert_eq!(join_spans(&spans), "café = 1;\n\nprint(café)");
+    }
+
+    #[test]
+    fn invalidating_surface_cancels_only_its_active_or_settled_selection() {
+        let _state = test_state_lock();
+        for dragging in [true, false] {
+            for key in [
+                "md-preview-1|row:0".to_owned(),
+                inline_fragment_key("md-preview-1|row:1", 0),
+            ] {
+                begin(&key, 0);
+                update_spans(vec![Span {
+                    key: key.clone(),
+                    range: 0..5,
+                    text: "$x_i$".into(),
+                }]);
+                if !dragging {
+                    end_active_drag();
+                } else {
+                    assert!(
+                        !clear_if_owner(&key),
+                        "ordinary outside-click clearing must still preserve an active drag"
+                    );
+                }
+                assert!(!cancel_surface("md-preview-10|"));
+                assert_eq!(is_dragging(), dragging);
+                assert_eq!(selected_text().as_deref(), Some("$x_i$"));
+                assert!(cancel_surface("md-preview-1|"));
+                assert!(!is_dragging());
+                assert!(selected_text().is_none());
+                assert!(!cancel_surface("md-preview-1|"));
+            }
+        }
     }
 
     #[test]

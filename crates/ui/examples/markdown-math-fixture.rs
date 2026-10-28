@@ -101,13 +101,44 @@ const BREAK_SOURCE: &str = concat!(
     "Nonbreaking control: long\u{00a0}token beside $z$.\n",
 );
 
+const FILE_SOURCE: &str = r#"# Cheatsheet
+
+Synthetic Week 9 notes · [Jump to formulas](#formulas)
+
+## Formulas
+
+Inline $\frac{a+b}{n}$ and \(\sqrt{x^2+y^2}\) stay with prose.
+
+\[ M=\begin{bmatrix}a & b\\ c & d\end{bmatrix} \]
+
+\[ \underbrace{wx}_{\text{weighted input}}+\underbrace{b}_{\text{bias}} \]
+
+| Quantity | Formula |
+|---|---:|
+| Standard error | $\frac{\sigma}{\sqrt{m}}$ |
+
+Literal controls: $5 and $10; `$x^2$`; $\unsupported{x}$.
+
+```latex
+\frac{a}{b} stays code
+```
+"#;
+
 struct MathFixture {
     tree: markdown::BlockTree,
+    preview: Option<gpui::AnyView>,
 }
 
 impl Render for MathFixture {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::Theme::of(cx);
+        if let Some(preview) = &self.preview {
+            return div()
+                .size_full()
+                .bg(theme.bg)
+                .child(preview.clone())
+                .into_any_element();
+        }
         let mut opts = markdown::render::RenderOptions::settled("math-fixture".into());
         opts.media = Some(markdown::render::MediaUi {
             diagram: None,
@@ -131,13 +162,17 @@ impl Render for MathFixture {
                 window,
                 &|_| None,
             ))
+            .into_any_element()
     }
 }
 
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     std::fs::create_dir_all(&output)?;
-    let source = if std::env::args().any(|arg| arg == "--breaks") {
+    let file_preview = std::env::args().any(|arg| arg == "--file-preview");
+    let source = if file_preview {
+        FILE_SOURCE
+    } else if std::env::args().any(|arg| arg == "--breaks") {
         BREAK_SOURCE
     } else if std::env::args().any(|arg| arg == "--unicode") {
         UNICODE_SOURCE
@@ -197,8 +232,12 @@ fn main() -> anyhow::Result<()> {
                                     ..Default::default()
                                 },
                                 |_, cx| {
+                                    let preview = file_preview.then(|| {
+                                        harness_ui::files::markdown_preview_fixture(source, cx)
+                                    });
                                     cx.new(|_| MathFixture {
                                         tree: markdown::parse_full(source),
+                                        preview,
                                     })
                                 },
                             )

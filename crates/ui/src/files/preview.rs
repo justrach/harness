@@ -4281,7 +4281,7 @@ mod markdown_buffer_tests {
                 });
                 let theme = Theme::of(cx).clone();
                 document.editor = Some(super::super::editor::new_file_editor(
-                    "# Unsaved",
+                    "# Unsaved\n\nInline \\(\\frac{a+b}{n}\\).",
                     "README.md",
                     false,
                     &theme,
@@ -4316,6 +4316,17 @@ mod markdown_buffer_tests {
                 panic!("missing heading");
             };
             assert_eq!(runs[0].text, "Unsaved");
+            let crate::markdown::parser::Block::Paragraph { runs } =
+                &preview.test_tree().blocks[1].block
+            else {
+                panic!("missing unsaved math paragraph");
+            };
+            assert!(runs.iter().any(|run| {
+                run.style
+                    .math
+                    .as_ref()
+                    .is_some_and(|math| math.source == r"\frac{a+b}{n}" && !math.display)
+            }));
         });
         let weak = preview.downgrade();
         drop(preview);
