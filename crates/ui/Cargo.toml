@@ -147,6 +147,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 usvg = "0.46"
 latex-rust = "=2.1.1"
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
+unicode-linebreak = "0.1.5"
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 fontdb.workspace = true

@@ -4161,6 +4161,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ttf-parser",
+ "unicode-linebreak",
  "unicode-segmentation",
  "unicode-width",
  "url",

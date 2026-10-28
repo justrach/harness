@@ -138,7 +138,10 @@ fn native_math_flow_reverse_drag_preserves_unicode_and_hard_break_copy(cx: &mut 
         let _ = window.draw(cx);
     });
     let entries = render::selection_test_entries();
-    let first = entries.iter().find(|(_, text, _)| text == "前置 ").unwrap();
+    let first = entries
+        .iter()
+        .find(|(_, text, _)| text.starts_with('前'))
+        .unwrap();
     let last = entries.iter().find(|(_, text, _)| text == "tail.").unwrap();
     // The transcript's right-gutter path anchors after the last glyph. A
     // click inside the final glyph correctly anchors before that character.
@@ -177,6 +180,248 @@ fn native_math_flow_tiny_viewports_keep_visible_hit_bounds_clipped(cx: &mut Test
                 );
             }
         }
+    }
+}
+
+#[gpui::test]
+fn native_math_flow_cjk_prose_wraps_instead_of_becoming_one_scroller(cx: &mut TestAppContext) {
+    let _guard = selection::test_state_lock();
+    let prose = "漢字かなカナ한글".repeat(6);
+    let entries = entries(cx, &format!("{prose} $x$"), 180.);
+    let prose_entries: Vec<_> = entries
+        .iter()
+        .filter(|(_, text, _)| !text.starts_with('$'))
+        .collect();
+    let first = prose_entries.first().unwrap();
+    let last = prose_entries.last().unwrap();
+    assert!(
+        last.2.top() > first.2.top() + px(22.),
+        "CJK prose must wrap across visual lines, not be clipped into one scrolling token: {prose_entries:?}"
+    );
+    let copied: String = prose_entries
+        .iter()
+        .map(|(_, text, _)| text.as_str())
+        .collect();
+    assert_eq!(copied, format!("{prose} "));
+}
+
+#[gpui::test]
+fn native_math_flow_resize_clamps_scroll_offset_and_keeps_source(cx: &mut TestAppContext) {
+    let _guard = selection::test_state_lock();
+    cx.update(|cx| cx.set_global(Theme::dark()));
+    let source = format!("${}z$", "x+".repeat(30));
+    let tree = parse_full(&source);
+    let (_, cx) = cx.add_window_view(|_, _| FlowHarness { tree });
+    let mut key = None;
+    for width in [180., 1000., 120., 320.] {
+        cx.simulate_resize(size(px(width), px(240.)));
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        let entries = render::selection_test_entries();
+        let formula = entries.iter().find(|(_, text, _)| text == &source).unwrap();
+        assert_eq!(
+            key.get_or_insert_with(|| formula.0.clone()).as_str(),
+            formula.0.as_str()
+        );
+        assert!(formula.2.left() >= px(0.) && formula.2.right() <= px(width));
+        if width == 1000. {
+            assert!(
+                cx.debug_bounds("math-flow-equation").unwrap().left() >= px(0.),
+                "growing the viewport must clear a stale negative scroll offset"
+            );
+        } else {
+            cx.simulate_event(gpui::MouseMoveEvent {
+                position: formula.2.center(),
+                ..Default::default()
+            });
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: formula.2.center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(-10000.), px(0.))),
+                ..Default::default()
+            });
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+            assert!(cx.debug_bounds("math-flow-equation").unwrap().left() < px(0.));
+        }
+    }
+}
+
+fn word_sources(words: &[Vec<Fragment>]) -> Vec<String> {
+    words
+        .iter()
+        .map(|word| {
+            word.iter()
+                .map(|fragment| {
+                    fragment.copy.clone().unwrap_or_else(|| {
+                        fragment.runs.iter().map(|run| run.text.as_str()).collect()
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn inline_math_flow_zero_width_space_creates_a_wrap_opportunity() {
+    let tree = parse_full("alpha\u{200b}beta $x$");
+    let crate::markdown::Block::Paragraph { runs } = &tree.blocks[0].block else {
+        panic!()
+    };
+    let words = word_sources(&fragments(runs, 14., &Theme::dark()));
+    assert_eq!(words, ["alpha\u{200b}", "beta ", "$x$"]);
+    assert_eq!(words.concat(), "alpha\u{200b}beta $x$");
+}
+
+#[test]
+fn inline_math_flow_unicode_glue_and_clusters_survive_style_boundaries() {
+    for (left, middle, right, expected) in [
+        ("a", "\u{2060}", "b ", "a\u{2060}b "),
+        ("a", "\u{00a0}", "b ", "a\u{00a0}b "),
+        ("a", "\u{202f}", "b ", "a\u{202f}b "),
+        ("e", "\u{301}", " ", "e\u{301} "),
+        ("👩", "\u{200d}", "💻 ", "👩\u{200d}💻 "),
+        ("🇺", "🇸", " ", "🇺🇸 "),
+    ] {
+        let tree = parse_full("$x$");
+        let crate::markdown::Block::Paragraph { runs: math } = &tree.blocks[0].block else {
+            panic!()
+        };
+        let mut runs: Vec<_> = [left, middle, right]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| InlineRun {
+                text: text.to_owned(),
+                style: crate::markdown::parser::InlineStyle {
+                    bold: index == 1,
+                    ..Default::default()
+                },
+            })
+            .collect();
+        runs.push(math[0].clone());
+        let fragments = fragments(&runs, 14., &Theme::dark());
+        let words = word_sources(&fragments);
+        assert_eq!(words, [expected, "$x$"], "{expected}");
+        assert_eq!(
+            fragments[0].len(),
+            1,
+            "a grapheme/joined word must reach one text layout, not separate shaped elements"
+        );
+        assert!(
+            fragments[0][0].runs.iter().any(|run| run.style.bold),
+            "coalescing must preserve styling"
+        );
+    }
+}
+
+#[test]
+fn inline_math_flow_shaping_style_boundaries_never_bisect_graphemes() {
+    use unicode_segmentation::UnicodeSegmentation;
+    for source in [
+        "👩**‍**💻 **bold** $x$",
+        "🇺**🇸** **bold** $x$",
+        "e**́** **bold** $x$",
+    ] {
+        let tree = parse_full(source);
+        let crate::markdown::Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        for fragment in fragments(runs, 14., &Theme::dark()).into_iter().flatten() {
+            if fragment.copy.is_some() {
+                continue;
+            }
+            let flat = flatten_prose(&fragment.runs, &Theme::dark(), false);
+            let boundaries = flat
+                .text
+                .grapheme_indices(true)
+                .map(|(index, _)| index)
+                .chain(std::iter::once(flat.text.len()))
+                .collect::<Vec<_>>();
+            let mut end = 0;
+            for run in &flat.runs {
+                end += run.len;
+                assert!(
+                    boundaries.contains(&end),
+                    "{source}: shaping boundary {end} bisects {:?}",
+                    flat.text
+                );
+            }
+            assert_eq!(end, flat.text.len());
+            if flat.text.starts_with("bold") {
+                assert_eq!(flat.runs[0].font.weight, gpui::FontWeight::SEMIBOLD);
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn native_math_flow_styled_graphemes_shape_like_intact_clusters(cx: &mut TestAppContext) {
+    let _guard = selection::test_state_lock();
+    for (plain, styled, cluster) in [
+        ("👩‍💻 $x$", "👩**‍**💻 $x$", "👩‍💻"),
+        ("🇺🇸 $x$", "🇺**🇸** $x$", "🇺🇸"),
+        ("é $x$", "e**́** $x$", "é"),
+    ] {
+        let width = |entries: Vec<(String, String, gpui::Bounds<gpui::Pixels>)>| {
+            entries
+                .iter()
+                .find(|(_, text, _)| text.contains(cluster))
+                .unwrap()
+                .2
+                .size
+                .width
+        };
+        let expected = width(entries(cx, plain, 320.));
+        let actual = width(entries(cx, styled, 320.));
+        assert!(
+            (f32::from(actual - expected)).abs() < 0.1,
+            "styling inside {cluster} must not break shaping: {actual:?} vs {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn inline_math_flow_cjk_punctuation_and_styles_follow_unicode_breaks() {
+    let tree = parse_full("**甲**乙（丙丁） $x$。");
+    let crate::markdown::Block::Paragraph { runs } = &tree.blocks[0].block else {
+        panic!()
+    };
+    let words = word_sources(&fragments(runs, 14., &Theme::dark()));
+    assert_eq!(words.concat(), "甲乙（丙丁） $x$。");
+    assert_eq!(words[0], "甲");
+    assert_eq!(words[1], "乙");
+    assert!(words.iter().all(|word| !word.starts_with(['）', '。'])));
+    assert!(words.iter().all(|word| !word.ends_with('（')));
+    assert_eq!(words.last().unwrap(), "$x$。");
+}
+
+#[test]
+fn inline_math_flow_semantic_tokens_keep_their_presentation_and_metadata() {
+    for source in [
+        "https://example.com/a/b?c=d $x$",
+        "[linked/path](https://example.com) $x$",
+        "`some/path/to/code` $x$",
+    ] {
+        let tree = parse_full(source);
+        let crate::markdown::Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        let semantic = runs
+            .iter()
+            .find(|run| run.style.code || run.style.link.is_some())
+            .unwrap();
+        let words = fragments(runs, 14., &Theme::dark());
+        let retained = words
+            .iter()
+            .flatten()
+            .flat_map(|fragment| &fragment.runs)
+            .filter(|run| run.style == semantic.style)
+            .collect::<Vec<_>>();
+        assert_eq!(retained.len(), 1, "{source}");
+        assert_eq!(retained[0].text, semantic.text, "{source}");
     }
 }
 
@@ -411,10 +656,21 @@ fn native_math_flow_double_click_keeps_styled_unicode_words_whole(cx: &mut TestA
                 let _ = window.draw(cx);
             });
             let entries = render::selection_test_entries();
-            let clicked = entries.iter().find(|(_, text, _)| text == target).unwrap();
+            let clicked = entries
+                .iter()
+                .find(|(_, text, _)| text.contains(target))
+                .unwrap();
+            let start = clicked.1.find(target).unwrap();
+            let fraction = (clicked.1[..start].chars().count() as f32
+                + target.chars().count() as f32 / 2.)
+                / clicked.1.chars().count() as f32;
+            let position = point(
+                clicked.2.left() + clicked.2.size.width * fraction,
+                clicked.2.center().y,
+            );
             cx.simulate_event(gpui::MouseDownEvent {
                 button: gpui::MouseButton::Left,
-                position: clicked.2.center(),
+                position,
                 click_count: 2,
                 ..Default::default()
             });

@@ -33,6 +33,23 @@ fn fragments_styled(
     theme: &Theme,
     bold_default: bool,
 ) -> Vec<Vec<Fragment>> {
+    // Find breaks across styles, rather than treating every styled run as a
+    // separate string. A letter stands in for each atomic equation, keeping
+    // surrounding Latin prose and punctuation attached as before.
+    let logical: String = runs
+        .iter()
+        .map(|run| {
+            if run.style.math.is_some() {
+                "M"
+            } else {
+                &run.text
+            }
+        })
+        .collect();
+    let mut breaks = unicode_linebreak::linebreaks(&logical)
+        .map(|(offset, _)| offset)
+        .peekable();
+    let mut offset = 0;
     let mut words = Vec::new();
     let mut word = Vec::new();
     for run in runs {
@@ -63,12 +80,36 @@ fn fragments_styled(
                     source
                 }),
             });
-            if math.display {
+            offset += 1;
+            let boundary = breaks.peek() == Some(&offset);
+            if boundary {
+                breaks.next();
+            }
+            if math.display || boundary {
                 words.push(std::mem::take(&mut word));
             }
             continue;
         }
-        for text in run.text.split_inclusive(breakable_space) {
+        let end = offset + run.text.len();
+        let mut start = offset;
+        // Keep semantic tokens intact for link/reference/code presentation;
+        // these may contain punctuation that normally permits Unicode breaks.
+        let semantic = run.style.link.is_some() || run.style.code || run.style.content_reference;
+        let mut pieces = Vec::new();
+        while breaks.peek().is_some_and(|boundary| *boundary <= end) {
+            let boundary = breaks.next().unwrap();
+            let local = boundary - offset;
+            if !semantic || local == run.text.len() || run.text[..local].ends_with(breakable_space)
+            {
+                pieces.push((&run.text[start - offset..local], true));
+                start = boundary;
+            }
+        }
+        if start < end {
+            pieces.push((&run.text[start - offset..], false));
+        }
+        offset = end;
+        for (text, boundary) in pieces {
             if text.is_empty() {
                 continue;
             }
@@ -82,16 +123,23 @@ fn fragments_styled(
             {
                 continue;
             }
-            word.push(Fragment {
-                runs: vec![InlineRun {
-                    text: text.to_owned(),
-                    style: run.style.clone(),
-                }],
-                equation: None,
-                display: false,
-                copy: None,
-            });
-            if text.ends_with(breakable_space) {
+            let prose = InlineRun {
+                text: text.to_owned(),
+                style: run.style.clone(),
+            };
+            // Shape a joined word/grapheme as one text element, while retaining
+            // all runs for styling, links, and source-preserving selection.
+            if let Some(last) = word.last_mut().filter(|last| last.copy.is_none()) {
+                last.runs.push(prose);
+            } else {
+                word.push(Fragment {
+                    runs: vec![prose],
+                    equation: None,
+                    display: false,
+                    copy: None,
+                });
+            }
+            if boundary {
                 words.push(std::mem::take(&mut word));
             }
         }
@@ -100,6 +148,34 @@ fn fragments_styled(
         words.push(word);
     }
     words
+}
+
+fn flatten_prose(runs: &[InlineRun], theme: &Theme, bold: bool) -> render::FlatText {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut flat = render::flatten_runs(runs, theme, bold);
+    // Platform shapers deliberately break ligatures between styled runs. A
+    // style boundary inside a grapheme must therefore move to its end: the
+    // leading codepoint owns the cluster's paint style. Source/link/code byte
+    // ranges stay unchanged, and styles resume at the next complete grapheme.
+    let mut boundaries = flat
+        .text
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .peekable();
+    let mut source_end = 0;
+    let mut shaped_end = 0;
+    for run in &mut flat.runs {
+        source_end += run.len;
+        while boundaries.peek().is_some_and(|index| *index < source_end) {
+            boundaries.next();
+        }
+        let end = boundaries.peek().copied().unwrap_or(flat.text.len());
+        run.len = end - shaped_end;
+        shaped_end = end;
+    }
+    flat.runs.retain(|run| run.len > 0);
+    flat
 }
 
 fn flow_row(align: TableAlign) -> gpui::Div {
@@ -255,7 +331,7 @@ pub(super) fn render_aligned(
             } else {
                 // Malformed or unsupported commands stay visibly literal; a
                 // failed typeset must never masquerade as a successful layout.
-                let mut flat = render::flatten_runs(&fragment.runs, theme, bold);
+                let mut flat = flatten_prose(&fragment.runs, theme, bold);
                 if flat.text.contains('\n') {
                     let original = flat.text.clone();
                     flat.text = original.replace('\n', " ").into();

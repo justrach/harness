@@ -78,6 +78,19 @@ Operator spacing control: $a+b$.
 Explicit operator spacing: $a\hspace{0em}+b$.
 "#;
 
+const UNICODE_SOURCE: &str = r#"# Multilingual math flow
+
+漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글漢字かなカナ한글 $x$.
+
+Zero-width breaks: alpha​beta​gamma​delta​epsilon​zeta​eta​theta​iota​kappa​lambda​mu beside $y$.
+
+Joined emoji: 👩**‍**💻; regional flag: 🇺**🇸** beside $z$.
+
+Combining mark: e**́** beside $w$.
+
+Nonbreaking controls: long token and narrow space beside $n$.
+"#;
+
 struct MathFixture {
     tree: markdown::BlockTree,
 }
@@ -114,7 +127,9 @@ impl Render for MathFixture {
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     std::fs::create_dir_all(&output)?;
-    let source = if std::env::args().any(|arg| arg == "--semantics") {
+    let source = if std::env::args().any(|arg| arg == "--unicode") {
+        UNICODE_SOURCE
+    } else if std::env::args().any(|arg| arg == "--semantics") {
         SEMANTICS_SOURCE
     } else if std::env::args().any(|arg| arg == "--ink") {
         INK_SOURCE
