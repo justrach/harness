@@ -250,6 +250,8 @@ pub const App = struct {
     retired_ids: std.ArrayList([]u8) = .empty,
     /// The process's environment (main's), for what's started from here.
     env: ?*const std.process.Environ.Map = null,
+    /// `harness headless`, started here when no engine answers.
+    engine_start: @import("engine_start.zig").State = .{},
     /// Drawn offscreen (a scene): no main run loop to post to.
     offscreen: bool = false,
     /// Dictation through the device's Codex voice.
@@ -365,6 +367,7 @@ pub const App = struct {
     pub fn deinit(a: *App) void {
         @import("app_surface.zig").deinit(a);
         a.engine.deinit();
+        @import("engine_start.zig").stop();
         a.attachments.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);
         var blobs = a.tool_blobs.valueIterator();
@@ -500,6 +503,7 @@ pub const App = struct {
                     queue_mod.watch(a);
                     @import("app_panels.zig").chatChanged(a);
                 }
+                @import("engine_start.zig").connected(a);
             },
             .disconnected, .connecting => {
                 for (a.peers.items) |*p| p.* = .{ .id = p.id, .transcript = p.transcript };
@@ -512,6 +516,8 @@ pub const App = struct {
                 a.w_doc = .{};
                 a.w_queue = .{};
                 change_requests.disconnected(a);
+                // Nothing answers: start an engine, as a person would.
+                if (s == .disconnected) @import("engine_start.zig").disconnected(a);
             },
         }
         a.redraw();

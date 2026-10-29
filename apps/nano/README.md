@@ -28,11 +28,11 @@ client codegraff uses. For now it fetches the newest release's manifest.
   See [the browser's boundaries and checks](../../docs/nano-browser.md).
 
 Also: answering the agent's questions, the message queue, the changes pane
-and file explorer, and project actions with their terminal dock.
+and file explorer, project actions with their terminal dock, attachments,
+dictation, pins and settings.
 
 Not there yet: typing into the dock, split diffs, editing files,
-dragging queued messages, attachments and dictation, pins, settings,
-starting an engine when none is running, Linux and Windows.
+dragging queued messages, Linux and Windows.
 
 ## Build and run
 
@@ -51,8 +51,16 @@ The bundler forwards Zig build arguments. When testing a local nanoui fork,
 use the same override for the release app: `sh scripts/bundle.sh --fork=/path/to/nanoui`.
 Otherwise it builds the dependency pinned in `build.zig.zon`.
 
-An engine has to be running. With Harness open, its daemon already is, so
-harness-nano shows your chats. Otherwise start one with `harness headless`.
+harness-nano needs an engine. With Harness open, its engine is already
+running, so harness-nano shows your chats. When nothing answers, harness-nano
+starts `harness headless` itself (from `/Applications/Harness.app`,
+`~/Applications/Harness.app`, or `harness` on `PATH`; `HARNESS_NANO_ENGINE_BIN`
+names another), with its own environment, and writes the engine's output to
+`harness-nano-engine.log` in Harness's logs folder. When harness-nano quits it
+stops that engine, and only that one: an engine Harness.app, a daemon or a
+terminal started is never stopped from here. If Harness.app attached to the
+engine harness-nano started, it loses it when harness-nano quits. Set
+`HARNESS_NANO_NO_ENGINE_START` to wait for an engine instead.
 
 harness-nano connects to `127.0.0.1:27664`. Set `HARNESS_IPC_PORT` to use
 another engine.

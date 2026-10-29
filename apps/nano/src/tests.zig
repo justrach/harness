@@ -10,6 +10,7 @@ test {
     _ = @import("tools.zig");
     _ = @import("compact.zig");
     _ = @import("prompt_history.zig");
+    _ = @import("engine_start.zig");
     _ = @import("diff.zig");
     _ = @import("wizard.zig");
     _ = @import("termlog.zig");
