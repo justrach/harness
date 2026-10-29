@@ -4454,6 +4454,157 @@ mod markdown_buffer_tests {
     }
 
     #[gpui::test]
+    fn working_notes_checkbox_undo_and_unsaved_formula_survive_preview_switches(
+        cx: &mut TestAppContext,
+    ) {
+        let _guard = crate::markdown::selection::test_state_lock();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let source =
+            "# Study notes\n\n- [ ] Revise fractions $\\frac{a}{b}$.\n\nFormula $\\sqrt{x+y}$.\n";
+        let (preview, editor) = window
+            .update(cx, |surface, window, cx| {
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "owner".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: "Study.md".into(),
+                });
+                document.set_loaded(harness_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: "Study.md".into(),
+                    text: Some(source.into()),
+                    content_hash: Some("hash".into()),
+                    size: source.len() as u64,
+                    modified_at: None,
+                    encoding: harness_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(harness_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: None,
+                    truncated: false,
+                });
+                surface
+                    .preview
+                    .documents
+                    .insert("Study.md".into(), document);
+                surface.preview.active = Some("Study.md".into());
+                let theme = Theme::of(cx).clone();
+                let editor = surface
+                    .ensure_editor("Study.md", &theme, window, cx)
+                    .unwrap();
+                let preview = surface
+                    .prepare_markdown_preview("Study.md", Some(&editor), cx)
+                    .unwrap();
+                (preview, editor)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+            let bounds = preview.read(cx).test_block_bounds(1);
+            let gutter = ((bounds.size.width - px(900.)) / 2.).max(px(24.));
+            let position = gpui::point(bounds.left() + gutter + px(8.), bounds.top() + px(11.));
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let checked = source.replacen("[ ]", "[x]", 1);
+        editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), checked));
+        // Return to source view, as a user would to continue editing the notes.
+        window
+            .update(cx, |surface, window, cx| {
+                surface
+                    .preview
+                    .documents
+                    .get_mut("Study.md")
+                    .unwrap()
+                    .show_markdown = false;
+                preview.update(cx, |view, cx| view.suspend(cx));
+                window.focus(&editor.focus_handle(cx), cx);
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), "cmd-z");
+        editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), source));
+        cx.simulate_keystrokes(window.into(), "cmd-shift-z");
+        editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), checked));
+        window
+            .update(cx, |surface, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    let start = editor.value().find("x+y").unwrap();
+                    editor.set_selected_range(start..start + 3, cx);
+                    editor.replace("u+v", window, cx);
+                });
+                surface
+                    .preview
+                    .documents
+                    .get_mut("Study.md")
+                    .unwrap()
+                    .show_markdown = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        preview.read_with(cx, |view, _| {
+            let crate::markdown::parser::Block::Paragraph { runs } =
+                &view.test_tree().blocks[2].block
+            else {
+                panic!("missing formula paragraph");
+            };
+            assert!(runs.iter().any(|run| {
+                run.style
+                    .math
+                    .as_ref()
+                    .is_some_and(|math| math.source == r"\sqrt{u+v}")
+            }));
+        });
+        window
+            .update(cx, |surface, _, _| {
+                let document = &surface.preview.documents["Study.md"];
+                assert!(document.is_dirty());
+                assert!(document.save_task.is_none() && document.autosave_task.is_none());
+                assert_eq!(
+                    document.file.as_ref().unwrap().text.as_deref(),
+                    Some(source),
+                    "preview must use the unsaved editor without replacing the disk baseline"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn preview_reads_unsaved_buffer_without_starting_a_save(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);

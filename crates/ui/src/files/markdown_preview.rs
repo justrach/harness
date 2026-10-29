@@ -1343,8 +1343,9 @@ impl Render for MarkdownPreview {
                     }
                 }),
             )
-            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "c"
+            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
+                if view.owns_selection()
+                    && event.keystroke.key == "c"
                     && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
                 {
                     if let Some(text) = crate::markdown::selection::selected_text() {

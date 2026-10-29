@@ -571,6 +571,122 @@ fn file_preview_suspension_cancels_its_drag_without_touching_another_document(
 }
 
 #[gpui::test]
+fn file_preview_copy_in_another_window_does_not_steal_the_first_notes_selection(
+    cx: &mut TestAppContext,
+) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let first = open(cx, r"Week 9 $\frac{a}{b}$ notes.", 320.);
+    let second = open(cx, "Week 10 $y$ notes.", 320.);
+    let equation = entries(cx, first)
+        .into_iter()
+        .find(|(_, text, _)| text == r"$\frac{a}{b}$")
+        .unwrap();
+    cx.update_window(first.into(), |_, window, cx| {
+        let position = equation.2.center();
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count: 2,
+                ..Default::default()
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count: 2,
+                ..Default::default()
+            }),
+            cx,
+        );
+    })
+    .unwrap();
+    assert_eq!(
+        crate::markdown::selection::selected_text().as_deref(),
+        Some(r"$\frac{a}{b}$")
+    );
+    let focus = second.update(cx, |view, _, _| view.focus.clone()).unwrap();
+    cx.update_window(second.into(), |_, window, cx| window.focus(&focus, cx))
+        .unwrap();
+    cx.update(|cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("Existing clipboard".into()))
+    });
+    cx.simulate_keystrokes(second.into(), "cmd-c");
+    cx.update(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some("Existing clipboard"),
+            "Copy in notes with no selection must not copy another window's equation"
+        )
+    });
+    let focus = first.update(cx, |view, _, _| view.focus.clone()).unwrap();
+    cx.update_window(first.into(), |_, window, cx| window.focus(&focus, cx))
+        .unwrap();
+    cx.simulate_keystrokes(first.into(), "cmd-c");
+    cx.update(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().as_deref(),
+            Some(r"$\frac{a}{b}$")
+        )
+    });
+}
+
+#[gpui::test]
+fn file_preview_lecture_notes_copy_math_from_quotes_lists_and_tables(cx: &mut TestAppContext) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let source = "# Week 9\n\n> Use $\\frac{a}{b}$ here.\n\n- Revise $\\sqrt{x+y}$.\n\n| Quantity | Formula |\n| --- | --- |\n| Error | $\\frac{1}{n}$ |\n\nPrinting costs $5 and $10. Code: `$x^2$`.";
+    for width in [320., 600.] {
+        let window = open(cx, source, width);
+        for expected in [r"$\frac{a}{b}$", r"$\sqrt{x+y}$", r"$\frac{1}{n}$"] {
+            let visible = entries(cx, window);
+            let equation = visible
+                .iter()
+                .find(|(_, text, bounds)| text == expected && bounds.size.width < px(80.))
+                .unwrap_or_else(|| {
+                    panic!("missing equation {expected}, width={width}: {visible:?}")
+                });
+            cx.update_window(window.into(), |_, window, cx| {
+                let position = equation.2.center();
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        click_count: 2,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        click_count: 2,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.simulate_keystrokes(window.into(), "cmd-c");
+            cx.update(|cx| {
+                assert_eq!(
+                    cx.read_from_clipboard().unwrap().text().as_deref(),
+                    Some(expected)
+                )
+            });
+        }
+        let visible = entries(cx, window);
+        let text: String = visible.iter().map(|(_, text, _)| text.as_str()).collect();
+        assert!(
+            text.contains("$5 and $10") && text.contains("$x^2$"),
+            "{visible:?}"
+        );
+    }
+}
+
+#[gpui::test]
 fn file_preview_math_mouse_and_keyboard_copy_preserve_latex_source(cx: &mut TestAppContext) {
     let _guard = crate::markdown::selection::test_state_lock();
     let source = "# Cheatsheet\n\nBefore $\\frac{a}{b}$ after.\n\nOther $x$.";
