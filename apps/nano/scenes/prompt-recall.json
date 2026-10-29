@@ -1,0 +1,30 @@
+{
+ "width": 1200, "height": 780, "dark": true, "scale": 2,
+ "devices": [{"id": "d", "name": "Studio"}],
+ "spaces": [{"id": "s", "deviceId": "d", "path": "/work/fieldnotes"}],
+ "chats": [{"id": "a", "deviceId": "d", "title": "Synthetic recall chat", "archived": false, "spaceId": "s"}],
+ "open": "a",
+ "transcripts": {
+  "a": [
+   {"id": "u1", "role": "user", "parts": [{"id": "p", "kind": "text", "text": "Sketch the fieldnotes import"}]},
+   {"id": "a1", "role": "assistant", "status": "complete", "parts": [{"id": "p", "kind": "text", "text": "Here is a sketch of the import."}]},
+   {"id": "u2", "role": "user", "parts": [{"id": "p", "kind": "text", "text": "[Message from Harness chat Build helper. Sender chat: helper. Agent coordination, not a human request.]\n\nThe synthetic build passed."}]},
+   {"id": "u3", "role": "user", "parts": [{"id": "p", "kind": "text", "text": "Add tests for the empty file case"}]},
+   {"id": "a3", "role": "assistant", "status": "complete", "parts": [{"id": "p", "kind": "text", "text": "Added a test for an empty file."}]},
+   {"id": "u4", "role": "user", "parts": [{"id": "p", "kind": "text", "text": "Now rename the module to notes_import"}]},
+   {"id": "a4", "role": "assistant", "status": "complete", "parts": [{"id": "p", "kind": "text", "text": "Renamed it."}]}
+  ]
+ },
+ "steps": [
+  {"snap": "0-empty"},
+  {"press": "up"},   {"snap": "1-up-newest"},
+  {"press": "up"},   {"snap": "2-up-skips-agent"},
+  {"press": "up"},   {"snap": "3-up-oldest"},
+  {"press": "up"},   {"snap": "4-up-stays-oldest"},
+  {"press": "down"}, {"snap": "5-down"},
+  {"press": "down"}, {"snap": "6-down-newest"},
+  {"press": "down"}, {"snap": "7-down-back-to-empty"},
+  {"type": "half-written idea"},
+  {"press": "up"},   {"snap": "8-draft-caret-at-end-keeps-draft"}
+ ]
+}
