@@ -255,6 +255,8 @@ pub const App = struct {
     /// Dictation through the device's Codex voice.
     dictation: @import("app_dictation.zig").State = .{},
     composer: nanoui.ui.TextBuffer = .{},
+    /// ↑/↓ through the open chat's earlier prompts.
+    prompt_nav: @import("prompt_history.zig").Nav = .{},
     attachments: @import("app_attachments.zig").State = .{},
     /// The last error the engine gave, shown under the composer.
     notice: [200]u8 = undefined,
@@ -384,6 +386,7 @@ pub const App = struct {
         }
         a.peers.deinit(a.gpa);
         drafts.deinit(a);
+        a.prompt_nav.reset(a.gpa);
         a.account.deinit(a.gpa);
         a.cloud_sandboxes.deinit();
         a.settings.deinit();
