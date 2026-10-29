@@ -18351,6 +18351,16 @@ mod tests {
         assert!(!opener.opens("/tmp/report.md"));
         assert!(!opener.opens("/work/app/../secret.rs"));
         assert!(!opener.opens("../secret.rs"));
+        // A real filename containing `%20` is not decoded on the way.
+        assert_eq!(
+            crate::workspace_links::resolve_markdown_file_link(
+                &ToolFileOpener::destination("/work/app/a%20b.md"),
+                "/work/app"
+            )
+            .map(|link| link.path)
+            .as_deref(),
+            Some("a%20b.md")
+        );
 
         let read = |path: &str| ToolItem {
             part_id: "fixture".into(),
@@ -18411,7 +18421,21 @@ mod tests {
         {
             let opened = opened.borrow();
             assert_eq!(opened.len(), 1);
-            assert_eq!(opened[0].target.original, "/work/app/src/guard.rs");
+            // A tool path is literal, so it travels as the canonical file
+            // reference rather than a Markdown URI that would decode `%`.
+            assert_eq!(
+                opened[0].target.original,
+                "harness-file:/work/app/src/guard.rs"
+            );
+            assert_eq!(
+                crate::workspace_links::resolve_markdown_file_link(
+                    &opened[0].target.original,
+                    "/work/app"
+                )
+                .map(|link| link.path)
+                .as_deref(),
+                Some("src/guard.rs")
+            );
             assert_eq!(opened[0].action, render::LinkAction::Primary);
             assert_eq!(opened[0].source_session.as_deref(), Some("chat"));
         }
