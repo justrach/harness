@@ -167,6 +167,18 @@ pub fn count(a: *const App) usize {
     return n;
 }
 
+/// Whether an attachment named `name` is a picture the composer previews
+/// (`attachments::is_image_path`); anything else shows the file's icon,
+/// without trying to decode it.
+pub fn isImageName(name: []const u8) bool {
+    const ext = std.fs.path.extension(name);
+    if (ext.len < 2) return false;
+    for ([_][]const u8{ "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff" }) |e| {
+        if (std.ascii.eqlIgnoreCase(ext[1..], e)) return true;
+    }
+    return false;
+}
+
 pub fn ready(a: *const App) bool {
     for (a.attachments.items.items) |item| if (item.active(a) and item.status != .ready) return false;
     return true;

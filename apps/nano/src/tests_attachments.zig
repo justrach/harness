@@ -118,3 +118,12 @@ test "staged images stay with their chat and removing an upload is safe before i
     try testing.expectEqual(@as(usize, 0), a.attachments.items.items.len);
     try pump(&a);
 }
+
+test "only picture names get a thumbnail, as GPUI's is_image_path" {
+    for ([_][]const u8{ "image.png", "0a1b2c3d-shot.PNG", "a.jpg", "a.jpeg", "a.gif", "a.webp", "a.svg", "a.bmp", "a.tif", "a.TIFF" }) |name| {
+        try testing.expect(attachments.isImageName(name));
+    }
+    for ([_][]const u8{ "pasted-text.txt", "0a1b2c3d-report.pdf", "png", "archive.png.zip", "noext", "trailing." }) |name| {
+        try testing.expect(!attachments.isImageName(name));
+    }
+}

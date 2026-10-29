@@ -256,7 +256,7 @@ test "composer keystrokes only build the sidebar rows in view" {
     const large_nodes = h.t.ctx.stats.nodes;
     const large_ms = h.t.ctx.stats.build_ms + h.t.ctx.stats.layout_ms + h.t.ctx.stats.paint_ms;
     try testing.expectEqualStrings("ab", h.a.composer.text());
-    std.debug.print("\ncomposer sidebar: 50 sessions {d} nodes / {d:.2} ms; 2000 sessions {d} nodes / {d:.2} ms\n", .{ small_nodes, small_ms, large_nodes, large_ms });
+    std.log.info("composer sidebar: 50 sessions {d} nodes / {d:.2} ms; 2000 sessions {d} nodes / {d:.2} ms", .{ small_nodes, small_ms, large_nodes, large_ms });
     // A large offscreen history must not turn each key into thousands of
     // shaped, laid-out and painted rows. Compare the shape, not a tight
     // wall-clock limit that depends on the machine running the test.
