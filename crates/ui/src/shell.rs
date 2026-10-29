@@ -62,7 +62,7 @@ use crate::terminal::panel::{
 };
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
-use crate::workspace_links::resolve_workspace_file_link;
+use crate::workspace_links::resolve_markdown_file_link;
 use app_update::{AppUpdateUi, StagedUpdate};
 pub use app_update::{UpdateRelaunch, UpdateRelaunched, take_relaunch_marker};
 
@@ -4066,7 +4066,7 @@ impl Shell {
         let Some(root) = chat.cwd.as_deref() else {
             return false;
         };
-        let Some(link) = resolve_workspace_file_link(target, root) else {
+        let Some(link) = resolve_markdown_file_link(target, root) else {
             return false;
         };
 
