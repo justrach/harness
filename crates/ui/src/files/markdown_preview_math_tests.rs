@@ -296,6 +296,79 @@ fn file_preview_resume_replaces_cancelled_math_and_uses_only_the_new_anchor(
 }
 
 #[gpui::test]
+fn file_preview_reference_links_with_spaced_filenames_open_from_native_clicks(
+    cx: &mut TestAppContext,
+) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    for label in [
+        "[Week 9 formulas][review]",
+        "[Week 9 formulas][]",
+        "[Week 9 formulas]",
+    ] {
+        let reference = if label.contains("[review]") {
+            "review"
+        } else {
+            "Week 9 formulas"
+        };
+        let source = format!(
+            "Read {label} beside $x_i$.\n\n[{reference}]: <../Revision%20Notes/Cheatsheet.md#standard-error> \"Review formulas\""
+        );
+        let window = open(cx, &source, 320.);
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        window
+            .update(cx, |view, _, _| {
+                let opened = opened.clone();
+                view.open_file =
+                    Rc::new(move |path, anchor, _| opened.borrow_mut().push((path, anchor)));
+            })
+            .unwrap();
+        settle(cx, window);
+        let visible = entries(cx, window);
+        let link = visible
+            .iter()
+            .find(|(_, text, _)| text.trim() == "formulas")
+            .unwrap_or_else(|| panic!("missing reference label: {label}: {visible:?}"));
+        cx.update_window(window.into(), |_, window, cx| {
+            let position = link.2.center();
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            &*opened.borrow(),
+            &[(
+                "Revision Notes/Cheatsheet.md".into(),
+                Some("standard-error".into())
+            )],
+            "reference links must use the file route and preserve their section: {label}"
+        );
+    }
+}
+
+#[gpui::test]
 fn file_preview_relative_notes_link_then_cheatsheet_uses_math_preview(cx: &mut TestAppContext) {
     let _guard = crate::markdown::selection::test_state_lock();
     let window = open(
@@ -349,6 +422,51 @@ fn file_preview_relative_notes_link_then_cheatsheet_uses_math_preview(cx: &mut T
             .any(|(_, text, bounds)| text == r"$\frac{a+b}{n}$" && bounds.size.width < px(80.)),
         "{entries:?}"
     );
+}
+
+#[gpui::test]
+fn file_preview_reference_section_links_reveal_headings_inside_quotes_and_lists(
+    cx: &mut TestAppContext,
+) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    for destination in [
+        "> ## Details\n>\n> Formula $\\frac{7}{q}$.",
+        "- ## Details\n\n  Formula $\\frac{7}{q}$.",
+        "- Quoted lecture extract\n\n  > ## Details\n  >\n  > Formula $\\frac{7}{q}$.",
+    ] {
+        let filler = "Revision paragraph.\n\n".repeat(40);
+        let source = format!(
+            "Read [Jump to details][section] beside $x$.\n\n[section]: #details-1\n\n# Details\n\n{filler}{destination}\n\n{filler}"
+        );
+        let window = open(cx, &source, 320.);
+        let visible = entries(cx, window);
+        let link = visible
+            .iter()
+            .find(|(_, text, _)| text.trim() == "details")
+            .unwrap();
+        {
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            visual.simulate_click(link.2.center(), gpui::Modifiers::default());
+        }
+        settle(cx, window);
+        let visible = entries(cx, window);
+        assert!(
+            visible
+                .iter()
+                .any(|(_, text, bounds)| text == r"$\frac{7}{q}$" && bounds.size.height > px(20.)),
+            "section link must reveal a nested heading and its typeset formula: {destination}: {visible:?}"
+        );
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.list.logical_scroll_top().item_ix > 0);
+                assert_eq!(view.anchors.get("details"), Some(&1));
+                assert!(
+                    view.anchors.contains_key("details-1"),
+                    "nested headings share the document's duplicate-slug order"
+                );
+            })
+            .unwrap();
+    }
 }
 
 #[gpui::test]
@@ -683,6 +801,77 @@ fn file_preview_lecture_notes_copy_math_from_quotes_lists_and_tables(cx: &mut Te
             text.contains("$5 and $10") && text.contains("$x^2$"),
             "{visible:?}"
         );
+    }
+}
+
+#[gpui::test]
+fn file_preview_resizing_selected_study_paragraph_reflows_without_changing_copy(
+    cx: &mut TestAppContext,
+) {
+    let _guard = crate::markdown::selection::test_state_lock();
+    let source = "Review **naïve estimates** with $\\frac{a+b}{n}$ and compare the café notes before tomorrow's lecture.";
+    let expected = "Review naïve estimates with $\\frac{a+b}{n}$ and compare the café notes before tomorrow's lecture.";
+    let window = open(cx, source, 720.);
+    let equation = entries(cx, window)
+        .into_iter()
+        .find(|(_, text, _)| text == r"$\frac{a+b}{n}$")
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        let position = equation.2.center();
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count: 3,
+                ..Default::default()
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count: 3,
+                ..Default::default()
+            }),
+            cx,
+        );
+    })
+    .unwrap();
+    let mut narrow_height = None;
+    for width in [280., 720., 360.] {
+        cx.simulate_window_resize(window.into(), size(px(width), px(600.)));
+        settle(cx, window);
+        let visible = entries(cx, window);
+        let copied: String = visible.iter().map(|(_, text, _)| text.as_str()).collect();
+        assert_eq!(
+            copied, expected,
+            "reflow must neither drop nor duplicate fragments"
+        );
+        for (_, text, bounds) in &visible {
+            assert!(
+                bounds.left() >= px(24.) && bounds.right() <= px(width - 24.),
+                "resized fragment escaped the preview: {text}: {bounds:?}"
+            );
+        }
+        let height = window
+            .update(cx, |view, _, _| view.test_block_bounds(0).size.height)
+            .unwrap();
+        if width == 280. {
+            narrow_height = Some(height);
+        } else if width == 720. {
+            assert!(
+                height < narrow_height.unwrap(),
+                "widening must actually reflow the paragraph"
+            );
+        }
+        cx.simulate_keystrokes(window.into(), "cmd-c");
+        cx.update(|cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some(expected)
+            );
+        });
     }
 }
 

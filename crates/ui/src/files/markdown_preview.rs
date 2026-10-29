@@ -45,6 +45,40 @@ fn comment_block(lines: &[u32], line: u32) -> Option<usize> {
     })
 }
 
+/// Containers are virtualized as one row, so nested headings navigate to
+/// their containing row while sharing the document's heading-slug order.
+fn index_heading_anchors(block: &Block, row: usize, anchors: &mut HashMap<String, usize>) {
+    match block {
+        Block::Heading { runs, .. } => {
+            let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+            let slug: String = text
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+                .map(|c| if c == ' ' { '-' } else { c })
+                .collect();
+            let mut unique = slug.clone();
+            let mut n = 1;
+            while anchors.contains_key(&unique) {
+                unique = format!("{slug}-{n}");
+                n += 1;
+            }
+            anchors.insert(unique, row);
+        }
+        Block::BlockQuote { children } => {
+            for child in children {
+                index_heading_anchors(child, row, anchors);
+            }
+        }
+        Block::List { items, .. } => {
+            for child in items.iter().flatten() {
+                index_heading_anchors(child, row, anchors);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn is_markdown(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
@@ -452,22 +486,7 @@ impl MarkdownPreview {
                                 highlights.insert(ix, Arc::new(doc));
                             }
                         }
-                        if let Block::Heading { runs, .. } = &top.block {
-                            let text: String = runs.iter().map(|r| r.text.as_str()).collect();
-                            let slug: String = text
-                                .to_lowercase()
-                                .chars()
-                                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
-                                .map(|c| if c == ' ' { '-' } else { c })
-                                .collect();
-                            let mut unique = slug.clone();
-                            let mut n = 1;
-                            while anchors.contains_key(&unique) {
-                                unique = format!("{slug}-{n}");
-                                n += 1;
-                            }
-                            anchors.insert(unique, ix);
-                        }
+                        index_heading_anchors(&top.block, ix, &mut anchors);
                     }
                     (tree, highlights, anchors, block_lines)
                 })
