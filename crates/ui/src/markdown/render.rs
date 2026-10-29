@@ -2012,7 +2012,7 @@ fn sole_workspace_file_link(runs: &[InlineRun], workspace_root: &str) -> Option<
             _ => {}
         }
     }
-    crate::workspace_links::resolve_workspace_file_link(target?, workspace_root)
+    crate::workspace_links::resolve_markdown_file_link(target?, workspace_root)
         .map(|link| link.path)
 }
 

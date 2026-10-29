@@ -10497,17 +10497,24 @@ impl ToolFileOpener {
     /// clickable badge; the rest stay inert instead of looking clickable and
     /// doing nothing.
     fn opens(&self, path: &str) -> bool {
-        crate::workspace_links::resolve_workspace_file_link(path, &self.root).is_some()
+        crate::workspace_links::resolve_markdown_file_link(&Self::destination(path), &self.root)
+            .is_some()
     }
 
     fn open(&self, path: &str, window: &mut Window, cx: &mut gpui::App) {
         render::activate_link(
-            render::LinkTarget::new(file_badge_name(path), path),
+            render::LinkTarget::new(file_badge_name(path), &Self::destination(path)),
             render::LinkAction::Primary,
             Some(&self.link),
             window,
             cx,
         );
+    }
+
+    /// A tool's path is literal, but the link route reads Markdown URIs and
+    /// decodes `%`. The canonical file reference carries it exactly.
+    fn destination(path: &str) -> String {
+        crate::markdown::content_reference::file_destination(path)
     }
 }
 
@@ -18344,6 +18351,16 @@ mod tests {
         assert!(!opener.opens("/tmp/report.md"));
         assert!(!opener.opens("/work/app/../secret.rs"));
         assert!(!opener.opens("../secret.rs"));
+        // A real filename containing `%20` is not decoded on the way.
+        assert_eq!(
+            crate::workspace_links::resolve_markdown_file_link(
+                &ToolFileOpener::destination("/work/app/a%20b.md"),
+                "/work/app"
+            )
+            .map(|link| link.path)
+            .as_deref(),
+            Some("a%20b.md")
+        );
 
         let read = |path: &str| ToolItem {
             part_id: "fixture".into(),
@@ -18404,7 +18421,21 @@ mod tests {
         {
             let opened = opened.borrow();
             assert_eq!(opened.len(), 1);
-            assert_eq!(opened[0].target.original, "/work/app/src/guard.rs");
+            // A tool path is literal, so it travels as the canonical file
+            // reference rather than a Markdown URI that would decode `%`.
+            assert_eq!(
+                opened[0].target.original,
+                "harness-file:/work/app/src/guard.rs"
+            );
+            assert_eq!(
+                crate::workspace_links::resolve_markdown_file_link(
+                    &opened[0].target.original,
+                    "/work/app"
+                )
+                .map(|link| link.path)
+                .as_deref(),
+                Some("src/guard.rs")
+            );
             assert_eq!(opened[0].action, render::LinkAction::Primary);
             assert_eq!(opened[0].source_session.as_deref(), Some("chat"));
         }
