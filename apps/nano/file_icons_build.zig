@@ -1,5 +1,8 @@
 //! Embed Harness's file-theme artwork and compile its manifest into lookup
-//! tables. No JSON parsing, SVG rewriting or persistent allocation in the app.
+//! tables. No JSON parsing in the app. Each SVG is embedded once, deflated
+//! (a sixth of the binary as plain text, light and dark); the app unpacks an
+//! icon the first time it's drawn and derives its dark palette then
+//! (src/file_icons.zig).
 const std = @import("std");
 
 pub fn module(b: *std.Build) *std.Build.Module {
@@ -10,7 +13,8 @@ pub fn module(b: *std.Build) *std.Build.Module {
     var source: std.ArrayList(u8) = .empty;
     append(b, &source,
         \\const std = @import("std");
-        \\pub const Asset = struct { path: []const u8, light: []const u8, dark: []const u8 };
+        \\/// `deflated`: the SVG as raw deflate, `len` bytes once unpacked.
+        \\pub const Asset = struct { path: []const u8, deflated: []const u8, len: u32 };
         \\pub const assets = [_]Asset{
         \\
     );
@@ -19,14 +23,10 @@ pub fn module(b: *std.Build) *std.Build.Module {
         const icon_path = entry.value_ptr.object.get("iconPath").?.string;
         if (!std.mem.startsWith(u8, icon_path, "./icons/")) @panic("invalid file-icon asset path");
         const path = icon_path["./icons/".len..];
-        const input = b.fmt("../../crates/ui/assets/file-icons/{s}", .{path});
-        const light = b.fmt("light/{s}", .{path});
-        _ = files.addCopyFile(b.path(input), light);
-        const svg = read(b, input);
-        const dark_svg = darkSvg(b, svg);
-        const dark = if (std.mem.eql(u8, svg, dark_svg)) light else b.fmt("dark/{s}", .{path});
-        if (!std.mem.eql(u8, svg, dark_svg)) _ = files.add(dark, dark_svg);
-        append(b, &source, b.fmt("    .{{ .path = {s}, .light = @embedFile({s}), .dark = @embedFile({s}) }},\n", .{ quote(b, path), quote(b, light), quote(b, dark) }));
+        const svg = read(b, b.fmt("../../crates/ui/assets/file-icons/{s}", .{path}));
+        const packed_name = b.fmt("deflated/{s}", .{path});
+        _ = files.add(packed_name, deflate(b, svg));
+        append(b, &source, b.fmt("    .{{ .path = {s}, .deflated = @embedFile({s}), .len = {d} }},\n", .{ quote(b, path), quote(b, packed_name), svg.len }));
         definitions.put(entry.key_ptr.*, @intCast(definitions.count())) catch @panic("OOM");
     }
     append(b, &source, "};\n");
@@ -65,18 +65,13 @@ fn append(b: *std.Build, source: *std.ArrayList(u8), text: []const u8) void {
     source.appendSlice(b.allocator, text) catch @panic("OOM");
 }
 
-fn darkSvg(b: *std.Build, source: []const u8) []const u8 {
-    // GPUI's dark_icon_svg palette: lift dark accents, never tint the artwork.
-    var svg = source;
-    for ([_][2][]const u8{
-        .{ "#64748B", "#CBD5E1" }, .{ "#71717A", "#D4D4D8" },
-        .{ "#2563EB", "#60A5FA" }, .{ "#EA580C", "#FB923C" },
-        .{ "#16A34A", "#4ADE80" }, .{ "#8B5CF6", "#A78BFA" },
-        .{ "#A855F7", "#C084FC" },
-    }) |pair| {
-        svg = std.mem.replaceOwned(u8, b.allocator, svg, pair[0], pair[1]) catch @panic("OOM");
-        const lower = std.ascii.allocLowerString(b.allocator, pair[0]) catch @panic("OOM");
-        svg = std.mem.replaceOwned(u8, b.allocator, svg, lower, pair[1]) catch @panic("OOM");
-    }
-    return svg;
+fn deflate(b: *std.Build, bytes: []const u8) []const u8 {
+    const flate = std.compress.flate;
+    // Compress asserts room for its header up front.
+    var out = std.Io.Writer.Allocating.initCapacity(b.allocator, bytes.len + 64) catch @panic("OOM");
+    const window = b.allocator.alloc(u8, flate.max_window_len) catch @panic("OOM");
+    var z = flate.Compress.init(&out.writer, window, .raw, flate.Compress.Options.best) catch @panic("deflate");
+    z.writer.writeAll(bytes) catch @panic("deflate");
+    z.finish() catch @panic("deflate");
+    return out.written();
 }
