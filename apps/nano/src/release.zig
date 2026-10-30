@@ -1,9 +1,12 @@
 //! The newest Harness release, from the manifest its release job attaches
-//! to every GitHub release (crates/update/src/lib.rs: `{base}/manifest.json`),
-//! fetched over HTTPS with ALPN h2 by http-zig on a thread of its own. The
-//! download URL redirects to GitHub's object store; up to three hops are
-//! followed.
+//! to every GitHub release (crates/update/src/lib.rs: `{base}/manifest.json`).
+//! On macOS through the system's own client (nanoui.http: NSURLSession, its
+//! TLS, proxies and certificates, following the download URL's redirect to
+//! GitHub's object store), so the app links no TLS of its own; elsewhere
+//! over HTTPS with ALPN h2 by http-zig on a thread of its own, following up
+//! to three hops.
 const std = @import("std");
+const builtin = @import("builtin");
 const nanoui = @import("nanoui");
 const http_zig = @import("http_zig");
 const Allocator = std.mem.Allocator;
@@ -25,8 +28,36 @@ pub const Check = struct {
 
     /// Checks once, in the background; `c` must stay where it is.
     pub fn start(c: *Check) void {
-        const t = std.Thread.spawn(.{}, work, .{c}) catch return;
-        t.detach();
+        // Decided at compile time: on macOS http-zig isn't analysed or linked.
+        if (builtin.os.tag == .macos) {
+            nanoui.http.fetch(c.gpa, .{
+                .url = manifest_url,
+                .headers = &.{.{ .name = "User-Agent", .value = "harness-nano" }},
+            }, c, loaded);
+        } else {
+            const t = std.Thread.spawn(.{}, work, .{c}) catch return;
+            t.detach();
+        }
+    }
+
+    /// On the UI thread: the manifest, or why there was none.
+    fn loaded(c: *Check, r: nanoui.http.Response) void {
+        if (r.status != 200) {
+            std.log.info("harness-nano: no release manifest: {s} ({d})", .{ r.err, r.status });
+            return;
+        }
+        if (!c.take(r.body)) return;
+        if (c.done) |d| d.func(d.ctx);
+    }
+
+    /// Keeps the manifest's version; false without one.
+    fn take(c: *Check, body: []const u8) bool {
+        const v = parseVersion(c.gpa, body) orelse return false;
+        defer c.gpa.free(v);
+        const n = @min(v.len, c.latest.len);
+        @memcpy(c.latest[0..n], v[0..n]);
+        c.latest_len = n;
+        return true;
     }
 
     fn work(c: *Check) void {
@@ -35,12 +66,8 @@ pub const Check = struct {
             return;
         };
         defer c.gpa.free(body);
-        const v = parseVersion(c.gpa, body) orelse return;
-        const n = @min(v.len, c.latest.len);
-        @memcpy(c.latest[0..n], v[0..n]);
-        c.gpa.free(v);
         // Written before the UI thread is told; read only after.
-        c.latest_len = n;
+        if (!c.take(body)) return;
         nanoui.App.after(0, c, delivered);
     }
 
