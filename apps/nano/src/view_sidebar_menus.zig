@@ -165,7 +165,9 @@ pub fn projectRows(a: *const App, gpa: std.mem.Allocator) ![]Row {
     const now = a.nowMs();
     for (spaces, 0..) |s, ix| if (rules.matchRank(q, s.name)) |rank|
         try found.append(gpa, .{ .rank = rank, .ix = ix, .online = online(a, s.device_id, now) });
-    std.mem.sort(Ranked, found.items, {}, struct {
+    // Insertion, stable like std.mem.sort: a person's projects are tens, and
+    // each std.mem.sort type costs the binary 12-25 KB.
+    std.sort.insertion(Ranked, found.items, {}, struct {
         fn lt(_: void, x: Ranked, y: Ranked) bool {
             return if (x.rank != y.rank) x.rank < y.rank else x.ix < y.ix;
         }
@@ -180,7 +182,7 @@ pub fn projectRows(a: *const App, gpa: std.mem.Allocator) ![]Row {
 /// By name, case aside, then id (`spaces_sorted`).
 fn sortedSpaces(a: *const App, gpa: std.mem.Allocator) ![]workspace.Space {
     const out = try gpa.dupe(workspace.Space, a.spaces.items);
-    std.mem.sort(workspace.Space, out, {}, struct {
+    std.sort.insertion(workspace.Space, out, {}, struct {
         fn lt(_: void, x: workspace.Space, y: workspace.Space) bool {
             const o = std.ascii.orderIgnoreCase(x.name, y.name);
             return if (o != .eq) o == .lt else std.mem.order(u8, x.id, y.id) == .lt;
