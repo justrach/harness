@@ -1,0 +1,265 @@
+{
+    "name": "settings-accounts-device-code",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 18,
+            "y": 762
+        },
+        {
+            "do": "click",
+            "x": 100,
+            "y": 750
+        },
+        {
+            "do": "click",
+            "x": 60,
+            "y": 372
+        },
+        {
+            "do": "hover",
+            "x": 1150,
+            "y": 20
+        },
+        {
+            "do": "scroll",
+            "x": 800,
+            "y": 400,
+            "dy": -600
+        },
+        {
+            "do": "wait",
+            "ms": 300
+        },
+        {
+            "do": "click",
+            "x": 1040,
+            "y": 683
+        },
+        {
+            "do": "wait",
+            "ms": 500
+        }
+    ],
+    "accounts": {
+        "snapshot": {
+            "accounts": [
+                {
+                    "id": "cc-1",
+                    "harness": "claude-code",
+                    "email": "ada@fieldnotes.example",
+                    "planLabel": "Max",
+                    "active": true,
+                    "switchable": true,
+                    "usageWindows": [
+                        {
+                            "label": "5h",
+                            "usedFraction": 0.42,
+                            "resetsAt": "2027-01-14T15:45:00Z"
+                        },
+                        {
+                            "label": "Week",
+                            "usedFraction": 0.83,
+                            "resetsAt": "2027-01-20T09:00:00Z"
+                        }
+                    ]
+                },
+                {
+                    "id": "cc-2",
+                    "harness": "claude-code",
+                    "email": "lin@fieldnotes.example",
+                    "planLabel": "Pro",
+                    "active": false,
+                    "switchable": true,
+                    "usageWindows": [
+                        {
+                            "label": "5h",
+                            "usedFraction": 0.05,
+                            "resetsAt": "2027-01-14T18:00:00Z"
+                        }
+                    ]
+                },
+                {
+                    "id": "cx-1",
+                    "harness": "codex",
+                    "email": "ada@fieldnotes.example",
+                    "planLabel": "Plus",
+                    "active": true,
+                    "switchable": true,
+                    "usageWindows": [
+                        {
+                            "label": "5h",
+                            "usedFraction": 0.97,
+                            "resetsAt": "2027-01-14T16:30:00Z"
+                        }
+                    ]
+                }
+            ],
+            "warnings": [
+                {
+                    "harness": "codex",
+                    "message": "Keychain didn't allow reading the live Codex login."
+                }
+            ]
+        },
+        "codegraffUsage": {
+            "email": "ada@fieldnotes.example",
+            "tier": "pro",
+            "credits_micro_usd": 12340000,
+            "spend_30d_micro_usd": 4560000,
+            "requests_30d": 128,
+            "key_budget_monthly_micro_usd": 50000000,
+            "key_spend_monthly_micro_usd": 12500000,
+            "key_budget_resets_at": "2027-02-01T00:00:00Z"
+        },
+        "codegraffJobs": {
+            "jobs": [
+                {
+                    "id": "job-1",
+                    "kind": "pr_review",
+                    "status": "completed",
+                    "cancellable": false,
+                    "repo": "fieldnotes/app",
+                    "pr": 42,
+                    "title": "Tidy the release notes",
+                    "result_url": "https://github.com/fieldnotes/app/pull/42"
+                }
+            ]
+        },
+        "graffLogins": [
+            {
+                "id": "chatgpt-new",
+                "name": "ChatGPT",
+                "signedIn": true,
+                "account": "ada@fieldnotes.example",
+                "planUsage": true
+            },
+            {
+                "id": "xai",
+                "name": "xAI",
+                "signedIn": true
+            },
+            {
+                "id": "kimi",
+                "name": "Kimi",
+                "signedIn": false
+            },
+            {
+                "id": "zai",
+                "name": "Z.AI",
+                "signedIn": false
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic Console",
+                "signedIn": false
+            }
+        ],
+        "codegraffSandboxes": {
+            "enabled": true,
+            "sandboxes": [
+                {
+                    "id": "sbx-1",
+                    "provider": "fleet",
+                    "name": "Cloud sandbox",
+                    "state": "running",
+                    "tier": "personal",
+                    "expiresAt": "2027-01-14T18:00:00Z",
+                    "harness": true,
+                    "deviceName": "fieldnotes-cloud",
+                    "keepRunning": false,
+                    "cpu": 2,
+                    "memoryGiB": 4,
+                    "diskGiB": 40,
+                    "pricePerHourMicroUsd": 100000
+                },
+                {
+                    "id": "tmp-1",
+                    "provider": "daytona",
+                    "name": null,
+                    "state": "paused",
+                    "tier": "ephemeral",
+                    "harness": false,
+                    "cpu": 1,
+                    "memoryGiB": 2,
+                    "diskGiB": 10,
+                    "pricePerHourMicroUsd": 50000
+                }
+            ],
+            "sizes": [
+                {
+                    "id": "standard",
+                    "cpu": 2,
+                    "memoryGiB": 4,
+                    "diskGiB": 40,
+                    "pricePerHourMicroUsd": 100000,
+                    "default": true
+                },
+                {
+                    "id": "large",
+                    "cpu": 4,
+                    "memoryGiB": 8,
+                    "diskGiB": 80,
+                    "pricePerHourMicroUsd": 200000,
+                    "default": false
+                }
+            ]
+        },
+        "loginStart": {
+            "loginId": "login-2",
+            "url": "https://kimi.example/device",
+            "mode": "device-code",
+            "code": "WXYZ-1234"
+        }
+    }
+}

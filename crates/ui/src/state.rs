@@ -501,8 +501,10 @@ impl EngineHandle {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_client(client: RpcClient) -> Self {
+    /// An engine over `client`'s channels: tests, and headless scenes whose
+    /// replies are made up (examples/ui-scenes.rs `replies`).
+    #[cfg(any(test, feature = "ui-scenes"))]
+    pub fn from_test_client(client: RpcClient) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -2114,8 +2116,8 @@ impl AppState {
         self.engine.as_ref()
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_test_engine(&mut self, handle: EngineHandle) {
+    #[cfg(any(test, feature = "ui-scenes"))]
+    pub fn set_test_engine(&mut self, handle: EngineHandle) {
         self.engine = Some(handle);
     }
 

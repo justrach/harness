@@ -1,0 +1,114 @@
+{
+ "name": "model-picker-light",
+ "appearance": "light",
+ "dictationAvailable": true,
+ "width": 1200,
+ "height": 780,
+ "spaces": [{"id":"s","deviceId":"scene-device","path":"/work/fieldnotes","gitDetected":true,"createdAt":"2026-09-24T14:41:22.685Z"}],
+ "selectedSpace": "s",
+ "replies": {
+  "ListHarnesses": [
+   {
+    "id": "graff",
+    "name": "graff",
+    "installed": true,
+    "canInstall": false,
+    "enabled": true,
+    "reasoningLevels": [
+     "low",
+     "high"
+    ],
+    "steeringMode": "step-boundary",
+    "supportsSteering": true
+   },
+   {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "installed": true,
+    "canInstall": false,
+    "enabled": true,
+    "reasoningLevels": [
+     "low",
+     "high"
+    ],
+    "steeringMode": "step-boundary",
+    "supportsSteering": true
+   },
+   {
+    "id": "codex",
+    "name": "Codex",
+    "installed": true,
+    "canInstall": false,
+    "enabled": true,
+    "reasoningLevels": [
+     "low",
+     "high"
+    ],
+    "steeringMode": "step-boundary",
+    "supportsSteering": true
+   }
+  ],
+  "ListModels": [
+   {
+    "id": "openai/synthetic-fast",
+    "label": "Synthetic Fast",
+    "description": "128k context",
+    "maker": "openai",
+    "billing": "credits",
+    "reasoningLevels": [
+     "low",
+     "high"
+    ]
+   },
+   {
+    "id": "chatgpt-new/synthetic-plan",
+    "label": "Synthetic Plan",
+    "description": "500k context",
+    "maker": "openai",
+    "billing": "plan",
+    "reasoningLevels": [
+     "high",
+     "ultra"
+    ]
+   },
+   {
+    "id": "anthropic/synthetic-thought",
+    "label": "Synthetic Thought",
+    "description": "200k context",
+    "maker": "anthropic",
+    "billing": "credits",
+    "reasoningLevels": [
+     "low",
+     "high"
+    ]
+   }
+  ]
+ },
+ "steps": [
+  {
+   "do": "wait",
+   "ms": 200
+  },
+  {
+   "do": "click",
+   "x": 500,
+   "y": 412
+  },
+  {
+   "do": "wait",
+   "ms": 200
+  },
+  {
+   "do": "type",
+   "text": "Plan"
+  },
+  {
+   "do": "wait",
+   "ms": 100
+  },
+  {
+   "do": "key",
+   "keys": "escape"
+  }
+ ]
+}

@@ -4,8 +4,8 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, Focusable, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use std::time::Duration;
 
@@ -159,6 +159,8 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 struct RenameDialog {
     device_id: String,
     input: Entity<ComposerInput>,
+    /// The field takes the keys on the dialog's first frame.
+    focus_pending: bool,
     _events: Subscription,
 }
 
@@ -398,6 +400,7 @@ impl DevicesPage {
         self.rename = Some(RenameDialog {
             device_id,
             input,
+            focus_pending: true,
             _events: events,
         });
         cx.notify();
@@ -470,13 +473,27 @@ impl DevicesPage {
         cx.notify();
     }
 
+    /// Escape closes the Rename dialog (the shell routes it here while
+    /// Settings → Devices is open). False when no dialog was open.
+    pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.rename.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     fn render_rename_dialog(
         &mut self,
-        viewport: gpui::Size<gpui::Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let viewport = window.viewport_size();
         let theme = Theme::of(cx).for_popup();
-        let dialog = self.rename.as_ref()?;
+        let dialog = self.rename.as_mut()?;
+        if std::mem::take(&mut dialog.focus_pending) {
+            window.focus(&dialog.input.focus_handle(cx), cx);
+        }
         let input = dialog.input.clone();
         let card = popover::dialog_card(&theme)
             .child(popover::dialog_title(&theme, "Rename device"))
@@ -563,7 +580,7 @@ impl Render for DevicesPage {
         };
         let copied = self.copied.clone();
         let confirm_remove = self.confirm_remove.clone();
-        let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        let dialog = self.render_rename_dialog(window, cx);
         let emerald = theme.success; // emerald-400
         let count = devices.len();
 
@@ -946,6 +963,19 @@ mod tests {
             format_last_seen(Some(now - TimeDelta::days(2)), now),
             "2d ago"
         );
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_rename_dialog(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| crate::state::AppState::new());
+        let page = cx.new(|cx| DevicesPage::new(state, cx));
+        page.update(cx, |page, cx| {
+            assert!(!page.dismiss_on_escape(cx), "nothing open, nothing closed");
+            page.open_rename("d2".into(), "Laptop".into(), cx);
+            assert!(page.rename.as_ref().is_some_and(|d| d.focus_pending));
+            assert!(page.dismiss_on_escape(cx));
+            assert!(page.rename.is_none());
+        });
     }
 
     #[test]

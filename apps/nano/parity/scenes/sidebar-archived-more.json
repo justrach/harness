@@ -1,0 +1,294 @@
+{
+    "name": "sidebar-archived-more",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        },
+        {
+            "id": "q0",
+            "deviceId": "scene-device",
+            "title": "Archived note 1",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-20T10:00:00Z",
+            "createdAt": "2026-10-20T10:00:00Z"
+        },
+        {
+            "id": "q1",
+            "deviceId": "scene-device",
+            "title": "Archived note 2",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-19T10:00:00Z",
+            "createdAt": "2026-10-19T10:00:00Z"
+        },
+        {
+            "id": "q2",
+            "deviceId": "scene-device",
+            "title": "Archived note 3",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-18T10:00:00Z",
+            "createdAt": "2026-10-18T10:00:00Z"
+        },
+        {
+            "id": "q3",
+            "deviceId": "scene-device",
+            "title": "Archived note 4",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-17T10:00:00Z",
+            "createdAt": "2026-10-17T10:00:00Z"
+        },
+        {
+            "id": "q4",
+            "deviceId": "scene-device",
+            "title": "Archived note 5",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-16T10:00:00Z",
+            "createdAt": "2026-10-16T10:00:00Z"
+        },
+        {
+            "id": "q5",
+            "deviceId": "scene-device",
+            "title": "Archived note 6",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-15T10:00:00Z",
+            "createdAt": "2026-10-15T10:00:00Z"
+        },
+        {
+            "id": "q6",
+            "deviceId": "scene-device",
+            "title": "Archived note 7",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-14T10:00:00Z",
+            "createdAt": "2026-10-14T10:00:00Z"
+        },
+        {
+            "id": "q7",
+            "deviceId": "scene-device",
+            "title": "Archived note 8",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-13T10:00:00Z",
+            "createdAt": "2026-10-13T10:00:00Z"
+        },
+        {
+            "id": "q8",
+            "deviceId": "scene-device",
+            "title": "Archived note 9",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-12T10:00:00Z",
+            "createdAt": "2026-10-12T10:00:00Z"
+        },
+        {
+            "id": "q9",
+            "deviceId": "scene-device",
+            "title": "Archived note 10",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-11T10:00:00Z",
+            "createdAt": "2026-10-11T10:00:00Z"
+        },
+        {
+            "id": "q10",
+            "deviceId": "scene-device",
+            "title": "Archived note 11",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-10T10:00:00Z",
+            "createdAt": "2026-10-10T10:00:00Z"
+        },
+        {
+            "id": "q11",
+            "deviceId": "scene-device",
+            "title": "Archived note 12",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-09T10:00:00Z",
+            "createdAt": "2026-10-09T10:00:00Z"
+        },
+        {
+            "id": "q12",
+            "deviceId": "scene-device",
+            "title": "Archived note 13",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-08T10:00:00Z",
+            "createdAt": "2026-10-08T10:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "hover",
+            "x": 100,
+            "y": 700
+        }
+    ]
+}

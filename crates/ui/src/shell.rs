@@ -9901,6 +9901,15 @@ impl Shell {
         {
             return true;
         }
+        // Settings → Devices' "Rename device" dialog.
+        if matches!(self.route, Route::Settings(SettingsSection::Devices))
+            && self
+                .devices_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx)))
+        {
+            return true;
+        }
         if self.spaces_menu.is_open() {
             self.close_spaces_menu(cx);
             return true;
@@ -13621,7 +13630,15 @@ impl Render for Shell {
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
-        if self.motion_active.get() | motion::hover_fades_active() {
+        let hover_fading = motion::hover_fades_active();
+        if hover_fading || motion::hover_fades_held() {
+            // The sidebar is a cached view: unnotified, its rows would read
+            // their fade once and keep that first frame's color, and a fade
+            // left unread through a frame (a menu animating over a hovered
+            // trigger) is pruned as unmounted.
+            self.sidebar_pane.update(cx, |_, cx| cx.notify());
+        }
+        if self.motion_active.get() | hover_fading {
             window.request_animation_frame();
         }
 

@@ -46,6 +46,13 @@ actions!(
 pub fn init(cx: &mut App) {
     #[cfg(all(target_os = "macos", not(test)))]
     native_quit::init(cx);
+    register_actions(cx);
+}
+
+/// The menu verbs' handlers alone, without the native quit hook (which needs
+/// AppKit's application delegate): headless renders (examples/ui-scenes.rs)
+/// register these so ⌘W, ⌘= and the rest act as they do in the app.
+pub fn register_actions(cx: &mut App) {
     cx.on_action(quit);
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &About, _| about_panel::show());

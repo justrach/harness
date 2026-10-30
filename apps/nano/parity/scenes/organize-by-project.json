@@ -1,0 +1,138 @@
+{
+    "name": "organize-by-project",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        },
+        {
+            "id": "s1",
+            "deviceId": "scene-device",
+            "path": "/work/atlas",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        },
+        {
+            "id": "s2",
+            "deviceId": "scene-device",
+            "path": "/work/Ledger",
+            "gitDetected": false,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        },
+        {
+            "id": "s3",
+            "deviceId": "scene-device",
+            "path": "/work/quarry-tools",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        },
+        {
+            "id": "c",
+            "deviceId": "scene-device",
+            "title": "Map the ledger import",
+            "archived": false,
+            "spaceId": "s2",
+            "cwd": "/work/Ledger",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-20T00:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 233,
+            "y": 96
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        },
+        {
+            "do": "hover",
+            "x": 320,
+            "y": 105
+        },
+        {
+            "do": "wait",
+            "ms": 500
+        },
+        {
+            "do": "click",
+            "x": 540,
+            "y": 158
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        },
+        {
+            "do": "key",
+            "keys": "escape"
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        },
+        {
+            "do": "hover",
+            "x": 700,
+            "y": 700
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        }
+    ]
+}
