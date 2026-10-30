@@ -159,7 +159,7 @@ pub fn matchRanges(gpa: std.mem.Allocator, text: []const u8, query: []const u8) 
             from = i + 1;
         }
     }
-    std.mem.sort(Range, ranges.items, {}, struct {
+    std.sort.insertion(Range, ranges.items, {}, struct {
         fn lt(_: void, x: Range, y: Range) bool {
             return x.start < y.start;
         }

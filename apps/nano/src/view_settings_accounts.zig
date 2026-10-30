@@ -425,7 +425,7 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// The devices in a stable order: when added, then id.
 fn sortedDevices(c: *ui.Context, a: *App) []@import("workspace.zig").Device {
     const list = c.alloc().dupe(@import("workspace.zig").Device, a.devices.items) catch return &.{};
-    std.mem.sort(@import("workspace.zig").Device, list, {}, struct {
+    std.sort.insertion(@import("workspace.zig").Device, list, {}, struct {
         fn lt(_: void, x: @import("workspace.zig").Device, y: @import("workspace.zig").Device) bool {
             if (x.created_ms != y.created_ms) return x.created_ms < y.created_ms;
             return std.mem.order(u8, x.id, y.id) == .lt;

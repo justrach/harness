@@ -41,7 +41,7 @@ fn platformIcon(p: []const u8) icons.Name {
 /// The devices by when they were added, then id.
 pub fn sortedDevices(alloc: Allocator, devices: []const workspace.Device) []workspace.Device {
     const out = alloc.dupe(workspace.Device, devices) catch return &.{};
-    std.mem.sort(workspace.Device, out, {}, struct {
+    std.sort.insertion(workspace.Device, out, {}, struct {
         fn lt(_: void, x: workspace.Device, y: workspace.Device) bool {
             if (x.created_ms != y.created_ms) return x.created_ms < y.created_ms;
             return std.mem.order(u8, x.id, y.id) == .lt;

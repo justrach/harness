@@ -27,7 +27,7 @@ class BundleArgumentsTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 73, result.stderr)
             self.assertEqual(result.stdout.splitlines(), [
-                "build", "-Doptimize=ReleaseFast", "--fork=/synthetic/nanoui", "-j1",
+                "build", "-Doptimize=ReleaseSafe", "--fork=/synthetic/nanoui", "-j1",
             ])
 
 

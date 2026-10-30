@@ -928,7 +928,7 @@ fn mapSyntax(a: Allocator, theme: *const Normalized, out: *Variant, report: *Rep
     var selectors: std.ArrayList([]const u8) = .empty;
     var it = theme.semantic.keyIterator();
     while (it.next()) |k| try selectors.append(a, k.*);
-    std.mem.sort([]const u8, selectors.items, {}, struct {
+    std.sort.insertion([]const u8, selectors.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.order(u8, x, y) == .lt;
         }
