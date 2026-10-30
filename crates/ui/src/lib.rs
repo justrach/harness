@@ -32,6 +32,7 @@ pub mod composer;
 mod composer_dock;
 mod composer_markdown;
 mod context_usage;
+pub mod context_window;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;

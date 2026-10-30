@@ -1,4 +1,5 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
+use crate::context_window::compact_count;
 use crate::theme::Theme;
 use gpui::{
     Context, IntoElement, PathBuilder, Render, SharedString, Window, canvas, div, point,
@@ -72,17 +73,24 @@ pub fn render(
         .hover(|s| s.bg(crate::theme::ink(0.05)))
         .child(ring)
         .child(SharedString::from(label))
-        .tooltip(move |_, cx| {
-            cx.new(|cx| UsageCard {
-                _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
-                state: state.clone(),
-            })
-            .into()
-        })
+        .tooltip(move |_, cx| card(state.clone(), cx))
+}
+
+/// The card the usage ring opens on hover.
+pub fn card(state: gpui::Entity<crate::state::AppState>, cx: &mut gpui::App) -> gpui::AnyView {
+    let window = cx.new(|cx| crate::context_window::ContextWindowCard::new(state.clone(), cx));
+    cx.new(|cx| UsageCard {
+        _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
+        state,
+        window,
+    })
+    .into()
 }
 
 struct UsageCard {
     state: gpui::Entity<crate::state::AppState>,
+    /// The segment bar, legend and status line ([`crate::context_window`]).
+    window: gpui::Entity<crate::context_window::ContextWindowCard>,
     _subscription: gpui::Subscription,
 }
 
@@ -107,16 +115,6 @@ const SAVED_LABEL_MIN: u64 = 1_000;
 fn saved_label(usage: Option<ContextUsage>) -> Option<String> {
     let kept = usage?.savings?.kept_out_tokens();
     (kept >= SAVED_LABEL_MIN).then(|| format!("{} saved", compact_count(kept)))
-}
-
-/// 1.2k, 34k, 1.5M.
-fn compact_count(n: u64) -> String {
-    match n {
-        0..1_000 => n.to_string(),
-        1_000..10_000 => format!("{:.1}k", n as f64 / 1_000.0),
-        10_000..1_000_000 => format!("{}k", n / 1_000),
-        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
-    }
 }
 
 /// The card's breakdown of [`ContextSavings`], one measured source per line.
@@ -188,18 +186,22 @@ fn details(usage: Option<ContextUsage>) -> String {
 impl Render for UsageCard {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &Theme::of(cx).for_popup();
+        let usage = self.state.read(cx).context_usage;
         let card = crate::popover::popover_card(theme)
             .p(px(12.0))
             .flex()
             .flex_col()
             .gap(px(8.0))
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("Context window"),
-            )
+            .when(has_window(usage), |card| card.child(self.window.clone()))
+            .when(!has_window(usage), |card| {
+                card.child(
+                    div()
+                        .text_size(px(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("Context window"),
+                )
+            })
             .child(
                 // the lines break only at their own newlines: a tooltip sizes
                 // from the unwrapped text, so soft wrapping clipped the last line
