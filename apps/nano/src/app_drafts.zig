@@ -11,15 +11,17 @@ const Draft = @import("tabs.zig").Draft;
 const canvas_key = "";
 
 /// The composer's own prompt: set aside while a question or a queued
-/// message being edited borrows the composer.
+/// message being edited borrows the composer, and while a recalled earlier
+/// prompt shows, the draft from before recall.
 fn live(a: *const App) []const u8 {
-    return if (a.wizard != null or a.queue_edit != null) a.draft_stash.items else a.composer.text();
+    return if (a.wizard != null or a.queue_edit != null) a.draft_stash.items else a.prompt_nav.draftOf(a.composer.text());
 }
 
 /// Before the selection changes: the prompt kept under the chat it was
 /// written in. A question or a queued edit in progress stays with it.
 pub fn leave(a: *App) void {
     put(a, a.selected orelse canvas_key, live(a));
+    a.prompt_nav.reset(a.gpa);
     if (a.wizard) |*w| w.deinit();
     a.wizard = null;
     a.draft_stash.clearRetainingCapacity();

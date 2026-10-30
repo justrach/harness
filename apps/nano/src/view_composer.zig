@@ -229,6 +229,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         }
     }
     if (!on_enter and (std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0) and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) a.send();
+    recall(c, a, c.node(@intCast(at)).id);
     keepFocus(c, a, c.node(@intCast(at)).id);
     // ⌘↩ with nothing typed sends the newest queued message now.
     if (c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true }) and std.mem.trim(u8, a.composer.text(), " \n\t").len == 0) {
@@ -240,6 +241,25 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         defer line.end();
         ui.text(c, n, .{ .size = 11, .color = k.danger });
     }
+}
+
+/// ↑ at the text's start or ↓ at its end steps through the chat's earlier
+/// prompts (`history_step`, `navigate_prompt_history`), unless a question,
+/// a queued edit or the model picker has the composer. The key comes as a
+/// shortcut before the field sees it, so the caret hasn't moved yet.
+fn recall(c: *ui.Context, a: *App, id: u64) void {
+    if (a.wizard != null or a.queue_edit != null or a.picker != .none) return;
+    const s = c.input.shortcut orelse return;
+    if (s.cmd or s.ctrl or s.alt or s.shift) return;
+    const delta: i8 = if (s.key == ui.Shortcut.up) -1 else if (s.key == ui.Shortcut.down) 1 else return;
+    const f = c.focused_text orelse return;
+    if (f.id != id) return;
+    const history = @import("prompt_history.zig");
+    const text = a.composer.text();
+    if (!history.wantsStep(&a.prompt_nav, text, delta, f.caret, f.anchor, f.marked != null)) return;
+    _ = c.shortcut(s);
+    const next = a.prompt_nav.step(a.gpa, a.transcript.entries.items, text, delta) catch return;
+    if (next) |t| a.composer.set(t);
 }
 
 /// The composer has the keys after the window moves to another chat, pane

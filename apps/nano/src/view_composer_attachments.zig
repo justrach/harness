@@ -30,7 +30,7 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             {
                 const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(if (item.status == .failed) k.danger else k.border).bg(k.hover).clip();
                 defer thumb.end();
-                const image = ui.image(c, .{ .key = &item.id, .bytes = item.bytes, .max_width = 56, .max_height = 56, .radius = 6, .scale = 1 });
+                const image = attachments.isImageName(item.name) and ui.image(c, .{ .key = &item.id, .bytes = item.bytes, .max_width = 56, .max_height = 56, .radius = 6, .scale = 1 });
                 if (!image) icons.icon(c, .document, 24, k.muted, 0);
                 if (item.status != .ready) {
                     const state = ui.div(c).row().absolute().offset(38, 38).size(18, 18).center().roundedFull().bg(k.composer);

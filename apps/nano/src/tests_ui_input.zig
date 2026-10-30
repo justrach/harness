@@ -151,6 +151,8 @@ test "a paste beyond the editing buffer is kept losslessly as a text attachment"
     const item = h.a.attachments.items.items[0];
     try testing.expectEqualStrings("pasted-text.txt", item.name);
     try testing.expectEqualSlices(u8, &bytes, item.bytes);
+    // Its tile is the file's icon: the text was never decoded as a picture.
+    for (h.t.text.images.decoded.values()) |d| try testing.expect(d != null);
 }
 
 test "image Paste stages one removable preview and enables image-only send after upload" {

@@ -267,5 +267,5 @@ test "large model catalogs only build visible rows and keep the footer pinned" {
     try testing.expect(h.t.ctx.stats.nodes <= small_nodes * 2);
     const after = h.t.findText("Reasoning") orelse return error.MissingFooter;
     try testing.expectApproxEqAbs(footer.y, after.y, 0.01);
-    std.debug.print("\nmodel picker: 3 models {d} nodes; 2000 models {d} nodes\n", .{ small_nodes, large_nodes });
+    std.log.info("model picker: 3 models {d} nodes; 2000 models {d} nodes", .{ small_nodes, large_nodes });
 }
