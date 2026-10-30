@@ -5510,8 +5510,12 @@ mod tests {
         }));
         assert!(matches!(
             &done[..],
-            [AgentEvent::ToolResult { id, is_error: false, output: Some(text), .. }]
-                if id == "acp-compaction-k1" && text == "Kept the plan."
+            [
+                AgentEvent::ToolCall { call, .. },
+                AgentEvent::ToolResult { id, is_error: false, output: Some(text), .. },
+            ] if id == "acp-compaction-k1"
+                && text == "Kept the plan."
+                && call.compaction().and_then(|meta| meta.item_tokens) == Some(4)
         ));
     }
 

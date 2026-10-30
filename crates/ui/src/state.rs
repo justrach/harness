@@ -748,6 +748,8 @@ pub struct AppState {
     /// straight from its host. Live-only: never in the transcript's doc.
     pub tool_progress: Vec<harness_proto::ToolProgressItem>,
     pub context_usage: Option<harness_proto::ContextUsage>,
+    /// Each visited chat's context over this app session, by chat id.
+    pub context_trajectories: HashMap<String, crate::context_trajectory::Trajectory>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -863,6 +865,7 @@ impl AppState {
             remote_pending: Vec::new(),
             tool_progress: Vec::new(),
             context_usage: None,
+            context_trajectories: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -1446,9 +1449,20 @@ impl AppState {
         }
         if self.context_usage != update.context_usage {
             self.context_usage = update.context_usage;
+            self.record_context_trajectory();
             cx.notify();
         }
         Ok(())
+    }
+
+    /// Add the selected chat's current meter to its trajectory.
+    pub fn record_context_trajectory(&mut self) {
+        if let Some(chat) = &self.selected_chat {
+            self.context_trajectories
+                .entry(chat.clone())
+                .or_default()
+                .observe(self.context_usage, &self.transcript);
+        }
     }
 
     /// The opt-in opening tail is provisional. Never replace a complete view

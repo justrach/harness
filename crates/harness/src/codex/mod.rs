@@ -37,6 +37,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+mod compaction;
 pub mod dictation;
 mod normalize;
 mod npm_repair;
@@ -1177,6 +1178,8 @@ async fn run_session(session: Session) {
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
     let mut pending_usage: Option<AgentEvent> = None;
+    // Compaction chips: sizes from the meter around each one.
+    let mut compactions = compaction::CompactionChips::default();
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     let mut queued_steers: VecDeque<String> = VecDeque::new();
@@ -1253,6 +1256,11 @@ async fn run_session(session: Session) {
                             Phase::Completed
                         };
                         let item = params.get("item").unwrap_or(&Value::Null);
+                        for event in compactions.item(phase, item) {
+                            if !send(&event_tx, event).await {
+                                break 'main;
+                            }
+                        }
                         if phase == Phase::Completed {
                             let output = match item_type(item) {
                                 "exitedReviewMode" => item.get("review").and_then(Value::as_str),
@@ -1316,8 +1324,15 @@ async fn run_session(session: Session) {
                     }
 
                     "thread/tokenUsage/updated" => {
-                        if let Some(usage) = normalize::context_usage_event(&params)
-                            && !send(&event_tx, usage).await { break 'main; }
+                        if let Some(usage) = normalize::context_usage_event(&params) {
+                            let tokens = match &usage {
+                                AgentEvent::ContextUsage { tokens, .. } => *tokens,
+                                _ => None,
+                            };
+                            if !send(&event_tx, usage).await { break 'main; }
+                            if let Some(chip) = compactions.context(tokens)
+                                && !send(&event_tx, chip).await { break 'main; }
+                        }
                         if let Some(usage) = usage_event(&params) {
                             pending_usage = Some(usage);
                         }
