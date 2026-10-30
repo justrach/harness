@@ -150,16 +150,24 @@ ignore = "0.4"
 nucleo-matcher = "0.3"
 
 [profile.release]
-# Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
-# LTO's size/speed win at a fraction of the link time; strip debug symbols.
-lto = "thin"
+# Distribution profile (scripts/package-macos.sh, package-linux.sh,
+# package-windows.ps1). Fat LTO in one codegen unit merges the generic code
+# thin LTO leaves duplicated: the macOS app binary measured 101.9 MB with
+# thin LTO and 16 units, 84.5 MB this way, for a link of about 8 minutes on
+# an M-series Mac. Strip debug symbols.
+lto = "fat"
+codegen-units = 1
 strip = "symbols"
 
 [profile.mobile]
 # The Android app's native library (apps/android builds it per ABI). Release
-# code, smaller than speed-first: it ships inside every APK.
+# code, smaller than speed-first: it ships inside every APK. Thin LTO in 16
+# units as before, so four ABIs still build inside android-release.yml's
+# 40 minutes.
 inherits = "release"
 opt-level = "s"
+lto = "thin"
+codegen-units = 16
 
 [profile.dev]
 # gpui is slow unoptimized; match zed's approach for deps
