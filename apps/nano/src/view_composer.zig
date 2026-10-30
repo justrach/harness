@@ -198,7 +198,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     const box = if (shape == .compact) ui.div(c).row().grow().w(0).px(8).pt(1).itemsCenter() else ui.div(c).column().wFull();
     defer box.end();
     const placeholder = if (a.engine.state != .connected)
-        "Waiting for the engine…"
+        @import("engine_start.zig").waiting(a)
     else if (a.queue_edit != null)
         "Edit queued message…"
     else
