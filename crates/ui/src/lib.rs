@@ -31,6 +31,7 @@ pub mod comments;
 pub mod composer;
 mod composer_dock;
 mod composer_markdown;
+pub mod context_trajectory;
 mod context_usage;
 pub mod context_window;
 pub mod edge_fade;

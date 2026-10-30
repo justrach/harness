@@ -8,11 +8,20 @@
 //! when it would exceed the reported total. Whatever the transcript cannot
 //! account for (system prompt, tool schemas, images) is "System & other".
 //!
+//! Compaction comes in two kinds ([`CompactionKind`]). A readable summary
+//! becomes "Chat summary". An opaque provider item (OpenAI's encrypted
+//! `compaction` item, which Codex passes back unread) becomes a locked
+//! "Compacted context" block: only its size is shown, never contents. Its
+//! size is the agent's own count when it reports one; otherwise it is
+//! estimated as the context after the compaction minus the share the
+//! transcript could not account for just before it.
+//!
 //! Motion: on open the segments cascade in and the counter rolls up. When the
 //! agent compacts, the header reads "compacting", the chat block loses
 //! segments from its right edge while the blocks after it slide left, its
-//! legend entry crossfades to "Chat summary" and the status line fades up
-//! with what was freed. Reduced motion snaps every transition to its end.
+//! legend entry crossfades to "Chat summary" (or "Compacted context") and
+//! the status line fades up with what was freed; the header goes back to
+//! "reading". Reduced motion snaps every transition to its end.
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -20,7 +29,7 @@ use gpui::{
     prelude::*, px,
 };
 use harness_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use harness_proto::{COMPACTION_TOOL_NAME, ContextUsage, ToolCall};
+use harness_proto::{CompactionKind, ContextUsage, ToolCall};
 
 pub use crate::context_usage::card as usage_card;
 use crate::motion::{AnimationExt, CubicBezier};
@@ -45,10 +54,32 @@ const TRANSITION_MS: u64 = 720;
 /// Each later block starts this much after the one before it.
 const CASCADE_STAGGER_MS: u64 = 70;
 
+/// What the oldest block of the context holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum History {
+    /// The conversation itself: nothing compacted yet.
+    #[default]
+    Chat,
+    /// A readable summary replaced the older chat.
+    Summary,
+    /// An opaque provider item replaced it; its contents are sealed.
+    Sealed,
+}
+
+impl History {
+    fn of(kind: Option<CompactionKind>) -> Self {
+        match kind {
+            Some(CompactionKind::Opaque) => History::Sealed,
+            // Chips from before the record existed are ACP summaries.
+            Some(CompactionKind::Summary) | None => History::Summary,
+        }
+    }
+}
+
 /// One kind of thing in the context, in the order the bar draws them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
-    /// The conversation before any compaction, or the summary that replaced it.
+    /// The conversation before any compaction, or what replaced it.
     History,
     /// Conversation since the last compaction.
     Recent,
@@ -71,10 +102,13 @@ impl Slot {
         Slot::System,
     ];
 
-    pub fn label(self, compacted: bool) -> &'static str {
+    pub fn label(self, history: History) -> &'static str {
         match self {
-            Slot::History if compacted => "Chat summary",
-            Slot::History => "Chat history",
+            Slot::History => match history {
+                History::Chat => "Chat history",
+                History::Summary => "Chat summary",
+                History::Sealed => "Compacted context",
+            },
             Slot::Recent => "Recent chat",
             Slot::Files => "Files",
             Slot::Commands => "Commands",
@@ -84,10 +118,13 @@ impl Slot {
         }
     }
 
-    fn color(self, compacted: bool, theme: &Theme) -> Hsla {
+    fn color(self, history: History, theme: &Theme) -> Hsla {
         let hex = match self {
-            Slot::History if compacted => 0x4C8DF6,
-            Slot::History => 0xFFB020,
+            Slot::History => match history {
+                History::Chat => 0xFFB020,
+                History::Summary => 0x4C8DF6,
+                History::Sealed => 0x7D8BA3,
+            },
             Slot::Recent => 0xF7C873,
             Slot::Files => 0x7C5CFF,
             Slot::Commands => 0x5BC0EB,
@@ -106,18 +143,19 @@ pub struct Breakdown {
     pub tokens: u64,
     /// Reported window size.
     pub window: u64,
-    /// A compaction summary has replaced the older chat.
-    pub compacted: bool,
+    /// What replaced the older chat, if anything has.
+    pub history: History,
     /// A compaction is running now.
     pub compacting: bool,
-    /// Tokens graff reported freeing by compaction, cumulative.
+    /// The kind of the running compaction, when it said.
+    pub pending: History,
+    /// Tokens freed by compaction, cumulative: graff's own count, or the
+    /// before/after meters on each compaction chip.
     pub freed: u64,
+    /// The sealed block's size is an estimate, not the agent's count.
+    pub sealed_estimated: bool,
     /// Non-empty slots in [`Slot::ALL`] order; they sum to `tokens`.
     pub items: Vec<(Slot, u64)>,
-}
-
-fn is_compaction(call: &ToolCall) -> bool {
-    matches!(call, ToolCall::Unknown { name, .. } if name == COMPACTION_TOOL_NAME)
 }
 
 fn tool_slot(call: &ToolCall) -> Slot {
@@ -139,8 +177,19 @@ fn output_len(output: &Option<String>, output_bytes: Option<u64>) -> u64 {
     output_bytes.unwrap_or_else(|| output.as_ref().map_or(0, |o| o.len() as u64))
 }
 
+impl Breakdown {
+    /// Something has replaced the older chat.
+    pub fn compacted(&self) -> bool {
+        self.history != History::Chat
+    }
+}
+
 /// The split of the reported context across [`Slot`]s. `None` when the agent
 /// reports no window to measure against.
+///
+/// One pass over the transcript. Each finished compaction is a boundary:
+/// what came before it now lives in its summary or sealed item, so the
+/// per-slot counts restart there.
 pub fn breakdown(
     usage: Option<ContextUsage>,
     transcript: &[SessionMessageEntry],
@@ -149,31 +198,17 @@ pub fn breakdown(
     let window = usage.window.filter(|w| *w > 0)?;
     let tokens = usage.tokens.unwrap_or(0);
 
-    // The last finished compaction is the boundary: what came before it now
-    // lives in its summary.
-    let mut boundary = None;
-    for (entry_index, entry) in transcript.iter().enumerate() {
-        for (part_index, part) in entry.parts.iter().enumerate() {
-            if let MessagePart::Tool { call, resolved, .. } = part
-                && is_compaction(call)
-                && *resolved
-            {
-                boundary = Some((entry_index, part_index));
-            }
-        }
-    }
-    let compacted = boundary.is_some();
-    let mut compacting = false;
-    let mut bytes = [0u64; Slot::ALL.len()];
     let index = |slot: Slot| Slot::ALL.iter().position(|s| *s == slot).unwrap_or(0);
-    for (entry_index, entry) in transcript.iter().enumerate() {
-        for (part_index, part) in entry.parts.iter().enumerate() {
-            let position = (entry_index, part_index);
-            if let Some(boundary) = boundary
-                && position < boundary
-            {
-                continue;
-            }
+    let mut bytes = [0u64; Slot::ALL.len()];
+    let mut history = History::Chat;
+    // Tokens of the summary or sealed item standing in for older chat.
+    let mut history_tokens = 0u64;
+    let mut compacting = false;
+    let mut pending = History::Summary;
+    let mut chip_freed = 0u64;
+    let mut sealed_estimated = false;
+    for entry in transcript {
+        for part in &entry.parts {
             match part {
                 MessagePart::Tool {
                     call,
@@ -181,12 +216,43 @@ pub fn breakdown(
                     output,
                     output_bytes,
                     ..
-                } if is_compaction(call) => {
-                    if Some(position) == boundary {
-                        bytes[index(Slot::History)] += output_len(output, *output_bytes);
-                    } else if !resolved {
+                } if call.is_compaction() => {
+                    let meta = call.compaction();
+                    if !resolved {
                         compacting = true;
+                        pending = History::of(meta.as_ref().map(|m| m.kind));
+                        continue;
                     }
+                    compacting = false;
+                    let transcript_before: u64 = bytes
+                        .iter()
+                        .map(|b| b.div_ceil(BYTES_PER_TOKEN))
+                        .sum::<u64>()
+                        + history_tokens;
+                    let kind = History::of(meta.as_ref().map(|m| m.kind));
+                    let reported = meta.as_ref().and_then(|m| m.item_tokens);
+                    history_tokens = match (kind, reported) {
+                        (_, Some(n)) => n,
+                        (History::Sealed, None) => {
+                            // After minus what the transcript could not
+                            // account for before: the system share is the
+                            // same on both sides of the compaction.
+                            let sizes = meta
+                                .as_ref()
+                                .and_then(|m| Some((m.tokens_before?, m.tokens_after?)));
+                            sealed_estimated = sizes.is_some();
+                            sizes.map_or(0, |(before, after)| {
+                                after.saturating_sub(before.saturating_sub(transcript_before))
+                            })
+                        }
+                        _ => output_len(output, *output_bytes).div_ceil(BYTES_PER_TOKEN),
+                    };
+                    if kind != History::Sealed || reported.is_some() {
+                        sealed_estimated = false;
+                    }
+                    chip_freed += meta.as_ref().and_then(|m| m.freed()).unwrap_or(0);
+                    history = kind;
+                    bytes = [0; Slot::ALL.len()];
                 }
                 MessagePart::Tool {
                     call,
@@ -197,10 +263,10 @@ pub fn breakdown(
                 MessagePart::Text { text, .. }
                     if matches!(entry.role, MessageRole::User | MessageRole::Assistant) =>
                 {
-                    let slot = if compacted {
-                        Slot::Recent
-                    } else {
+                    let slot = if history == History::Chat {
                         Slot::History
+                    } else {
+                        Slot::Recent
                     };
                     bytes[index(slot)] += text.len() as u64;
                 }
@@ -209,6 +275,9 @@ pub fn breakdown(
         }
     }
     let mut estimated: Vec<u64> = bytes.iter().map(|b| b.div_ceil(BYTES_PER_TOKEN)).collect();
+    if history != History::Chat {
+        estimated[index(Slot::History)] += history_tokens;
+    }
     let sum: u64 = estimated.iter().sum();
     if sum > tokens {
         // The meter is the truth: scale the estimate into it.
@@ -224,12 +293,19 @@ pub fn breakdown(
         .filter(|(_, tokens)| *tokens > 0)
         .map(|(slot, tokens)| (*slot, tokens))
         .collect();
+    let graff_freed = usage.savings.map_or(0, |s| s.compacted_tokens);
     Some(Breakdown {
         tokens,
         window,
-        compacted,
+        history,
         compacting,
-        freed: usage.savings.map_or(0, |s| s.compacted_tokens),
+        pending,
+        freed: if graff_freed > 0 {
+            graff_freed
+        } else {
+            chip_freed
+        },
+        sealed_estimated: sealed_estimated && history == History::Sealed,
         items,
     })
 }
@@ -263,18 +339,33 @@ pub fn compact_count(n: u64) -> String {
 
 /// The status line under the legend.
 pub fn status_line(from: &Breakdown, to: &Breakdown) -> String {
+    let sealed = to.history == History::Sealed;
     if to.compacting {
-        return "Summarizing older chat to free up space".into();
+        return match to.pending {
+            History::Sealed => "Compacting older chat into a sealed item".into(),
+            _ => "Summarizing older chat to free up space".into(),
+        };
     }
     let freed_now = to.freed.saturating_sub(from.freed);
     if from.compacting && freed_now > 0 {
-        return format!("Compacted older chat, freed {}", compact_count(freed_now));
+        return if sealed {
+            format!("Sealed older chat, freed {}", compact_count(freed_now))
+        } else {
+            format!("Compacted older chat, freed {}", compact_count(freed_now))
+        };
     }
-    if to.compacted && to.freed > 0 {
-        return format!(
-            "Older chat summarized, {} freed so far",
-            compact_count(to.freed)
-        );
+    if to.compacted() && to.freed > 0 {
+        return if sealed {
+            format!(
+                "Older chat sealed, {} freed so far",
+                compact_count(to.freed)
+            )
+        } else {
+            format!(
+                "Older chat summarized, {} freed so far",
+                compact_count(to.freed)
+            )
+        };
     }
     format!(
         "{} free of {}",
@@ -484,6 +575,121 @@ fn crossfade(t: f32) -> f32 {
     (1.0 - 2.0 * t).abs()
 }
 
+/// A legend entry's marker: a dot for live content, a summary block with
+/// three lines for a readable summary, a padlock for a sealed item. `t` is
+/// the marker's opacity while it crossfades between shapes.
+fn legend_marker(shape: History, color: Hsla, t: f32) -> Div {
+    let slot = div()
+        .flex_none()
+        .size(px(10.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .opacity(t);
+    match shape {
+        History::Chat => slot.child(div().size(px(8.0)).rounded(px(4.0)).bg(color)),
+        History::Summary => slot.child(
+            div()
+                .size(px(10.0))
+                .rounded(px(2.0))
+                .bg(color)
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(1.0))
+                .px(px(2.0))
+                .children((0..3).map(|line| {
+                    div()
+                        .h(px(1.0))
+                        .w(px(if line == 2 { 4.0 } else { 6.0 }))
+                        .bg(gpui::white().opacity(0.9))
+                })),
+        ),
+        History::Sealed => slot.child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(6.0))
+                        .h(px(4.0))
+                        .border_t(px(1.5))
+                        .border_l(px(1.5))
+                        .border_r(px(1.5))
+                        .border_color(color)
+                        .rounded_t(px(3.0)),
+                )
+                .child(div().w(px(9.0)).h(px(6.0)).rounded(px(1.5)).bg(color)),
+        ),
+    }
+}
+
+/// The session's context fill as a strip of columns, one per meter update
+/// (the latest [`SEGMENTS`]). The first column after each compaction takes
+/// the color of what replaced the older chat.
+fn trajectory_strip(trajectory: &crate::context_trajectory::Trajectory, theme: &Theme) -> Div {
+    const HEIGHT: f32 = 18.0;
+    let fills = trajectory.fills();
+    let skip = fills.len().saturating_sub(SEGMENTS);
+    let points = trajectory.compaction_points();
+    let columns = fills.iter().enumerate().skip(skip).map(|(index, fill)| {
+        let point = points.iter().find(|(i, _)| *i == index).map(|(_, kind)| {
+            let shape = if *kind == "opaque" {
+                History::Sealed
+            } else {
+                History::Summary
+            };
+            Slot::History.color(shape, theme)
+        });
+        let column = div()
+            .flex_none()
+            .w(px(SEGMENT_W))
+            .h(px(HEIGHT))
+            .flex()
+            .items_end()
+            .rounded(px(1.0));
+        // A compaction's column gets a full-height tint, so the drop it
+        // caused reads even when the context after it is small.
+        let column = match point {
+            Some(color) => column.bg(color.opacity(0.3)),
+            None => column,
+        };
+        column.child(
+            div()
+                .w_full()
+                .h(px((fill * HEIGHT).max(1.0)))
+                .rounded(px(1.0))
+                .bg(point.unwrap_or(theme.text_faint.opacity(0.55))),
+        )
+    });
+    let count = trajectory.compactions.len();
+    let caption = match count {
+        0 => "This session".to_owned(),
+        1 => "This session, 1 compaction".to_owned(),
+        n => format!("This session, {n} compactions"),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .child(SharedString::from(caption)),
+        )
+        .child(
+            div()
+                .id("context-window-trajectory")
+                .flex()
+                .items_end()
+                .h(px(HEIGHT))
+                .gap(px(SEGMENT_GAP))
+                .children(columns),
+        )
+}
+
 impl Render for ContextWindowCard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh(cx);
@@ -503,7 +709,13 @@ impl Render for ContextWindowCard {
         let (from, to) = (&transition.from, &transition.to);
 
         // Header: "Context <state>" and the rolling counter.
-        let state_word = |b: &Breakdown| if b.compacting { "compacting" } else { "window" };
+        let state_word = |b: &Breakdown| {
+            if b.compacting {
+                "compacting"
+            } else {
+                "reading"
+            }
+        };
         let (word, word_opacity) = if state_word(from) != state_word(to) && from.window > 0 {
             (
                 if t < 0.5 {
@@ -569,21 +781,17 @@ impl Render for ContextWindowCard {
 
         // The bar: each slot's whole segments, a fading partial one, then
         // the empty track.
-        let history_t = if from.compacted != to.compacted {
-            t
-        } else {
-            1.0
-        };
+        let history_t = if from.history != to.history { t } else { 1.0 };
         let history_color = mix(
-            Slot::History.color(from.compacted, &theme),
-            Slot::History.color(to.compacted, &theme),
+            Slot::History.color(from.history, &theme),
+            Slot::History.color(to.history, &theme),
             history_t,
         );
         let color_of = |slot: Slot| {
             if slot == Slot::History {
                 history_color
             } else {
-                slot.color(to.compacted, &theme)
+                slot.color(to.history, &theme)
             }
         };
         let mut segments: Vec<gpui::AnyElement> = Vec::with_capacity(SEGMENTS);
@@ -639,29 +847,27 @@ impl Render for ContextWindowCard {
                     return None;
                 }
                 let value = lerp(before.unwrap_or(0) as f32, after.unwrap_or(0) as f32, st);
-                let relabel = *slot == Slot::History && from.compacted != to.compacted;
+                let relabel = *slot == Slot::History && from.history != to.history;
                 let (label, label_opacity) = if relabel {
                     (
-                        slot.label(if st < 0.5 {
-                            from.compacted
-                        } else {
-                            to.compacted
-                        }),
+                        slot.label(if st < 0.5 { from.history } else { to.history }),
                         crossfade(st),
                     )
                 } else {
-                    (slot.label(to.compacted), 1.0)
+                    (slot.label(to.history), 1.0)
                 };
-                // The dot squares off into the summary's block as it compacts.
-                let square = if *slot == Slot::History {
-                    match (from.compacted, to.compacted) {
-                        (false, true) => st,
-                        (true, false) => 1.0 - st,
-                        (true, true) => 1.0,
-                        _ => 0.0,
-                    }
+                let marker = if *slot == Slot::History {
+                    let (shape, t) = if relabel {
+                        (
+                            if st < 0.5 { from.history } else { to.history },
+                            crossfade(st),
+                        )
+                    } else {
+                        (to.history, 1.0)
+                    };
+                    legend_marker(shape, color_of(*slot), t)
                 } else {
-                    0.0
+                    legend_marker(History::Chat, color_of(*slot), 1.0)
                 };
                 Some(
                     div()
@@ -673,13 +879,7 @@ impl Render for ContextWindowCard {
                         .items_center()
                         .gap(px(6.0))
                         .overflow_hidden()
-                        .child(
-                            div()
-                                .flex_none()
-                                .size(px(8.0))
-                                .rounded(px(lerp(4.0, 1.5, square)))
-                                .bg(color_of(*slot)),
-                        )
+                        .child(marker)
                         .child(
                             div()
                                 .flex()
@@ -729,16 +929,31 @@ impl Render for ContextWindowCard {
                 .into_any_element()
         };
 
+        let trajectory = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat
+                .as_ref()
+                .and_then(|chat| state.context_trajectories.get(chat))
+                .filter(|t| t.samples.len() >= 2)
+                .map(|t| trajectory_strip(t, &theme))
+        };
+
         card.child(header)
             .child(bar)
             .child(legend)
             .child(status_el)
+            .children(trajectory)
             .child(
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
                     .whitespace_nowrap()
-                    .child("Split estimated from this chat; total reported by the agent."),
+                    .child(if to.history == History::Sealed {
+                        "Compacted context is sealed by the provider: size only."
+                    } else {
+                        "Split estimated from this chat; total reported by the agent."
+                    }),
             )
     }
 }
@@ -746,7 +961,7 @@ impl Render for ContextWindowCard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness_proto::ContextSavings;
+    use harness_proto::{CompactionMeta, ContextSavings};
 
     fn entry(role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
         SessionMessageEntry {
@@ -779,12 +994,20 @@ mod tests {
     fn compaction(bytes: u64, resolved: bool) -> MessagePart {
         tool(
             ToolCall::Unknown {
-                name: COMPACTION_TOOL_NAME.into(),
+                name: harness_proto::COMPACTION_TOOL_NAME.into(),
                 input: None,
             },
             bytes,
             resolved,
         )
+    }
+
+    fn sealed(before: u64, after: u64, item: Option<u64>, resolved: bool) -> MessagePart {
+        let mut meta = CompactionMeta::new(CompactionKind::Opaque);
+        meta.tokens_before = Some(before);
+        meta.tokens_after = resolved.then_some(after);
+        meta.item_tokens = item;
+        tool(meta.call(), 0, resolved)
     }
 
     fn usage(tokens: u64, freed: u64) -> Option<ContextUsage> {
@@ -839,7 +1062,7 @@ mod tests {
             ]
         );
         assert_eq!(b.items.iter().map(|(_, n)| n).sum::<u64>(), 30_000);
-        assert!(!b.compacted && !b.compacting);
+        assert!(!b.compacted() && !b.compacting);
     }
 
     #[test]
@@ -866,13 +1089,13 @@ mod tests {
             entry(MessageRole::Assistant, vec![compaction(0, false)]),
         ];
         let running = breakdown(usage(90_000, 0), &transcript).unwrap();
-        assert!(running.compacting && !running.compacted);
+        assert!(running.compacting && !running.compacted());
         assert_eq!(running.items[0], (Slot::History, 40_000));
 
         transcript[2] = entry(MessageRole::Assistant, vec![compaction(16_000, true)]);
         transcript.push(entry(MessageRole::User, vec![text(400)]));
         let done = breakdown(usage(20_000, 70_000), &transcript).unwrap();
-        assert!(done.compacted && !done.compacting);
+        assert!(done.compacted() && !done.compacting);
         assert_eq!(
             done.items,
             vec![
@@ -881,7 +1104,8 @@ mod tests {
                 (Slot::System, 15_900)
             ]
         );
-        assert_eq!(Slot::History.label(done.compacted), "Chat summary");
+        assert_eq!(done.history, History::Summary);
+        assert_eq!(Slot::History.label(done.history), "Chat summary");
         assert_eq!(
             status_line(&running, &done),
             "Compacted older chat, freed 70k"
@@ -894,6 +1118,76 @@ mod tests {
             status_line(&running, &running),
             "Summarizing older chat to free up space"
         );
+    }
+
+    #[test]
+    fn an_opaque_compaction_is_a_sealed_block_sized_without_contents() {
+        let mut transcript = vec![
+            entry(MessageRole::User, vec![text(40_000)]),
+            entry(
+                MessageRole::Assistant,
+                vec![tool(ToolCall::ReadFile { path: "a".into() }, 40_000, true)],
+            ),
+            entry(MessageRole::Assistant, vec![sealed(50_000, 0, None, false)]),
+        ];
+        let running = breakdown(usage(50_000, 0), &transcript).unwrap();
+        assert!(running.compacting && running.pending == History::Sealed);
+        assert_eq!(
+            status_line(&running, &running),
+            "Compacting older chat into a sealed item"
+        );
+
+        // 20k of the 50k came from the transcript, so 30k is system share;
+        // 34k after the compaction leaves ~4k for the sealed item.
+        transcript[2] = entry(
+            MessageRole::Assistant,
+            vec![sealed(50_000, 34_000, None, true)],
+        );
+        transcript.push(entry(MessageRole::User, vec![text(400)]));
+        let done = breakdown(usage(34_100, 0), &transcript).unwrap();
+        assert_eq!(done.history, History::Sealed);
+        assert!(done.sealed_estimated && !done.compacting);
+        assert_eq!(
+            done.items,
+            vec![
+                (Slot::History, 4_000),
+                (Slot::Recent, 100),
+                (Slot::System, 30_000)
+            ]
+        );
+        assert_eq!(Slot::History.label(done.history), "Compacted context");
+        assert_eq!(done.freed, 16_000);
+        assert_eq!(status_line(&running, &done), "Sealed older chat, freed 16k");
+        assert_eq!(
+            status_line(&done, &done),
+            "Older chat sealed, 16k freed so far"
+        );
+
+        // A size the agent reports wins over the estimate.
+        transcript[2] = entry(
+            MessageRole::Assistant,
+            vec![sealed(50_000, 34_000, Some(2_500), true)],
+        );
+        let reported = breakdown(usage(34_100, 0), &transcript).unwrap();
+        assert!(!reported.sealed_estimated);
+        assert_eq!(reported.items[0], (Slot::History, 2_500));
+    }
+
+    #[test]
+    fn a_later_summary_replaces_an_earlier_sealed_block() {
+        let transcript = vec![
+            entry(MessageRole::User, vec![text(8_000)]),
+            entry(
+                MessageRole::Assistant,
+                vec![sealed(10_000, 6_000, Some(1_000), true)],
+            ),
+            entry(MessageRole::User, vec![text(8_000)]),
+            entry(MessageRole::Assistant, vec![compaction(2_000, true)]),
+        ];
+        let b = breakdown(usage(5_000, 0), &transcript).unwrap();
+        assert_eq!(b.history, History::Summary);
+        assert_eq!(b.items, vec![(Slot::History, 500), (Slot::System, 4_500)]);
+        assert_eq!(b.freed, 4_000);
     }
 
     #[test]
