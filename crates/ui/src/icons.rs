@@ -198,6 +198,8 @@ icon_assets![
     (HARD_DRIVE, "hard-drive"),
     (HOME, "home"),
     (STOP, "stop"),
+    // Hand-drawn padlock for steps that wait on the user ("Asks first").
+    (LOCK, "lock"),
     (CHECK, "check"),
     (COPY, "copy"),
     // Project Action icon family (Solar Linear-compatible strokes).
