@@ -11073,6 +11073,12 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let usage = self.state.read(cx).context_usage;
+            // Steps and subagents of the running turn (crate::agent_work).
+            let agent_work = (session_chrome_opacity > 0.0)
+                .then(|| {
+                    crate::agent_work::footer_chip(self.state.clone(), &theme, cx.entity_id(), cx)
+                })
+                .flatten();
             // OpenAI's guidelines: say so while requests run on the plan.
             let plan = (session_chrome_opacity > 0.0
                 && self.pickers.read(cx).uses_chatgpt_plan(cx))
@@ -11138,6 +11144,10 @@ impl Render for Composer {
                                         .pr(px(10.0))
                                         .child(chip)
                                 }))
+                                .children(
+                                    agent_work
+                                        .map(|chip| div().flex_none().pr(px(4.0)).child(chip)),
+                                )
                                 .children(crate::context_usage::has_window(usage).then(|| {
                                     div().flex_none().pr(px(10.0)).child(
                                         crate::context_usage::render(
