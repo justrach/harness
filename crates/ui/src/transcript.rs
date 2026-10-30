@@ -9894,7 +9894,7 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
 /// A small glyph standing in for the tool's icon (harness uses an icon set; a
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (harness tool-chip.tsx `toolIcon`, Solar set).
-fn tool_icon_path(call: &ToolCall) -> &'static str {
+pub(crate) fn tool_icon_path(call: &ToolCall) -> &'static str {
     match call {
         ToolCall::Exec { .. } => crate::icons::TERMINAL,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,
@@ -10599,7 +10599,7 @@ fn subagent_task_title(text: &str) -> Option<&str> {
 /// a fixed-width tab spent on "Agent: " never shows the task, so the genus
 /// is stripped here and the call input's description/prompt fields back up
 /// a bare name (older docs). Without a task title, no transcript is offered.
-fn subagent_tab_title(call: &ToolCall) -> Option<SharedString> {
+pub(crate) fn subagent_tab_title(call: &ToolCall) -> Option<SharedString> {
     let (name, input) = match call {
         ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
