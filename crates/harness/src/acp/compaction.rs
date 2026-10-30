@@ -11,7 +11,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use harness_proto::{AgentEvent, COMPACTION_TOOL_NAME, ToolCall};
+use harness_proto::{
+    AgentEvent, COMPACTION_TOOL_NAME, CompactionKind, CompactionMeta, ToolCall, text_tokens,
+};
 use serde_json::{Value, json};
 
 use super::normalize::{OUTPUT_CAP, cap_text, chunk_text, content_block_text};
@@ -94,6 +96,16 @@ impl CompactionTracker {
         };
         self.open.remove(compaction);
         self.finished.insert(compaction.to_owned());
+        // A readable summary: record its size on the chip, since the text
+        // itself stays out of the doc with every other tool output.
+        if let (false, Some(text)) = (is_error, output.as_deref()) {
+            let mut meta = CompactionMeta::new(CompactionKind::Summary);
+            meta.item_tokens = Some(text_tokens(text));
+            events.push(AgentEvent::ToolCall {
+                id: chip_id(compaction),
+                call: meta.call(),
+            });
+        }
         events.push(AgentEvent::ToolResult {
             id: chip_id(compaction),
             is_error,
@@ -130,6 +142,15 @@ mod tests {
                 name: COMPACTION_TOOL_NAME.into(),
                 input: None,
             },
+        }
+    }
+
+    fn summary_size(id: &str, text: &str) -> AgentEvent {
+        let mut meta = CompactionMeta::new(CompactionKind::Summary);
+        meta.item_tokens = Some(text_tokens(text));
+        AgentEvent::ToolCall {
+            id: chip_id(id),
+            call: meta.call(),
         }
     }
 
@@ -171,12 +192,15 @@ mod tests {
         );
         assert_eq!(
             tracker.observe(&update("c1", "completed")),
-            vec![AgentEvent::ToolResult {
-                id: chip_id("c1"),
-                is_error: false,
-                output: Some("Fixed the parser.".into()),
-                diff: None,
-            }]
+            vec![
+                summary_size("c1", "Fixed the parser."),
+                AgentEvent::ToolResult {
+                    id: chip_id("c1"),
+                    is_error: false,
+                    output: Some("Fixed the parser.".into()),
+                    diff: None,
+                }
+            ]
         );
         // Resolved ids are never reopened by a late frame.
         assert!(tracker.observe(&chunk("c1", "late")).is_empty());
@@ -196,6 +220,7 @@ mod tests {
             tracker.observe(&done),
             vec![
                 opening("c2"),
+                summary_size("c2", "First.\n\nSecond."),
                 AgentEvent::ToolResult {
                     id: chip_id("c2"),
                     is_error: false,
