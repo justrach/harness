@@ -50,6 +50,7 @@ fn workspace_footer_row() -> gpui::Div {
         .gap(px(4.0))
 }
 
+use crate::chat_mode;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
@@ -105,6 +106,8 @@ pub struct DraftConfig {
     pub branch: Option<String>,
     /// Where the new session runs (the t3code env-mode).
     pub checkout: CheckoutKind,
+    /// A plain chat (`chat_mode`): no project, graff on the auto tiers only.
+    pub chat_mode: bool,
 }
 
 /// A new-session canvas's run picks. Chat tabs and split panes each park
@@ -120,6 +123,14 @@ pub struct CanvasDraft {
     pub target: Option<CanvasTarget>,
     /// The canvas's unsent prompt and files. `None` leaves the composer's.
     pub input: Option<CanvasInput>,
+    /// Parked Git picks belong to this canvas, never to a fresh sibling.
+    pub git: Option<CanvasGit>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasGit {
+    pub branch: Option<String>,
+    pub checkout: CheckoutKind,
 }
 
 impl CanvasDraft {
@@ -128,6 +139,7 @@ impl CanvasDraft {
     pub fn fresh(&self) -> Self {
         Self {
             input: Some(CanvasInput::default()),
+            git: None,
             ..self.clone()
         }
     }
@@ -181,10 +193,21 @@ pub struct CanvasTarget {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CheckoutKind {
     /// The space's own folder — or the picked ref's existing worktree.
-    #[default]
     Local,
     /// A fresh isolated worktree created off the picked base ref on send.
+    #[default]
     NewWorktree,
+}
+
+impl CheckoutKind {
+    fn for_space(space: Option<&Space>) -> Self {
+        match space {
+            Some(space) if !space.git_detected => Self::Local,
+            // An unloaded project must not seed a shared-checkout draft that
+            // gets restored after the Git project arrives from the engine.
+            _ => Self::NewWorktree,
+        }
+    }
 }
 
 /// The resolved on-send checkout action (composer consumes this — see
@@ -198,8 +221,8 @@ pub enum CheckoutPlan {
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
     /// `CreateWorktree` off `base` on send (harness mints a `harness/<name>`
-    /// branch). `base: None` = refs never loaded — send falls back to the
-    /// space folder rather than failing.
+    /// branch). `base: None` = refs never loaded — the host resolves the
+    /// repository's default branch without dropping isolation.
     NewWorktree { base: Option<String> },
 }
 
@@ -212,6 +235,7 @@ pub struct ResolvedRunConfig {
     pub model: Option<String>,
     pub reasoning: Option<ReasoningLevel>,
     pub model_options: serde_json::Map<String, serde_json::Value>,
+    pub chat_mode: bool,
 }
 
 impl ResolvedRunConfig {
@@ -223,6 +247,7 @@ impl ResolvedRunConfig {
             reasoning: self.reasoning,
             model_options: self.model_options.clone(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            chat_mode: self.chat_mode,
         })
     }
 }
@@ -529,6 +554,7 @@ struct ModelRowsKey {
     locked: bool,
     catalog_rev: u64,
     selected: Option<String>,
+    chat_mode: bool,
 }
 
 /// One row of the model list: the model plus the harness it belongs to —
@@ -819,6 +845,7 @@ pub struct Pickers {
     /// Space the branch draft/cache belong to (see the state observer).
     space_owner: Option<String>,
     device_owner: Option<String>,
+    git_owner: bool,
     target_generation: u64,
     menu_geometry: HashMap<PickerKind, popover::MenuGeometry>,
     model_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
@@ -966,6 +993,8 @@ impl Pickers {
                 this.config.harness = None;
                 this.config.model = None;
                 this.config.reasoning = None;
+                this.config.branch = None;
+                this.config.checkout = CheckoutKind::for_space(state.read(cx).selected_space_row());
                 this.switch_error = None;
             }
             if this.creating_chat.as_ref().is_some_and(|(id, _)| {
@@ -977,30 +1006,7 @@ impl Pickers {
             }) {
                 this.creating_chat = None;
             }
-            // A space switch invalidates the branch draft + cache — the folder
-            // (and possibly the device) changed under them.
-            let space = state.read(cx).selected_space.clone();
-            let device = state.read(cx).effective_device_id();
-            if space != this.space_owner || device != this.device_owner {
-                this.space_owner = space;
-                this.device_owner = device;
-                this.target_generation = this.target_generation.wrapping_add(1);
-                this.setting_menu = None;
-                this.setting_bounds = None;
-                this.refs_task = None;
-                this.load_task = None;
-                this.config.branch = None;
-                this.config.checkout = CheckoutKind::default();
-                this.refs = Loadable::Idle;
-                this.refs_space = None;
-                // Catalogs are per-DEVICE (fetched from the space's host):
-                // a space switch may land on another device, so refetch.
-                this.harnesses = Loadable::Idle;
-                this.models.clear();
-                this.model_loads.clear();
-                this.model_refresh_errors.clear();
-                this.catalog_rev += 1;
-            }
+            this.sync_target(cx);
             cx.notify();
         });
         // A Settings → Agents toggle changed some device's enabled set:
@@ -1038,16 +1044,25 @@ impl Pickers {
         let draft_owner = state.read(cx).selected_chat.clone();
         let space_owner = state.read(cx).selected_space.clone();
         let device_owner = state.read(cx).effective_device_id();
+        let git_owner = state
+            .read(cx)
+            .selected_space_row()
+            .is_some_and(|space| space.git_detected);
+        let checkout = CheckoutKind::for_space(state.read(cx).selected_space_row());
         Self {
             state,
             space_owner,
             device_owner,
+            git_owner,
             target_generation: 0,
             menu_geometry: HashMap::new(),
             model_trigger_bounds: None,
             open_model_width: None,
             open_model_height: model_menu_height(0),
-            config: DraftConfig::default(),
+            config: DraftConfig {
+                checkout,
+                ..DraftConfig::default()
+            },
             defaults,
             data_dir,
             draft_owner,
@@ -1101,6 +1116,39 @@ impl Pickers {
         }
     }
 
+    /// Invalidate the target before restoring its parked draft, so a deferred
+    /// state observer cannot erase the newly restored Git picks.
+    fn sync_target(&mut self, cx: &App) {
+        let state = self.state.read(cx);
+        let space = state.selected_space.clone();
+        let device = state.effective_device_id();
+        let git = state
+            .selected_space_row()
+            .is_some_and(|space| space.git_detected);
+        if space != self.space_owner || device != self.device_owner || git != self.git_owner {
+            self.space_owner = space;
+            self.device_owner = device;
+            self.git_owner = git;
+            self.target_generation = self.target_generation.wrapping_add(1);
+            self.setting_menu = None;
+            self.setting_bounds = None;
+            self.refs_task = None;
+            self.load_task = None;
+            self.switch_task = None;
+            self.switching = None;
+            self.switch_error = None;
+            self.config.branch = None;
+            self.config.checkout = CheckoutKind::for_space(state.selected_space_row());
+            self.refs = Loadable::Idle;
+            self.refs_space = None;
+            self.harnesses = Loadable::Idle;
+            self.models.clear();
+            self.model_loads.clear();
+            self.model_refresh_errors.clear();
+            self.catalog_rev += 1;
+        }
+    }
+
     /// Persist the sticky defaults (best-effort; picks are rare and tiny).
     fn save_defaults(&self) {
         if let Some(dir) = self.data_dir.as_deref()
@@ -1129,6 +1177,13 @@ impl Pickers {
                 device: state.selected_device.clone(),
             }),
             input: None,
+            git: state
+                .selected_space_row()
+                .filter(|space| space.git_detected)
+                .map(|_| CanvasGit {
+                    branch: self.config.branch.clone(),
+                    checkout: self.config.checkout,
+                }),
         }
     }
 
@@ -1152,6 +1207,8 @@ impl Pickers {
                 }
             });
         }
+        self.sync_target(cx);
+        let git = draft.as_ref().and_then(|draft| draft.git.clone());
         let offered = |harness: HarnessId| match self.harnesses.ready() {
             Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
             None => true,
@@ -1163,6 +1220,12 @@ impl Pickers {
         self.config.harness = draft.harness;
         self.config.model = draft.model;
         self.config.reasoning = draft.reasoning;
+        let git = git.unwrap_or_else(|| CanvasGit {
+            branch: None,
+            checkout: CheckoutKind::for_space(self.state.read(cx).selected_space_row()),
+        });
+        self.config.branch = git.branch;
+        self.config.checkout = git.checkout;
         self.switch_error = None;
         cx.notify();
     }
@@ -1185,7 +1248,77 @@ impl Pickers {
 
     /// Harness is locked once the chat exists (feature-inventory §1.7).
     fn harness_locked(&self, cx: &App) -> bool {
+        self.state.read(cx).selected_chat.is_some() || self.chat_mode(cx)
+    }
+
+    /// A chat is selected, whether or not its row and config have synced yet:
+    /// not a new-chat canvas, so nothing falls back to the remembered
+    /// defaults. Unlike [`Self::harness_locked`], a chat-mode draft is still
+    /// a new-chat canvas.
+    fn chat_selected(&self, cx: &App) -> bool {
         self.state.read(cx).selected_chat.is_some()
+    }
+
+    /// Whether the draft or the selected chat is a plain chat (chat mode).
+    pub fn chat_mode(&self, cx: &App) -> bool {
+        match self.state.read(cx).selected_chat_row() {
+            Some(chat) => chat.config.as_ref().is_some_and(|c| c.chat_mode),
+            None => self.config.chat_mode,
+        }
+    }
+
+    /// Switch the new-session draft between a plain chat and a coding
+    /// session. A chat has no project and starts on Auto (low); either way
+    /// the run picks start over, since the two offer different models.
+    pub fn set_chat_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.state.read(cx).selected_chat.is_some() || self.config.chat_mode == on {
+            return;
+        }
+        if on && self.chat_mode_availability() == chat_mode::Availability::Unavailable {
+            // No tier to offer: stay a coding session and check the catalog
+            // again, so the option turns on once the gateway lists a tier.
+            self.ensure_models(chat_mode::HARNESS, true, cx);
+            cx.notify();
+            return;
+        }
+        self.config.chat_mode = on;
+        self.config.harness = None;
+        self.config.model = None;
+        self.config.reasoning = None;
+        *self.model_rows_cache.borrow_mut() = None;
+        if on {
+            self.ensure_models(chat_mode::HARNESS, false, cx);
+            if !self.state.read(cx).no_project {
+                self.pick_no_project(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Whether chat mode can be offered: graff is listed and its catalog
+    /// has at least one of the auto tiers.
+    fn chat_mode_availability(&self) -> chat_mode::Availability {
+        if self.harnesses.ready().is_some_and(|list| {
+            !list
+                .iter()
+                .any(|d| d.id == chat_mode::HARNESS && d.installed)
+        }) {
+            return chat_mode::Availability::Unavailable;
+        }
+        chat_mode::availability(self.models.get(&chat_mode::HARNESS))
+    }
+
+    /// The note the composer shows in chat mode: why chat isn't available
+    /// when the gateway lists no tier, else the selected model's note (the
+    /// API-cost warning for Auto (smart)).
+    pub fn chat_mode_note(&self, cx: &App) -> Option<&'static str> {
+        if !self.chat_mode(cx) {
+            return None;
+        }
+        if self.chat_mode_availability() == chat_mode::Availability::Unavailable {
+            return Some(chat_mode::UNAVAILABLE_NOTE);
+        }
+        chat_mode::note_for(self.effective_model_id(cx))
     }
 
     fn engine(&self, cx: &App) -> Option<EngineHandle> {
@@ -1205,6 +1338,9 @@ impl Pickers {
 
     /// Effective harness: picked, or the chat's config, or the first listed.
     fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
+        if self.chat_mode(cx) {
+            return Some(chat_mode::HARNESS);
+        }
         if let Some(harness) = self.config.harness {
             return Some(harness);
         }
@@ -1220,7 +1356,7 @@ impl Pickers {
             return config.harness;
         }
         // A selected chat without synced config is not a new-chat canvas.
-        if self.harness_locked(cx) {
+        if self.chat_selected(cx) {
             return None;
         }
         // New-chat canvas: the remembered last-used harness (sticky defaults),
@@ -1267,8 +1403,16 @@ impl Pickers {
         if let Some(config) = self.creating_chat_config(cx) {
             return config.model.as_deref();
         }
-        if self.harness_locked(cx) {
+        if self.chat_selected(cx) {
             return None;
+        }
+        if self.config.chat_mode {
+            // A new chat starts on Auto (low), not the code default.
+            return self
+                .models
+                .get(&chat_mode::HARNESS)
+                .and_then(Loadable::ready)
+                .and_then(|models| chat_mode::default_id(models));
         }
         let harness = self.effective_harness(cx)?;
         self.defaults.model_for(harness).map(|m| m.id.as_str())
@@ -1288,7 +1432,7 @@ impl Pickers {
                 config.reasoning
             } else if let Some(config) = self.creating_chat_config(cx) {
                 config.reasoning
-            } else if self.harness_locked(cx) {
+            } else if self.chat_selected(cx) {
                 None
             } else {
                 // New chat: the remembered last-used level.
@@ -1308,7 +1452,21 @@ impl Pickers {
     fn selected_model<'a>(&'a self, cx: &'a App) -> Option<&'a Model> {
         let harness = self.effective_harness(cx)?;
         let models = self.models.get(&harness)?.ready()?;
-        selected_catalog_model(models, self.effective_model_id(cx))
+        let selected = self.effective_model_id(cx);
+        // Chat mode never falls back to the catalog's default model.
+        if self.chat_mode(cx) && !selected.is_some_and(chat_mode::offers) {
+            return None;
+        }
+        selected_catalog_model(models, selected)
+    }
+
+    /// A chat-mode draft with no auto tier to run on (the catalog hasn't
+    /// listed one yet, or lists none): sending would fall to graff's own
+    /// default model, so the composer holds the send.
+    pub fn chat_mode_send_blocked(&self, cx: &App) -> bool {
+        self.state.read(cx).selected_chat.is_none()
+            && self.config.chat_mode
+            && !self.effective_model_id(cx).is_some_and(chat_mode::offers)
     }
 
     fn model_chip_icon(&self, theme: &Theme, cx: &App) -> (&'static str, Option<gpui::Hsla>) {
@@ -1318,6 +1476,15 @@ impl Pickers {
     }
 
     fn selected_model_label(&self, cx: &App) -> Option<String> {
+        // Chat mode names its tiers itself, whatever the catalog calls them.
+        if self.chat_mode(cx) {
+            if let Some(label) = self.effective_model_id(cx).and_then(chat_mode::label_for) {
+                return Some(label.to_owned());
+            }
+            if self.chat_mode_availability() == chat_mode::Availability::Unavailable {
+                return Some(chat_mode::UNAVAILABLE_CHIP.to_owned());
+            }
+        }
         self.selected_model(cx)
             .map(|model| model.label.clone())
             .or_else(|| {
@@ -1354,7 +1521,7 @@ impl Pickers {
         if let Some(config) = self.creating_chat_config(cx) {
             return config.model_options.clone();
         }
-        if self.harness_locked(cx) {
+        if self.chat_selected(cx) {
             return Default::default();
         }
         let Some(harness) = self.effective_harness(cx) else {
@@ -1401,6 +1568,7 @@ impl Pickers {
                 .or_else(|| self.effective_model_id(cx).map(str::to_string)),
             reasoning: self.effective_reasoning(cx),
             model_options: self.explicit_options(cx),
+            chat_mode: self.chat_mode(cx),
         }
     }
 
@@ -1943,13 +2111,16 @@ impl Pickers {
         if self.state.read(cx).selected_chat_row().is_some() {
             return;
         }
-        if row.worktree_path.is_some() {
+        if self.config.checkout == CheckoutKind::NewWorktree {
+            // An isolated draft selects a base, never another session's tree.
+            self.config.branch = Some(row.name.clone());
+        } else if row.worktree_path.is_some() {
             // Reuse the ref's existing worktree ("Current worktree") — the
             // t3code `reuseExistingWorktree` path.
             self.config.branch = Some(row.name.clone());
             self.config.checkout = CheckoutKind::Local;
-        } else if self.config.checkout == CheckoutKind::NewWorktree || row.current {
-            // Base pick for a new worktree, or the already-current ref.
+        } else if row.current {
+            // The already-current ref in explicitly shared checkout mode.
             self.config.branch = Some(row.name.clone());
         } else {
             // Local mode + a plain non-current ref: CHECK OUT the space
@@ -2063,8 +2234,11 @@ impl Pickers {
             self.update_chat_config(cx, move |config| config.model = Some(model_id));
         } else {
             // New chat: draft pick + sticky last-used memory for this harness.
+            // A chat-mode pick isn't remembered: the code defaults stay its own.
             self.config.model = Some(model_id.clone());
-            if let Some(harness) = self.effective_harness(cx) {
+            if !self.config.chat_mode
+                && let Some(harness) = self.effective_harness(cx)
+            {
                 let label = self
                     .models
                     .get(&harness)
@@ -2270,6 +2444,7 @@ impl Pickers {
             locked: self.harness_locked(cx),
             catalog_rev: self.catalog_rev,
             selected: self.effective_model_id(cx).map(str::to_owned),
+            chat_mode: self.chat_mode(cx),
         };
         if let Some((cached_key, rows)) = self.model_rows_cache.borrow().as_ref()
             && *cached_key == key
@@ -2284,6 +2459,33 @@ impl Pickers {
     fn visible_model_rows(&self, cx: &App) -> Vec<ModelRowData> {
         let effective = self.effective_harness(cx);
         let descriptors = self.rail_descriptors(cx);
+        if self.chat_mode(cx) {
+            // A plain chat offers the three auto tiers and nothing else.
+            let query = self.search.read(cx).text().trim().to_lowercase();
+            let name: SharedString = descriptors
+                .iter()
+                .find(|d| d.id == chat_mode::HARNESS)
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| "Graff".into())
+                .into();
+            let catalog = self
+                .models
+                .get(&chat_mode::HARNESS)
+                .and_then(Loadable::ready)
+                .map(|models| models.as_slice())
+                .unwrap_or_default();
+            return chat_mode::models(catalog)
+                .into_iter()
+                .filter(|m| query.is_empty() || m.label.to_lowercase().contains(&query))
+                .map(|model| ModelRowData {
+                    harness: chat_mode::HARNESS,
+                    harness_name: name.clone(),
+                    model,
+                    selected_only: false,
+                    header: None,
+                })
+                .collect();
+        }
         // Favorite lookups are per-row; the Vec scan made the flatten
         // O(models × favorites).
         let favorites: std::collections::HashSet<(HarnessId, &str)> = self
@@ -2445,7 +2647,7 @@ impl Pickers {
             .read(cx)
             .selected_chat_row()
             .and_then(|c| c.branch.clone())
-            .or_else(|| self.config.branch.clone());
+            .or_else(|| self.effective_ref_name());
         let index = match selected {
             Some(name) => rows.iter().position(|r| r.name == name).unwrap_or(0),
             None => rows.iter().position(|r| r.current).unwrap_or(0),
@@ -2453,11 +2655,13 @@ impl Pickers {
         index.min(MAX_REF_ROWS.saturating_sub(1))
     }
 
-    /// The picked ref's row, else the repo's current branch's row.
+    /// The picked ref's row. Fresh isolated work starts from the repository's
+    /// default branch (ListRefs orders it first), not the shared checkout's PR.
     fn selected_ref(&self) -> Option<&RepoRef> {
         let refs = self.refs.ready()?;
         match self.config.branch.as_deref() {
             Some(name) => refs.iter().find(|r| r.name == name),
+            None if self.config.checkout == CheckoutKind::NewWorktree => refs.first(),
             None => refs.iter().find(|r| r.current),
         }
     }
@@ -4054,14 +4258,21 @@ impl Pickers {
                 cx,
             )
             .when(offline, |el| el.text_color(theme.warning.opacity(0.8)));
-        let project_chip = self.footer_chip(
-            PickerKind::Space,
-            "picker-project",
-            crate::icons::FOLDER,
-            project_label,
-            &theme,
-            cx,
-        );
+        let chat_mode = self.chat_mode(cx);
+        let project_chip = (!chat_mode).then(|| {
+            self.footer_chip(
+                PickerKind::Space,
+                "picker-project",
+                crate::icons::FOLDER,
+                project_label,
+                &theme,
+                cx,
+            )
+        });
+        let mode_switch = self.render_chat_mode_switch(chat_mode, &theme, cx);
+        let note = self
+            .chat_mode_note(cx)
+            .map(|note| chat_mode::note_chip(note, &theme));
         div()
             .min_w_0()
             .max_w_full()
@@ -4069,6 +4280,7 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(4.0))
+            .child(mode_switch)
             .child(attach_overlay_end(
                 device_chip,
                 &mut overlay,
@@ -4076,13 +4288,90 @@ impl Pickers {
                 "device-popover",
                 closing,
             ))
-            .child(attach_overlay_end(
-                project_chip,
-                &mut overlay,
-                PickerKind::Space,
-                "project-popover",
-                closing,
+            .children(project_chip.map(|chip| {
+                attach_overlay_end(
+                    chip,
+                    &mut overlay,
+                    PickerKind::Space,
+                    "project-popover",
+                    closing,
+                )
+            }))
+            .children(note)
+            .into_any_element()
+    }
+
+    /// Chat | Code: whether the new session is a plain chat or a coding
+    /// session. Clicking switches the draft (see [`Self::set_chat_mode`]).
+    fn render_chat_mode_switch(
+        &self,
+        chat_mode: bool,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = "picker-chat-mode";
+        // Off while the gateway lists no auto tier: a coding session can't
+        // switch to a chat it couldn't run. A click checks the catalog again.
+        let unavailable =
+            !chat_mode && self.chat_mode_availability() == chat_mode::Availability::Unavailable;
+        let (icon_path, label, hint) = if chat_mode {
+            (
+                crate::icons::CHAT_ROUND_LINE,
+                "Chat",
+                "Plain chat. Click for a coding session",
+            )
+        } else if unavailable {
+            (crate::icons::FILE_CODE, "Code", chat_mode::UNAVAILABLE_NOTE)
+        } else {
+            (
+                crate::icons::FILE_CODE,
+                "Code",
+                "Coding session. Click for a plain chat",
+            )
+        };
+        div()
+            .id(id)
+            .debug_selector(move || {
+                if unavailable {
+                    "picker-chat-mode-unavailable".into()
+                } else {
+                    id.into()
+                }
+            })
+            .tooltip(crate::settings::widgets::text_tooltip(hint))
+            .when(unavailable, |el| el.opacity(0.5))
+            .h(px(20.0))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(8.0))
+            .rounded(px(FOOTER_CHIP_RADIUS))
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(motion::hover_blend(
+                id,
+                theme.text_muted.opacity(0.7),
+                theme.text.opacity(0.8),
             ))
+            .bg(motion::hover_blend(
+                id,
+                gpui::transparent_black(),
+                theme.element_hover,
+            ))
+            .on_hover(motion::hover_listener(id))
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(hint)
+            .on_click(cx.listener(move |this, _, _, cx| this.set_chat_mode(!chat_mode, cx)))
+            .child(
+                crate::icons::icon(icon_path)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.7)),
+            )
+            .child(SharedString::from(label))
             .into_any_element()
     }
 
@@ -4092,6 +4381,9 @@ impl Pickers {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if self.chat_mode(cx) {
+            return None; // A plain chat has no project, so no checkout or branch.
+        }
         let git = self
             .state
             .read(cx)
@@ -4862,7 +5154,15 @@ impl Pickers {
         };
         let catalog_problem = effective
             .and_then(|harness| self.model_catalog_problem(harness))
-            .map(str::to_owned);
+            .map(str::to_owned)
+            .or_else(|| {
+                // Chat mode with a catalog that lists none of the auto tiers.
+                (rows.is_empty()
+                    && !searching
+                    && self.chat_mode(cx)
+                    && self.chat_mode_availability() == chat_mode::Availability::Unavailable)
+                    .then(|| chat_mode::UNAVAILABLE_NOTE.to_owned())
+            });
         let list_children: Vec<AnyElement> = if !rows.is_empty() {
             Vec::new()
         } else if let Some(message) = &catalog_problem {
@@ -6680,6 +6980,7 @@ mod tests {
                 reasoning: Some(ReasoningLevel::Medium),
                 sandbox: SandboxLevel::WorkspaceWrite,
                 model_options: Default::default(),
+                chat_mode: false,
             });
             cx.notify();
         });
@@ -6939,6 +7240,214 @@ mod tests {
                 );
             });
         }
+    }
+
+    /// Chat mode: a plain chat offers graff's three auto tiers only, starts
+    /// on Auto (low), records itself on the chat, and warns about API costs
+    /// while Auto (smart) is selected.
+    #[gpui::test]
+    fn chat_mode_offers_only_the_auto_tiers(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let graff_catalog = || {
+            vec![
+                bare_model("codegraff/claude-opus-5-5", "Claude Opus 5.5"),
+                bare_model("codegraff/auto-high", "Auto (high)"),
+                bare_model("codegraff/auto-smart", "Auto (smart)"),
+                bare_model("chatgpt-new/gpt-6.1-sol", "GPT-6.1 Sol"),
+                bare_model("codegraff/auto-low", "Auto (low)"),
+            ]
+        };
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            pickers.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::Graff, "Graff"),
+            ]);
+            pickers.apply_model_catalog(HarnessId::Graff, Loadable::Ready(graff_catalog()), cx);
+            pickers.apply_model_catalog(
+                HarnessId::Codex,
+                Loadable::Ready(vec![bare_model("gpt-6-sol", "GPT-6 Sol")]),
+                cx,
+            );
+            assert!(!pickers.chat_mode(cx));
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Codex));
+
+            pickers.set_chat_mode(true, cx);
+            assert!(pickers.chat_mode(cx));
+            assert_eq!(pickers.effective_harness(cx), Some(HarnessId::Graff));
+            assert!(pickers.harness_locked(cx), "a chat can't switch agents");
+            let rows = pickers.model_rows(cx);
+            assert_eq!(
+                rows.iter()
+                    .map(|r| r.model.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Auto (low)", "Auto (high)", "Auto (smart)"]
+            );
+            let resolved = pickers.resolved(cx);
+            assert_eq!(resolved.harness, Some(HarnessId::Graff));
+            assert_eq!(resolved.model.as_deref(), Some("codegraff/auto-low"));
+            assert!(resolved.chat_mode);
+            assert!(
+                resolved.chat_config().unwrap().chat_mode,
+                "recorded on the chat"
+            );
+            assert_eq!(pickers.chat_mode_note(cx), None);
+
+            pickers.activate_model_index(2, cx);
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("codegraff/auto-smart")
+            );
+            assert_eq!(
+                pickers.chat_mode_note(cx),
+                Some("Auto (smart) may incur API costs.")
+            );
+
+            pickers.set_chat_mode(false, cx);
+            assert!(!pickers.resolved(cx).chat_mode);
+            assert_eq!(pickers.chat_mode_note(cx), None);
+            assert_ne!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("codegraff/auto-smart")
+            );
+        });
+
+        // An existing chat-mode chat keeps its mode and its three choices.
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats.push(serde_json::from_value(serde_json::json!({
+                "id":"plain-chat", "deviceId":"device", "archived":false, "createdAt":"2026-10-18T00:00:00Z",
+                "config":{"harness":"graff", "model":"codegraff/auto-high", "reasoning":null, "sandbox":"workspace-write", "chatMode":true}
+            })).unwrap());
+            state.selected_chat = Some("plain-chat".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Graff, "Graff")]);
+            pickers.apply_model_catalog(HarnessId::Graff, Loadable::Ready(graff_catalog()), cx);
+            assert!(pickers.chat_mode(cx));
+            assert_eq!(pickers.model_rows(cx).len(), 3);
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("codegraff/auto-high")
+            );
+            pickers.set_chat_mode(false, cx);
+            assert!(
+                pickers.chat_mode(cx),
+                "an existing chat's mode doesn't change"
+            );
+        });
+    }
+
+    /// Chat mode degrades when the gateway lists none of the auto tiers
+    /// (an older gateway, signed out, offline): the Chat option stays off
+    /// with a reason instead of opening an empty picker, a draft that was
+    /// already switched says why, and the option turns on once a tier is
+    /// listed.
+    #[gpui::test]
+    fn chat_mode_is_off_with_a_reason_while_no_auto_tier_is_listed(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let no_tiers = || {
+            vec![
+                bare_model("codegraff/claude-opus-5-5", "Claude Opus 5.5"),
+                bare_model("chatgpt-new/gpt-6.1-sol", "GPT-6.1 Sol"),
+            ]
+        };
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            pickers.harnesses = Loadable::Ready(vec![
+                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::Graff, "Graff"),
+            ]);
+            pickers.apply_model_catalog(HarnessId::Graff, Loadable::Ready(no_tiers()), cx);
+            assert_eq!(
+                pickers.chat_mode_availability(),
+                chat_mode::Availability::Unavailable
+            );
+            pickers.set_chat_mode(true, cx);
+            assert!(
+                !pickers.chat_mode(cx),
+                "no tier: the draft stays a coding session"
+            );
+
+            // Signed out or offline: the catalog fails.
+            pickers.apply_model_catalog(
+                HarnessId::Graff,
+                Loadable::Error("not signed in".into()),
+                cx,
+            );
+            pickers.set_chat_mode(true, cx);
+            assert!(!pickers.chat_mode(cx));
+
+            // An older gateway that lists only auto-medium still offers chat,
+            // on Auto (low).
+            pickers.apply_model_catalog(
+                HarnessId::Graff,
+                Loadable::Ready(vec![bare_model("codegraff/auto-medium", "Auto (medium)")]),
+                cx,
+            );
+            pickers.set_chat_mode(true, cx);
+            assert!(pickers.chat_mode(cx));
+            assert_eq!(
+                pickers
+                    .model_rows(cx)
+                    .iter()
+                    .map(|r| r.model.label.as_str())
+                    .collect::<Vec<_>>(),
+                ["Auto (low)"]
+            );
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("codegraff/auto-medium")
+            );
+            assert_eq!(
+                pickers.selected_model_label(cx).as_deref(),
+                Some("Auto (low)"),
+                "the chip names the tier, not the catalog row"
+            );
+            assert!(!pickers.chat_mode_send_blocked(cx));
+            assert_eq!(pickers.chat_mode_note(cx), None);
+
+            // The tiers disappear from a refreshed catalog under a chat-mode
+            // draft: the draft says why, and Code is one click away.
+            pickers.apply_model_catalog(HarnessId::Graff, Loadable::Ready(no_tiers()), cx);
+            assert!(pickers.model_rows(cx).is_empty());
+            assert_eq!(
+                pickers.chat_mode_note(cx),
+                Some(chat_mode::UNAVAILABLE_NOTE)
+            );
+            assert_eq!(
+                pickers.resolved(cx).model,
+                None,
+                "never the catalog's default"
+            );
+            assert_eq!(
+                pickers.selected_model_label(cx).as_deref(),
+                Some(chat_mode::UNAVAILABLE_CHIP)
+            );
+            assert!(pickers.chat_mode_send_blocked(cx), "nothing to send on");
+            pickers.set_chat_mode(false, cx);
+            assert!(!pickers.chat_mode(cx));
+            assert_eq!(pickers.chat_mode_note(cx), None);
+        });
+
+        // Graff isn't installed on the device: no chat mode either.
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults = ComposerDefaults::default();
+            let mut graff = descriptor(HarnessId::Graff, "Graff");
+            graff.installed = false;
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex"), graff]);
+            pickers.set_chat_mode(true, cx);
+            assert!(!pickers.chat_mode(cx));
+        });
     }
 
     #[test]
@@ -7495,6 +8004,23 @@ mod tests {
             assert!(footer.right() <= usage.left(), "width={width}");
             assert!((f32::from(usage.right()) - width).abs() < 0.1);
         }
+        for selected in [None, Some("session")] {
+            fixture.update(cx, |fixture, cx| {
+                fixture.pickers.update(cx, |pickers, cx| {
+                    pickers.state.update(cx, |state, cx| {
+                        state.select_chat(selected.map(str::to_owned), cx);
+                    });
+                    pickers.adopt_canvas_draft(None, cx);
+                });
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear());
+            assert_eq!(
+                cx.debug_bounds("workspace-footer-pr").is_some(),
+                selected.is_some(),
+                "a fresh chat must not display the previous chat's cached PR"
+            );
+        }
     }
 
     #[gpui::test]
@@ -7550,6 +8076,63 @@ mod tests {
             2,
             "closing via the trigger returns to the composer"
         );
+    }
+
+    #[gpui::test]
+    fn startup_draft_does_not_restore_shared_checkout_after_projects_load(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let startup = pickers.read_with(cx, |pickers, cx| pickers.canvas_draft(cx));
+        state.update(cx, |state, cx| {
+            state.local_device_id = Some("local".into());
+            state.apply_spaces(vec![Space {
+                id: "repo".into(),
+                device_id: "local".into(),
+                path: "/repo".into(),
+                name: None,
+                git_detected: true,
+                git_checked_at: None,
+                checkout_id: None,
+                created_at: chrono::Utc::now(),
+            }]);
+            state.select_space(Some("repo".into()), cx);
+        });
+        cx.run_until_parked();
+        pickers.update(cx, |pickers, cx| {
+            pickers.adopt_canvas_draft(Some(startup), cx);
+            // ListRefs puts the repository's default branch first, even when
+            // the shared folder is still checked out on a merged PR branch.
+            pickers.refs = Loadable::Ready(vec![
+                RepoRef {
+                    name: "main".into(),
+                    current: false,
+                    worktree_path: Some("/repo/main".into()),
+                },
+                RepoRef {
+                    name: "old-pr-branch".into(),
+                    current: true,
+                    worktree_path: None,
+                },
+            ]);
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::NewWorktree {
+                    base: Some("main".into())
+                }
+            );
+            assert_eq!(pickers.checkout_label(), "New worktree");
+            assert_eq!(pickers.ref_label().as_ref(), "From main");
+            assert_eq!(pickers.selected_ref_index(cx), 0);
+            pickers.pick_ref(pickers.refs.ready().unwrap()[0].clone(), cx);
+            assert_eq!(
+                pickers.checkout_plan(),
+                CheckoutPlan::NewWorktree {
+                    base: Some("main".into())
+                }
+            );
+        });
     }
 
     #[gpui::test]
@@ -9218,9 +9801,98 @@ mod tests {
     }
 }
 
+/// Chat-mode stages for the isolated native screenshot fixture
+/// (`chat-mode-fixture`); never used by the app. `stage` is `code`, `chat`,
+/// `menu` (the model menu open in chat mode), `smart` (Auto (smart) picked)
+/// or `unavailable` (a chat-mode draft whose graff lists no tier).
+#[cfg(feature = "project-palette-fixture")]
+impl Pickers {
+    pub(crate) fn fixture_chat_mode(
+        &mut self,
+        stage: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.models.get(&HarnessId::Graff), Some(Loadable::Ready(_))) {
+            self.harnesses = Loadable::Ready(
+                serde_json::from_value(serde_json::json!([
+                    {"id":"codex","name":"Codex","installed":true,"supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]},
+                    {"id":"graff","name":"Graff","installed":true,"supportsSteering":true,"steeringMode":"step-boundary","reasoningLevels":[]}
+                ]))
+                .unwrap(),
+            );
+            let mut graff =
+                vec![serde_json::json!({"id":"codegraff/fixture-coder","label":"Fixture coder"})];
+            if stage != "unavailable" {
+                graff.extend([
+                    serde_json::json!({"id":"codegraff/auto-low","label":"auto-low"}),
+                    serde_json::json!({"id":"codegraff/auto-high","label":"auto-high"}),
+                    serde_json::json!({"id":"codegraff/auto-smart","label":"auto-smart"}),
+                ]);
+            }
+            self.models.insert(
+                HarnessId::Graff,
+                Loadable::Ready(serde_json::from_value(serde_json::Value::Array(graff)).unwrap()),
+            );
+            self.models.insert(
+                HarnessId::Codex,
+                Loadable::Ready(
+                    serde_json::from_value(serde_json::json!([
+                        {"id":"fixture-codex","label":"Fixture model","reasoningLevels":["low","medium","high"]}
+                    ]))
+                    .unwrap(),
+                ),
+            );
+            self.catalog_rev += 1;
+            cx.notify();
+        }
+        if stage == "code" {
+            return;
+        }
+        if !self.config.chat_mode {
+            if stage == "unavailable" {
+                // Stands for a draft whose tiers left the catalog after it
+                // switched; the switch itself stays off without a tier.
+                self.config.chat_mode = true;
+                *self.model_rows_cache.borrow_mut() = None;
+                self.pick_no_project(cx);
+            } else {
+                self.set_chat_mode(true, cx);
+            }
+            if stage == "smart" {
+                self.config.model = Some("codegraff/auto-smart".into());
+            }
+            cx.notify();
+        }
+        if stage == "menu" {
+            self.open_model_menu(window, cx);
+        }
+    }
+}
+
 /// Catalog for the isolated native screenshot fixture; never used by the app.
 #[cfg(feature = "project-palette-fixture")]
 impl Pickers {
+    pub fn fixture_checkout_controls(&mut self, shared: bool, cx: &mut Context<Self>) {
+        self.refs_space = self.state.read(cx).selected_space.clone();
+        self.refs = Loadable::Ready(vec![
+            RepoRef {
+                name: "main".into(),
+                current: false,
+                worktree_path: None,
+            },
+            RepoRef {
+                name: "feature/other-task".into(),
+                current: true,
+                worktree_path: None,
+            },
+        ]);
+        if shared {
+            self.config.checkout = CheckoutKind::Local;
+        }
+        cx.notify();
+    }
+
     pub(crate) fn fixture_model_catalog(&mut self, cx: &mut Context<Self>) {
         if matches!(self.models.get(&HarnessId::Codex), Some(Loadable::Ready(_))) {
             return;

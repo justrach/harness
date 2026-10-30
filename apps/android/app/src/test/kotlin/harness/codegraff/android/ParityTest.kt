@@ -11,6 +11,10 @@ import harness.codegraff.android.model.DeviceAgents
 import harness.codegraff.android.model.OnboardingAgent
 import harness.codegraff.android.model.AccountDeletion
 import harness.codegraff.android.model.Chat
+import harness.codegraff.android.model.ChatMode
+import harness.codegraff.android.model.DeviceCatalog
+import harness.codegraff.android.model.HarnessInfo
+import harness.codegraff.android.model.ModelInfo
 import harness.codegraff.android.model.HomeGroup
 import harness.codegraff.android.model.HomeGroupBy
 import harness.codegraff.android.model.HomeGrouping
@@ -22,6 +26,7 @@ import harness.codegraff.android.model.QueueDeliveryGate
 import harness.codegraff.android.model.QueueEditFinishResult
 import harness.codegraff.android.model.QueueEditLease
 import harness.codegraff.android.model.QueuedMessage
+import harness.codegraff.android.model.StopGuard
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfPolicy
 import harness.codegraff.android.perf.PerfBatchMeta
@@ -315,6 +320,46 @@ class ParityTest {
     }
 
     // MARK: Bring in your agent
+
+    @Test
+    fun theChatModeRulesMatch() {
+        val v = load("vectors/chat-mode.json")
+        assertEquals(v.getString("harness"), ChatMode.HARNESS)
+        assertEquals(v.getString("unavailableNote"), ChatMode.UNAVAILABLE_NOTE)
+        val tiers = v.rows("tiers")
+        assertEquals(tiers.map { it.getString("id") }, ChatMode.tiers.map { it.id })
+        assertEquals(tiers.map { if (it.isNull("fallbackId")) null else it.getString("fallbackId") }, ChatMode.tiers.map { it.fallbackId })
+        assertEquals(tiers.map { it.getString("label") }, ChatMode.tiers.map { it.label })
+        assertEquals(tiers.map { if (it.isNull("note")) null else it.getString("note") }, ChatMode.tiers.map { it.note })
+        assertEquals(tiers.map { if (it.isNull("footerNote")) null else it.getString("footerNote") }, ChatMode.tiers.map { it.footerNote })
+        for (c in v.rows("cases")) {
+            val name = c.getString("name")
+            val catalog = DeviceCatalog(c.getJSONArray("catalog").strings().map { ModelInfo(it, it, null, emptyList()) }, c.getBoolean("catalogLive"))
+            val harnesses = if (c.isNull("harnesses")) DeviceCatalog<HarnessInfo>()
+            else DeviceCatalog(c.getJSONArray("harnesses").strings().map { HarnessInfo(it, it) }, isLive = true)
+            val expected = c.getJSONObject("expect")
+            val offered = expected.getJSONArray("offered")
+            assertEquals(name, (0 until offered.length()).map { offered.getJSONArray(it).strings() }, ChatMode.models(catalog.items).map { listOf(it.id, it.label) })
+            assertEquals(name, expected.getString("availability"), ChatMode.availability(catalog, harnesses).name.lowercase())
+            val selection = ChatMode.selection(c.getString("stored"), catalog, harnesses)
+            assertEquals(name, expected.getString("selected"), selection.model.id)
+            assertEquals(name, expected.getString("availability") == "unavailable", selection.unavailable)
+        }
+        for (n in v.rows("notes")) {
+            val model = if (n.isNull("model")) null else n.getString("model")
+            assertEquals("$model", if (n.isNull("note")) null else n.getString("note"), ChatMode.note(model))
+        }
+    }
+
+    @Test
+    fun theComposerStopGuardMatches() {
+        val v = load("vectors/composer-stop.json")
+        assertEquals(v.getLong("graceMs"), StopGuard.GRACE_MS)
+        for (c in v.rows("cases")) {
+            val closed = if (c.isNull("questionClosedAtMs")) null else c.getLong("questionClosedAtMs")
+            assertEquals(c.getString("name"), c.getBoolean("allowed"), StopGuard.allows(c.getLong("nowMs"), closed))
+        }
+    }
 
     @Test
     fun theAgentReadinessRulesMatch() {

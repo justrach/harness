@@ -1587,6 +1587,7 @@ async fn queued_turn_uses_current_config_at_turn_end_and_send_now() {
             reasoning: Some(ReasoningLevel::Medium),
             model_options: Default::default(),
             sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
+            chat_mode: false,
         };
         core.workspace.set_chat_config(CHAT, &config).unwrap();
         core.doc_host
@@ -1798,6 +1799,7 @@ async fn a_failed_explicit_send_pauses_a_flowing_queue() {
         reasoning: None,
         model_options: Default::default(),
         sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
+        chat_mode: false,
     };
     core.workspace.set_chat_config(CHAT, &config).unwrap();
     assert!(core.doc_host.send_queued_now(CHAT, &retry).await.is_err());

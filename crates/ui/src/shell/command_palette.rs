@@ -713,7 +713,7 @@ impl Shell {
                     false,
                     None,
                     None,
-                    Some(&query),
+                    Some(ChatRowSearch::Palette(&query)),
                     &theme,
                     cx,
                 )

@@ -1,20 +1,301 @@
 use super::*;
 
 #[test]
-fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-    assert_eq!(titlebar_new_session_alpha(true, true), 1.0);
-    assert_eq!(titlebar_new_session_alpha(true, false), 0.0);
-    assert_eq!(titlebar_new_session_alpha(false, true), 0.0);
-    assert_eq!(titlebar_new_session_alpha(false, false), 0.0);
+fn new_session_action_lives_in_the_titlebar_on_every_chat_tab() {
+    assert_eq!(titlebar_new_session_alpha(true), 1.0);
+    assert_eq!(titlebar_new_session_alpha(false), 0.0);
+}
+
+#[test]
+fn titlebar_distribution_handles_fullscreen_captions_and_fractional_widths() {
+    for (width, start, buttons, expected) in [
+        (256.0, 88.0, 5, 9.5),
+        (224.0, 88.0, 5, 2.0),
+        (225.0, 88.0, 5, 2.0),
+        (255.5, 88.0, 5, 9.5),
+        (400.0, 88.0, 5, 45.5),
+        (256.0, 12.0, 5, 28.5),
+        (240.0, 50.0, 5, 15.0),
+        (256.0, 10.0, 5, 29.0),
+        (256.0, 36.0, 5, 22.5),
+        (256.0, 88.0, 4, 21.0),
+        (0.0, 88.0, 5, 2.0),
+        (128.0, 88.0, 5, 2.0),
+        (256.0, 88.0, 0, 2.0),
+        (256.0, 88.0, 1, 2.0),
+    ] {
+        let gap = distributed_titlebar_gap(width, start, buttons, 2.0);
+        assert!(
+            (gap - expected).abs() < 0.001,
+            "width={width}, start={start}, buttons={buttons}: expected {expected}, got {gap}"
+        );
+        assert!(gap.is_finite() && gap >= TITLEBAR_CONTROL_GAP);
+    }
+    for (scale, expected) in [
+        (1.0, 10.0),
+        (1.25, 9.6),
+        (1.5, 28.0 / 3.0),
+        (2.0, 9.5),
+        (3.0, 28.0 / 3.0),
+    ] {
+        let gap = distributed_titlebar_gap(255.0, 88.0, 5, scale);
+        assert!(
+            (gap - expected).abs() < 0.001,
+            "display scale {scale}: got {gap}"
+        );
+        let physical_gap = gap * scale;
+        assert!((physical_gap - physical_gap.round()).abs() < 0.001);
+    }
 }
 
 struct ToolbarHost(Entity<Shell>);
 
 impl Render for ToolbarHost {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
-            div().size_full().child(shell.render_titlebar_cluster(cx))
+            div()
+                .size_full()
+                .child(shell.render_titlebar_cluster(window, cx))
         })
+    }
+}
+
+#[gpui::test]
+fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::default());
+        crate::app_menus::init(cx);
+        crate::history::init(
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            cx,
+        );
+        settings::init(settings::UiSettings::default(), dir.path(), cx);
+    });
+    let (host, cx) = cx.add_window_view(|_, cx| {
+        ToolbarHost(cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            let mut shell = Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    codegraff_client_id: None,
+                    default_harness: harness_proto::HarnessId::Mock,
+                },
+                cx,
+            );
+            shell.chat_tabs = vec![chat_tabs::ChatTab::default(); 3];
+            shell.chat_tab = 1;
+            shell.settings.sidebar_width = SIDEBAR_MIN;
+            shell.install = harness_update::InstallKind::MacApp {
+                bundle: PathBuf::from("/nonexistent/Harness.app"),
+            };
+            shell.update_flow = UpdateFlow::Ready(StagedUpdate {
+                path: PathBuf::from("/nonexistent/staged"),
+                version: "9.9.9".into(),
+            });
+            shell
+        }))
+    });
+    let shell = host.read_with(cx, |host, _| host.0.clone());
+    for fullscreen in [false, true] {
+        for sidebar_width in [
+            SIDEBAR_MIN,
+            225.0,
+            255.0,
+            255.5,
+            SIDEBAR_DEFAULT,
+            399.5,
+            SIDEBAR_MAX,
+        ] {
+            for collapsed in [false, true] {
+                let mut draft_bounds = None;
+                for selected in [None, Some("first-prompt")] {
+                    shell.update(cx, |shell, cx| {
+                        shell.fullscreen = Some(fullscreen);
+                        shell.titlebar_tween = None;
+                        shell.settings.sidebar_width = sidebar_width;
+                        shell.settings.sidebar_collapsed = collapsed;
+                        shell.state.update(cx, |state, cx| {
+                            state.select_chat(selected.map(str::to_owned), cx);
+                        });
+                        cx.notify();
+                    });
+                    cx.update(|window, cx| window.draw(cx).clear());
+                    let plus = cx
+                        .debug_bounds("titlebar-new-session")
+                        .expect("+ must remain available before and after the first prompt");
+                    let update = cx.debug_bounds("titlebar-update").unwrap();
+                    let controls = [
+                        cx.debug_bounds("toggle-sidebar").unwrap(),
+                        cx.debug_bounds("nav-back").unwrap(),
+                        cx.debug_bounds("nav-forward").unwrap(),
+                        plus,
+                        update,
+                    ];
+                    let gap = controls[1].left() - controls[0].right();
+                    assert!(gap >= px(TITLEBAR_CONTROL_GAP));
+                    for pair in controls.windows(2) {
+                        assert_eq!(
+                            pair[1].left() - pair[0].right(),
+                            gap,
+                            "every adjacent titlebar icon must have the same gap"
+                        );
+                    }
+                    if !collapsed {
+                        assert!(
+                            update.right() < px(sidebar_width),
+                            "the divider must not intersect update"
+                        );
+                        assert!(
+                            px(sidebar_width) - update.right() <= px(TITLEBAR_CLUSTER_PAD),
+                            "fullscreen={fullscreen}, width={sidebar_width}: trailing gap {:?}, controls {controls:?}",
+                            px(sidebar_width) - update.right()
+                        );
+                    }
+                    let bounds = (plus, update);
+                    if let Some(draft) = draft_bounds {
+                        assert_eq!(
+                            bounds, draft,
+                            "sending the first prompt must not move controls"
+                        );
+                    } else {
+                        draft_bounds = Some(bounds);
+                    }
+                }
+            }
+        }
+    }
+    // An empty active tab still offers a working +, rather than consuming it
+    // as the update control's slot.
+    shell.update(cx, |shell, cx| {
+        shell
+            .state
+            .update(cx, |state, cx| state.select_chat(None, cx));
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    let tabs_before = shell.read_with(cx, |shell, _| shell.chat_tabs.len());
+    let plus = cx.debug_bounds("titlebar-new-session").unwrap();
+    cx.simulate_click(plus.center(), Default::default());
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, _| {
+        assert_eq!(shell.chat_tabs.len(), tabs_before + 1)
+    });
+
+    for in_settings in [false, true] {
+        let mut update_bounds = None;
+        for mode in [
+            "none",
+            "available",
+            "downloading",
+            "ready",
+            "failed",
+            "advisory",
+            "preview",
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell.route = if in_settings {
+                    Route::Settings(SettingsSection::Devices)
+                } else {
+                    Route::Chat
+                };
+                shell.fullscreen = Some(false);
+                shell.titlebar_tween = None;
+                shell.settings.sidebar_collapsed = false;
+                shell.settings.sidebar_width = SIDEBAR_DEFAULT;
+                shell.chat_tabs = vec![chat_tabs::ChatTab::default(); 3];
+                shell.chat_tab = 1;
+                shell.install = if mode == "advisory" {
+                    harness_update::InstallKind::Unmanaged
+                } else {
+                    harness_update::InstallKind::MacApp {
+                        bundle: PathBuf::from("/nonexistent/Harness.app"),
+                    }
+                };
+                shell.update_dismissed = None;
+                shell.app_update.dev_preview = mode == "preview";
+                shell.update_flow = match mode {
+                    "downloading" => UpdateFlow::Downloading,
+                    "ready" => UpdateFlow::Ready(StagedUpdate {
+                        path: PathBuf::from("/nonexistent/staged"),
+                        version: "9.9.9".into(),
+                    }),
+                    "failed" => UpdateFlow::Failed("synthetic download failure".into()),
+                    _ => UpdateFlow::Idle,
+                };
+                shell.state.update(cx, |state, _| {
+                    state.update = Some(harness_update::UpdateStatus {
+                        current_version: "0.0.0".into(),
+                        latest_version: Some("9.9.9".into()),
+                        update_available: mode != "none",
+                        checked_at: None,
+                        error: None,
+                        host: None,
+                    });
+                });
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear());
+            assert_eq!(
+                cx.debug_bounds("titlebar-new-session").is_none(),
+                in_settings
+            );
+            assert_eq!(cx.debug_bounds("nav-back").is_none(), in_settings);
+            assert_eq!(cx.debug_bounds("nav-forward").is_none(), in_settings);
+            let update = cx.debug_bounds("titlebar-update");
+            if mode == "none" {
+                assert!(update.is_none());
+                continue;
+            }
+            let update = update.expect("every visible update state owns the same slot");
+            let right_gap = px(SIDEBAR_DEFAULT) - update.right();
+            assert!(
+                right_gap > px(0.0) && right_gap <= px(TITLEBAR_CLUSTER_PAD),
+                "route/settings={in_settings}, mode={mode}: keep a small right inset"
+            );
+            if let Some(expected) = update_bounds {
+                assert_eq!(
+                    update, expected,
+                    "changing update state must not shift its button"
+                );
+            } else {
+                update_bounds = Some(update);
+            }
+            if matches!(mode, "downloading" | "preview" | "advisory") {
+                cx.simulate_click(update.center(), Default::default());
+                cx.run_until_parked();
+                shell.read_with(cx, |shell, _| {
+                    if mode == "downloading" {
+                        assert!(matches!(shell.update_flow, UpdateFlow::Downloading));
+                    } else {
+                        assert!(matches!(shell.update_flow, UpdateFlow::Idle));
+                    }
+                    assert!(
+                        shell.app_update.watch.is_none(),
+                        "inert clicks cannot arm a restart"
+                    );
+                    if mode == "advisory" {
+                        assert_eq!(shell.update_dismissed.as_deref(), Some("9.9.9"));
+                    }
+                });
+                cx.update(|window, cx| window.draw(cx).clear());
+                assert_eq!(
+                    cx.debug_bounds("titlebar-update").is_none(),
+                    mode == "advisory"
+                );
+            }
+        }
     }
 }
 
@@ -421,7 +702,23 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
         0.0
     );
 
+    // Harness Dev can show the ready-state geometry without a staged update.
     shell.update(cx, |shell, cx| {
+        shell.app_update.dev_preview = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    let preview = cx.debug_bounds("titlebar-update").unwrap();
+    cx.simulate_click(preview.center(), Default::default());
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert!(matches!(shell.update_flow, UpdateFlow::Idle));
+        assert!(shell.app_update.watch.is_none());
+        assert_eq!(shell.titlebar_update_slot(cx), TITLEBAR_ACTION_SLOT_WIDTH);
+    });
+
+    shell.update(cx, |shell, cx| {
+        shell.app_update.dev_preview = false;
         shell.install = harness_update::InstallKind::MacApp {
             bundle: PathBuf::from("/nonexistent/Harness.app"),
         };

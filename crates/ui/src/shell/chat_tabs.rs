@@ -754,10 +754,9 @@ impl Shell {
             || self.chat_in_other_tab(chat_id).is_some()
     }
 
-    /// The shared archive path for pane and tab closes by ⌘W or a ✕ button,
-    /// under the archive-on-close setting (⌘⌥W never enters this path). Keep
-    /// unfinished work and sessions still visible elsewhere; no archive runs
-    /// on window exit.
+    /// The ✕-button archive path, under the archive-on-close setting.
+    /// ⌘W supplies its per-close choice to `archive_closed_session_if_idle`.
+    /// No archive runs on window exit.
     pub(super) fn archive_closed_session(
         &mut self,
         chat_id: String,
@@ -767,6 +766,16 @@ impl Shell {
         if !settings::archive_sessions_on_close(cx) {
             return CloseArchive::Off;
         }
+        self.archive_closed_session_if_idle(chat_id, window, cx)
+    }
+
+    /// Shared safety checks for a saved preference or an explicit close choice.
+    pub(super) fn archive_closed_session_if_idle(
+        &mut self,
+        chat_id: String,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> CloseArchive {
         if self.chat_still_open(&chat_id, cx)
             || cx.windows().into_iter().any(|other| {
                 other.window_id() != window.window_handle().window_id()

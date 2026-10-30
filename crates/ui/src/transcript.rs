@@ -54,9 +54,17 @@ use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
 use harness_syntax::LanguageId as Lang;
 
+mod cadence;
+
 #[cfg(test)]
 #[path = "transcript/bottom_flicker_tests.rs"]
 mod bottom_flicker_tests;
+#[cfg(test)]
+#[path = "transcript/final_answer_tests.rs"]
+mod final_answer_tests;
+#[cfg(test)]
+#[path = "transcript/mermaid_tests.rs"]
+mod mermaid_tests;
 #[cfg(test)]
 #[path = "transcript/selection_tests.rs"]
 mod selection_tests;
@@ -322,10 +330,11 @@ fn prune_code_fences<V>(fences: &mut HashMap<SharedString, V>, rows: &[Row]) {
             return false;
         };
         match &row.kind {
-            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
-                .blocks
-                .get(*block_ix)
-                .is_some_and(|top| render::code_block_indices(&top.block, *block_ix).contains(&ix)),
+            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix, .. } => {
+                tree.blocks.get(*block_ix).is_some_and(|top| {
+                    render::code_block_indices(&top.block, *block_ix).contains(&ix)
+                })
+            }
             _ => false,
         }
     });
@@ -1314,6 +1323,11 @@ pub enum RowKind {
     LiveMarkdown {
         tree: Arc<BlockTree>,
         block_ix: usize,
+        /// The block's bytes are final: a later block follows it, or it is a
+        /// fence whose closer has arrived. Only a settled block's Mermaid
+        /// fences render as diagrams; one still streaming shows its source,
+        /// so a diagram isn't rendered on every token.
+        settled: bool,
     },
     ToolGroup {
         summary: SharedString,
@@ -1363,6 +1377,33 @@ pub enum RowKind {
 
 /// The host path of a reply's Markdown image source: absolute, `file://`, or
 /// relative to the chat's workspace. Remote URLs and data URIs have none.
+/// A reply block's Mermaid handler (see [`render::MediaUi::diagram`]).
+type DiagramHandler = Rc<dyn Fn(&str, SharedString, &Theme) -> render::DiagramUi>;
+
+/// Memory an enlarged diagram may use in the lightbox.
+const DIAGRAM_ZOOM_BYTES: usize = 32 * 1024 * 1024;
+
+struct DiagramZoom {
+    image: Arc<gpui::Image>,
+    natural: gpui::Size<Pixels>,
+    owned: bool,
+}
+
+/// The note under a diagram's source when the renderer rejected it: its
+/// first line, kept short.
+fn diagram_failure_note(error: &str) -> SharedString {
+    let first = error.lines().next().unwrap_or_default().trim();
+    let mut note: String = first.chars().take(120).collect();
+    if first.chars().count() > 120 {
+        note.push('…');
+    }
+    if note.is_empty() {
+        "Couldn't draw this diagram.".into()
+    } else {
+        format!("Couldn't draw this diagram: {note}").into()
+    }
+}
+
 fn reply_image_path(source: &str, workspace_root: Option<&str>) -> Option<String> {
     let source = match source.strip_prefix("file://") {
         // `file:///C:/x.png` names `C:/x.png` on Windows.
@@ -1397,6 +1438,14 @@ fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
     devices
 }
 
+/// Decoration on the first block of a completed assistant's trailing answer.
+#[derive(Clone)]
+pub struct FinalAnswer {
+    pub worked_secs: Option<i64>,
+    /// Compact work already has a heading; keep only the answer's divider there.
+    pub show_label: bool,
+}
+
 /// A transcript row: stable id + content version (diff key) + block payload.
 #[derive(Clone)]
 pub struct Row {
@@ -1418,6 +1467,8 @@ pub struct Row {
     pub copy_text: Option<SharedString>,
     /// Hidden while the named compact-work fold is closed.
     pub compact_fold: Option<SharedString>,
+    /// A completion boundary, not a separate row: markdown ids and selection stay stable.
+    pub final_answer: Option<FinalAnswer>,
 }
 
 /// Absolute hover-timestamp label, e.g. "Jul 1, 3:45 PM" — the exact
@@ -1600,6 +1651,40 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
     motion::MotionSpec::new(user_resize_duration_ms(height_delta), curve)
 }
 
+/// Only a completed trailing reply is an answer, never narration before more
+/// work or an error. Media and blank text may follow or accompany that reply.
+fn final_answer_part(entry: &SessionMessageEntry) -> Option<&str> {
+    if entry.role != MessageRole::Assistant
+        || entry.status != Some(MessageStatus::Complete)
+        || entry.parts.iter().any(|part| {
+            matches!(
+                part,
+                MessagePart::Input {
+                    resolved: false,
+                    ..
+                } | MessagePart::Tool {
+                    resolved: false,
+                    ..
+                } | MessagePart::Tool {
+                    subagent_status: Some(SubagentStatus::Running),
+                    ..
+                }
+            )
+        })
+    {
+        return None;
+    }
+    let mut first = None;
+    for part in entry.parts.iter().rev() {
+        match part {
+            MessagePart::Text { id, text } if !text.trim().is_empty() => first = Some(id.as_str()),
+            MessagePart::Text { .. } | MessagePart::Image { .. } | MessagePart::Visual { .. } => {}
+            _ => break,
+        }
+    }
+    first
+}
+
 #[cfg(test)]
 thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
@@ -1670,6 +1755,7 @@ pub fn rows_for_entry(
             timestamp: Some(entry.created_at),
             copy_text,
             compact_fold: None,
+            final_answer: None,
         }];
     }
 
@@ -1730,6 +1816,7 @@ pub fn rows_for_entry(
                 timestamp: None,
                 copy_text: None,
                 compact_fold: None,
+                final_answer: None,
             });
             *group_ix += 1;
         };
@@ -1868,6 +1955,11 @@ pub fn rows_for_entry(
                                 .get(range.start.min(end)..end)
                                 .unwrap_or_default();
                             let version = (fnv1a(bytes) << 1) | streaming as u64;
+                            let settled = block_ix + 1 < tree.blocks.len()
+                                || (matches!(tree.blocks[block_ix].block, Block::CodeBlock { .. })
+                                    && crate::markdown::diagram::fence_is_closed(
+                                        std::str::from_utf8(bytes).unwrap_or_default(),
+                                    ));
                             rows.push(Row {
                                 id: format!("{key}.{block_ix}").into(),
                                 version,
@@ -1876,10 +1968,12 @@ pub fn rows_for_entry(
                                 timestamp: None,
                                 copy_text: None,
                                 compact_fold: None,
+                                final_answer: None,
                                 kind: if streaming {
                                     RowKind::LiveMarkdown {
                                         tree: tree.clone(),
                                         block_ix,
+                                        settled,
                                     }
                                 } else {
                                     RowKind::Markdown {
@@ -1903,6 +1997,7 @@ pub fn rows_for_entry(
                             timestamp: None,
                             copy_text: None,
                             compact_fold: None,
+                            final_answer: None,
                             kind: RowKind::Visual {
                                 title: title.clone(),
                                 script: script.clone(),
@@ -1926,6 +2021,7 @@ pub fn rows_for_entry(
                             timestamp: None,
                             copy_text: None,
                             compact_fold: None,
+                            final_answer: None,
                             kind: RowKind::GeneratedImage {
                                 owner: entry.device_id.clone(),
                                 path: path.clone(),
@@ -1960,6 +2056,7 @@ pub fn rows_for_entry(
                                 timestamp: None,
                                 copy_text: None,
                                 compact_fold: None,
+                                final_answer: None,
                                 kind: RowKind::Markdown {
                                     tree: tree.clone(),
                                     block_ix,
@@ -2002,6 +2099,7 @@ pub fn rows_for_entry(
                             timestamp: None,
                             copy_text: None,
                             compact_fold: None,
+                            final_answer: None,
                         });
                     }
                     MessagePart::Error {
@@ -2044,6 +2142,7 @@ pub fn rows_for_entry(
                             timestamp: None,
                             copy_text: None,
                             compact_fold: None,
+                            final_answer: None,
                         });
                     }
                     // Tools and thoughts are grouped by the outer arms;
@@ -2091,6 +2190,7 @@ pub fn rows_for_entry(
                 row.timestamp = None;
                 row.copy_text = None;
                 row.compact_fold = Some(work_id.clone());
+                row.final_answer = None;
             }
             let header = Row {
                 id: work_id,
@@ -2114,6 +2214,7 @@ pub fn rows_for_entry(
                 timestamp: None,
                 copy_text: None,
                 compact_fold: None,
+                final_answer: None,
             };
             after_work = pos + 1 + inner.len();
             for (i, row) in inner.into_iter().enumerate() {
@@ -2139,6 +2240,7 @@ pub fn rows_for_entry(
                     timestamp: None,
                     copy_text: None,
                     compact_fold: None,
+                    final_answer: None,
                 },
             );
         }
@@ -2152,6 +2254,33 @@ pub fn rows_for_entry(
     }
 
     rows.extend(viewed_image_rows(entry));
+
+    if let Some(part_id) = final_answer_part(entry) {
+        let answer_id = format!("{}#{part_id}.0", entry.id);
+        let show_label = !rows.iter().any(|row| {
+            matches!(
+                row.kind,
+                RowKind::ToolGroup {
+                    compact_shell: true,
+                    ..
+                }
+            )
+        });
+        if let Some(row) = rows.iter_mut().find(|row| row.id.as_ref() == answer_id) {
+            let worked_secs = entry
+                .duration_ms
+                .filter(|&ms| ms > 0)
+                .map(|ms| (ms / 1000).max(1));
+            // Timing can arrive after the text, and Compact changes the
+            // heading's height. Invalidate both without changing the block id.
+            row.version ^= fnv1a(&worked_secs.unwrap_or(0).to_le_bytes());
+            row.version ^= u64::from(show_label) << 61;
+            row.final_answer = Some(FinalAnswer {
+                worked_secs,
+                show_label,
+            });
+        }
+    }
 
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
@@ -2203,6 +2332,7 @@ fn viewed_image_rows(entry: &SessionMessageEntry) -> Vec<Row> {
                 timestamp: None,
                 copy_text: None,
                 compact_fold: None,
+                final_answer: None,
                 kind: RowKind::GeneratedImage {
                     owner: entry.device_id.clone(),
                     path: path.clone(),
@@ -3662,6 +3792,7 @@ impl SavedViewportCache {
 
 pub struct Transcript {
     state: Entity<AppState>,
+    pane_cadence: cadence::PaneCadence,
     /// The reconnect generation the cards were last measured at (`reauth_recovery.rs`).
     reauth_generation: u64,
     list: ListState,
@@ -3881,6 +4012,14 @@ pub struct Transcript {
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
+    /// Mermaid diagrams in replies, rendered off the main thread and cached
+    /// per (source, theme palette).
+    diagrams: crate::markdown::diagram::DiagramCache,
+    /// Diagram frames toggled to their source ("Show source").
+    diagram_sources_shown: Rc<HashSet<SharedString>>,
+    /// The enlarged diagram the lightbox is showing, with the diagram's
+    /// natural size; `owned` when the enlargement is its own image to release.
+    diagram_zoom: Option<DiagramZoom>,
     /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
@@ -4014,7 +4153,9 @@ impl Transcript {
         chat_id: String,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(state, Some(chat_id), true, ListAlignment::Bottom, cx)
+        let mut this = Self::build(state, Some(chat_id), true, ListAlignment::Bottom, cx);
+        this.set_background_pane(true, cx);
+        this
     }
 
     /// Change only the feed/presentation role, not the chat or its interaction
@@ -4025,7 +4166,7 @@ impl Transcript {
     /// fills a `None` owner from `chat_id`). A promoted peer that kept its
     /// fixed owner would have its links rejected as a stale source once the
     /// primary moved to another chat (#456).
-    pub(crate) fn set_split_source(&mut self, peer: Option<String>) {
+    pub(crate) fn set_split_source(&mut self, peer: Option<String>, cx: &mut Context<Self>) {
         if let Some(link) = self.workspace_link.as_mut() {
             link.source_session = peer.clone();
         }
@@ -4037,6 +4178,7 @@ impl Transcript {
         }
         self.doc_override = peer;
         self.last_source = None;
+        self.set_background_pane(self.doc_override.is_some(), cx);
     }
 
     fn build(
@@ -4048,9 +4190,13 @@ impl Transcript {
     ) -> Self {
         // A split pane drawn from a cached frame keeps its selectable text
         // registered under this transcript; drop it with the transcript.
-        let selection_owner = cx.entity_id().as_u64();
-        cx.on_release(move |_, _| {
-            crate::markdown::render::release_selection_owner(selection_owner)
+        let view = cx.entity_id();
+        let selection_owner = view.as_u64();
+        cx.on_release(move |this: &mut Self, cx| {
+            crate::markdown::render::release_selection_owner(selection_owner);
+            motion::set_background_notifier(view, None, cx);
+            crate::image_media::release_media(this.diagrams.clear(), cx);
+            this.release_diagram_zoom(cx);
         })
         .detach();
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
@@ -4074,7 +4220,7 @@ impl Transcript {
             })
             .ok();
         });
-        let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        let observe = cx.observe(&state, |this: &mut Self, _, cx| this.request_sync(cx));
         let text_changes = cx.subscribe(
             &state,
             |this: &mut Self, state, event: &crate::state::TranscriptTextChanged, cx| {
@@ -4083,7 +4229,7 @@ impl Transcript {
                     .as_deref()
                     .or_else(|| state.read(cx).selected_chat.as_deref());
                 if doc_id == Some(event.doc_id.as_str()) {
-                    this.sync(cx);
+                    this.request_sync(cx);
                 }
             },
         );
@@ -4099,6 +4245,7 @@ impl Transcript {
         let pinned = follow;
         let mut this = Self {
             state,
+            pane_cadence: cadence::PaneCadence::default(),
             reauth_generation: 0,
             list,
             rows: Vec::new(),
@@ -4182,6 +4329,9 @@ impl Transcript {
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
+            diagrams: Default::default(),
+            diagram_sources_shown: Rc::default(),
+            diagram_zoom: None,
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
@@ -7029,43 +7179,51 @@ impl Transcript {
         }
     }
 
-    /// Images a reply's Markdown block references (`![caption](shot.png)`),
-    /// loaded like generated images through the engine's read-back, which
-    /// serves files under a chat's folder (#400). Relative sources resolve
-    /// against the chat's workspace. `None` for a block without images, and
-    /// a remote URL or an unreadable file shows its caption.
+    /// Media in one reply Markdown block: the images it references
+    /// (`![caption](shot.png)`), loaded like generated images through the
+    /// engine's read-back, which serves files under a chat's folder (#400) —
+    /// relative sources resolve against the chat's workspace, and a remote URL
+    /// or an unreadable file shows its caption — and, when `diagrams`, its
+    /// Mermaid fences drawn as diagrams. `None` for a block with neither.
     fn reply_media_ui(
         &mut self,
+        row_id: &SharedString,
         block: &Block,
         workspace_root: Option<&str>,
+        diagrams: bool,
         cx: &mut Context<Self>,
     ) -> Option<render::MediaUi> {
         use crate::attachments::AttachmentSnapshot;
         let sources = crate::files::markdown_media::block_image_sources(block);
-        if sources.is_empty() {
+        let diagram = diagrams
+            .then(|| self.reply_diagram_ui(row_id, block, cx))
+            .flatten();
+        if sources.is_empty() && diagram.is_none() {
             return None;
         }
-        let devices = {
-            let state = self.state.read(cx);
-            let owner = self
-                .chat_id
-                .as_deref()
-                .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
-                .map(|chat| chat.device_id.clone())
-                .unwrap_or_default();
-            generated_image_devices(&owner, &self.attachment_device_ids(cx))
-        };
         let mut images = HashMap::new();
-        for source in sources {
-            if let Some(path) = reply_image_path(&source, workspace_root) {
-                let state = self.attachment_state(&devices, &path, None, cx);
-                images.insert(source, state);
+        if !sources.is_empty() {
+            let devices = {
+                let state = self.state.read(cx);
+                let owner = self
+                    .chat_id
+                    .as_deref()
+                    .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
+                    .map(|chat| chat.device_id.clone())
+                    .unwrap_or_default();
+                generated_image_devices(&owner, &self.attachment_device_ids(cx))
+            };
+            for source in sources {
+                if let Some(path) = reply_image_path(&source, workspace_root) {
+                    let state = self.attachment_state(&devices, &path, None, cx);
+                    images.insert(source, state);
+                }
             }
         }
         let images = Rc::new(images);
         let transcript = cx.entity().downgrade();
         Some(render::MediaUi {
-            diagram: None,
+            diagram,
             image: Rc::new(move |image, id, theme| {
                 let frame = div()
                     .id(id.clone())
@@ -7139,6 +7297,177 @@ impl Transcript {
                 }
             }),
         })
+    }
+
+    /// The Mermaid handler for one reply block: each fence's diagram from
+    /// the cache (a miss queues a background render and shows the source
+    /// meanwhile), the source toggle, and the full-size viewer on click. A
+    /// diagram the renderer rejects falls back to its source with a note.
+    fn reply_diagram_ui(
+        &mut self,
+        row_id: &SharedString,
+        block: &Block,
+        cx: &mut Context<Self>,
+    ) -> Option<DiagramHandler> {
+        use crate::markdown::diagram::{DiagramKey, DiagramState};
+        let sources = crate::files::markdown_media::block_diagram_sources(block);
+        if sources.is_empty() {
+            return None;
+        }
+        let palette = crate::markdown::mermaid::Palette::from_theme(Theme::of(cx));
+        let states: HashMap<String, DiagramState> = sources
+            .into_iter()
+            .map(|source| {
+                let key = DiagramKey {
+                    palette: palette.clone(),
+                    source,
+                };
+                let state = self.diagrams.request(&key, row_id);
+                (key.source, state)
+            })
+            .collect();
+        self.pump_diagrams(&palette, cx);
+        let shown = self.diagram_sources_shown.clone();
+        let transcript = cx.weak_entity();
+        let row_id = row_id.clone();
+        Some(Rc::new(move |code, id, _theme| {
+            let loaded = match states.get(code) {
+                Some(DiagramState::Ready(loaded))
+                | Some(DiagramState::Rendering {
+                    stand_in: Some(loaded),
+                }) => loaded,
+                Some(DiagramState::Failed(error)) => {
+                    return render::DiagramUi::Source {
+                        note: Some(diagram_failure_note(error)),
+                    };
+                }
+                // Still rendering (or a fence this block's request didn't
+                // cover): the source until the diagram lands.
+                _ => return render::DiagramUi::Source { note: None },
+            };
+            let open = {
+                let transcript = transcript.clone();
+                let loaded = loaded.clone();
+                move |window: &mut Window, cx: &mut gpui::App| {
+                    transcript
+                        .update(cx, |this, cx| {
+                            this.open_diagram_preview(&loaded, window, cx)
+                        })
+                        .ok();
+                }
+            };
+            let toggle_source = {
+                let transcript = transcript.clone();
+                let (id, row_id) = (id.clone(), row_id.clone());
+                Rc::new(move |_: &mut Window, cx: &mut gpui::App| {
+                    transcript
+                        .update(cx, |this, cx| {
+                            let shown = Rc::make_mut(&mut this.diagram_sources_shown);
+                            if !shown.remove(&id) {
+                                shown.insert(id.clone());
+                            }
+                            this.remeasure_row(&row_id);
+                            cx.notify();
+                        })
+                        .ok();
+                }) as Rc<dyn Fn(&mut Window, &mut gpui::App)>
+            };
+            render::DiagramUi::Diagram {
+                body: div()
+                    .debug_selector(|| "mermaid-diagram".into())
+                    .w_full()
+                    .min_w_0()
+                    .p(px(12.0))
+                    .child(crate::markdown::diagram::fitted_media(
+                        loaded,
+                        format!("{id}-image").into(),
+                        "Enlarge diagram".into(),
+                        open,
+                    ))
+                    .into_any_element(),
+                show_source: shown.contains(&id),
+                toggle_source,
+            }
+        }))
+    }
+
+    /// Start the next queued diagram render, if none is running. One at a
+    /// time: the renderer serializes its work anyway, and a queue of blocked
+    /// jobs would hold background threads other work needs.
+    fn pump_diagrams(
+        &mut self,
+        palette: &crate::markdown::mermaid::Palette,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.diagrams.next_job(palette) else {
+            return;
+        };
+        let job = key.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let (source, palette) = (job.source.clone(), job.palette.clone());
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::markdown::diagram::render_media(&source, &palette) })
+                .await;
+            this.update(cx, |this, cx| {
+                let (rows, evicted) = this.diagrams.finish(job, result);
+                crate::image_media::release_media(evicted, cx);
+                for row in &rows {
+                    this.remeasure_row(row);
+                }
+                let palette = crate::markdown::mermaid::Palette::from_theme(Theme::of(cx));
+                this.pump_diagrams(&palette, cx);
+                cx.notify();
+            })
+            .ok();
+        });
+        self.diagrams.start(key, task);
+    }
+
+    fn remeasure_row(&mut self, row_id: &SharedString) {
+        if let Some(ix) = self.rows.iter().position(|row| &row.id == row_id) {
+            self.list.remeasure_items(ix..ix + 1);
+        }
+    }
+
+    /// Show a diagram in the shared lightbox, rasterized for the window
+    /// rather than the inline size.
+    fn open_diagram_preview(
+        &mut self,
+        diagram: &crate::image_media::MediaImage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = window.viewport_size();
+        let enlarged = diagram.enlarged(
+            (
+                f32::from(viewport.width) * 0.9,
+                f32::from(viewport.height) * 0.85,
+            ),
+            window.scale_factor(),
+            DIAGRAM_ZOOM_BYTES,
+            None,
+        );
+        self.release_diagram_zoom(cx);
+        let preview =
+            crate::attachments::PreviewImage::new("Mermaid diagram", enlarged.image.clone());
+        self.diagram_zoom = Some(DiagramZoom {
+            owned: !Arc::ptr_eq(&enlarged.image, &diagram.image),
+            image: enlarged.image,
+            natural: gpui::size(px(diagram.width), px(diagram.height)),
+        });
+        self.attachment_preview_return_focus = window.focused(cx);
+        self.attachment_preview = Some(preview);
+        window.focus(&self.attachment_preview_focus, cx);
+        cx.notify();
+    }
+
+    fn release_diagram_zoom(&mut self, cx: &mut gpui::App) {
+        if let Some(zoom) = self.diagram_zoom.take()
+            && zoom.owned
+        {
+            cx.defer(move |cx| gpui::ImageSource::Image(zoom.image).evict(None, cx));
+        }
     }
 
     /// A sent non-image attachment: the thumbnail's footprint (so row heights
@@ -7898,7 +8227,8 @@ impl Transcript {
                     return gpui::Empty.into_any_element();
                 };
                 let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
-                let media = self.reply_media_ui(&top.block, workspace_root.as_deref(), cx);
+                let media =
+                    self.reply_media_ui(&row.id, &top.block, workspace_root.as_deref(), true, cx);
                 let opts = RenderOptions {
                     tasks: None,
                     media,
@@ -7925,7 +8255,11 @@ impl Transcript {
                         .map(|document| document.lines.as_slice()),
                 )
             }
-            RowKind::LiveMarkdown { tree, block_ix } => {
+            RowKind::LiveMarkdown {
+                tree,
+                block_ix,
+                settled,
+            } => {
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -7958,7 +8292,13 @@ impl Transcript {
                         })
                         .clone()
                 });
-                let media = self.reply_media_ui(&top.block, workspace_root.as_deref(), cx);
+                let media = self.reply_media_ui(
+                    &row.id,
+                    &top.block,
+                    workspace_root.as_deref(),
+                    *settled,
+                    cx,
+                );
                 let opts = RenderOptions {
                     tasks: None,
                     media,
@@ -7973,7 +8313,7 @@ impl Transcript {
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
-                    if let RowKind::LiveMarkdown { tree, block_ix } = &historical.kind
+                    if let RowKind::LiveMarkdown { tree, block_ix, .. } = &historical.kind
                         && let Some(top) = tree.blocks.get(*block_ix)
                     {
                         // Use the renderer's own nested element keys and text
@@ -8093,6 +8433,38 @@ impl Transcript {
             } => self.render_model_mismatch(&row.id, requested, restored.as_ref(), &theme, cx),
             RowKind::PlanUsageLimit { message } => plan_usage_limit_card(&row.id, message, &theme),
             RowKind::RestartNotice { message } => restart_notice_chip(message.clone(), &theme),
+        };
+
+        let inner = if let Some(answer) = &row.final_answer {
+            let heading = div()
+                .w_full()
+                .border_b_1()
+                .border_color(theme.border)
+                .mb(px(Theme::SPACE_MD))
+                .when(answer.show_label, |el| {
+                    el.pt(px(Theme::SPACE_SM))
+                        .pb(px(Theme::SPACE_SM + Theme::SPACE_XS))
+                        .child(
+                            div()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(
+                                    answer
+                                        .worked_secs
+                                        .map(worked_for_label)
+                                        .unwrap_or_else(|| "Final answer".into()),
+                                )),
+                        )
+                });
+            #[cfg(test)]
+            let heading = heading.debug_selector(|| "transcript-final-answer-heading".into());
+            div()
+                .w_full()
+                .child(heading)
+                .child(inner)
+                .into_any_element()
+        } else {
+            inner
         };
 
         // Hover-revealed metadata strip: a RESERVED 32px lane under the
@@ -8281,8 +8653,8 @@ impl Transcript {
             .child(
                 canvas(
                     |_, _, _| (),
-                    move |_, _, window, _| {
-                        window.on_next_frame(move |_, cx| cx.notify(view));
+                    move |_, _, window, cx| {
+                        motion::request_view_frame(view, window, cx);
                     },
                 )
                 .absolute()
@@ -8863,8 +9235,8 @@ impl Transcript {
                     group.child(
                         canvas(
                             |_, _, _| (),
-                            move |_, _, window, _| {
-                                window.on_next_frame(move |_, cx| cx.notify(view));
+                            move |_, _, window, cx| {
+                                motion::request_view_frame(view, window, cx);
                             },
                         )
                         .absolute()
@@ -9172,8 +9544,8 @@ impl Transcript {
                 group.child(
                     canvas(
                         |_, _, _| (),
-                        move |_, _, window, _| {
-                            window.on_next_frame(move |_, cx| cx.notify(view));
+                        move |_, _, window, cx| {
+                            motion::request_view_frame(view, window, cx);
                         },
                     )
                     .absolute()
@@ -9522,7 +9894,7 @@ fn input_chip(header: SharedString, resolved: bool, theme: &Theme) -> AnyElement
 /// A small glyph standing in for the tool's icon (harness uses an icon set; a
 /// quiet monochrome character keeps the tile without shipping SVGs).
 /// The glyph for a tool call (harness tool-chip.tsx `toolIcon`, Solar set).
-fn tool_icon_path(call: &ToolCall) -> &'static str {
+pub(crate) fn tool_icon_path(call: &ToolCall) -> &'static str {
     match call {
         ToolCall::Exec { .. } => crate::icons::TERMINAL,
         ToolCall::ReadFile { .. } | ToolCall::ApplyPatch { .. } => crate::icons::DOCUMENT,
@@ -10125,17 +10497,24 @@ impl ToolFileOpener {
     /// clickable badge; the rest stay inert instead of looking clickable and
     /// doing nothing.
     fn opens(&self, path: &str) -> bool {
-        crate::workspace_links::resolve_workspace_file_link(path, &self.root).is_some()
+        crate::workspace_links::resolve_markdown_file_link(&Self::destination(path), &self.root)
+            .is_some()
     }
 
     fn open(&self, path: &str, window: &mut Window, cx: &mut gpui::App) {
         render::activate_link(
-            render::LinkTarget::new(file_badge_name(path), path),
+            render::LinkTarget::new(file_badge_name(path), &Self::destination(path)),
             render::LinkAction::Primary,
             Some(&self.link),
             window,
             cx,
         );
+    }
+
+    /// A tool's path is literal, but the link route reads Markdown URIs and
+    /// decodes `%`. The canonical file reference carries it exactly.
+    fn destination(path: &str) -> String {
+        crate::markdown::content_reference::file_destination(path)
     }
 }
 
@@ -10220,7 +10599,7 @@ fn subagent_task_title(text: &str) -> Option<&str> {
 /// a fixed-width tab spent on "Agent: " never shows the task, so the genus
 /// is stripped here and the call input's description/prompt fields back up
 /// a bare name (older docs). Without a task title, no transcript is offered.
-fn subagent_tab_title(call: &ToolCall) -> Option<SharedString> {
+pub(crate) fn subagent_tab_title(call: &ToolCall) -> Option<SharedString> {
     let (name, input) = match call {
         ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),
@@ -10574,6 +10953,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pane_cadence.painted(cx.background_executor().now());
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
@@ -10678,15 +11058,19 @@ impl Render for Transcript {
             && !self.own_turn_scheduled
         {
             self.own_turn_scheduled = true;
-            let entity = cx.weak_entity();
-            window.on_next_frame(move |_, cx| {
-                entity
-                    .update(cx, |this: &mut Transcript, cx| {
-                        this.own_turn_scheduled = false;
-                        this.step_own_turn(cx);
-                    })
-                    .ok();
-            });
+            if self.pane_cadence.background {
+                self.schedule_background_frame(cx);
+            } else {
+                let entity = cx.weak_entity();
+                window.on_next_frame(move |_, cx| {
+                    entity
+                        .update(cx, |this: &mut Transcript, cx| {
+                            this.own_turn_scheduled = false;
+                            this.step_own_turn(cx);
+                        })
+                        .ok();
+                });
+            }
         }
         // Spring driver: one on_next_frame callback at a time; each tick
         // notifies, which re-enters render and schedules the next frame until
@@ -10698,15 +11082,19 @@ impl Render for Transcript {
             && self.spring_should_run()
         {
             self.spring_scheduled = true;
-            let entity = cx.weak_entity();
-            window.on_next_frame(move |_, cx| {
-                entity
-                    .update(cx, |this: &mut Transcript, cx| {
-                        this.spring_scheduled = false;
-                        this.step_spring(cx);
-                    })
-                    .ok();
-            });
+            if self.pane_cadence.background {
+                self.schedule_background_frame(cx);
+            } else {
+                let entity = cx.weak_entity();
+                window.on_next_frame(move |_, cx| {
+                    entity
+                        .update(cx, |this: &mut Transcript, cx| {
+                            this.spring_scheduled = false;
+                            this.step_spring(cx);
+                        })
+                        .ok();
+                });
+            }
         }
         // Programmatic `scroll_to` does not invoke the list's user-scroll
         // handler. Refresh distance-derived state once layout has measured the
@@ -10846,13 +11234,21 @@ impl Render for Transcript {
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
             let weak = cx.weak_entity();
-            return root.child(crate::attachments::lightbox(
+            // A diagram keeps its natural size; the image is a raster of it.
+            let natural = self
+                .diagram_zoom
+                .as_ref()
+                .filter(|zoom| Arc::ptr_eq(&zoom.image, &preview.image))
+                .map(|zoom| zoom.natural);
+            return root.child(crate::attachments::lightbox_with_size(
                 window,
                 &preview,
                 &self.attachment_preview_focus,
+                natural,
                 move |window, cx| {
                     if let Ok(focus) = weak.update(cx, |this, cx| {
                         this.attachment_preview = None;
+                        this.release_diagram_zoom(cx);
                         cx.notify();
                         this.attachment_preview_return_focus.take()
                     }) && let Some(focus) = focus
@@ -12837,6 +13233,7 @@ mod tests {
             timestamp: None,
             copy_text: None,
             compact_fold: None,
+            final_answer: None,
         }
     }
 
@@ -13140,7 +13537,8 @@ mod tests {
         let full: HashSet<String> = rows
             .iter()
             .flat_map(|row| match &row.kind {
-                RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => tree
+                RowKind::Markdown { tree, block_ix }
+                | RowKind::LiveMarkdown { tree, block_ix, .. } => tree
                     .blocks
                     .get(*block_ix)
                     .map(|top| {
@@ -13827,21 +14225,45 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 let block = |source: &str| parse_full(source).blocks[0].block.clone();
                 let root = Some("/fixture/ws");
+                let row: SharedString = "row".into();
                 assert!(
-                    this.reply_media_ui(&block("plain reply"), root, cx)
+                    this.reply_media_ui(&row, &block("plain reply"), root, true, cx)
                         .is_none()
                 );
                 assert!(
-                    this.reply_media_ui(&block("![Before and after](shot.png)"), root, cx)
-                        .is_some()
+                    this.reply_media_ui(
+                        &row,
+                        &block("![Before and after](shot.png)"),
+                        root,
+                        true,
+                        cx
+                    )
+                    .is_some()
                 );
                 assert!(
-                    this.reply_media_ui(&block("![Remote](https://example.com/a.png)"), root, cx)
-                        .is_some()
+                    this.reply_media_ui(
+                        &row,
+                        &block("![Remote](https://example.com/a.png)"),
+                        root,
+                        true,
+                        cx
+                    )
+                    .is_some()
                 );
                 assert!(
                     this.attachment_loads.is_empty(),
                     "a cached image repaints without a fetch, and a remote URL is never fetched"
+                );
+                // A Mermaid fence alone is media too, unless its block is
+                // still streaming.
+                let mermaid = block("```mermaid\nflowchart LR\n  A --> B\n```");
+                assert!(
+                    this.reply_media_ui(&row, &mermaid, root, true, cx)
+                        .is_some_and(|media| media.diagram.is_some())
+                );
+                assert!(
+                    this.reply_media_ui(&row, &mermaid, root, false, cx)
+                        .is_none()
                 );
             });
         });
@@ -17929,6 +18351,16 @@ mod tests {
         assert!(!opener.opens("/tmp/report.md"));
         assert!(!opener.opens("/work/app/../secret.rs"));
         assert!(!opener.opens("../secret.rs"));
+        // A real filename containing `%20` is not decoded on the way.
+        assert_eq!(
+            crate::workspace_links::resolve_markdown_file_link(
+                &ToolFileOpener::destination("/work/app/a%20b.md"),
+                "/work/app"
+            )
+            .map(|link| link.path)
+            .as_deref(),
+            Some("a%20b.md")
+        );
 
         let read = |path: &str| ToolItem {
             part_id: "fixture".into(),
@@ -17989,7 +18421,21 @@ mod tests {
         {
             let opened = opened.borrow();
             assert_eq!(opened.len(), 1);
-            assert_eq!(opened[0].target.original, "/work/app/src/guard.rs");
+            // A tool path is literal, so it travels as the canonical file
+            // reference rather than a Markdown URI that would decode `%`.
+            assert_eq!(
+                opened[0].target.original,
+                "harness-file:/work/app/src/guard.rs"
+            );
+            assert_eq!(
+                crate::workspace_links::resolve_markdown_file_link(
+                    &opened[0].target.original,
+                    "/work/app"
+                )
+                .map(|link| link.path)
+                .as_deref(),
+                Some("src/guard.rs")
+            );
             assert_eq!(opened[0].action, render::LinkAction::Primary);
             assert_eq!(opened[0].source_session.as_deref(), Some("chat"));
         }

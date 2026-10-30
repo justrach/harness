@@ -18,6 +18,7 @@ pub(super) const REQUEST_PREFIX: &str = "branch-drift-";
 const CONTINUE: &str = "Continue on ";
 const SWITCH_BACK: &str = "Switch back to ";
 const DONT_SEND: &str = "Don't send";
+const INDEPENDENT: &str = "Continue independently";
 /// Start small, but held user messages can push a question beyond this tail.
 const OPEN_QUESTION_TAIL_PARTS: usize = 64;
 const HELD_REQUESTS_MAP: &str = "branch_drift_held";
@@ -138,7 +139,7 @@ fn continue_note(drift: &Drift) -> String {
     }
 }
 
-fn question(drift: &Drift, can_switch_back: bool) -> UserInputQuestion {
+fn question(drift: &Drift, can_switch_back: bool, shared: bool) -> UserInputQuestion {
     let (from, to) = (
         branch_label(&drift.from_branch),
         branch_label(&drift.to_branch),
@@ -148,17 +149,35 @@ fn question(drift: &Drift, can_switch_back: bool) -> UserInputQuestion {
             "This chat's folder now holds a different checkout, on {to}. \
              Its earlier turns ran in the previous checkout, on {from}."
         )
+    } else if shared && drift.from_branch == drift.to_branch {
+        format!("This chat is using the checkout on {to}.")
     } else {
         format!("This chat was working on {from}, but its checkout is now on {to}.")
     };
-    let mut options = vec![format!("{CONTINUE}{}", drift.to_branch)];
+    let situation = if shared {
+        format!(
+            "{situation} This checkout is shared with other chats. Independent continuation creates a new worktree from this chat's recorded committed snapshot; uncommitted files stay in the shared checkout."
+        )
+    } else {
+        situation
+    };
+    let mut options = Vec::new();
+    if shared {
+        options.push(INDEPENDENT.to_string());
+    }
+    options.push(format!("{CONTINUE}{}", drift.to_branch));
     if can_switch_back {
         options.push(format!("{SWITCH_BACK}{}", drift.from_branch));
     }
     options.push(DONT_SEND.to_string());
     UserInputQuestion {
         id: "branch".into(),
-        header: "Branch changed".into(),
+        header: if shared {
+            "Shared checkout"
+        } else {
+            "Branch changed"
+        }
+        .into(),
         question: format!("{situation} How should it continue?"),
         options,
         multi_select: false,
@@ -261,8 +280,19 @@ impl DocHost {
             return None;
         }
         let previous = self.workspace()?.chat(chat_id).ok()??.source_context?;
-        let drift = detect(&previous, current)?;
-        if !drift.checkout_replaced && self.own_turn_renamed(chat_id, &previous, &drift).await {
+        let shared =
+            previous.cwd == current.cwd && self.unacknowledged_shared_checkout(chat_id, current);
+        let drift = detect(&previous, current).or_else(|| {
+            shared.then(|| Drift {
+                from_branch: previous.branch.clone(),
+                to_branch: current.branch.clone(),
+                checkout_replaced: false,
+            })
+        })?;
+        if !shared
+            && !drift.checkout_replaced
+            && self.own_turn_renamed(chat_id, &previous, &drift).await
+        {
             tracing::info!(
                 chat = %chat_id,
                 from = %drift.from_branch,
@@ -442,14 +472,15 @@ impl DocHost {
             handle.doc.doc().commit();
         }
         if open.is_none() {
-            let can_switch_back = self.can_switch_back(&cwd, drift).await;
+            let shared = self.checkout_is_shared(chat_id, &cwd);
+            let can_switch_back = self.can_switch_back(chat_id, &cwd, drift).await;
             handle.doc.push_message(&SessionMessageEntry {
                 id: new_id(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Input {
                     id: request_id.clone(),
                     request_id,
-                    questions: vec![question(drift, can_switch_back)],
+                    questions: vec![question(drift, can_switch_back, shared)],
                     resolved: false,
                 }],
                 created_at: now_ms(),
@@ -468,8 +499,11 @@ impl DocHost {
 
     /// Offered only when switching cannot touch anyone's work: the same
     /// checkout, a named branch to return to, and nothing uncommitted.
-    async fn can_switch_back(&self, cwd: &str, drift: &Drift) -> bool {
-        if drift.checkout_replaced || drift.from_branch == "HEAD" {
+    async fn can_switch_back(&self, chat_id: &str, cwd: &str, drift: &Drift) -> bool {
+        if drift.checkout_replaced
+            || drift.from_branch == "HEAD"
+            || self.checkout_is_shared(chat_id, cwd)
+        {
             return false;
         }
         let Some(repos) = self.inner.repos.get() else {
@@ -510,6 +544,34 @@ impl DocHost {
             .and_then(|answer| answer.labels.first())
             .map(String::as_str)
             .unwrap_or(DONT_SEND);
+        // Typed text instead of a choice ("go on", or the next instruction)
+        // answers "How should it continue?" by continuing: on the branch the
+        // question showed, with the text sent after the held messages.
+        // Holding it and asking again looped for as long as the user typed.
+        let typed = !(choice.starts_with(CONTINUE)
+            || choice.starts_with(SWITCH_BACK)
+            || choice == INDEPENDENT
+            || choice == DONT_SEND);
+        let held = if typed {
+            let message_id = new_id();
+            handle.write_user_message(&message_id, choice, now_ms())?;
+            match held {
+                Some(mut held) => {
+                    held.request.prompt = format!("{}\n\n{choice}", held.request.prompt);
+                    held.message_id = Some(message_id);
+                    Some(held)
+                }
+                None => self
+                    .request_from_chat_row(chat_id, choice)
+                    .map(|request| HeldDispatch {
+                        harness: self.harness_for_request(chat_id, &request),
+                        request,
+                        message_id: Some(message_id),
+                    }),
+            }
+        } else {
+            held
+        };
         let Some(mut held) = held else {
             handle.doc.resolve_input(request_id)?;
             self.clear_branch_drift_held(handle, request_id)?;
@@ -520,25 +582,64 @@ impl DocHost {
                 Some("nothing was waiting to send".into()),
             ));
         };
+        let displayed_choice =
+            entries
+                .iter()
+                .find(|entry| entry.id == entry_id)
+                .and_then(|entry| {
+                    entry.parts.iter().find_map(|part| match part {
+                        MessagePart::Input {
+                            request_id: id,
+                            questions,
+                            ..
+                        } if id == request_id => questions
+                            .first()?
+                            .options
+                            .iter()
+                            .find(|option| option.starts_with(CONTINUE)),
+                        _ => None,
+                    })
+                });
+        let choice = if typed {
+            displayed_choice.map_or(choice, String::as_str)
+        } else {
+            choice
+        };
+        let independent = choice == INDEPENDENT;
+        if independent || choice.starts_with(SWITCH_BACK) {
+            let offered = entries.iter().find(|entry| entry.id == entry_id)
+                .is_some_and(|entry| entry.parts.iter().any(|part| matches!(part,
+                    MessagePart::Input { request_id: id, questions, .. }
+                        if id == request_id && questions.iter().any(|q| q.options.iter().any(|option| option == choice)))));
+            if !offered
+                || sessions.turn_in_flight(chat_id)
+                || (choice.starts_with(SWITCH_BACK)
+                    && self.checkout_is_shared(chat_id, &held.request.cwd))
+            {
+                lock(&self.inner.branch_drift_holds).insert(chat_id.to_string(), vec![held]);
+                return Ok((
+                    SessionCommandStatus::Rejected,
+                    Some("That checkout action is no longer safe; please retry.".into()),
+                ));
+            }
+        }
+        if independent {
+            if let Err(error) = self.independent_checkout(handle, &mut held.request).await {
+                lock(&self.inner.branch_drift_holds).insert(chat_id.to_string(), vec![held]);
+                return Ok((SessionCommandStatus::Rejected, Some(error.to_string())));
+            }
+            let json = serde_json::to_string(&vec![&held])
+                .map_err(|error| EngineError::Other(error.to_string()))?;
+            handle
+                .doc
+                .doc()
+                .get_map(HELD_REQUESTS_MAP)
+                .insert(request_id, json)
+                .map_err(DocError::from)?;
+            handle.doc.doc().commit();
+            self.save_snapshot(handle);
+        }
         let continue_context = if let Some(accepted_branch) = choice.strip_prefix(CONTINUE) {
-            let displayed_choice =
-                entries
-                    .iter()
-                    .find(|entry| entry.id == entry_id)
-                    .and_then(|entry| {
-                        entry.parts.iter().find_map(|part| match part {
-                            MessagePart::Input {
-                                request_id: id,
-                                questions,
-                                ..
-                            } if id == request_id => questions
-                                .first()?
-                                .options
-                                .iter()
-                                .find(|option| option.starts_with(CONTINUE)),
-                            _ => None,
-                        })
-                    });
             let Some(current) = self.capture_source_context(&held.request.cwd).await else {
                 // No fresh observation means no consent. Leave the question
                 // and its durable request intact so the user can retry.
@@ -591,6 +692,8 @@ impl DocHost {
         handle.publish_messages();
         self.save_snapshot(handle);
         if let Some(current) = continue_context {
+            self.acknowledge_shared_checkout(handle, &current)?;
+            self.save_snapshot(handle);
             // Accept only the observation that matched the displayed choice.
             let previous = self
                 .workspace()
@@ -605,8 +708,10 @@ impl DocHost {
             {
                 tracing::warn!(chat = %chat_id, error = %err, "drift acknowledgement stamp failed");
             }
+        } else if independent {
+            // The request and durable row now point at the independent tree.
         } else if let Some(branch) = choice.strip_prefix(SWITCH_BACK) {
-            if let Err(err) = self.switch_back(&held.request.cwd, branch).await {
+            if let Err(err) = self.switch_back(chat_id, &held.request.cwd, branch).await {
                 // Dispatching again re-checks, so a failed switch simply asks
                 // again; keep git's reason next to the old question.
                 let part_id = format!("{request_id}-switch");
@@ -615,22 +720,7 @@ impl DocHost {
                     .append_error_part(&entry_id, &part_id, &err.to_string())?;
                 handle.publish_messages();
             }
-        } else if choice != DONT_SEND {
-            // Typed text instead of a choice: it is another message for this
-            // chat, not a decision. Hold it with the rest and ask again (or,
-            // if the checkout is back where it was, send them all).
-            let mut typed = held.request.clone();
-            typed.prompt = choice.to_string();
-            typed.attachments = Vec::new();
-            let harness = held.harness;
-            lock(&self.inner.branch_drift_holds)
-                .entry(chat_id.to_string())
-                .or_default()
-                .push(held);
-            self.dispatch_with_source_context(sessions, chat_id, harness, typed, Some(new_id()))
-                .await?;
-            return Ok((SessionCommandStatus::Applied, None));
-        } else {
+        } else if choice == DONT_SEND {
             // Not sent. Freeze the queue too, so the next row does not go
             // straight back into the same question; a new send thaws it.
             handle.queue_paused.store(true, Ordering::Release);
@@ -651,7 +741,12 @@ impl DocHost {
         Ok((SessionCommandStatus::Applied, None))
     }
 
-    async fn switch_back(&self, cwd: &str, branch: &str) -> Result<(), EngineError> {
+    async fn switch_back(&self, chat_id: &str, cwd: &str, branch: &str) -> Result<(), EngineError> {
+        if self.checkout_is_shared(chat_id, cwd) {
+            return Err(EngineError::Other(
+                "Didn't switch: another chat uses this checkout.".into(),
+            ));
+        }
         let repos = self
             .inner
             .repos
@@ -851,11 +946,11 @@ mod tests {
             checkout_replaced: false,
         };
         assert_eq!(
-            question(&drift, true).options,
+            question(&drift, true, false).options,
             ["Continue on beta", "Switch back to alpha", "Don't send"]
         );
         assert_eq!(
-            question(&drift, false).options,
+            question(&drift, false, false).options,
             ["Continue on beta", "Don't send"]
         );
     }

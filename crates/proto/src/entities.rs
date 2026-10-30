@@ -142,6 +142,10 @@ pub struct ChatConfig {
     #[serde(default)]
     pub model_options: serde_json::Map<String, serde_json::Value>,
     pub sandbox: SandboxLevel,
+    /// A plain chat rather than a coding session: no project, graff on the
+    /// hosted auto models only (Auto low / high / smart).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat_mode: bool,
 }
 
 /// Immutable-at-run-start repository context owned by one conversation.
@@ -1250,6 +1254,34 @@ mod tests {
         let state: SidebarPreferencesState = serde_json::from_value(state).unwrap();
         assert_eq!(state.pinned_session_ids, ["pin"]);
         assert!(serde_json::to_value(state).unwrap().get("sections").is_none());
+    }
+
+    #[test]
+    fn chat_config_chat_mode_is_optional_on_the_wire() {
+        // A config written before chat mode existed reads as a coding session.
+        let older = serde_json::json!({
+            "harness": "codex",
+            "model": "gpt-6-sol",
+            "reasoning": null,
+            "sandbox": "workspace-write"
+        });
+        let config: ChatConfig = serde_json::from_value(older.clone()).unwrap();
+        assert!(!config.chat_mode);
+        // A coding session writes no `chatMode`, so older clients see the
+        // same object they always did.
+        let written = serde_json::to_value(&config).unwrap();
+        assert!(written.get("chatMode").is_none());
+        assert_eq!(written["harness"], older["harness"]);
+
+        let chat = ChatConfig {
+            harness: HarnessId::Graff,
+            model: Some("codegraff/auto-low".into()),
+            chat_mode: true,
+            ..config
+        };
+        let written = serde_json::to_value(&chat).unwrap();
+        assert_eq!(written["chatMode"], serde_json::json!(true));
+        assert_eq!(serde_json::from_value::<ChatConfig>(written).unwrap(), chat);
     }
 
     #[test]

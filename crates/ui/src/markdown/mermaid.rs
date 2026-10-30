@@ -8,7 +8,7 @@ pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
 // CPU work across previews; UI owners discard results from superseded revisions.
 static RENDER_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Palette {
     dark: bool,
     font: String,

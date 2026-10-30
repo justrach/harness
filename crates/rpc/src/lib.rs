@@ -183,6 +183,10 @@ pub mod methods {
     /// (`{method, path, query?, body?}` → `{status, body}`), made with the
     /// engine's own sign-in. harness-mcp's room tools compose it.
     pub const ROOM_REQUEST: &str = "RoomRequest";
+    // browse Connected apps (engine browse_link; local only).
+    pub const BROWSE_LINK_STATUS: &str = "BrowseLinkStatus";
+    pub const BROWSE_LINK_PAIR: &str = "BrowseLinkPair";
+    pub const BROWSE_LINK_DISCONNECT: &str = "BrowseLinkDisconnect";
     pub const LIST_ORGS: &str = "ListOrgs";
     pub const CREATE_ORG: &str = "CreateOrg";
     pub const SELECT_ORG: &str = "SelectOrg";
@@ -236,6 +240,15 @@ pub mod methods {
     pub const WRITE_TERMINAL: &str = "WriteTerminal";
     pub const RESIZE_TERMINAL: &str = "ResizeTerminal";
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
+    // iOS Simulators on the target device (ControlRpc, relay-forwardable;
+    // WatchSimulatorScreen streams JPEG frames).
+    pub const LIST_SIMULATORS: &str = "ListSimulators";
+    /// Install the streaming helper: the user's consent step.
+    pub const SET_UP_SIMULATORS: &str = "SetUpSimulators";
+    pub const BOOT_SIMULATOR: &str = "BootSimulator";
+    pub const SHUTDOWN_SIMULATOR: &str = "ShutdownSimulator";
+    pub const WATCH_SIMULATOR_SCREEN: &str = "WatchSimulatorScreen";
+    pub const SIMULATOR_INPUT: &str = "SimulatorInput";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -283,6 +296,9 @@ pub mod methods {
     /// Run the release check now instead of waiting for its schedule; the
     /// result arrives on the `UpdateStatus` stream.
     pub const CHECK_FOR_UPDATES: &str = "CheckForUpdates";
+    /// Request one managed-host update, deferred until no chats or terminals
+    /// are active. Never fall back to ApplyUpdate on an older host.
+    pub const QUEUE_UPDATE: &str = "QueueUpdate";
 }
 
 #[derive(Debug, thiserror::Error)]

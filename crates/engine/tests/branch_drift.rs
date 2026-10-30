@@ -13,7 +13,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use harness_adapters::{Harness, HarnessError, RunControls};
-use harness_doc::{MessagePart, SessionCommandPayload, SessionCommandStatus};
+use harness_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionCommandStatus};
 use harness_engine::{EngineCore, HarnessRegistry};
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
@@ -334,28 +334,35 @@ async fn a_drifted_checkout_asks_before_the_chat_continues() {
     assert_eq!(prompts.lock().unwrap()[4], "sixth\n\nseventh");
     assert!(open_question(&core).is_none());
 
-    // Typed text instead of a choice is another message, not a decision.
+    // Typed text instead of a choice continues on the branch the question
+    // showed, sending the text too. It used to ask again, so typing "go on"
+    // looped on the same question.
     git(&repo, &["switch", "-c", "epsilon"]);
     send(&core, "m8", "eighth", &cwd);
     let (first, _) = wait_question(&core).await;
-    answer(&core, &first, "also check the docs");
-    let mut second = None;
-    wait_for(
-        || {
-            second = open_question(&core)
-                .map(|(id, _)| id)
-                .filter(|id| *id != first);
-            second.is_some()
-        },
-        "the question asked again",
-    )
-    .await;
-    let second = second.unwrap();
-    assert_eq!(prompts.lock().unwrap().len(), 5);
-    answer(&core, &second, "Continue on epsilon");
+    answer(&core, &first, "go on");
     wait_for(turns(6), "the turn after a typed answer").await;
     let both = prompts.lock().unwrap()[5].clone();
-    assert!(both.ends_with("eighth\n\nalso check the docs"), "{both}");
+    assert!(both.ends_with("eighth\n\ngo on"), "{both}");
+    assert!(both.contains("now on `epsilon`"), "{both}");
+    assert!(open_question(&core).is_none(), "not asked again");
+    assert_eq!(context_branch(&core), "epsilon");
+    let entries = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    let typed = entries
+        .iter()
+        .filter(|entry| entry.role == MessageRole::User)
+        .next_back()
+        .expect("the typed answer is in the transcript");
+    assert!(
+        matches!(&typed.parts[..], [MessagePart::Text { text, .. }] if text == "go on"),
+        "{typed:?}"
+    );
 
     // A question left open across a restart still sends its message.
     git(&repo, &["switch", "-c", "zeta"]);
@@ -569,6 +576,48 @@ async fn stale_continue_requires_new_consent_and_preserves_the_held_request() {
     assert!(request.prompt.ends_with("keep this request"));
     assert!(request.prompt.contains("now on `gamma`"));
     assert!(request.prompt.contains("ran on `alpha`"));
+    assert_eq!(context_branch(&core), "gamma");
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typed_answer_only_consents_to_the_branch_it_was_shown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cwd) = test_repo(tmp.path());
+    let data = tmp.path().join("data");
+    let (core, prompts) = engine(&data);
+    create_chat(&core, &cwd);
+    send(&core, "first", "establish alpha", &cwd);
+    wait_turn(&core, &prompts, 1).await;
+    git(&repo, &["switch", "-c", "beta"]);
+    send(&core, "held", "keep this request", &cwd);
+    let (old_id, _) = wait_question(&core).await;
+
+    // The folder moved again after the beta question was shown.
+    git(&repo, &["switch", "-c", "gamma"]);
+    answer(&core, &old_id, "go on");
+    let mut new_question = None;
+    wait_for(
+        || {
+            new_question = open_question(&core).filter(|(id, _)| id != &old_id);
+            new_question.is_some()
+        },
+        "fresh consent for gamma",
+    )
+    .await;
+    let (new_id, question) = new_question.unwrap();
+    assert_eq!(question.options[0], "Continue on gamma");
+    assert_eq!(prompts.lock().unwrap().len(), 1, "nothing ran on gamma");
+    assert_eq!(context_branch(&core), "alpha");
+
+    answer(&core, &new_id, "Continue on gamma");
+    wait_turn(&core, &prompts, 2).await;
+    let request = core.sessions.last_request(CHAT).unwrap();
+    assert!(
+        request.prompt.ends_with("keep this request\n\ngo on"),
+        "{}",
+        request.prompt
+    );
     assert_eq!(context_branch(&core), "gamma");
     core.shutdown().await;
 }

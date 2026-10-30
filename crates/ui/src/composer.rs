@@ -201,6 +201,28 @@ fn input_overflow_edges(
     (scroll_top > 1.0, scroll_top < max_scroll - 1.0)
 }
 
+/// A scroll fade marks hidden text, not hidden layout (#578). An edge fades
+/// only while some row that shows text (`ink`, the top and bottom of those
+/// rows) is clipped beyond it. Blank or whitespace-only rows past the last
+/// written row still scroll and keep the caret, but leave that row readable.
+fn input_fade_edges(
+    content_height: f32,
+    settled_height: f32,
+    visible_height: f32,
+    scroll_top: f32,
+    ink: Option<(f32, f32)>,
+) -> (bool, bool) {
+    let Some((ink_top, ink_bottom)) = ink else {
+        return (false, false);
+    };
+    let (top, bottom) =
+        input_overflow_edges(content_height, settled_height, visible_height, scroll_top);
+    (
+        top && scroll_top > ink_top + 1.0,
+        bottom && ink_bottom > scroll_top + visible_height + 1.0,
+    )
+}
+
 /// During the reveal, stop at a complete row boundary instead of slicing
 /// glyphs with a moving clip. Scrolling offsets the row grid inside the box.
 fn input_reveal_height(visible: f32, scroll: f32, line_height: f32, resizing: bool) -> f32 {
@@ -613,6 +635,22 @@ fn begin_interrupt(pending: &mut HashSet<String>, chat_id: &str) -> bool {
 
 fn retain_live_interrupts(pending: &mut HashSet<String>, mut is_live: impl FnMut(&str) -> bool) {
     pending.retain(|chat_id| is_live(chat_id));
+}
+
+/// How long the Stop button is ignored after a question panel gives way to
+/// the composer (#149). The panel's Submit is the footer's right-most control,
+/// where Stop shows up once it closes on a live run, so the second click of a
+/// double-click on Submit would stop the run it just answered. Pinned with
+/// the phones in `apps/parity/vectors/composer-stop.json`.
+const STOP_GRACE_MS: i64 = 1_500;
+
+/// Whether a Stop click at `now_ms` goes through, given when a question panel
+/// last closed (`None`: none has). A clock that went back never holds Stop off.
+fn stop_allowed(now_ms: i64, question_closed_at_ms: Option<i64>) -> bool {
+    match question_closed_at_ms {
+        None => true,
+        Some(closed) => now_ms < closed || now_ms - closed >= STOP_GRACE_MS,
+    }
 }
 
 fn interrupt_params(chat_id: &str) -> serde_json::Value {
@@ -1936,6 +1974,9 @@ pub struct ComposerInput {
     last_bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     content_height: f32,
+    /// Top and bottom of the rows that show text, in content coordinates.
+    /// Blank and whitespace-only rows still scroll, but never fade (#578).
+    ink_extent: Option<(f32, f32)>,
     max_line_width: f32,
     last_width: f32,
     /// Raw Markdown → chip display projection from the last layout pass.
@@ -2041,6 +2082,7 @@ impl ComposerInput {
             last_bounds: None,
             line_height: px(INPUT_LINE_HEIGHT),
             content_height: INPUT_LINE_HEIGHT,
+            ink_extent: None,
             max_line_width: 0.0,
             last_width: 0.0,
             projection: TextProjection::default(),
@@ -2369,6 +2411,17 @@ impl ComposerInput {
         } else {
             self.content_height
         }
+    }
+
+    /// Whether the top and bottom edges fade: see [`input_fade_edges`].
+    fn fade_edges(&self, settled_height: f32, visible_height: f32) -> (bool, bool) {
+        input_fade_edges(
+            self.scrollable_height(),
+            settled_height,
+            visible_height,
+            self.scroll_top,
+            self.ink_extent,
+        )
     }
 
     pub fn set_placeholder(
@@ -3177,7 +3230,11 @@ impl ComposerInput {
     fn mention_tab(&mut self, _: &MentionTab, window: &mut Window, cx: &mut Context<Self>) {
         if self.mention_has_selection {
             cx.emit(ComposerInputEvent::MentionAccept);
-        } else if !self.indent_list(false, window, cx) {
+        } else if !self.indent_list(false, window, cx)
+            && self.key_context != MESSAGE_COMPOSER_CONTEXT
+        {
+            // Standalone fields may traverse controls. An ordinary Tab while
+            // composing must not send the caret to unrelated sidebar buttons.
             cx.propagate();
         }
     }
@@ -3917,6 +3974,8 @@ impl ComposerInput {
             .filter(|(_, face)| *face == composer_markdown::Face::Code)
             .map(|(range, _)| range)
             .collect();
+        let mut row_top = 0.0f32;
+        let mut ink_extent: Option<(f32, f32)> = None;
         for text in display.split('\n') {
             let raw_line = self
                 .content
@@ -3984,6 +4043,27 @@ impl ComposerInput {
                     if !self.single_line {
                         wrap_reference_chips(&mut line, &chips, (width - indent).max(px(20.0)));
                     }
+                    let row_bottom = row_top + f32::from(line.size(self.line_height).height);
+                    // A logical line can end in soft-wrapped whitespace
+                    // rows. Count ink per visual row, not the whole line.
+                    let mut row_start = 0;
+                    for (row_ix, row_end) in line
+                        .wrap_boundaries()
+                        .iter()
+                        .map(|boundary| {
+                            line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index
+                        })
+                        .chain(std::iter::once(line.len()))
+                        .enumerate()
+                    {
+                        if !text[row_start..row_end].trim().is_empty() {
+                            let ink_top = row_top + row_ix as f32 * f32::from(self.line_height);
+                            let top = ink_extent.map_or(ink_top, |(top, _)| top);
+                            ink_extent = Some((top, ink_top + f32::from(self.line_height)));
+                        }
+                        row_start = row_end;
+                    }
+                    row_top = row_bottom;
                     lines.push(line);
                     indents.push(indent);
                 }
@@ -4014,6 +4094,7 @@ impl ComposerInput {
             .fold(0.0, f32::max);
 
         self.display_is_placeholder = is_placeholder;
+        self.ink_extent = ink_extent.filter(|_| !is_placeholder);
         self.max_ascent = lines
             .iter()
             .map(|line| f32::from(line.unwrapped_layout.ascent))
@@ -4031,13 +4112,9 @@ impl ComposerInput {
 
     fn paint_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
         let visible = f32::from(bounds.size.height);
-        let top_overflow = input_overflow_edges(
-            self.scrollable_height(),
-            self.settled_viewport_height.unwrap_or(visible),
-            visible,
-            self.scroll_top,
-        )
-        .0;
+        let top_overflow = self
+            .fade_edges(self.settled_viewport_height.unwrap_or(visible), visible)
+            .0;
         let top_padding = if top_overflow {
             self.overflow_top_padding
         } else {
@@ -4855,13 +4932,11 @@ impl Render for ComposerInput {
                     let visible_height = input
                         .last_bounds
                         .map_or(0.0, |bounds| f32::from(bounds.size.height));
-                    input_overflow_edges(
-                        input.scrollable_height(),
+                    input.fade_edges(
                         input
                             .settled_viewport_height
                             .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
                         visible_height,
-                        input.scroll_top,
                     )
                 })
             })
@@ -5113,6 +5188,46 @@ fn invocation_token(text: &str, cursor: usize, prefix: char) -> Option<MentionTo
         range: start..end,
         query: query.to_string(),
     })
+}
+
+/// The part of an invocation token that accepting `name` replaces (#575).
+///
+/// The token spans the whole command-like word, so a caret moved back into
+/// `/co|mpact` still completes the command. Text after the caret is consumed
+/// only while it continues the accepted name, matched like the popup filter
+/// (case-insensitive, substring): `/goal|prompt` keeps `prompt`, and `/goal|-x`
+/// keeps `-x`. The end never splits a grapheme at the caret.
+fn invocation_replacement_range(text: &str, token: &MentionToken, name: &str) -> Range<usize> {
+    let name_start = token.range.start + 1;
+    let Some(word) = text.get(name_start..token.range.end) else {
+        return token.range.clone();
+    };
+    let caret = (name_start + token.query.len()).min(token.range.end);
+    let mut end = caret;
+    for (offset, grapheme) in word.grapheme_indices(true) {
+        let grapheme_start = name_start + offset;
+        let grapheme_end = grapheme_start + grapheme.len();
+        if grapheme_end <= caret {
+            continue;
+        }
+        if grapheme_start < caret {
+            // The caret sits between a base character and its combining marks.
+            end = grapheme_end;
+            continue;
+        }
+        // Rank 0/1 are literal prefix/substring matches; 2/3 ignore
+        // punctuation, so they may extend through a separator only when an
+        // alphanumeric continuation of the name follows it.
+        if !crate::popover::match_rank(&text[name_start..grapheme_end], name)
+            .is_some_and(|rank| rank <= 3)
+        {
+            break;
+        }
+        if grapheme.chars().next().is_some_and(char::is_alphanumeric) {
+            end = grapheme_end;
+        }
+    }
+    token.range.start..end
 }
 
 /// Pasted file/skill references are eligible only at completion boundaries,
@@ -5664,6 +5779,9 @@ pub struct Composer {
     /// another chat's request when the user navigates quickly.
     interrupting: HashSet<String>,
     interrupt_tasks: HashMap<String, Task<()>>,
+    /// The chat whose question panel last gave way to the composer, and when
+    /// (`stop_allowed`).
+    question_closed: Option<(String, Instant)>,
     // -- compact/expanded flip state (hysteresis; see `composer_flip`) --
     /// Current layout mode (persisted across frames — never derived fresh).
     expanded_mode: bool,
@@ -5901,6 +6019,7 @@ impl Composer {
             send_task: None,
             interrupting: HashSet::new(),
             interrupt_tasks: HashMap::new(),
+            question_closed: None,
             editing_queued: None,
             queue_edit_lease_id: None,
             queue_edit_base_text_hash: None,
@@ -7464,12 +7583,18 @@ impl Composer {
     /// session would run; this names the project up front. Clicking it opens
     /// the project picker, which also offers "New project".
     fn render_new_thread_heading(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // A plain chat has no project to name or pick: say what it is.
+        let chat_mode = self.pickers.read(cx).chat_mode(cx);
         let project = self
             .state
             .read(cx)
             .selected_space_row()
             .map(|s| s.display_name().to_string());
         let (eyebrow, title) = match project {
+            _ if chat_mode => (
+                crate::chat_mode::HEADING_EYEBROW,
+                crate::chat_mode::HEADING_TITLE.to_string(),
+            ),
             Some(name) => ("New session in", name),
             None => ("New session in your home folder", "No project".to_string()),
         };
@@ -7497,18 +7622,24 @@ impl Composer {
                     .text_size(crate::typography::ui_rems(22.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(motion::hover_blend(id, theme.text.opacity(0.9), theme.text))
-                    .on_hover(motion::hover_listener(id))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.pickers
-                            .update(cx, |pickers, cx| pickers.open_project_menu(window, cx));
-                    }))
+                    .when(!chat_mode, |el| {
+                        el.on_hover(motion::hover_listener(id))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.pickers.update(cx, |pickers, cx| {
+                                    pickers.open_project_menu(window, cx)
+                                });
+                            }))
+                    })
+                    .when(chat_mode, |el| el.cursor_default())
                     .child(div().min_w_0().truncate().child(SharedString::from(title)))
-                    .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                            .size(px(16.0))
-                            .flex_none()
-                            .text_color(theme.text_muted.opacity(0.6)),
-                    ),
+                    .when(!chat_mode, |el| {
+                        el.child(
+                            crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                                .size(px(16.0))
+                                .flex_none()
+                                .text_color(theme.text_muted.opacity(0.6)),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -7742,14 +7873,16 @@ impl Composer {
         else {
             return;
         };
+        // Replace the typed name, not prompt text that follows the caret (#575).
+        let range = invocation_replacement_range(self.input.read(cx).text(), &token, &command.name);
         if let Some(action) = command.workspace_command {
-            self.execute_workspace_command(action, token.range, cx);
+            self.execute_workspace_command(action, range, cx);
             return;
         }
         let insertion =
             invocation_insertion(&command.invocation, self.reference_delivery_supported(cx));
         self.input.update(cx, |input, cx| {
-            input.replace_plain_token(token.range, &insertion, cx)
+            input.replace_plain_token(range, &insertion, cx)
         });
         self.reset_slash(None, cx);
         cx.notify();
@@ -8151,6 +8284,12 @@ impl Composer {
                     if released {
                         self.wizard = None;
                         self.advance_task = None;
+                        self.question_closed = self
+                            .state
+                            .read(cx)
+                            .selected_chat
+                            .clone()
+                            .map(|chat| (chat, Instant::now()));
                         let draft = self
                             .drafts
                             .get(&self.current_key)
@@ -8228,7 +8367,9 @@ impl Composer {
         // no-agents check only fires once the catalog is loaded — offline
         // and still-loading states must not block (the harness resolves from
         // the remembered default and the engine reports real failures).
-        self.pickers.read(cx).no_agents_available()
+        // A chat-mode draft also waits for an auto tier to run on.
+        let pickers = self.pickers.read(cx);
+        pickers.no_agents_available() || pickers.chat_mode_send_blocked(cx)
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
@@ -8884,16 +9025,11 @@ impl Composer {
                             // instead of failing the run.
                             chat_branch = base.clone();
                             if let Some(repo_path) = &space_path {
-                                // A remote repo's branch list loads over the
-                                // relay — on a bad link it may never arrive
-                                // and the picker has no base. That must NOT
-                                // silently drop the isolation the user picked
-                                // (2026-08-19: "New worktree" ran in the main
-                                // checkout): default to HEAD, which git — any
-                                // host version — resolves as the repo's
-                                // current checkout state.
-                                let base =
-                                    base.clone().unwrap_or_else(|| "HEAD".to_string());
+                                // Refs may still be loading over the relay.
+                                // An empty base asks the host to resolve the
+                                // repository default, not the shared folder's
+                                // current (possibly unrelated PR) branch.
+                                let base = base.clone().unwrap_or_default();
                                 run_worktree = Some(harness_proto::WorktreeSpec {
                                     repo_path: repo_path.clone(),
                                     base,
@@ -9206,6 +9342,18 @@ impl Composer {
         self.interrupt_chat(chat_id, cx);
     }
 
+    /// The Stop button: `interrupt_selected`, unless a question panel on this
+    /// chat closed a moment ago (`stop_allowed`).
+    fn stop_from_button(&mut self, cx: &mut Context<Self>) {
+        let held = self.question_closed.as_ref().is_some_and(|(chat, at)| {
+            self.state.read(cx).selected_chat.as_deref() == Some(chat.as_str())
+                && !stop_allowed(at.elapsed().as_millis() as i64, Some(0))
+        });
+        if !held {
+            self.interrupt_selected(cx);
+        }
+    }
+
     pub(crate) fn interrupt_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -9442,6 +9590,7 @@ impl Composer {
         let answer_text = self.input.read(cx).text().to_string();
         self.advance_task = None;
         self.answered_requests.insert(wizard.request_id.clone());
+        self.question_closed = Some((chat_id.clone(), Instant::now()));
         let draft = self
             .drafts
             .get(&self.current_key)
@@ -9884,7 +10033,7 @@ impl Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
-                .on_click(cx.listener(|this, _, _, cx| this.interrupt_selected(cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.stop_from_button(cx)))
                 .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg))
                 .into_any_element(),
             SendButtonMode::Send | SendButtonMode::Queue => {
@@ -10924,10 +11073,21 @@ impl Render for Composer {
                     .update(cx, |pickers, cx| pickers.render_footer(cx))
             });
             let usage = self.state.read(cx).context_usage;
+            // Steps and subagents of the running turn (crate::agent_work).
+            let agent_work = (session_chrome_opacity > 0.0)
+                .then(|| {
+                    crate::agent_work::footer_chip(self.state.clone(), &theme, cx.entity_id(), cx)
+                })
+                .flatten();
             // OpenAI's guidelines: say so while requests run on the plan.
             let plan = (session_chrome_opacity > 0.0
                 && self.pickers.read(cx).uses_chatgpt_plan(cx))
             .then(|| crate::chatgpt_plan::using_plan_chip(&theme));
+            // Chat mode: say so while the selected model may bill API rates.
+            let chat_note = (session_chrome_opacity > 0.0)
+                .then(|| self.pickers.read(cx).chat_mode_note(cx))
+                .flatten()
+                .map(|note| crate::chat_mode::note_chip(note, &theme));
             container.child(
                 div()
                     .w_full()
@@ -10976,6 +11136,18 @@ impl Render for Composer {
                                         .pr(px(10.0))
                                         .child(chip)
                                 }))
+                                .children(chat_note.map(|chip| {
+                                    div()
+                                        .flex_shrink(1.0)
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .pr(px(10.0))
+                                        .child(chip)
+                                }))
+                                .children(
+                                    agent_work
+                                        .map(|chip| div().flex_none().pr(px(4.0)).child(chip)),
+                                )
                                 .children(crate::context_usage::has_window(usage).then(|| {
                                     div().flex_none().pr(px(10.0)).child(
                                         crate::context_usage::render(
@@ -11294,6 +11466,10 @@ fn dictation_unavailable_message(
 }
 
 #[cfg(test)]
+#[path = "composer/fade_tests.rs"]
+mod fade_tests;
+
+#[cfg(test)]
 #[path = "composer/prompt_history_tests.rs"]
 mod prompt_history_tests;
 
@@ -11305,7 +11481,7 @@ mod question_recovery_tests;
 mod tests {
     use super::*;
 
-    fn composer_focus_window(
+    pub(super) fn composer_focus_window(
         cx: &mut gpui::TestAppContext,
     ) -> (tempfile::TempDir, gpui::WindowHandle<Composer>) {
         let dir = composer_test_init(cx);
@@ -12851,6 +13027,157 @@ mod tests {
             .unwrap();
     }
 
+    fn command_row(name: &str) -> InvocationCandidate {
+        InvocationCandidate {
+            name: name.into(),
+            description: String::new(),
+            input_hint: None,
+            workspace_command: None,
+            invocation: harness_proto::invocation::Invocation::Command { name: name.into() },
+        }
+    }
+
+    /// Type `draft` with the caret at `cursor`, offer `rows` (or the Harness
+    /// commands when `None`), accept the top row as Tab does, and return the draft.
+    fn accept_offered_invocation(
+        composer: &mut Composer,
+        draft: &str,
+        cursor: usize,
+        rows: Option<Vec<InvocationCandidate>>,
+        cx: &mut Context<Composer>,
+    ) -> String {
+        composer.input.update(cx, |input, cx| {
+            input.set_text(draft, cx);
+            input.selected_range = cursor..cursor;
+        });
+        composer.update_slash(draft, cursor, cx);
+        assert!(composer.slash.token.is_some(), "{draft:?}@{cursor}");
+        if let Some(rows) = rows {
+            composer
+                .slash_cache
+                .insert(composer.slash.context.clone(), rows);
+        }
+        composer.refilter_slash(cx);
+        composer.accept_slash(cx);
+        composer.input.read(cx).text().to_string()
+    }
+
+    #[gpui::test]
+    fn explicit_command_completion_preserves_adjacent_prompt_text(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, window, cx| {
+                // #575: `/goal|prompt text remains` + Tab.
+                let draft = "/goalprompt text remains";
+                let accepted = accept_offered_invocation(
+                    composer,
+                    draft,
+                    5,
+                    Some(vec![command_row("goal")]),
+                    cx,
+                );
+                assert_eq!(accepted, "/goal prompt text remains");
+                composer.input.update(cx, |input, cx| {
+                    input.undo(&Undo, window, cx);
+                    assert_eq!(input.text(), draft, "acceptance is one undo step");
+                    input.redo(&Redo, window, cx);
+                    assert_eq!(input.text(), "/goal prompt text remains");
+                });
+
+                // Mid-command completion still completes the whole command
+                // word, with prefix, substring and case-insensitive matches.
+                for (draft, cursor, name, expected) in [
+                    ("/compact now", 3, "compact", "/compact now"),
+                    ("/comp now", 3, "compact", "/compact now"),
+                    ("/COMPACT now", 3, "compact", "/compact now"),
+                    ("/pact now", 3, "compact", "/compact now"),
+                    ("/pactprompt now", 3, "compact", "/compact prompt now"),
+                    ("/goal-prompt", 5, "goal", "/goal -prompt"),
+                    ("/goalprompt", 5, "goal", "/goal prompt"),
+                    ("/goal prompt", 5, "goal", "/goal prompt"),
+                    ("/goal", 5, "goal", "/goal "),
+                    ("please /goalprompt", 12, "goal", "please /goal prompt"),
+                    ("(/goalprompt)", 6, "goal", "(/goal prompt)"),
+                    ("/review:allprompt", 4, "review:all", "/review:all prompt"),
+                    // Unicode: never split a grapheme at the caret.
+                    ("/確認テキスト", "/確認".len(), "確認", "/確認 テキスト"),
+                    (
+                        "/cafe\u{301}prompt",
+                        5,
+                        "cafe\u{301}",
+                        "/cafe\u{301} prompt",
+                    ),
+                    ("/re\u{301}view", 3, "re\u{301}view", "/re\u{301}view "),
+                ] {
+                    let accepted = accept_offered_invocation(
+                        composer,
+                        draft,
+                        cursor,
+                        Some(vec![command_row(name)]),
+                        cx,
+                    );
+                    assert_eq!(accepted, expected, "{draft:?}@{cursor}");
+                }
+
+                // Skills replace the same range with their reference.
+                let skill = harness_proto::invocation::Invocation::Skill {
+                    name: "review".into(),
+                    path: "/repo/SKILL.md".into(),
+                    command: None,
+                };
+                let accepted = accept_offered_invocation(
+                    composer,
+                    "/reviewprompt more",
+                    7,
+                    Some(vec![InvocationCandidate {
+                        invocation: skill.clone(),
+                        ..command_row("review")
+                    }]),
+                    cx,
+                );
+                assert_eq!(accepted, format!("{} prompt more", skill.link()));
+
+                // Harness's own commands consume only their trigger.
+                for (draft, cursor, expected) in [
+                    ("/modelprompt text remains", 6, "prompt text remains"),
+                    ("/MOprompt text", 3, "prompt text"),
+                    ("/modprompt", 4, "prompt"),
+                    ("/model keep", 3, "keep"),
+                ] {
+                    let accepted = accept_offered_invocation(composer, draft, cursor, None, cx);
+                    assert_eq!(accepted, expected, "{draft:?}@{cursor}");
+                    composer.input.update(cx, |input, cx| {
+                        input.undo(&Undo, window, cx);
+                        assert_eq!(input.text(), draft, "action removal is undoable");
+                    });
+                }
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn invocation_replacement_stops_where_the_accepted_name_does() {
+        let range = |text: &str, cursor: usize, name: &str| {
+            let token = slash_token(text, cursor).unwrap();
+            invocation_replacement_range(text, &token, name)
+        };
+        assert_eq!(range("/goalprompt text", 5, "goal"), 0..5);
+        assert_eq!(range("/compact now", 3, "compact"), 0..8);
+        assert_eq!(range("/compactprompt", 3, "compact"), 0..8);
+        assert_eq!(range("/Compact", 3, "compact"), 0..8);
+        assert_eq!(range("/goal-x", 5, "goal"), 0..5);
+        assert_eq!(range("/harness:model", 8, "harness:model"), 0..14);
+        assert_eq!(range("/harnessmodel", 8, "harness:model"), 0..13);
+        assert_eq!(range("/re\u{301}view", 3, "réview"), 0..5);
+        // Literal tokens whose end was trimmed (closing emphasis) stay intact.
+        let text = "_see /review_";
+        let token = slash_token(text, text.len() - 1).unwrap();
+        assert_eq!(
+            invocation_replacement_range(text, &token, "review"),
+            token.range
+        );
+    }
+
     #[gpui::test]
     fn up_and_down_recall_this_sessions_prompts_and_restore_the_draft(
         cx: &mut gpui::TestAppContext,
@@ -13273,6 +13600,75 @@ mod tests {
         // written its frame into the channel by the time the executor parks.
         cx.run_until_parked();
         assert!(server_in.try_recv().is_err());
+    }
+
+    #[test]
+    fn stop_grace_matches_the_phones() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/parity/vectors/composer-stop.json"
+        ))
+        .unwrap();
+        assert_eq!(v["graceMs"].as_i64(), Some(STOP_GRACE_MS));
+        for case in v["cases"].as_array().unwrap() {
+            assert_eq!(
+                stop_allowed(
+                    case["nowMs"].as_i64().unwrap(),
+                    case["questionClosedAtMs"].as_i64()
+                ),
+                case["allowed"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    /// #149: Stop takes the answered question panel's place on a live run, so
+    /// the second click of a double-click on Submit lands on it. That click
+    /// must not stop the run it just answered; a Stop once the grace is over
+    /// still does.
+    #[gpui::test]
+    fn stop_right_after_answering_a_question_is_ignored(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, _requests) = tokio::sync::mpsc::channel(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(64);
+        handle
+            .update(cx, |composer, window, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                        harness_rpc::RpcClient::new(out, inbound),
+                    ));
+                });
+                let questions = vec![question("custom", &["Yes", "No"], false)];
+                switch_question_draft_chat(composer, "c", Some(("ask", questions)), cx);
+                composer.input.update(cx, |input, cx| {
+                    input.replace_text_in_range(None, "Go ahead", window, cx);
+                });
+                composer.state.update(cx, |state, _| {
+                    state.begin_pending_send("c", "m1", chrono::Utc::now());
+                });
+                composer.on_submit(cx);
+                assert!(composer.wizard.is_none());
+                assert_eq!(composer.button_mode(cx), SendButtonMode::Stop);
+
+                composer.stop_from_button(cx);
+                assert!(
+                    !composer.interrupting.contains("c"),
+                    "the double-click's second half"
+                );
+
+                let earlier = Instant::now()
+                    .checked_sub(Duration::from_millis(1_600))
+                    .unwrap();
+                composer.question_closed = Some(("c".into(), earlier));
+                composer.stop_from_button(cx);
+                assert!(composer.interrupting.contains("c"), "a deliberate Stop");
+            })
+            .unwrap();
     }
 
     #[gpui::test]
@@ -16236,6 +16632,198 @@ mod tests {
     }
 
     #[test]
+    fn scroll_fade_marks_hidden_text_not_hidden_blank_rows() {
+        // #578's measurements: eleven written rows and one blank row
+        // (H=273, V=S=240). At T=10.25 row 11 ends exactly at the bottom edge.
+        let ink = Some((0.0, 11.0 * 22.75));
+        assert_eq!(
+            input_fade_edges(273.0, 240.0, 240.0, 10.25, ink),
+            (true, false)
+        );
+        assert_eq!(
+            input_fade_edges(273.0, 240.0, 240.0, 33.0, ink),
+            (true, false)
+        );
+        assert_eq!(
+            input_fade_edges(273.0, 240.0, 240.0, 0.0, ink),
+            (false, true)
+        );
+        // Genuinely hidden text still fades at either edge.
+        let long = Some((0.0, 364.0));
+        assert_eq!(
+            input_fade_edges(364.0, 240.0, 240.0, 104.0, long),
+            (true, true)
+        );
+        assert_eq!(
+            input_fade_edges(364.0, 240.0, 240.0, 124.0, long),
+            (true, false)
+        );
+        // Leading blank rows are the symmetric case at the top.
+        let leading = Some((45.5, 295.75));
+        assert_eq!(
+            input_fade_edges(295.75, 240.0, 240.0, 45.5, leading),
+            (false, true)
+        );
+        assert_eq!(
+            input_fade_edges(295.75, 240.0, 240.0, 50.0, leading),
+            (true, true)
+        );
+        // A draft of only blank rows has nothing to fade; neither does a
+        // settling resize, as before.
+        assert_eq!(
+            input_fade_edges(400.0, 240.0, 240.0, 80.0, None),
+            (false, false)
+        );
+        assert_eq!(
+            input_fade_edges(100.0, 100.0, 240.0, 80.0, Some((0.0, 100.0))),
+            (false, false)
+        );
+    }
+
+    /// Lay `draft` out in the 240px capped viewport of #578 at `width`.
+    fn layout_capped_draft(
+        input: &mut ComposerInput,
+        draft: &str,
+        width: f32,
+        window: &mut Window,
+        cx: &mut Context<ComposerInput>,
+    ) -> f32 {
+        let viewport = TEXTAREA_MAX - TEXTAREA_PAD_V;
+        input.set_text(draft, cx);
+        input.layout_text(px(width), &window.text_style(), window, cx);
+        input.settled_viewport_height = Some(viewport);
+        input.last_bounds = Some(Bounds::new(
+            point(px(0.0), px(0.0)),
+            size(px(width), px(viewport)),
+        ));
+        viewport
+    }
+
+    fn wheel(
+        input: &mut ComposerInput,
+        dy: f32,
+        window: &mut Window,
+        cx: &mut Context<ComposerInput>,
+    ) {
+        input.on_scroll_wheel(
+            &ScrollWheelEvent {
+                position: point(px(10.0), px(10.0)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                touch_phase: gpui::TouchPhase::Moved,
+                modifiers: Default::default(),
+            },
+            window,
+            cx,
+        );
+    }
+
+    #[gpui::test]
+    fn trailing_blank_rows_never_fade_the_last_written_line(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, window, cx| {
+                composer.input.update(cx, |input, cx| {
+                    let line = INPUT_LINE_HEIGHT;
+                    let rows = (1..=11)
+                        .map(|row| format!("Synthetic draft row {row:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let draft = format!("{rows}\n");
+                    let viewport = layout_capped_draft(input, &draft, 600.0, window, cx);
+                    assert_eq!(input.content_height, 12.0 * line, "rows must not wrap");
+
+                    // Caret at the end of row 11, kept in view by caret following.
+                    input.selected_range = rows.len()..rows.len();
+                    input.follow_cursor = true;
+                    input.clamp_scroll(viewport);
+                    assert!(
+                        (input.scroll_top - 10.25).abs() < 0.01,
+                        "{}",
+                        input.scroll_top
+                    );
+                    assert_eq!(input.fade_edges(viewport, viewport), (true, false));
+
+                    // Caret at EOF on the blank row, then one row up by wheel.
+                    input.selected_range = draft.len()..draft.len();
+                    input.follow_cursor = true;
+                    input.clamp_scroll(viewport);
+                    assert_eq!(input.scroll_top, 33.0);
+                    assert_eq!(input.fade_edges(viewport, viewport), (true, false));
+                    wheel(input, line, window, cx);
+                    assert!(
+                        (input.scroll_top - 10.25).abs() < 0.01,
+                        "{}",
+                        input.scroll_top
+                    );
+                    assert_eq!(
+                        input.fade_edges(viewport, viewport),
+                        (true, false),
+                        "only the blank row is below the last written line"
+                    );
+                    assert_eq!(input.text(), draft, "the draft stays verbatim");
+                    wheel(input, line, window, cx);
+                    assert_eq!(input.scroll_top, 0.0);
+                    assert_eq!(input.fade_edges(viewport, viewport), (false, true));
+                    // Scrolling back to the end keeps its full extent.
+                    wheel(input, -10.0 * line, window, cx);
+                    assert_eq!(input.scroll_top, 33.0);
+                    assert_eq!(input.fade_edges(viewport, viewport), (true, false));
+
+                    // Zero, two and whitespace-only trailing rows.
+                    for (suffix, blank_rows) in [("", 0.0), ("\n\n", 2.0), ("\n \t ", 1.0)] {
+                        let draft = format!("{rows}{suffix}");
+                        layout_capped_draft(input, &draft, 600.0, window, cx);
+                        assert_eq!(input.content_height, (11.0 + blank_rows) * line);
+                        input.scroll_top = 11.0 * line - viewport;
+                        assert_eq!(
+                            input.fade_edges(viewport, viewport),
+                            (true, false),
+                            "{suffix:?}"
+                        );
+                        input.scroll_top = 0.0;
+                        assert_eq!(input.fade_edges(viewport, viewport), (false, true));
+                    }
+
+                    // Leading blank rows: no top fade until text is clipped.
+                    let draft = format!("\n\n{rows}");
+                    layout_capped_draft(input, &draft, 600.0, window, cx);
+                    input.scroll_top = 2.0 * line;
+                    assert_eq!(input.fade_edges(viewport, viewport), (false, true));
+                    input.scroll_top = 2.0 * line + 5.0;
+                    assert_eq!(input.fade_edges(viewport, viewport), (true, true));
+
+                    // Only blank rows: nothing to fade anywhere.
+                    let draft = " \n".repeat(20);
+                    layout_capped_draft(input, &draft, 600.0, window, cx);
+                    input.scroll_top = 40.0;
+                    assert_eq!(input.fade_edges(viewport, viewport), (false, false));
+
+                    // A fitting draft never fades.
+                    layout_capped_draft(input, "one\ntwo\nthree\n", 600.0, window, cx);
+                    input.scroll_top = 0.0;
+                    assert_eq!(input.fade_edges(viewport, viewport), (false, false));
+
+                    // Softly wrapped text below the viewport still fades.
+                    let paragraph = "Synthetic wrapped words keep flowing across rows ".repeat(3);
+                    let draft = format!("{}\n", [paragraph.as_str(); 4].join("\n"));
+                    layout_capped_draft(input, &draft, 140.0, window, cx);
+                    let height = input.content_height;
+                    assert!(
+                        height > viewport + 2.0 * line,
+                        "the draft must wrap: {height}"
+                    );
+                    input.scroll_top = 0.0;
+                    assert_eq!(input.fade_edges(viewport, viewport), (false, true));
+                    input.scroll_top = height - line - viewport;
+                    assert_eq!(input.fade_edges(viewport, viewport), (true, false));
+                    input.scroll_top = height - line - viewport - line;
+                    assert_eq!(input.fade_edges(viewport, viewport), (true, true));
+                });
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn content_resize_retargets_from_visible_height_and_settles() {
         let start = composer_total_height(input_content_height(3));
         let target = composer_total_height(input_content_height(6));
@@ -17214,5 +17802,107 @@ impl Composer {
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
         self.appshots.clear();
         cx.notify();
+    }
+
+    /// Type `draft` with the caret at byte `cursor` and open slash completion
+    /// over synthetic agent command names, as a connected agent would offer.
+    pub fn fixture_offer_commands(
+        &mut self,
+        draft: &str,
+        cursor: usize,
+        names: &[&str],
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.set_text(draft, cx);
+            input.selected_range = cursor..cursor;
+        });
+        self.update_slash(draft, cursor, cx);
+        let rows = names
+            .iter()
+            .map(|name| InvocationCandidate {
+                workspace_command: None,
+                name: (*name).into(),
+                description: "Synthetic agent command".into(),
+                input_hint: None,
+                invocation: harness_proto::invocation::Invocation::Command {
+                    name: (*name).into(),
+                },
+            })
+            .collect();
+        self.slash_cache.insert(self.slash.context.clone(), rows);
+        self.slash.loading = false;
+        self.refilter_slash(cx);
+        cx.notify();
+    }
+
+    /// Accept the highlighted completion row (what Tab emits).
+    pub fn fixture_accept_completion(&mut self, cx: &mut Context<Self>) {
+        self.accept_slash(cx);
+    }
+
+    /// Put `draft` in the input with the caret at its end.
+    pub fn fixture_set_draft(&mut self, draft: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.set_text(draft, cx));
+        cx.notify();
+    }
+
+    /// Reveal the last written grapheme without discarding trailing whitespace.
+    pub fn fixture_set_draft_at_last_glyph(&mut self, draft: &str, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.set_text(draft, cx);
+            let last = draft
+                .trim_end()
+                .grapheme_indices(true)
+                .next_back()
+                .map_or(0, |(at, _)| at);
+            input.move_to(last, cx);
+        });
+        cx.notify();
+    }
+
+    /// Scroll the input by a pixel wheel delta (positive scrolls toward the start).
+    pub fn fixture_scroll_input(
+        &mut self,
+        delta_y: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.on_scroll_wheel(
+                &ScrollWheelEvent {
+                    position: point(px(10.0), px(10.0)),
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(delta_y))),
+                    touch_phase: gpui::TouchPhase::Moved,
+                    modifiers: Default::default(),
+                },
+                window,
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    /// The input's scroll offset and its (top, bottom) scroll fades.
+    pub fn fixture_input_scroll(&self, cx: &App) -> (f32, (bool, bool)) {
+        let input = self.input.read(cx);
+        let visible = input
+            .last_bounds
+            .map_or(0.0, |bounds| f32::from(bounds.size.height));
+        (
+            input.scroll_top,
+            input.fade_edges(
+                input
+                    .settled_viewport_height
+                    .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
+                visible,
+            ),
+        )
+    }
+
+    /// The input's text and caret offset.
+    pub fn fixture_input_text(&self, cx: &App) -> (String, usize) {
+        let input = self.input.read(cx);
+        (input.text().to_string(), input.selected_range.end)
     }
 }

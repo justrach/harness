@@ -3811,7 +3811,7 @@ dependencies = [
 
 [[package]]
 name = "harness"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "clap",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "harness-adapters"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3863,7 +3863,7 @@ dependencies = [
 
 [[package]]
 name = "harness-doc"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "chrono",
  "harness-proto",
@@ -3877,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "harness-engine"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3898,12 +3898,16 @@ dependencies = [
  "loro",
  "notify",
  "nucleo-matcher",
+ "p256",
  "portable-pty",
+ "rand_core 0.6.4",
  "reqwest",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3917,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mcp"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3935,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "harness-mobile"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "async-trait",
  "futures",
@@ -3958,7 +3962,7 @@ dependencies = [
 
 [[package]]
 name = "harness-observe"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "clap",
@@ -3971,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "harness-preview"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3999,7 +4003,7 @@ dependencies = [
 
 [[package]]
 name = "harness-proto"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "chrono",
  "pulldown-cmark",
@@ -4010,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "harness-rpc"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4029,7 +4033,7 @@ dependencies = [
 
 [[package]]
 name = "harness-sync"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -4052,7 +4056,7 @@ dependencies = [
 
 [[package]]
 name = "harness-syntax"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -4086,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "harness-theme"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "clap",
@@ -4101,7 +4105,7 @@ dependencies = [
 
 [[package]]
 name = "harness-ui"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4168,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "harness-update"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "futures",
@@ -4185,7 +4189,7 @@ dependencies = [
 
 [[package]]
 name = "harness-visual"
-version = "0.2.136"
+version = "0.2.146"
 dependencies = [
  "mlua",
  "serde",
@@ -8583,6 +8587,29 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "security-framework"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
+dependencies = [
+ "bitflags 2.13.1",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
+
+[[package]]
+name = "security-framework-sys"
+version = "2.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
 ]
 
 [[package]]

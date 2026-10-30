@@ -1,0 +1,78 @@
+{
+  "comment": "Chat mode (a plain chat, no project) runs on graff and offers only the hosted gateway's auto tiers, in this order and under these names. A tier the catalog doesn't list is left out; an older gateway's auto-medium stands in for Auto (low). `availability` is available when a tier is listed; unavailable when a successful reply proved none is (`catalogLive`: graff's catalog came from the device, not the cache; `harnesses`: the device's agent list from a successful reply, null before one); pending otherwise. A new chat starts on its own last pick if still listed, else the first tier, else nothing (empty id). `note` is the line above the composer while a model is selected; the picker row's note is the tier's `note`. The desktop checks the same rules in harness-ui's `chat_mode`.",
+  "harness": "graff",
+  "tiers": [
+    { "id": "codegraff/auto-low", "fallbackId": "codegraff/auto-medium", "label": "Auto (low)", "note": null, "footerNote": null },
+    { "id": "codegraff/auto-high", "fallbackId": null, "label": "Auto (high)", "note": null, "footerNote": null },
+    { "id": "codegraff/auto-smart", "fallbackId": null, "label": "Auto (smart)", "note": "May incur API costs.", "footerNote": "Auto (smart) may incur API costs." }
+  ],
+  "unavailableNote": "Chat needs the hosted Auto models, which aren't available right now.",
+  "cases": [
+    {
+      "name": "the gateway lists all three among other models",
+      "catalog": ["codegraff/auto-smart", "codegraff/claude-opus-5-5", "codegraff/auto-high", "chatgpt-new/gpt-6.1-sol", "codegraff/auto-low"],
+      "catalogLive": true,
+      "harnesses": ["graff", "codex"],
+      "stored": "",
+      "expect": {
+        "offered": [["codegraff/auto-low", "Auto (low)"], ["codegraff/auto-high", "Auto (high)"], ["codegraff/auto-smart", "Auto (smart)"]],
+        "availability": "available",
+        "selected": "codegraff/auto-low"
+      }
+    },
+    {
+      "name": "the last pick is kept while it is listed",
+      "catalog": ["codegraff/auto-low", "codegraff/auto-high", "codegraff/auto-smart"],
+      "catalogLive": false,
+      "harnesses": null,
+      "stored": "codegraff/auto-smart",
+      "expect": {
+        "offered": [["codegraff/auto-low", "Auto (low)"], ["codegraff/auto-high", "Auto (high)"], ["codegraff/auto-smart", "Auto (smart)"]],
+        "availability": "available",
+        "selected": "codegraff/auto-smart"
+      }
+    },
+    {
+      "name": "an older gateway offers auto-medium as Auto (low) and leaves out what it lacks",
+      "catalog": ["codegraff/auto-medium", "codegraff/auto-high"],
+      "catalogLive": true,
+      "harnesses": ["graff"],
+      "stored": "codegraff/auto-smart",
+      "expect": {
+        "offered": [["codegraff/auto-medium", "Auto (low)"], ["codegraff/auto-high", "Auto (high)"]],
+        "availability": "available",
+        "selected": "codegraff/auto-medium"
+      }
+    },
+    {
+      "name": "graff answered without any tier",
+      "catalog": ["codegraff/claude-opus-5-5"],
+      "catalogLive": true,
+      "harnesses": ["graff"],
+      "stored": "",
+      "expect": { "offered": [], "availability": "unavailable", "selected": "" }
+    },
+    {
+      "name": "graff isn't on the device",
+      "catalog": [],
+      "catalogLive": false,
+      "harnesses": ["codex", "claude-code"],
+      "stored": "",
+      "expect": { "offered": [], "availability": "unavailable", "selected": "" }
+    },
+    {
+      "name": "no reply yet and nothing cached",
+      "catalog": [],
+      "catalogLive": false,
+      "harnesses": null,
+      "stored": "codegraff/auto-high",
+      "expect": { "offered": [], "availability": "pending", "selected": "" }
+    }
+  ],
+  "notes": [
+    { "model": "codegraff/auto-smart", "note": "Auto (smart) may incur API costs." },
+    { "model": "codegraff/auto-high", "note": null },
+    { "model": "codegraff/auto-medium", "note": null },
+    { "model": null, "note": null }
+  ]
+}

@@ -224,7 +224,13 @@ final class HarnessAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        MainActor.assumeIsolated { PushNotifications.shared.install() }
+        MainActor.assumeIsolated {
+            PushNotifications.shared.install()
+            // Crash and hang reports iOS kept for Harness (Settings → Crash reports).
+            CrashReports.shared.start()
+            // Before launch finishes, so items the Watch queued arrive now.
+            WatchBridge.shared.activate()
+        }
         return true
     }
 

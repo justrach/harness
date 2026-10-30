@@ -6,6 +6,8 @@ use harness_proto::ToolCall;
 
 mod archive_edges;
 mod gesture_edges;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod link_owner;
 
 /// Keep the real Shell and peer-pane capture handlers, transcript, markdown and
 /// tool controls, without booting an engine or rendering unrelated chrome.
@@ -18,6 +20,7 @@ impl Render for InteractionPanes {
             let Some(split) = shell.chat_split.as_ref() else {
                 // The split closed: one ordinary transcript pane remains.
                 return div()
+                    .debug_selector(|| "peer-column".into())
                     .w(px(480.0))
                     .h_full()
                     .flex()

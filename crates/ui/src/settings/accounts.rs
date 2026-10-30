@@ -399,6 +399,10 @@ pub struct AccountsPage {
     codegraff_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     poll_task: Option<Task<()>>,
+    browse: Entity<crate::settings::browse_link::BrowseLinkCard>,
+    /// Fixture only: the page as it was before the browse card.
+    #[cfg(feature = "appshots-fixture")]
+    hide_browse: bool,
     _observe: Subscription,
     _code_events: Subscription,
 }
@@ -407,6 +411,8 @@ impl AccountsPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         let code_input = cx.new(|cx| ComposerInput::new("Paste the authorization code", cx));
+        let browse =
+            cx.new(|cx| crate::settings::browse_link::BrowseLinkCard::new(state.clone(), cx));
         let code_events = cx.subscribe(&code_input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 this.submit_code(cx);
@@ -445,6 +451,9 @@ impl AccountsPage {
             codegraff_task: None,
             action_task: None,
             poll_task: None,
+            browse,
+            #[cfg(feature = "appshots-fixture")]
+            hide_browse: false,
             _observe: observe,
             _code_events: code_events,
         };
@@ -1646,6 +1655,21 @@ impl AccountsPage {
             })
             .ok();
         }));
+        cx.notify();
+    }
+
+    /// browse Connected apps QA: the card in a made-up state, or hidden.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_browse_link(
+        &mut self,
+        status: Option<crate::settings::browse_link::BrowseLinkStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        self.hide_browse = status.is_none();
+        if let Some(status) = status {
+            self.browse
+                .update(cx, |card, cx| card.fixture_status(status, cx));
+        }
         cx.notify();
     }
 
@@ -3247,6 +3271,11 @@ impl Render for AccountsPage {
         };
 
         let scrollbar = popover::rail(self, "accounts-page-scrollbar", &theme, cx);
+        // browse runs on this Mac and pairs with this device's engine only:
+        // the card would misstate another device's pairing.
+        let show_browse = cfg!(target_os = "macos") && !self.target_is_remote(cx);
+        #[cfg(feature = "appshots-fixture")]
+        let show_browse = show_browse && !self.hide_browse;
         div()
             .id("accounts-page-host")
             .relative()
@@ -3308,6 +3337,7 @@ impl Render for AccountsPage {
                                         })),
                                 )
                             })
+                            .when(show_browse, |el| el.child(self.browse.clone()))
                             .child(self.render_codegraff_section(&theme, now, cx))
                             .child(self.render_chatgpt_section(&theme, cx))
                             .child(self.render_graff_logins_section(&theme, cx))

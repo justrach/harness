@@ -14,6 +14,8 @@ each app runs its own test against the same files, so neither can drift without 
 | `vectors/registry-projection.json` | which registry rows become devices, projects, sessions and pins, with their defaults and order | `ParityTests.swift` (through `WorkspaceStore`) | `ParityTest.kt` (through the native core, `crates/mobile`) |
 | `vectors/transcript-decode.json` | how a session doc's messages, parts and queue rows decode, and which ones are dropped | `ParityTests.swift` (through `SessionStore`) | `ParityTest.kt` (through the native core) |
 | `vectors/cloud-sandbox.json` | how a cloud sandbox list reads: row titles, details and buttons, hourly rates, size choices, the running summary, and which size a create names (the desktop checks it too, in `harness-ui`'s `codegraff_sandboxes`; its gateway half, from sign-in and call plans to error sentences, runs in the engine, which the phone reaches through one of its computers) | `ParityTests.swift` | not yet |
+| `vectors/chat-mode.json` | chat mode's auto tiers (order, names, the older-gateway stand-in), when a chat can start, the model a new chat starts on, and the cost and unavailable notes (the desktop checks the same rules in `harness-ui`'s `chat_mode`) | `ParityTests.swift` | `ParityTest.kt` |
+| `vectors/composer-stop.json` | how long the composer ignores Stop after a question panel gives way to it (the desktop checks it too, in `harness-ui`'s `composer`) | `ParityTests.swift` | `ParityTest.kt` |
 | `perf-contract.json` | the operations the performance monitor times, their budgets, and the Performance page copy | `ParityTests.swift` | `ParityTest.kt` |
 | `apps/ios/Harness/Theme/themes.json` | the theme catalog (Android bundles a copy) | `ThemeStoreTests.swift` | `ThemeCatalogTest.kt` |
 

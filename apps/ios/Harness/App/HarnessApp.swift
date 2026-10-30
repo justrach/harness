@@ -8,11 +8,15 @@ import SwiftUI
 struct HarnessApp: App {
     /// APNs registration and notification taps (PushNotifications).
     @UIApplicationDelegateAdaptor(HarnessAppDelegate.self) private var appDelegate
-    @State private var model = AppModel()
+    @State private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         Perf.shared.startWatching()
+        let model = AppModel()
+        _model = State(initialValue: model)
+        // A Watch message can launch the app with no window to restore from.
+        WatchBridge.shared.attach(model)
     }
 
     var body: some Scene {

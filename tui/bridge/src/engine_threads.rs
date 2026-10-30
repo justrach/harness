@@ -329,6 +329,7 @@ async fn thread_start(conn: &Arc<Conn>, engine: &Arc<Engine>, params: &Value) ->
         reasoning: None,
         model_options: Default::default(),
         sandbox: SandboxLevel::WorkspaceWrite,
+        chat_mode: false,
     };
     let mut mutate = json!({
         "op": "createChat",
@@ -472,6 +473,7 @@ async fn thread_settings_update(conn: &Arc<Conn>, engine: &Engine, params: &Valu
             reasoning: None,
             model_options: Default::default(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            chat_mode: false,
         });
         config.harness = harness;
         config.model = Some(model.clone());

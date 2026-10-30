@@ -724,8 +724,56 @@ pub fn relaunch_app_after_exit_with(bundle: &Path, relaunch: Relaunch) {
 // Engine-side checker
 // ---------------------------------------------------------------------------
 
-/// What the engine reports over the `UpdateStatus` stream. Version facts only —
-/// download/apply progress is owned by whoever drives the update (UI or CLI).
+/// A host's update path. Desktop installs keep their UI's restart safeguards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HostUpdateMode {
+    Managed,
+    Desktop,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HostUpdatePhase {
+    #[default]
+    Idle,
+    Checking,
+    Downloading,
+    WaitingForIdle,
+    Restarting,
+    Failed,
+}
+
+/// Additive capability/status data: absent on older hosts, never inferred from
+/// their platform or version. In particular, only Managed accepts QueueUpdate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostUpdateStatus {
+    pub mode: HostUpdateMode,
+    pub automatic: bool,
+    pub phase: HostUpdatePhase,
+}
+
+impl HostUpdateStatus {
+    fn new(install: &InstallKind, automatic: bool) -> Self {
+        let mode = if matches!(install, InstallKind::Managed { .. }) {
+            HostUpdateMode::Managed
+        } else if install.supports_desktop_update() {
+            HostUpdateMode::Desktop
+        } else {
+            HostUpdateMode::Manual
+        };
+        Self {
+            mode,
+            automatic,
+            phase: HostUpdatePhase::Idle,
+        }
+    }
+}
+
+/// What the engine reports over the `UpdateStatus` stream. Desktop download
+/// progress remains owned by its UI; managed-host progress is included here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
@@ -739,6 +787,8 @@ pub struct UpdateStatus {
     pub checked_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostUpdateStatus>,
 }
 
 impl UpdateStatus {
@@ -749,6 +799,7 @@ impl UpdateStatus {
             update_available: false,
             checked_at: None,
             error: None,
+            host: None,
         }
     }
 }
@@ -868,6 +919,9 @@ pub struct Updater {
     status_tx: Arc<watch::Sender<UpdateStatus>>,
     check_tx: Arc<watch::Sender<u64>>,
     quiescent: Option<QuiescentCheck>,
+    install: InstallKind,
+    automatic: bool,
+    requested: Arc<std::sync::atomic::AtomicBool>,
     /// Flips to true exactly once; the check loop selects against it so
     /// cancellation lands at any await point (no tokio-util in this crate).
     shutdown_tx: Arc<watch::Sender<bool>>,
@@ -877,7 +931,18 @@ pub struct Updater {
 impl Updater {
     /// Spawn the check loop (must run on a tokio runtime).
     pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>) -> Self {
-        let (status_tx, _) = watch::channel(UpdateStatus::initial());
+        Self::spawn_for_install(edge_url, quiescent, detect_install(), auto_update_enabled())
+    }
+
+    fn spawn_for_install(
+        edge_url: String,
+        quiescent: Option<QuiescentCheck>,
+        install: InstallKind,
+        automatic: bool,
+    ) -> Self {
+        let mut initial = UpdateStatus::initial();
+        initial.host = Some(HostUpdateStatus::new(&install, automatic));
+        let (status_tx, _) = watch::channel(initial);
         let (check_tx, _) = watch::channel(0);
         let (shutdown_tx, _) = watch::channel(false);
         let updater = Self {
@@ -885,6 +950,9 @@ impl Updater {
             status_tx: Arc::new(status_tx),
             check_tx: Arc::new(check_tx),
             quiescent,
+            install,
+            automatic,
+            requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shutdown_tx: Arc::new(shutdown_tx),
             check_task: Arc::new(std::sync::Mutex::new(None)),
         };
@@ -898,7 +966,7 @@ impl Updater {
     /// not keep polling `{edge}/releases` (or auto-applying) in the background.
     /// Idempotent, and callable from any clone.
     pub async fn shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         let task = self
             .check_task
             .lock()
@@ -920,6 +988,41 @@ impl Updater {
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
+    /// Explicitly request one managed-host update, without changing the
+    /// automatic-update preference. The checker owns the work after RPC returns;
+    /// repeated requests coalesce and never bypass the active-session gate.
+    pub fn queue_update(&self) -> anyhow::Result<()> {
+        if !matches!(self.install, InstallKind::Managed { .. }) {
+            bail!(
+                "this device cannot queue a remote update; update its desktop app or package locally"
+            );
+        }
+        if *self.shutdown_tx.borrow() {
+            bail!("the updater is shutting down");
+        }
+        self.requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.check_now();
+        Ok(())
+    }
+
+    fn phase(&self, phase: HostUpdatePhase) {
+        self.status_tx.send_modify(|status| {
+            if let Some(host) = &mut status.host {
+                host.phase = phase;
+            }
+        });
+    }
+
+    fn update_failed(&self, error: anyhow::Error) {
+        self.status_tx.send_modify(|status| {
+            status.error = Some(format!("{error:#}"));
+            if let Some(host) = &mut status.host {
+                host.phase = HostUpdatePhase::Failed;
+            }
+        });
+    }
+
     fn quiescent_now(&self) -> bool {
         self.quiescent.as_ref().is_none_or(|check| check())
     }
@@ -927,7 +1030,7 @@ impl Updater {
     async fn check_loop(&self) {
         // The installed app and managed server installs follow Harness's
         // release feed; source builds and copied binaries never check.
-        if !cfg!(test) && !detect_install().checks_releases() {
+        if !cfg!(test) && !self.install.checks_releases() {
             return;
         }
         let mut shutdown = self.shutdown_tx.subscribe();
@@ -944,15 +1047,19 @@ impl Updater {
                 }
                 let mut failures = 0u32;
                 loop {
-                    let ok = self.check_once().await;
-                    failures = if ok { 0 } else { failures.saturating_add(1) };
-                    if ok
-                        && self.status_tx.borrow().update_available
-                        && auto_update_enabled()
-                        && let InstallKind::Managed { .. } = detect_install()
+                    let mut ok = self.check_once().await;
+                    if ok && self.status_tx.borrow().update_available
+                        && (self.automatic || self.requested.load(std::sync::atomic::Ordering::Acquire))
+                        && matches!(self.install, InstallKind::Managed { .. })
                     {
-                        self.auto_apply_when_idle().await;
+                        if let Err(error) = self.auto_apply_when_idle().await {
+                            self.update_failed(error);
+                            ok = false;
+                        }
+                    } else if ok {
+                        self.requested.store(false, std::sync::atomic::Ordering::Release);
                     }
+                    failures = if ok { 0 } else { failures.saturating_add(1) };
                     let due = now_ms()
                         .saturating_add(next_check_delay(ok, failures).as_millis() as i64);
                     // Short ticks against the wall clock, not one long sleep:
@@ -972,45 +1079,60 @@ impl Updater {
         }
     }
 
-    /// Sessions must never die to an update: pre-stage the download now
-    /// (harmless while busy), wait for a quiet window (no live runs, no open
-    /// terminals), then apply — which re-fetches the manifest (so a long defer
-    /// lands on whatever is newest) and reuses the staged dir, keeping the
-    /// idle→restart gap to well under a second.
-    async fn auto_apply_when_idle(&self) {
-        if let InstallKind::Managed { app_root } = detect_install() {
-            match fetch_latest(&self.edge_url).await {
-                Ok(manifest) if version_newer(&manifest.version, current_version()) => {
-                    if let Err(err) = stage_headless(&self.edge_url, &manifest, &app_root).await {
-                        tracing::warn!(error = %err, "auto-update staging failed");
-                        return;
-                    }
-                }
-                Ok(_) => return,
-                Err(err) => {
-                    tracing::warn!(error = %err, "auto-update staging fetch failed");
-                    return;
-                }
+    /// Stage while busy, then install that verified release only once idle.
+    /// There is no network await between the final activity check and restart:
+    /// a newer release appearing during a long defer can wait for the next check.
+    /// The enclosing check_loop select cancels staging and waiting on shutdown.
+    async fn auto_apply_when_idle(&self) -> anyhow::Result<()> {
+        let InstallKind::Managed { app_root } = &self.install else {
+            bail!("not a managed install");
+        };
+        self.phase(HostUpdatePhase::Downloading);
+        let manifest = fetch_latest(&self.edge_url).await?;
+        self.status_tx.send_modify(|status| {
+            status.latest_version = Some(manifest.version.clone());
+            status.update_available = version_newer(&manifest.version, current_version());
+        });
+        if !version_newer(&manifest.version, current_version()) {
+            self.phase(HostUpdatePhase::Idle);
+            self.requested
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Ok(());
+        }
+        stage_headless(&self.edge_url, &manifest, app_root).await?;
+        self.wait_until_idle().await;
+        apply_headless(app_root, &manifest.version)?;
+        self.phase(HostUpdatePhase::Restarting);
+        self.requested
+            .store(false, std::sync::atomic::Ordering::Release);
+        if supervised() {
+            match restart_service() {
+                Ok(()) => return Ok(()),
+                Err(error) => tracing::warn!(%error, "service restart failed; restarting in place"),
             }
         }
-        let mut deferred = false;
-        while !self.quiescent_now() {
-            if !deferred {
-                deferred = true;
-                tracing::info!("auto-update deferred: sessions or terminals active");
+        reexec_tx().send_replace(true);
+        Ok(())
+    }
+
+    async fn wait_until_idle(&self) {
+        loop {
+            self.phase(HostUpdatePhase::WaitingForIdle);
+            while !self.quiescent_now() {
+                tokio::time::sleep(IDLE_RECHECK).await;
             }
-            tokio::time::sleep(IDLE_RECHECK).await;
-        }
-        match self.apply().await {
-            Ok(version) => {
-                tracing::info!(%version, "auto-update applied; restarting")
+            // Give a just-starting run time to register; also lets the queue
+            // RPC flush. Check again after the wait, not before a download.
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            if self.quiescent_now() {
+                return;
             }
-            Err(err) => tracing::warn!(error = %err, "auto-update failed"),
         }
     }
 
     /// One check; returns false on fetch failure (retry sooner).
     async fn check_once(&self) -> bool {
+        self.phase(HostUpdatePhase::Checking);
         match fetch_latest(&self.edge_url).await {
             Ok(manifest) => {
                 let status = UpdateStatus {
@@ -1019,6 +1141,7 @@ impl Updater {
                     latest_version: Some(manifest.version),
                     checked_at: Some(now_ms()),
                     error: None,
+                    host: Some(HostUpdateStatus::new(&self.install, self.automatic)),
                 };
                 if status.update_available {
                     tracing::info!(
@@ -1032,8 +1155,7 @@ impl Updater {
             }
             Err(err) => {
                 tracing::debug!(error = %err, "update check failed");
-                self.status_tx
-                    .send_modify(|s| s.error = Some(format!("{err:#}")));
+                self.update_failed(err);
                 false
             }
         }
@@ -1101,6 +1223,79 @@ mod tests {
         assert!(!desktop_auto_update_from(Some(" OFF ")));
         assert!(!desktop_auto_update_from(Some("false")));
         assert!(!desktop_auto_update_from(Some("no")));
+    }
+
+    #[test]
+    fn old_hosts_do_not_advertise_remote_update_capability() {
+        let old: UpdateStatus = serde_json::from_value(serde_json::json!({
+            "currentVersion": "0.2.132", "updateAvailable": true
+        }))
+        .unwrap();
+        assert!(old.host.is_none());
+        assert_eq!(
+            HostUpdateStatus::new(&InstallKind::Unmanaged, true).mode,
+            HostUpdateMode::Manual
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_updates_are_managed_only_coalesced_and_respect_shutdown() {
+        let manual = Updater::spawn_for_install(
+            "http://127.0.0.1:1".into(),
+            None,
+            InstallKind::Unmanaged,
+            false,
+        );
+        assert!(manual.queue_update().is_err());
+        manual.shutdown().await;
+        let dir = tempfile::tempdir().unwrap();
+        let managed = Updater::spawn_for_install(
+            "http://127.0.0.1:1".into(),
+            Some(Arc::new(|| false)),
+            InstallKind::Managed {
+                app_root: dir.path().to_path_buf(),
+            },
+            false,
+        );
+        managed.queue_update().unwrap();
+        managed.queue_update().unwrap();
+        assert!(managed.requested.load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            !managed.automatic,
+            "one explicit update must not change the opt-out"
+        );
+        managed.shutdown().await;
+        assert!(managed.queue_update().is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn queued_update_rechecks_activity_after_the_quiet_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let checks = Arc::new(AtomicUsize::new(0));
+        let probe = checks.clone();
+        let updater = Updater::spawn_for_install(
+            "http://127.0.0.1:1".into(),
+            Some(Arc::new(move || probe.fetch_add(1, Ordering::SeqCst) == 0)),
+            InstallKind::Unmanaged,
+            false,
+        );
+        // Initially idle; activity begins during the final delay. No install
+        // or restart may follow that stale first observation.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(900),
+                updater.wait_until_idle()
+            )
+            .await
+            .is_err()
+        );
+        assert!(checks.load(Ordering::SeqCst) >= 2);
+        assert_eq!(
+            updater.watch().borrow().host.as_ref().unwrap().phase,
+            HostUpdatePhase::WaitingForIdle
+        );
+        updater.shutdown().await;
     }
 
     #[test]

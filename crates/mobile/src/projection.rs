@@ -103,6 +103,7 @@ fn chat_config(value: &Value) -> Option<ChatConfigRecord> {
             })
             .unwrap_or_default(),
         sandbox: text("sandbox"),
+        chat_mode: c.get("chatMode").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 

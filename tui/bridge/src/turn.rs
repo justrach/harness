@@ -553,6 +553,7 @@ async fn drive(
         steering,
         interrupt: token,
         origin: None,
+        mcp_servers: Vec::new(),
     };
     let mut stream = match harness.run(request, controls).await {
         Ok(stream) => stream,

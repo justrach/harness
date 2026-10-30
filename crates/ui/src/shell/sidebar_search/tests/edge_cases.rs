@@ -1,6 +1,9 @@
 use super::*;
 
-fn open_search(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> Entity<ComposerInput> {
+pub(super) fn open_search(
+    shell: &Entity<Shell>,
+    cx: &mut gpui::VisualTestContext,
+) -> Entity<ComposerInput> {
     let bounds = cx.debug_bounds("sidebar-search-toggle").unwrap();
     cx.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
@@ -9,7 +12,7 @@ fn open_search(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> Entit
     })
 }
 
-fn query(input: &Entity<ComposerInput>, text: &str, cx: &mut gpui::VisualTestContext) {
+pub(super) fn query(input: &Entity<ComposerInput>, text: &str, cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| {
         window.focus(&input.focus_handle(cx), cx);
         input.update(cx, |input, cx| input.set_text(text, cx));

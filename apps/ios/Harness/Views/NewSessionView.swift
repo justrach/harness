@@ -17,6 +17,8 @@ struct NewSessionView: View {
     @AppStorage("newSessionHarness") private var harness = "claude-code"
     @AppStorage("newSessionModel") private var storedModel = ""
     @AppStorage("newSessionReasoning") private var storedReasoning = ""
+    /// Chat mode keeps its own pick, so it never changes the coding defaults.
+    @AppStorage("newChatModel") private var storedChatModel = ""
 
     @State private var draft: String
     @State private var selectedHostId: String?
@@ -63,6 +65,9 @@ struct NewSessionView: View {
         if case .projectless = destination, let selectedHostId {
             return .projectless(deviceId: selectedHostId)
         }
+        if case .chat = destination, let selectedHostId {
+            return .chat(deviceId: selectedHostId)
+        }
         return destination
     }
 
@@ -76,6 +81,7 @@ struct NewSessionView: View {
         switch effectiveDestination {
         case .project: return space?.displayName ?? "Project unavailable"
         case .projectless: return "No project"
+        case .chat: return "Chat"
         }
     }
 
@@ -83,19 +89,51 @@ struct NewSessionView: View {
         catalogDevice == deviceId ? (liveHarnesses ?? []) : []
     }
 
+    private var isChat: Bool { destination.isChat }
+
+    /// Projectless sessions and chats both pick their host device here.
+    private var isProjectlessLike: Bool {
+        switch destination {
+        case .projectless, .chat: return true
+        case .project: return false
+        }
+    }
+
+    /// The agent this draft runs on: graff in chat mode, else the picked one.
+    private var runHarness: String { isChat ? ChatMode.harness : harness }
+
     private var scopedCatalogs: [String: [ModelInfo]] {
         catalogDevice == deviceId ? catalogs : [:]
     }
 
-    private var models: [ModelInfo] { scopedCatalogs[harness] ?? [] }
+    /// A chat offers the three auto tiers and nothing else.
+    private var models: [ModelInfo] {
+        if isChat { return ChatMode.models(from: scopedCatalogs[ChatMode.harness] ?? []) }
+        return scopedCatalogs[harness] ?? []
+    }
+
+    /// Whether this device's graff lists any of the auto tiers.
+    private var chatAvailability: ChatMode.Availability {
+        guard catalogDevice == deviceId else { return .pending }
+        return ChatMode.availability(catalog: scopedCatalogs[ChatMode.harness] ?? [],
+                                     liveHarnesses: confirmedHarnesses,
+                                     liveModels: confirmedCatalogs[ChatMode.harness])
+    }
 
     private var selectionUnavailable: Bool {
         guard catalogDevice == deviceId else { return false }
+        if isChat { return chatAvailability == .unavailable }
         return HarnessCatalog.selectionUnavailable(harness: harness, modelId: selectedModel.id,
             liveHarnesses: confirmedHarnesses, liveModels: confirmedCatalogs[harness])
     }
 
     private var selectedModel: ModelInfo {
+        if isChat {
+            // Its own last pick, so a chat never changes the coding defaults.
+            return ChatMode.selectedModel(storedId: storedChatModel,
+                                          catalog: scopedCatalogs[ChatMode.harness] ?? [],
+                                          loading: catalogsLoading)
+        }
         if storedModel.isEmpty, models.isEmpty {
             return ModelInfo(id: "", label: catalogsLoading ? "Loading models…" : "Select model",
                              description: nil, reasoningLevels: [])
@@ -141,7 +179,7 @@ struct NewSessionView: View {
                     HarnessMark()
                         .frame(width: 84, height: 84)
                         .opacity(0.22)
-                    Text("What are we building?")
+                    Text(isChat ? "What's on your mind?" : "What are we building?")
                         .font(Theme.sans(15))
                         .foregroundStyle(Theme.textFaint)
                 }
@@ -153,7 +191,7 @@ struct NewSessionView: View {
                 hostNotice(notice, deviceId: deviceId)
             }
 
-            if case .projectless = destination {
+            if isProjectlessLike {
                 Button {
                     focused = false
                     showHostPicker = true
@@ -165,6 +203,14 @@ struct NewSessionView: View {
                 .accessibilityIdentifier("session-host")
                 .disabled(busy)
                 .padding(.bottom, 8)
+            }
+
+            if isChat, let note = ChatMode.note(for: selectedModel.id) {
+                Text(note)
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.textMuted)
+                    .accessibilityIdentifier("chat-mode-note")
+                    .padding(.bottom, 6)
             }
 
             // Where-it-runs scope row (checkout + base ref), left-aligned
@@ -267,8 +313,8 @@ struct NewSessionView: View {
                 confirmedCatalogs = [:]
                 optionSelections = [:]
                 catalogDevice = deviceId
-                if let cached = DocDisk.loadModels(deviceId: deviceId, harness: harness), !cached.isEmpty {
-                    catalogs[harness] = cached
+                if let cached = DocDisk.loadModels(deviceId: deviceId, harness: runHarness), !cached.isEmpty {
+                    catalogs[runHarness] = cached
                 }
             }
             // Reconnect and explicit retry preserve rows/picks. Presence is
@@ -300,15 +346,26 @@ struct NewSessionView: View {
             catalogsLoading = false
         }
         .sheet(isPresented: $showPicker) {
-            ModelPickerSheet(harness: $harness, modelId: Binding(
-                get: { selectedModel.id },
-                set: { storedModel = $0 }
-            ), reasoning: Binding(
-                get: { reasoning },
-                set: { storedReasoning = $0 ?? "" }
-            ), harnesses: harnesses, catalogs: scopedCatalogs,
-               catalogsLoading: catalogsLoading || catalogDevice != deviceId,
-               onRetry: { catalogRetry += 1 })
+            if isChat {
+                // A chat offers the three auto tiers and nothing else.
+                ModelPickerSheet(harness: .constant(ChatMode.harness), modelId: Binding(
+                    get: { selectedModel.id },
+                    set: { storedChatModel = $0 }
+                ), reasoning: .constant(nil), lockedHarness: true,
+                   catalogs: models.isEmpty && chatAvailability == .pending ? [:] : [ChatMode.harness: models],
+                   catalogsLoading: chatAvailability == .pending,
+                   onRetry: { catalogRetry += 1 })
+            } else {
+                ModelPickerSheet(harness: $harness, modelId: Binding(
+                    get: { selectedModel.id },
+                    set: { storedModel = $0 }
+                ), reasoning: Binding(
+                    get: { reasoning },
+                    set: { storedReasoning = $0 ?? "" }
+                ), harnesses: harnesses, catalogs: scopedCatalogs,
+                   catalogsLoading: catalogsLoading || catalogDevice != deviceId,
+                   onRetry: { catalogRetry += 1 })
+            }
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(reasoning: Binding(
@@ -348,7 +405,8 @@ struct NewSessionView: View {
     private var composer: some View {
         VStack(spacing: 6) {
             if selectionUnavailable {
-                Text("Selected agent or model is unavailable on this device. Choose another model.")
+                Text(isChat ? ChatMode.unavailableNote
+                     : "Selected agent or model is unavailable on this device. Choose another model.")
                     .font(Theme.sans(12))
                     .foregroundStyle(Theme.warning)
                     .padding(.horizontal, 24)
@@ -373,7 +431,7 @@ struct NewSessionView: View {
             }
             ComposerShell(
                 draft: $draft,
-                placeholder: "Do anything…",
+                placeholder: isChat ? "Ask anything…" : "Do anything…",
                 sendEnabled: deviceId != nil && !selectedModel.id.isEmpty && !selectionUnavailable
                     && (refsScope == nil || refCatalog.scope == refsScope),
                 showStop: false,
@@ -391,7 +449,7 @@ struct NewSessionView: View {
             ) {
                 // Model + trait chips, split like the desktop's footer pickers
                 // (they ride right of the shell's attach button).
-                ComposerChip(label: selectedModel.label, badgeHarness: harness) {
+                ComposerChip(label: selectedModel.label, badgeHarness: runHarness) {
                     focused = false
                     showPicker = true
                 }
@@ -590,9 +648,9 @@ struct NewSessionView: View {
         let space = space
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
-        let config = ChatConfig(harness: harness, model: selectedModel.id,
+        let config = ChatConfig(harness: runHarness, model: selectedModel.id,
                                 reasoning: reasoning, modelOptions: resolvedModelOptions,
-                                sandbox: "workspace-write")
+                                sandbox: "workspace-write", chatMode: isChat ? true : nil)
         Task { @MainActor in
             var cwd: String?
             let branch = space == nil ? nil : selectedRef

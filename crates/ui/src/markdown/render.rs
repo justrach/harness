@@ -112,10 +112,18 @@ pub struct MediaUi {
     pub image: Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>,
 }
 
-pub struct DiagramUi {
-    pub body: AnyElement,
-    pub show_source: bool,
-    pub toggle_source: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+/// What a surface shows for one Mermaid fence.
+pub enum DiagramUi {
+    /// The diagram (or the surface's placeholder for it), with a toggle to
+    /// the source and back.
+    Diagram {
+        body: AnyElement,
+        show_source: bool,
+        toggle_source: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    },
+    /// No diagram to show (still rendering, or it failed): the ordinary code
+    /// block, with `note` under it when there is something to say.
+    Source { note: Option<SharedString> },
 }
 
 /// Copy-button wiring for one row's code blocks: the handler writes the code
@@ -2004,7 +2012,7 @@ fn sole_workspace_file_link(runs: &[InlineRun], workspace_root: &str) -> Option<
             _ => {}
         }
     }
-    crate::workspace_links::resolve_workspace_file_link(target?, workspace_root)
+    crate::workspace_links::resolve_markdown_file_link(target?, workspace_root)
         .map(|link| link.path)
 }
 
@@ -2082,16 +2090,45 @@ fn render_code_block(
     if language.is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
         if let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref()) {
             let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
-            let diagram = handler(code, frame_id.clone(), theme);
-            let toggle = diagram.toggle_source.clone();
+            let (body, show_source, toggle) = match handler(code, frame_id.clone(), theme) {
+                DiagramUi::Diagram {
+                    body,
+                    show_source,
+                    toggle_source,
+                } => (body, show_source, toggle_source),
+                DiagramUi::Source { note } => {
+                    let source = render_code_block_source(
+                        language, code, top_ix, ix, opts, theme, highlight,
+                    );
+                    let Some(note) = note else {
+                        return source;
+                    };
+                    return div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(source)
+                        .child(
+                            div()
+                                .debug_selector(|| "mermaid-note".into())
+                                .px(px(CODE_PADDING_X))
+                                .text_size(px(11.0))
+                                .text_color(theme.text_muted)
+                                .child(note),
+                        )
+                        .into_any_element();
+                }
+            };
             let toggle_action = code_icon_action(
                 format!("{frame_id}-source-toggle").into(),
-                if diagram.show_source {
+                if show_source {
                     "Show diagram"
                 } else {
                     "Show source"
                 },
-                if diagram.show_source {
+                if show_source {
                     crate::icons::EYE
                 } else {
                     crate::icons::FILE_CODE
@@ -2099,7 +2136,7 @@ fn render_code_block(
                 Rc::new(move |window, cx| toggle(window, cx)),
                 theme,
             );
-            if diagram.show_source {
+            if show_source {
                 return render_code_block_source_with_actions(
                     language,
                     code,
@@ -2113,8 +2150,7 @@ fn render_code_block(
             }
             let mut actions = vec![toggle_action];
             actions.extend(code_copy_button(code, ix, opts, theme));
-            return code_block_frame(frame_id, language, actions, diagram.body, theme)
-                .into_any_element();
+            return code_block_frame(frame_id, language, actions, body, theme).into_any_element();
         }
     }
     render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
@@ -2128,8 +2164,10 @@ fn code_icon_action(
     theme: &Theme,
 ) -> AnyElement {
     let fade_key = id.to_string();
+    let selector = id.clone();
     div()
         .id(id)
+        .debug_selector(move || selector.to_string())
         .size(px(CODE_ACTION_SIZE))
         .rounded(px(6.0))
         .flex()

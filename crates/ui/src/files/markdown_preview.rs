@@ -638,10 +638,7 @@ impl MarkdownPreview {
                 let palette = palette.clone();
                 let result = cx
                     .background_executor()
-                    .spawn(async move {
-                        let svg = crate::markdown::mermaid::render(&source, &palette)?;
-                        crate::image_media::decode_image("image/svg+xml", svg.into_bytes())
-                    })
+                    .spawn(async move { crate::markdown::diagram::render_media(&source, &palette) })
                     .await;
                 if this
                     .update(cx, |view, cx| {
@@ -915,21 +912,13 @@ impl MarkdownPreview {
         name: String,
         weak: gpui::WeakEntity<Self>,
     ) -> AnyElement {
-        use gpui::StyledImage as _;
         let preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
         let source = loaded.clone();
-        div()
-            .id(id)
-            .w_full()
-            .max_w(px(loaded.width))
-            .mx_auto()
-            .max_h(px(480.0))
-            .aspect_ratio(loaded.width / loaded.height)
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label("Enlarge image")
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
+        crate::markdown::diagram::fitted_media(
+            loaded,
+            id,
+            "Enlarge image".into(),
+            move |window, cx| {
                 let _ = weak.update(cx, |view, cx| {
                     view.close_media_preview(cx);
                     view.zoom_source = Some(source.clone());
@@ -938,13 +927,8 @@ impl MarkdownPreview {
                     window.focus(&view.preview_focus, cx);
                     cx.notify();
                 });
-            })
-            .child(
-                gpui::img(loaded.image.clone())
-                    .size_full()
-                    .object_fit(gpui::ObjectFit::Contain),
-            )
-            .into_any_element()
+            },
+        )
     }
 
     #[cfg(test)]
@@ -1087,7 +1071,7 @@ impl MarkdownPreview {
                                 })
                                 .into_any_element(),
                         };
-                        render::DiagramUi {
+                        render::DiagramUi::Diagram {
                             body,
                             show_source: source_shown,
                             toggle_source: Rc::new(move |_, cx| {

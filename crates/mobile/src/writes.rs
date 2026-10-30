@@ -23,6 +23,8 @@ pub struct NewChatConfig {
     pub reasoning: Option<String>,
     pub model_options: HashMap<String, String>,
     pub sandbox: Option<String>,
+    /// A plain chat (proto `ChatConfig.chat_mode`). Written only when true.
+    pub chat_mode: bool,
 }
 
 fn config_value(config: &NewChatConfig, keep_options: Option<&Map<String, Value>>) -> Value {
@@ -49,6 +51,9 @@ fn config_value(config: &NewChatConfig, keep_options: Option<&Map<String, Value>
     out.insert("modelOptions".into(), Value::Object(options));
     if let Some(sandbox) = &config.sandbox {
         out.insert("sandbox".into(), json!(sandbox));
+    }
+    if config.chat_mode {
+        out.insert("chatMode".into(), json!(true));
     }
     Value::Object(out)
 }
@@ -385,6 +390,48 @@ mod tests {
                 "spaceId": "s1", "branch": "main",
                 "config": {"harness": "graff", "model": "m", "modelOptions": {}},
             })
+        );
+    }
+
+    /// Chat mode rides the config: written only when on, read back by the
+    /// projection, and kept through an edit made on the phone.
+    #[test]
+    fn chat_mode_round_trips_through_the_config() {
+        let mut doc = RegistryDoc::new("phone");
+        let chat = NewChatConfig {
+            harness: "graff".into(),
+            model: Some("codegraff/auto-low".into()),
+            chat_mode: true,
+            ..Default::default()
+        };
+        create_chat(&mut doc, "c1", "mac", None, "~", &chat, None, 42);
+        let config = doc.overlay_row(KIND_CHATS, "c1").unwrap().fields["config"].clone();
+        assert_eq!(config["chatMode"], json!(true));
+        let read = crate::projection::chats(&doc);
+        assert!(read[0].config.as_ref().unwrap().chat_mode);
+
+        let code = NewChatConfig {
+            harness: "codex".into(),
+            ..Default::default()
+        };
+        create_chat(&mut doc, "c2", "mac", None, "~", &code, None, 43);
+        let config = doc.overlay_row(KIND_CHATS, "c2").unwrap().fields["config"].clone();
+        assert!(
+            config.get("chatMode").is_none(),
+            "omitted on coding sessions"
+        );
+
+        let edit = NewChatConfig {
+            model: Some("codegraff/auto-smart".into()),
+            ..chat
+        };
+        assert!(set_chat_config(&mut doc, "c1", &edit));
+        let read = crate::projection::chats(&doc);
+        let c1 = read.iter().find(|c| c.id == "c1").unwrap();
+        assert!(c1.config.as_ref().unwrap().chat_mode);
+        assert_eq!(
+            c1.config.as_ref().unwrap().model.as_deref(),
+            Some("codegraff/auto-smart")
         );
     }
 

@@ -63,6 +63,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import harness.codegraff.android.model.StopGuard
 import harness.codegraff.android.theme.opacity
 import harness.codegraff.android.theme.Glyph
 import harness.codegraff.android.theme.GlyphView
@@ -103,6 +104,8 @@ fun ComposerShell(
     /** Hold the expanded layout while a picker sheet is up, so it doesn't flap when the editor blurs. */
     keepExpanded: Boolean = false,
     onStop: () -> Unit = {},
+    /** When a question panel last gave way to this composer: a Stop tap within [StopGuard.GRACE_MS] of it is ignored. */
+    questionClosedAtMs: Long? = null,
     attachments: List<StagedAttachment> = emptyList(),
     onAttach: (() -> Unit)? = null,
     onRemoveAttachment: (String) -> Unit = {},
@@ -123,7 +126,10 @@ fun ComposerShell(
 
     val haptics = rememberHaptics()
     fun sendOrStop() {
-        if (showStop && !hasContent) { haptics.medium(); onStop() } else if (buttonActive) { haptics.light(); onSend() }
+        if (showStop && !hasContent) {
+            if (!StopGuard.allows(System.currentTimeMillis(), questionClosedAtMs)) return
+            haptics.medium(); onStop()
+        } else if (buttonActive) { haptics.light(); onSend() }
     }
 
     @Composable

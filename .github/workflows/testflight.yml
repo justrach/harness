@@ -215,15 +215,42 @@ jobs:
       - name: Archive build
         if: inputs.ci_certificates != 'list'
         working-directory: apps/ios
+        shell: bash
         run: |
-          xcodebuild -project Harness.xcodeproj -scheme Harness \
-            -configuration Release -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/Harness.xcarchive" archive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$AC_KEY_PATH" \
-            -authenticationKeyID "$AC_API_KEY_ID" \
-            -authenticationKeyIssuerID "$AC_API_ISSUER_ID" \
-            CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+          set -o pipefail
+          log="$RUNNER_TEMP/archive.log"
+          for attempt in 1 2 3; do
+            if xcodebuild -project Harness.xcodeproj -scheme Harness \
+              -configuration Release -destination 'generic/platform=iOS' \
+              -archivePath "$RUNNER_TEMP/Harness.xcarchive" archive \
+              -allowProvisioningUpdates \
+              -authenticationKeyPath "$AC_KEY_PATH" \
+              -authenticationKeyID "$AC_API_KEY_ID" \
+              -authenticationKeyIssuerID "$AC_API_ISSUER_ID" \
+              CURRENT_PROJECT_VERSION="$BUILD_NUMBER" 2>&1 | tee "$log"; then
+              exit 0
+            fi
+            # Automatic signing on a fresh runner makes a profile per target and
+            # can package one before its file is written ("Build input file
+            # cannot be found: …mobileprovision"), as with the Watch app's
+            # targets. The profiles are on disk by the next attempt. Any other
+            # failure stops here.
+            grep -q 'Build input file cannot be found: .*\.mobileprovision' "$log" || exit 1
+            echo "::warning::Archive attempt $attempt packaged a provisioning profile before it was on disk; retrying."
+            rm -rf "$RUNNER_TEMP/Harness.xcarchive"
+          done
+          exit 1
+
+      # Crash and hang reports (Settings → Crash reports on the phone, Xcode's
+      # Organizer) carry code addresses only. These turn them into function
+      # names: scripts/symbolicate-metrickit.py <report.json> <dSYMs folder>.
+      - name: Keep the build's debug symbols
+        if: inputs.ci_certificates != 'list'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsyms-build-${{ env.BUILD_NUMBER }}
+          path: ${{ runner.temp }}/Harness.xcarchive/dSYMs
+          retention-days: 90
 
       - name: Upload to TestFlight
         if: inputs.ci_certificates != 'list'

@@ -167,6 +167,10 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
     std::fs::write(repo_dir.join("README.md"), "hello\n").unwrap();
     git(&repo_dir, &["add", "."]);
     git(&repo_dir, &["commit", "-m", "init"]);
+    git(&repo_dir, &["switch", "-c", "unrelated-task"]);
+    std::fs::write(repo_dir.join("other-task.txt"), "another task\n").unwrap();
+    git(&repo_dir, &["add", "."]);
+    git(&repo_dir, &["commit", "-m", "other task"]);
     let repo_path = repo_dir.to_string_lossy().to_string();
     #[cfg(unix)]
     let project_dir = if use_project_symlink {
@@ -240,12 +244,15 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
         .rename_chat(CHAT, "Pre-titled")
         .expect("rename chat");
 
+    let mut first_payload = run_payload("msg-wt-1", &repo_path, Some("space-worktree-run"));
+    if let SessionCommandPayload::Run { request, .. } = &mut first_payload {
+        // The client sent before ListRefs arrived. Resolve main on the host,
+        // not HEAD (the shared folder belongs to another task).
+        request.worktree.as_mut().unwrap().base.clear();
+    }
     let first_command = core
         .doc_host
-        .queue_command(
-            CHAT,
-            run_payload("msg-wt-1", &repo_path, Some("space-worktree-run")),
-        )
+        .queue_command(CHAT, first_payload)
         .expect("queue run command");
     wait_for(|| complete_assistant_count(&core) == 1, "first turn").await;
 
@@ -255,6 +262,14 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
         "the run must execute in a fresh worktree, not the repo folder"
     );
     let first = PathBuf::from(&first_cwd);
+    assert!(
+        !first.join("other-task.txt").exists(),
+        "default base must not be the unrelated shared branch"
+    );
+    assert!(
+        repo_dir.join("other-task.txt").exists(),
+        "the original checkout is untouched"
+    );
     assert!(
         first.starts_with(&worktrees_root),
         "worktree lands under the worktrees root: {first_cwd}"

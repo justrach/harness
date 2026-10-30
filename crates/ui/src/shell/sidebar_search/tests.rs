@@ -79,11 +79,13 @@ fn press_keys(cx: &mut gpui::VisualTestContext, keys: &str) {
 
 struct SearchSidebar {
     shell: Entity<Shell>,
+    show_conversation: bool,
     _observe: Subscription,
 }
 
 impl Render for SearchSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_conversation = self.show_conversation;
         self.shell.update(cx, |shell, cx| {
             shell.focus_sidebar_search(window, cx);
             let theme = Theme::of(cx).clone();
@@ -91,12 +93,20 @@ impl Render for SearchSidebar {
                 .track_focus(&shell.shortcut_focus)
                 .w(px(shell.settings.sidebar_width))
                 .h(px(650.0))
+                .flex()
+                .flex_col()
                 .capture_key_down(cx.listener(Shell::on_key_down_capture))
                 .on_key_down(cx.listener(Shell::on_key_down))
                 .on_action(cx.listener(|shell, _: &ToggleSidebar, _, cx| shell.toggle_sidebar(cx)))
                 .when(!shell.settings.sidebar_collapsed, |el| {
-                    el.child(shell.render_chat_sidebar(&theme, cx))
+                    el.child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(shell.render_chat_sidebar(&theme, cx)),
+                    )
                 })
+                .when(show_conversation, |el| el.child(shell.composer.clone()))
         })
     }
 }
@@ -104,6 +114,18 @@ impl Render for SearchSidebar {
 fn fixture(
     cx: &mut gpui::TestAppContext,
     width: f32,
+) -> (
+    tempfile::TempDir,
+    Entity<Shell>,
+    &mut gpui::VisualTestContext,
+) {
+    fixture_with_conversation(cx, width, false)
+}
+
+fn fixture_with_conversation(
+    cx: &mut gpui::TestAppContext,
+    width: f32,
+    show_conversation: bool,
 ) -> (
     tempfile::TempDir,
     Entity<Shell>,
@@ -144,6 +166,13 @@ fn fixture(
             shell.state.update(cx, |state, cx| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
+                state.spaces = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "project", "deviceId": "local", "path": "/fixture/project",
+                        "createdAt": "2026-10-01T00:00:00Z",
+                    }))
+                    .unwrap(),
+                ];
                 state.chats = vec![
                     chat("current", "Current session", false, "project"),
                     chat("active", "Sidebar polish", false, "project"),
@@ -156,6 +185,7 @@ fn fixture(
         let observe = cx.observe(&shell, |_, _, cx| cx.notify());
         SearchSidebar {
             shell,
+            show_conversation,
             _observe: observe,
         }
     });
@@ -247,3 +277,5 @@ fn sidebar_search_native_controls_and_archived_open(cx: &mut gpui::TestAppContex
 }
 
 mod edge_cases;
+mod keyboard_edges;
+mod reported_regressions;

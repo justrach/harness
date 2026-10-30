@@ -16,6 +16,16 @@ def reply(request, result=None, error=None):
 
 
 args = sys.argv[1:]
+if args[:2] == ["worktree", "create"]:
+    name, base = args[2:]
+    assert base == "main", "the selected base must reach Graff"
+    tree = os.path.join(os.getcwd(), ".graff", "worktrees", name)
+    os.makedirs(tree)
+    with open(os.path.join(tree, "selected-base"), "w") as handle:
+        handle.write(base)
+    print("✓ created worktree")
+    sys.exit(0)
+
 if "-w" in args:
     name = args[args.index("-w") + 1]
     tree = os.path.join(os.getcwd(), ".graff", "worktrees", name)

@@ -9,6 +9,7 @@ import SwiftUI
 enum NewSessionTarget: Equatable {
     case space(String)
     case projectless
+    case chat
     case newSpace
 }
 
@@ -39,6 +40,17 @@ struct NewSessionPickerSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Button {
+                        choose(.chat)
+                    } label: {
+                        Label("New chat", systemImage: "bubble.left")
+                    }
+                    .accessibilityIdentifier("new-chat")
+                } footer: {
+                    Text("A plain conversation on Auto models, without a project.")
+                }
+                .harnessListRow()
                 if !model.spaces.isEmpty {
                     Section {
                         if spaces.isEmpty {

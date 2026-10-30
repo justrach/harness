@@ -7,6 +7,12 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
+    /// Opens straight onto Crash reports (the `-sheet crashreports` rig).
+    @State private var showCrashReports: Bool
+
+    init(openCrashReports: Bool = false) {
+        _showCrashReports = State(initialValue: openCrashReports)
+    }
 
     /// "Codegraff · System", or the two variant names when light and dark
     /// come from different families.
@@ -80,6 +86,20 @@ struct SettingsView: View {
                 }
                 .harnessListRow()
 
+                // A Mac's iOS Simulators, live on this phone. Only Macs run
+                // them, so the row is hidden until one of your computers is a Mac.
+                if !model.simulatorMacs.isEmpty {
+                    Section("Devices") {
+                        NavigationLink {
+                            SimulatorsView()
+                        } label: {
+                            Text("Simulators")
+                        }
+                        .accessibilityIdentifier("settings-simulators")
+                    }
+                    .harnessListRow()
+                }
+
                 // iPad already shows the list beside the open session; a phone can too, when there is room.
                 if UIDevice.current.userInterfaceIdiom == .phone {
                     Section {
@@ -110,6 +130,12 @@ struct SettingsView: View {
                         LabeledContent("Performance", value: Perf.shared.startupMs.map { "Started in \($0) ms" } ?? "")
                     }
                     .accessibilityIdentifier("settings-performance")
+                    NavigationLink {
+                        CrashReportsView()
+                    } label: {
+                        Text("Crash reports")
+                    }
+                    .accessibilityIdentifier("settings-crash-reports")
                 }
                 .harnessListRow()
 
@@ -123,6 +149,7 @@ struct SettingsView: View {
             }
             .harnessGroupedList()
             .navigationTitle("Settings")
+            .navigationDestination(isPresented: $showCrashReports) { CrashReportsView() }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

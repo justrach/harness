@@ -63,6 +63,7 @@ fn sends_made_offline_wait_in_the_outbox_across_a_restart() {
             reasoning: Some("high".into()),
             model_options: HashMap::from([("serviceTier".into(), "fast".into())]),
             sandbox: None,
+            chat_mode: false,
         },
         None,
     );

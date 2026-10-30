@@ -74,6 +74,7 @@ for line in sys.stdin:
         }),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         turn_origin: Default::default(),

@@ -153,6 +153,7 @@ async fn imported_claude_chat_continues_in_graff_seeded_and_never_resumed() {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
+                chat_mode: false,
             }),
             Some("/w/app".into()),
         )

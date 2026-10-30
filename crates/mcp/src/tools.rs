@@ -672,6 +672,7 @@ impl Tools {
             reasoning,
             model_options: Default::default(),
             sandbox,
+            chat_mode: false,
         };
 
         let (space, device_id) = match args.project.as_deref() {

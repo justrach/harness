@@ -542,7 +542,8 @@ impl Repos {
                 push(name);
             }
         }
-        // Default branch first: origin/HEAD's target, else the checked-out branch.
+        // Default branch first: origin/HEAD, a conventional main/master for
+        // local repositories without it, then the checked-out branch.
         let default = match self
             .git(
                 &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -555,6 +556,8 @@ impl Repos {
         };
         let default = match default {
             Some(branch) => Some(branch),
+            None if names.iter().any(|name| name == "main") => Some("main".into()),
+            None if names.iter().any(|name| name == "master") => Some("master".into()),
             None => self
                 .current_branch(repo_path)
                 .await

@@ -22,6 +22,7 @@ async fn live_run(cancel: bool) {
             let _ = tx.send(Vec::new());
             rx
         }),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         turn_origin: Default::default(),

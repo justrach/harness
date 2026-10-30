@@ -95,6 +95,7 @@ fn main() -> anyhow::Result<()> {
             reasoning: None,
             model_options: Default::default(),
             sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
+            chat_mode: false,
         });
     }
     let device = core.device_id.clone();

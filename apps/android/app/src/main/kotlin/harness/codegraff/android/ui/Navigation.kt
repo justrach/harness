@@ -25,6 +25,7 @@ sealed interface Route {
         is NewSession -> when (val d = destination) {
             is NewSessionDestination.Project -> "new:project:${d.spaceId}"
             is NewSessionDestination.Projectless -> "new:host:${d.deviceId}"
+            is NewSessionDestination.PlainChat -> "new:chat:${d.deviceId}"
         }
     }
 
@@ -34,6 +35,7 @@ sealed interface Route {
             s.startsWith("space:") -> Space(s.removePrefix("space:"))
             s.startsWith("new:project:") -> NewSession(NewSessionDestination.Project(s.removePrefix("new:project:")))
             s.startsWith("new:host:") -> NewSession(NewSessionDestination.Projectless(s.removePrefix("new:host:")))
+            s.startsWith("new:chat:") -> NewSession(NewSessionDestination.PlainChat(s.removePrefix("new:chat:")))
             else -> null
         }
 

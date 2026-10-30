@@ -31,6 +31,7 @@ async fn real_graff_messages_during_background_work_do_not_cancel_it() {
     let (steer_tx, steering) = mpsc::channel(8);
     let controls = RunControls {
         origin: None,
+        mcp_servers: Vec::new(),
         steering,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| {

@@ -221,6 +221,7 @@ fn create_chat(core: &EngineCore, harness: HarnessId) {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: SandboxLevel::WorkspaceWrite,
+                chat_mode: false,
             }),
             None,
         )

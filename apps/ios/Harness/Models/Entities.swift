@@ -73,6 +73,11 @@ struct ChatConfig: Hashable, Codable {
     /// rewrites the whole `config` field under per-field LWW.
     var modelOptions: [String: JSONValue] = [:]
     var sandbox: String?
+    /// A plain chat (proto `ChatConfig.chat_mode`): no project, graff on the
+    /// auto tiers only. Absent on coding sessions.
+    var chatMode: Bool? = nil
+
+    var isChatMode: Bool { chatMode == true }
 }
 
 struct Chat: Identifiable, Hashable {

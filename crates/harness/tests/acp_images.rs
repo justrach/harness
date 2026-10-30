@@ -36,6 +36,7 @@ async fn sent_prompt(images: bool) -> serde_json::Value {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         turn_origin: Default::default(),
@@ -143,6 +144,7 @@ async fn follow_up_prompt(authorized: bool) -> serde_json::Value {
         }),
         steering,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     };
     let request = RunRequest {
         turn_origin: Default::default(),

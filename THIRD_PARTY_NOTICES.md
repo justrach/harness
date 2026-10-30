@@ -171,6 +171,21 @@ The Zui native overlay renderer adapts Apache-2.0 GPUI code from
 [`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
 Attribution is retained in the pinned Zui dependency’s `NOTICE`.
 
+## Simulator streaming helper
+
+Settings → Simulators streams a Mac's iOS Simulators to the phone through
+[`expo-device-hub`](https://github.com/expo/expo-device-hub) 0.12.0 (MIT),
+which vendors Expo's fork of [`serve-sim`](https://github.com/EvanBacon/serve-sim)
+(Apache-2.0) and a LiveKit WebRTC framework (BSD-style). It is not bundled: the
+engine installs it with `npm ci --ignore-scripts` from a lockfile it ships
+(`crates/engine/src/simulators/helper/package-lock.json`) into
+`<data dir>/tools` only when the user sets simulators up, and each package's
+license travels with its install. Its dependencies are MIT, ISC, BSD,
+Apache-2.0, and MPL-2.0 (`mediabunny`, `node-datachannel`, used only by its
+Android path) packages; the lockfile lists each one's license. The engine
+integration and the host script (`harness-sim-host.mjs`) are independently
+written Harness code.
+
 ## Fonts
 
 The mobile apps bundle [Geist](https://github.com/vercel/geist-font) (sans),

@@ -21,10 +21,14 @@ struct HomeView: View {
     @State private var path: [Route] = []
     @State private var showNewSpace = false
     @State private var showProjectlessDevices = false
+    /// The host picker opened for a plain chat rather than a projectless session.
+    @State private var hostPickerForChat = false
     @State private var showNewSessionPicker = false
     /// What the "+" picker chose; acted on once it has closed.
     @State private var pendingNewSession: NewSessionTarget?
     @State private var showSettings = false
+    /// Screenshot rig (`-sheet crashreports`): Settings opens on Crash reports.
+    @State private var settingsOnCrashReports = false
     @State private var showProfile = false
     /// A session whose Delete is waiting on its confirmation.
     @State private var pendingDelete: Chat?
@@ -490,7 +494,7 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView()
+            SettingsView(openCrashReports: settingsOnCrashReports)
         }
         .sheet(isPresented: $showProfile) {
             ProfileView()
@@ -500,7 +504,12 @@ struct HomeView: View {
             pendingNewSession = nil
             switch target {
             case .space(let id): open(.newSession(spaceId: id))
-            case .projectless: showProjectlessDevices = true
+            case .projectless:
+                hostPickerForChat = false
+                showProjectlessDevices = true
+            case .chat:
+                hostPickerForChat = true
+                showProjectlessDevices = true
             case .newSpace: showNewSpace = true
             }
         }) {
@@ -516,7 +525,7 @@ struct HomeView: View {
         .sheet(isPresented: $showProjectlessDevices) {
             SessionHostPickerSheet { deviceId in
                 spaceFilter = ""
-                open(.newSession(.projectless(deviceId: deviceId)))
+                open(.newSession(hostPickerForChat ? .chat(deviceId: deviceId) : .projectless(deviceId: deviceId)))
             }
         }
         .task(id: model.overviewChats.map(\.id).joined()) {
@@ -543,7 +552,8 @@ struct HomeView: View {
             if model.launchSheet == "newspace" {
                 model.launchSheet = nil
                 showNewSpace = true
-            } else if model.launchSheet == "settings" {
+            } else if model.launchSheet == "settings" || model.launchSheet == "crashreports" {
+                settingsOnCrashReports = model.launchSheet == "crashreports"
                 model.launchSheet = nil
                 showSettings = true
             } else if model.launchSheet == "profile" {
@@ -1012,7 +1022,10 @@ func relativeTime(_ ms: Int64) -> String {
 @MainActor
 func projectLocation(chat: Chat, model: AppModel) -> Text {
     let device = model.deviceName(chat.deviceId)
-    guard let spaceId = chat.spaceId else { return Text("No project @ \(device)") }
+    // A plain chat names itself; other sessions without a project say so.
+    guard let spaceId = chat.spaceId else {
+        return Text(chat.config?.isChatMode == true ? "Chat @ \(device)" : "No project @ \(device)")
+    }
     let project = model.space(for: chat)?.displayName
         ?? chat.cwd.map { ($0 as NSString).lastPathComponent }
         ?? "?"

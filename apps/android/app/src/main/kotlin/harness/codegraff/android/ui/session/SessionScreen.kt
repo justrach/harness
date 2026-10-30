@@ -1,5 +1,6 @@
 package harness.codegraff.android.ui.session
 
+import harness.codegraff.android.model.ChatMode
 import harness.codegraff.android.model.modelSelection
 import harness.codegraff.android.ui.components.rememberDeviceCatalog
 import harness.codegraff.android.model.Connection
@@ -54,6 +55,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
@@ -138,6 +140,14 @@ fun SessionScreen(
     val topInset = statusBarHeight()
     val jumpVisible by remember { derivedStateOf { listState.firstVisibleItemIndex > 1 } }
     val openRequest = entries.asReversed().flatMap { it.parts }.filterIsInstance<MessagePart.Input>().firstOrNull { !it.resolved }
+    // When the question panel last gave way to the composer (StopGuard).
+    val openRequestId = openRequest?.requestId
+    var shownRequestId by remember(chat.id) { mutableStateOf(openRequestId) }
+    var questionClosedAt by remember(chat.id) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(chat.id, openRequestId) {
+        if (openRequestId == null && shownRequestId != null) questionClosedAt = System.currentTimeMillis()
+        shownRequestId = openRequestId
+    }
 
     Box(modifier.fillMaxSize().background(p.bg)) {
         Column(Modifier.fillMaxSize().imePadding().navigationBarsPadding()) {
@@ -182,7 +192,7 @@ fun SessionScreen(
                     if (openRequest != null) {
                         QuestionPanel(openRequest.requestId, openRequest.questions) { id, answers -> model.respondInput(chat.id, id, answers) }
                     } else {
-                        ChatComposer(state, model, chat, runLive = status == SessionStatus.Working)
+                        ChatComposer(state, model, chat, runLive = status == SessionStatus.Working, questionClosedAtMs = questionClosedAt)
                     }
                 }
             }
@@ -257,7 +267,7 @@ private fun StatusStrip(chat: Chat, status: SessionStatus?, state: WorkspaceStat
 
 /** The live-chat composer: input, the photo attach button, the model and trait chips (harness stays locked mid-chat), and the morphing action button. */
 @Composable
-private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, runLive: Boolean) {
+private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, runLive: Boolean, questionClosedAtMs: Long? = null) {
     val clipboard = LocalClipboardManager.current
     var draft by rememberSaveable(chat.id) { mutableStateOf("") }
     var attachments by remember(chat.id) { mutableStateOf(listOf<StagedAttachment>()) }
@@ -274,7 +284,10 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
         initial = { model.cachedModels(chat.deviceId, harness) },
         fetch = { model.listModels(chat.deviceId, harness) },
     )
-    val selection = modelSelection(harness, chat.config?.model, chat.config?.reasoning, modelLoad.catalog, harnessLoad.catalog)
+    // A chat offers the three auto tiers and nothing else.
+    val isChat = chat.config?.chatMode == true
+    val models = if (isChat) modelLoad.catalog.copy(items = ChatMode.models(modelLoad.catalog.items)) else modelLoad.catalog
+    val selection = modelSelection(harness, chat.config?.model, chat.config?.reasoning, models, harnessLoad.catalog)
     val currentModel = selection.model
     val currentReasoning = selection.reasoning
 
@@ -394,6 +407,13 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
                 contentAlignment = Alignment.CenterStart,
             ) { Text(if (dead) "Copy edit and stop editing" else "Stop editing", style = sans(12f), color = Theme.palette.textMuted) }
         }
+        // Chat mode: the API-cost note for Auto (smart), on its own line so the chip row never squeezes it.
+        if (isChat) ChatMode.note(currentModel.id)?.let { note ->
+            Text(
+                note, style = sans(11f), color = Theme.palette.textMuted,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).testTag("chat-mode-note"),
+            )
+        }
         // Pre-send honesty: one quiet caption, never a warning box. The send still works; it just queues.
         if (model.chatDeliveryDegraded(chat)) {
             val connectivity by model.connectivity.collectAsState()
@@ -404,7 +424,7 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
         }
         if (selection.unavailable) {
             Text(
-                "The selected agent or model is not available on this device. Select another model.",
+                if (isChat) ChatMode.UNAVAILABLE_NOTE else "The selected agent or model is not available on this device. Select another model.",
                 style = sans(12f), color = Theme.palette.warning,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
             )
@@ -433,6 +453,7 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
                 }
             },
             onStop = { model.interrupt(chat.id) },
+            questionClosedAtMs = questionClosedAtMs,
             attachments = if (editingId == null) attachments else emptyList(),
             // A live send can't carry photos until they upload to the computer; the demo keeps the picker.
             onAttach = if (editingId == null && !model.isLive) ({ picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) else null,
@@ -451,7 +472,7 @@ private fun ChatComposer(state: WorkspaceState, model: AppModel, chat: Chat, run
     if (showModelPicker) {
         ModelPickerSheet(
             harness = harness, modelId = currentModel.id, reasoning = chat.config?.reasoning,
-            lockedHarness = true, harnesses = harnessLoad.catalog.items, catalogs = mapOf(harness to modelLoad.catalog.items),
+            lockedHarness = true, harnesses = harnessLoad.catalog.items, catalogs = mapOf(harness to models.items),
             loading = modelLoad.loading || harnessLoad.loading,
             confirmedHarnesses = harnessLoad.catalog.isLive,
             confirmedCatalogs = if (modelLoad.catalog.isLive) setOf(harness) else emptySet(),

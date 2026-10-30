@@ -18,10 +18,11 @@ use crate::theme::Theme;
 /// close-without-archiving one as displayed ("⌘W", "⌥⌘W").
 pub(crate) fn archive_on_close_copy(close: &str, close_only: &str) -> String {
     format!(
-        "Closing a session tab or pane with {close} or its \u{2715} button archives it if idle, \
-         unless it is still open in another tab or pane in this app. {close_only} always closes \
-         without archiving. Running sessions and sessions waiting for input remain in the \
-         sidebar. Closing the app or a window does not archive sessions."
+        "Closing a session tab or pane with its \u{2715} button archives it if idle, \
+         unless it is still open in another tab or pane in this app. {close} asks each time \
+         whether to archive or just close, without changing this setting. {close_only} always \
+         closes without archiving. Running sessions and sessions waiting for input remain \
+         in the sidebar. Closing the app or a window does not archive sessions."
     )
 }
 
@@ -649,7 +650,9 @@ mod tests {
     #[test]
     fn archive_on_close_copy_names_what_the_toggle_covers() {
         let copy = archive_on_close_copy("⌘W", "⌥⌘W");
-        assert!(copy.starts_with("Closing a session tab or pane with ⌘W or its \u{2715} button"));
+        assert!(copy.starts_with("Closing a session tab or pane with its \u{2715} button"));
+        assert!(copy.contains("⌘W asks each time"), "{copy}");
+        assert!(copy.contains("without changing this setting"), "{copy}");
         assert!(
             copy.contains("⌥⌘W always closes without archiving."),
             "{copy}"

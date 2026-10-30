@@ -1,0 +1,73 @@
+name: App Store
+
+run-name: App Store (${{ inputs.action }}${{ inputs.build && format(' build {0}', inputs.build) || '' }}) by @${{ github.actor }}
+
+# Submits a TestFlight build to App Review. `check` changes nothing and prints
+# what the version still needs; `submit` attaches the build, fills the Apple
+# Watch screenshot slot from apps/ios/app-store/watch, and submits.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'check: report only; submit: send to App Review'
+        type: choice
+        options:
+          - check
+          - submit
+        default: check
+      build:
+        description: 'TestFlight build number (empty: the newest valid build)'
+        type: string
+        default: ''
+      release:
+        description: 'After approval: keep the version setting, release automatically, or wait for a manual release'
+        type: choice
+        options:
+          - keep
+          - after_approval
+          - manual
+        default: keep
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-store-submission
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # The iOS team's Admin key, the one testflight.yml uses.
+      AC_API_KEY_P8: ${{ secrets.IOS_AC_API_KEY_P8 }}
+      AC_API_KEY_ID: ${{ secrets.IOS_AC_API_KEY_ID }}
+      AC_API_ISSUER_ID: ${{ secrets.IOS_AC_API_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: App Store Connect key
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AC_API_KEY_P8 AC_API_KEY_ID AC_API_ISSUER_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "Required repository secret IOS_$name is not configured." >&2
+              exit 2
+            fi
+          done
+          key_path="$RUNNER_TEMP/AuthKey_$AC_API_KEY_ID.p8"
+          printf '%s' "$AC_API_KEY_P8" > "$key_path"
+          chmod 600 "$key_path"
+          echo "AC_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          python -m pip install --quiet 'PyJWT[crypto]'
+
+      - name: ${{ inputs.action == 'submit' && 'Submit for App Review' || 'Check the App Store version' }}
+        shell: bash
+        env:
+          ACTION: ${{ inputs.action }}
+          BUILD: ${{ inputs.build }}
+          RELEASE: ${{ inputs.release }}
+        run: python scripts/app-store-submit.py "$ACTION" --build "$BUILD" --release "$RELEASE"

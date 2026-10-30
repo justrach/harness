@@ -89,6 +89,17 @@
       "Messages will send once the connection recovers.",
       "No folders here",
       "Listing truncated — this folder has more entries."
+    ],
+    "chatMode": [
+      "New chat",
+      "What's on your mind?",
+      "Ask anything…",
+      "Auto (low)",
+      "Auto (high)",
+      "Auto (smart)",
+      "May incur API costs.",
+      "Auto (smart) may incur API costs.",
+      "Chat needs the hosted Auto models, which aren't available right now."
     ]
   },
   "queuePanelLayout": {

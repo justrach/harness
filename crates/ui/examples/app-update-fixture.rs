@@ -35,6 +35,10 @@ fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     let light = std::env::args().nth(2).as_deref() == Some("light");
     let suffix = if light { "light" } else { "dark" };
+    let layout_states = std::env::var_os("APP_UPDATE_LAYOUT_STATES").is_some();
+    let sidebar_width = std::env::var("APP_UPDATE_SIDEBAR_WIDTH")
+        .ok()
+        .and_then(|width| width.parse::<f32>().ok());
     let stages: Vec<String> = std::env::var("APP_UPDATE_STAGES")
         .unwrap_or_else(|_| {
             "manual,downloading,ready,failed,advisory,countdown,updated,settings".into()
@@ -81,7 +85,10 @@ fn main() -> anyhow::Result<()> {
         .run(move |cx| {
             gpui_tokio::init(cx);
             gpui_base::init(cx);
-            let settings = settings::UiSettings::default();
+            let mut settings = settings::UiSettings::default();
+            if let Some(width) = sidebar_width {
+                settings.sidebar_width = width;
+            }
             settings::init(settings.clone(), data.clone(), cx);
             let fonts = typography::register_fonts(cx);
             typography::init(
@@ -163,6 +170,22 @@ fn main() -> anyhow::Result<()> {
                             &output,
                             &format!("app-update-{stage}-{suffix}"),
                         )?;
+                        if layout_states {
+                            window.update(cx, |shell, window, cx| {
+                                shell.fixture_chat_tab(None, window, cx)
+                            })?;
+                            pause(cx, 300).await;
+                            capture(
+                                window.into(),
+                                cx,
+                                &output,
+                                &format!("app-update-{stage}-draft-{suffix}"),
+                            )?;
+                            window.update(cx, |shell, window, cx| {
+                                shell.fixture_chat_tab(Some(0), window, cx)
+                            })?;
+                            pause(cx, 300).await;
+                        }
                     }
                     Ok(())
                 }

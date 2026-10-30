@@ -79,6 +79,7 @@ async fn agent_started_turns_end_on_gui_turn_end() {
     let (steering_tx, steering) = mpsc::channel(1);
     let controls = RunControls {
         origin: None,
+        mcp_servers: Vec::new(),
         request_input: Box::new(|_| {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Vec::new());

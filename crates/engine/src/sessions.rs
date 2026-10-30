@@ -322,6 +322,9 @@ struct Inner {
     /// dispatch or accepted steer) — the diff sync snapshots the checkout tree
     /// for the Changes pane's "Latest turn" scope. Absent in bare tests.
     turn_listener: OnceLock<TurnListener>,
+    /// browse Connected apps: gives runs a `browse` MCP server while browse
+    /// is paired and running (wired at engine assembly; absent in bare tests).
+    browse_link: OnceLock<Arc<crate::browse_link::BrowseLink>>,
     /// The version this boot updated Harness to, when the last boot recorded
     /// an older one (`RunJournal::note_boot_version`). Names the update in
     /// the note on a run the restart cut short.
@@ -382,6 +385,7 @@ impl SessionsEngine {
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 turn_listener: OnceLock::new(),
+                browse_link: OnceLock::new(),
                 boot_update: OnceLock::new(),
             }),
         }
@@ -422,6 +426,11 @@ impl SessionsEngine {
     /// Wire the turn-start listener (called once at engine assembly).
     pub fn set_turn_listener(&self, listener: TurnListener) {
         let _ = self.inner.turn_listener.set(listener);
+    }
+
+    /// Wire browse Connected apps (called once at engine assembly).
+    pub fn set_browse_link(&self, link: Arc<crate::browse_link::BrowseLink>) {
+        let _ = self.inner.browse_link.set(link);
     }
 
     fn note_turn_start(&self, chat_id: &str, cwd: &str) {
@@ -710,12 +719,32 @@ impl SessionsEngine {
 
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
-        // An imported chat's first graff turn carries the earlier transcript
-        // as read-only context; read the doc before the new user row lands.
-        let seed_entries = crate::external_history::continues_in_graff(chat_id)
-            .then(|| handle.doc().read_entries())
-            .and_then(Result::ok);
+        // A different checkout cannot resume the old native session. Carry
+        // the transcript read-only rather than silently dropping its context.
+        let moved_checkout = self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| {
+                chat.source_context
+                    .as_ref()
+                    .is_some_and(|source| !same_dir(&source.cwd, &request.cwd))
+                    || chat
+                        .harness_session_cwd
+                        .as_deref()
+                        .is_some_and(|cwd| !cwd.is_empty() && !same_dir(cwd, &request.cwd))
+            });
+        let imported = crate::external_history::continues_in_graff(chat_id);
         let user_id = message_id.unwrap_or_else(new_id);
+        let seed_entries = (imported || moved_checkout)
+            .then(|| handle.doc().read_entries())
+            .and_then(Result::ok)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .filter(|entry| entry.id != user_id)
+                    .collect::<Vec<_>>()
+            });
         self.inner.journal.record_pending_turn_origin(chat_id, &user_id, request.turn_origin, false);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         self.inner.journal.record_confirmed_turn_origin(chat_id, &user_id, request.turn_origin);
@@ -739,8 +768,11 @@ impl SessionsEngine {
             && let Some(entries) = seed_entries
             && !entries.is_empty()
         {
-            request.prompt =
-                crate::external_history::seed_prompt(chat_id, &entries, &request.prompt);
+            request.prompt = if imported {
+                crate::external_history::seed_prompt(chat_id, &entries, &request.prompt)
+            } else {
+                crate::external_history::seed_checkout_prompt(&entries, &request.prompt)
+            };
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
@@ -782,6 +814,12 @@ impl SessionsEngine {
             })
         };
         let interrupt_token = CancellationToken::new();
+        // browse, while paired and running: this run's own pages, closed
+        // when it ends (`remove_run`).
+        let mcp_servers = match self.inner.browse_link.get() {
+            Some(link) => link.mcp_server_for_run(&run_id).await.into_iter().collect(),
+            None => Vec::new(),
+        };
         let controls = RunControls {
             origin: Some(harness_adapters::RunOrigin {
                 chat_id: chat_id.to_string(),
@@ -789,6 +827,7 @@ impl SessionsEngine {
             request_input,
             steering: steer_rx,
             interrupt: interrupt_token.clone(),
+            mcp_servers,
         };
 
         lock(&self.inner.runs).insert(
@@ -2052,6 +2091,7 @@ impl Inner {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: config.sandbox,
+                chat_mode: false,
             };
             if let Err(err) = ws.set_chat_config(chat_id, &config) {
                 tracing::warn!(chat = %chat_id, error = %err, "imported chat graff config write failed");
@@ -2122,6 +2162,10 @@ impl Inner {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
+        }
+        drop(runs);
+        if let Some(link) = self.browse_link.get() {
+            link.end_run(run_id);
         }
     }
 }
@@ -4445,6 +4489,7 @@ mod tests {
             reasoning: Some(ReasoningLevel::High),
             model_options: serde_json::Map::new(),
             sandbox: SandboxLevel::WorkspaceWrite,
+            chat_mode: false,
         };
         workspace
             .create_chat("picker", None, Some("test-device"), Some(original), None)

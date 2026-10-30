@@ -37,6 +37,8 @@ pub struct ChatConfigRecord {
     /// Option id to choice id. Values that are not strings stay in the row and are not shown here.
     pub model_options: HashMap<String, String>,
     pub sandbox: Option<String>,
+    /// A plain chat (proto `ChatConfig.chat_mode`): graff on the auto tiers only.
+    pub chat_mode: bool,
 }
 
 /// A session (`chats` rows).

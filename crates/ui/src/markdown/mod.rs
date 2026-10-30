@@ -15,6 +15,7 @@
 //!   completion.
 
 pub mod content_reference;
+pub(crate) mod diagram;
 mod link_destination;
 mod link_interaction;
 mod link_presentation;

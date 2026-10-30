@@ -80,6 +80,7 @@ async fn real_pi_mock_lifecycle() {
                 .unwrap();
                 rx
             }),
+            mcp_servers: Vec::new(),
         };
         let request = RunRequest {
             turn_origin: Default::default(),
@@ -175,6 +176,7 @@ async fn real_pi_mock_lifecycle() {
     let (_, steering) = mpsc::channel(1);
     let controls = RunControls {
         origin: None,
+        mcp_servers: Vec::new(),
         steering,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| oneshot::channel().1),
@@ -246,6 +248,7 @@ async fn real_pi_steering_bursts_share_the_next_model_call() {
     let (tx, steering) = mpsc::channel(8);
     let controls = RunControls {
         origin: None,
+        mcp_servers: Vec::new(),
         steering,
         interrupt: CancellationToken::new(),
         request_input: Box::new(|_| oneshot::channel().1),

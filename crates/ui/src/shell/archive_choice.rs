@@ -1,7 +1,6 @@
-//! The one-time question the first ⌘W close asks: archive the session, or
-//! just close it. The answer becomes the archive-on-close setting (Settings →
-//! Archived sessions), which ⌘W and the ✕ buttons follow from then on. The
-//! close-without-archiving shortcut (⌘⌥W) and the ✕ buttons never ask.
+//! Every ⌘W chat close asks whether to archive the session or just close it.
+//! The answer applies only to that close, not the archive-on-close setting
+//! used by ✕ buttons. The close-without-archiving shortcut (⌘⌥W) never asks.
 
 use super::*;
 
@@ -11,35 +10,33 @@ mod tests;
 /// The dialog's copy, given the two shortcuts as displayed.
 pub(super) fn archive_choice_copy(close: &str, close_only: &str) -> (String, String) {
     (
-        format!("When you close a chat with {close}"),
+        format!("Close this chat with {close}?"),
         format!(
-            "Archive it to move an idle session to the archived shelf, or just close it \
-             and keep it in the sidebar. Running sessions are never archived. \
-             {close_only} always just closes. You can change this in Settings \u{2192} \
-             Archived sessions."
+            "Just close it to keep it in the sidebar, or archive it to move an idle session \
+             to the archived shelf. This choice applies only to this close. Sessions that \
+             are running, waiting for input, or still open elsewhere are never archived. \
+             {close_only} always just closes without asking."
         ),
     )
 }
 
 impl Shell {
-    /// ⌘W on a chat pane, tab or the last session. Archives the closed
-    /// session when archive-on-close is on. Until that has been chosen once,
-    /// a ⌘W that would close a session asks first and closes nothing yet.
+    /// ⌘W on a chat pane, tab or the last session always asks first,
+    /// regardless of any saved archive-on-close preference.
     pub(crate) fn close_chat_view_by_shortcut(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !settings::archive_on_close_chosen(cx) && self.state.read(cx).selected_chat.is_some() {
+        if self.state.read(cx).selected_chat.is_some() {
             self.archive_choice_prompt = true;
             cx.notify();
             return false;
         }
-        self.close_chat_view_with_archive(true, window, cx)
+        self.close_chat_view_with_archive(false, window, cx)
     }
 
-    /// The question's answer: save it as the archive-on-close setting, then
-    /// do the close the ⌘W asked for.
+    /// Apply the answer to this close only; leave the ✕-button setting alone.
     pub(crate) fn choose_close_archiving(
         &mut self,
         archive: bool,
@@ -49,9 +46,7 @@ impl Shell {
         if !std::mem::take(&mut self.archive_choice_prompt) {
             return false;
         }
-        settings::set_archive_sessions_on_close(archive, cx);
-        self.sync_independent_settings(cx);
-        self.close_chat_view_with_archive(true, window, cx)
+        self.close_chat_view_with_archive(archive, window, cx)
     }
 
     /// Escape: nothing closes and nothing is saved; the next ⌘W asks again.
@@ -85,17 +80,24 @@ impl Shell {
                     .justify_end()
                     .gap(px(8.0))
                     .child(
-                        popover::btn_ghost(theme, "Just close it", "archive-choice-close")
-                            .id("archive-choice-close")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.choose_close_archiving(false, window, cx);
+                        popover::btn_ghost(theme, "Cancel", "archive-choice-cancel")
+                            .id("archive-choice-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.dismiss_archive_choice(cx);
                             })),
                     )
                     .child(
-                        popover::btn_primary(theme, "Archive it")
+                        popover::btn_ghost(theme, "Archive it", "archive-choice-archive")
                             .id("archive-choice-archive")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.choose_close_archiving(true, window, cx);
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Just close it")
+                            .id("archive-choice-close")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_close_archiving(false, window, cx);
                             })),
                     ),
             )

@@ -168,7 +168,8 @@ pub struct RunRequest {
 pub struct WorktreeSpec {
     /// The repo whose worktree to create (the space's folder on the host).
     pub repo_path: String,
-    /// Base ref the fresh `harness/<name>` branch is created off.
+    /// Base ref the fresh `harness/<name>` branch is created off. Empty asks
+    /// the host to resolve the repository's default branch (refs not loaded).
     pub base: String,
     /// Owning project used to resolve host-local setup Actions. Optional for
     /// wire compatibility with clients that only request worktree creation.

@@ -158,6 +158,7 @@ mod tests {
                 reasoning: None,
                 model_options: Default::default(),
                 sandbox: harness_proto::SandboxLevel::WorkspaceWrite,
+                chat_mode: false,
             }),
             last_message_preview: None,
             last_message_at: None,

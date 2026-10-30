@@ -427,6 +427,29 @@ struct TerminalIdParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SimulatorParams {
+    simulator_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchSimulatorParams {
+    simulator_id: String,
+    /// The viewer's frame-rate cap (a phone on cellular asks for fewer);
+    /// clamped to what the helper produces.
+    #[serde(default)]
+    max_fps: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SimulatorInputParams {
+    simulator_id: String,
+    input: crate::simulators::SimulatorInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SubscribeTerminalParams {
     terminal_id: String,
     #[serde(default)]
@@ -683,6 +706,7 @@ pub struct EngineRpc {
     terminals: Terminals,
     project_actions: ProjectActionsStore,
     previews: Option<harness_preview::PreviewService>,
+    simulators: Option<crate::simulators::Simulators>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -728,6 +752,7 @@ impl EngineRpc {
             terminals,
             project_actions,
             previews: None,
+            simulators: None,
             change_requests,
             diff_sync,
             uploads,
@@ -744,6 +769,78 @@ impl EngineRpc {
     pub fn with_previews(mut self, previews: harness_preview::PreviewService) -> Self {
         self.previews = Some(previews);
         self
+    }
+
+    pub fn with_simulators(mut self, simulators: crate::simulators::Simulators) -> Self {
+        self.simulators = Some(simulators);
+        self
+    }
+
+    fn simulators(&self) -> Result<&crate::simulators::Simulators, RpcError> {
+        self.simulators
+            .as_ref()
+            .ok_or_else(|| RpcError::Failed("simulators are not available on this engine".into()))
+    }
+
+    #[inline(never)]
+    fn handle_simulators<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> futures::future::BoxFuture<'a, Result<RpcReply, RpcError>> {
+        Box::pin(async move { self.simulator_reply(method, params).await })
+    }
+
+    async fn simulator_reply(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        let simulators = self.simulators()?;
+        match method {
+            methods::LIST_SIMULATORS => RpcReply::value(&simulators.list().await),
+            methods::SET_UP_SIMULATORS => {
+                let list = simulators.set_up().await.map_err(RpcError::Failed)?;
+                RpcReply::value(&list)
+            }
+            methods::BOOT_SIMULATOR => {
+                let p: SimulatorParams = parse_params(params)?;
+                simulators
+                    .boot(&p.simulator_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::SHUTDOWN_SIMULATOR => {
+                let p: SimulatorParams = parse_params(params)?;
+                simulators
+                    .shutdown_device(&p.simulator_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::WATCH_SIMULATOR_SCREEN => {
+                let p: WatchSimulatorParams = parse_params(params)?;
+                let rx = simulators
+                    .watch_screen(&p.simulator_id)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                // Latest frame wins at the viewer's own rate: a slow viewer
+                // skips frames instead of queueing them.
+                let stream = crate::simulators::viewer_frames(rx, p.max_fps)
+                    .filter_map(|frame| async move { serde_json::to_value(&*frame).ok() });
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
+            methods::SIMULATOR_INPUT => {
+                let p: SimulatorInputParams = parse_params(params)?;
+                simulators
+                    .input(&p.simulator_id, p.input)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            _ => Err(RpcError::UnknownMethod(method.to_string())),
+        }
     }
 
     /// Attach the auth service (AuthStatus + AuthRpc mutations).
@@ -1301,7 +1398,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         methods::CLONE_REPO | methods::FETCH_ALL | methods::APPLY_UPDATE => {
             Duration::from_secs(15 * 60)
         }
-        methods::INSTALL_HARNESS => Duration::from_secs(15 * 60),
+        methods::INSTALL_HARNESS | methods::SET_UP_SIMULATORS => Duration::from_secs(15 * 60),
+        methods::BOOT_SIMULATOR => Duration::from_secs(150),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
@@ -1393,6 +1491,13 @@ fn forwardable(method: &str) -> bool {
             | methods::WRITE_TERMINAL
             | methods::RESIZE_TERMINAL
             | methods::CLOSE_TERMINAL
+            // Simulators run on the computer that has Xcode.
+            | methods::LIST_SIMULATORS
+            | methods::SET_UP_SIMULATORS
+            | methods::BOOT_SIMULATOR
+            | methods::SHUTDOWN_SIMULATOR
+            | methods::WATCH_SIMULATOR_SCREEN
+            | methods::SIMULATOR_INPUT
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -1417,6 +1522,8 @@ fn forwardable(method: &str) -> bool {
             | methods::READ_ATTACHMENT_CHUNK
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
+            | methods::CHECK_FOR_UPDATES
+            | methods::QUEUE_UPDATE
             | methods::APPLY_UPDATE
     )
 }
@@ -1429,6 +1536,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_QUEUE
             | methods::WATCH_TOOL_PROGRESS
             | methods::SUBSCRIBE_TERMINAL
+            | methods::WATCH_SIMULATOR_SCREEN
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
@@ -1716,6 +1824,21 @@ impl RpcService for EngineRpc {
                 crate::codegraff_auth::CodegraffAuth::shared(self.repos.data_dir())
                     .sign_out()
                     .await;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::BROWSE_LINK_STATUS => {
+                let link = crate::browse_link::BrowseLink::shared(self.repos.data_dir());
+                // Scopes changed in browse, or Harness revoked there, show now.
+                link.refresh().await;
+                RpcReply::value(&link.status())
+            }
+            methods::BROWSE_LINK_PAIR => {
+                let link = crate::browse_link::BrowseLink::shared(self.repos.data_dir());
+                let code = link.start_pair().await.map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "code": code }))
+            }
+            methods::BROWSE_LINK_DISCONNECT => {
+                crate::browse_link::BrowseLink::shared(self.repos.data_dir()).disconnect();
                 RpcReply::value(&serde_json::json!({ "ok": true }))
             }
             methods::CODEGRAFF_JOBS => {
@@ -2473,6 +2596,12 @@ impl RpcService for EngineRpc {
             methods::CHECK_FOR_UPDATES => {
                 self.updater()?.check_now();
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::QUEUE_UPDATE => {
+                self.updater()?
+                    .queue_update()
+                    .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
+                RpcReply::value(&serde_json::json!({ "ok": true, "queued": true }))
             }
             methods::APPLY_UPDATE => {
                 let version = self
@@ -3366,6 +3495,13 @@ impl RpcService for EngineRpc {
                 });
                 Ok(RpcReply::Stream(stream.boxed()))
             }
+            // Built and boxed in its own frame: the dispatcher's stack is budgeted.
+            methods::LIST_SIMULATORS
+            | methods::SET_UP_SIMULATORS
+            | methods::BOOT_SIMULATOR
+            | methods::SHUTDOWN_SIMULATOR
+            | methods::WATCH_SIMULATOR_SCREEN
+            | methods::SIMULATOR_INPUT => self.handle_simulators(method, params).await,
             methods::WRITE_TERMINAL => {
                 let p: WriteTerminalParams = parse_params(params)?;
                 self.terminals
@@ -4018,6 +4154,27 @@ mod tests {
     }
 
     #[test]
+    fn device_updates_route_to_the_requested_host() {
+        for method in [
+            methods::UPDATE_STATUS,
+            methods::CHECK_FOR_UPDATES,
+            methods::QUEUE_UPDATE,
+        ] {
+            assert!(
+                forwardable(method),
+                "{method} must not act on the viewer's device"
+            );
+        }
+        assert!(is_stream_method(methods::UPDATE_STATUS));
+        assert!(!is_stream_method(methods::CHECK_FOR_UPDATES));
+        assert!(!is_stream_method(methods::QUEUE_UPDATE));
+        assert_eq!(
+            forward_deadline(methods::QUEUE_UPDATE),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
         assert!(!forwardable(methods::SHOW_VISUAL));
@@ -4073,6 +4230,41 @@ mod tests {
         );
         assert_eq!(
             forward_deadline(methods::QUEUE_COMMAND),
+            Duration::from_secs(30)
+        );
+    }
+
+    /// Simulator calls reach another computer only as device-addressed calls
+    /// over the relay, the same path (and the same account check at the
+    /// relay) as terminals; the screen is proxied as a stream.
+    #[test]
+    fn simulator_methods_route_to_the_mac_like_terminals() {
+        for method in [
+            methods::LIST_SIMULATORS,
+            methods::SET_UP_SIMULATORS,
+            methods::BOOT_SIMULATOR,
+            methods::SHUTDOWN_SIMULATOR,
+            methods::WATCH_SIMULATOR_SCREEN,
+            methods::SIMULATOR_INPUT,
+        ] {
+            assert!(forwardable(method), "{method}");
+            assert_eq!(
+                is_stream_method(method),
+                method == methods::WATCH_SIMULATOR_SCREEN,
+                "{method}"
+            );
+        }
+        use std::time::Duration;
+        assert_eq!(
+            forward_deadline(methods::SET_UP_SIMULATORS),
+            Duration::from_secs(15 * 60)
+        );
+        assert_eq!(
+            forward_deadline(methods::BOOT_SIMULATOR),
+            Duration::from_secs(150)
+        );
+        assert_eq!(
+            forward_deadline(methods::SIMULATOR_INPUT),
             Duration::from_secs(30)
         );
     }

@@ -39,6 +39,8 @@ data class ChatConfig(
     /** Harness-specific option picks (option id to choice id), round-tripped so a mobile edit never clobbers desktop picks. */
     val modelOptions: Map<String, String> = emptyMap(),
     val sandbox: String? = null,
+    /** A plain chat (proto `ChatConfig.chat_mode`): no project, graff on the auto tiers only. */
+    val chatMode: Boolean = false,
 )
 
 data class Chat(
@@ -163,6 +165,8 @@ fun relativeTime(thenMs: Long, nowMs: Long): String {
 sealed interface NewSessionDestination {
     data class Project(val spaceId: String) : NewSessionDestination
     data class Projectless(val deviceId: String) : NewSessionDestination
+    /** A plain chat (chat mode): no project, hosted by this device. */
+    data class PlainChat(val deviceId: String) : NewSessionDestination
 }
 
 data class RepoRef(val name: String, val current: Boolean, val worktreePath: String?)

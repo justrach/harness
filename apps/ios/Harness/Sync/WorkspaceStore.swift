@@ -457,7 +457,8 @@ final class WorkspaceStore {
                                         model: c["model"]?.stringValue,
                                         reasoning: c["reasoning"]?.stringValue,
                                         modelOptions: c["modelOptions"]?.objectValue ?? [:],
-                                        sandbox: c["sandbox"]?.stringValue)
+                                        sandbox: c["sandbox"]?.stringValue,
+                                        chatMode: c["chatMode"]?.boolValue)
             }
             return Chat(id: f["id"]?.stringValue ?? row.id, deviceId: deviceId,
                         title: f["title"]?.stringValue,
@@ -726,6 +727,47 @@ final class WorkspaceStore {
     func codegraffGithubRunnerAction(deviceId: String, action: GithubRunnerAction) async throws {
         let _: JSONValue = try await relay(for: deviceId).call(method: "CodegraffGithubRunnerAction",
                                                                params: action.params, timeoutSeconds: 30)
+    }
+
+    // MARK: Simulators (the computer's iOS Simulators, watched and driven from here)
+    // Device-addressed relay calls like terminals: only the account's own
+    // devices can open a device's relay room.
+
+    func listSimulators(deviceId: String) async throws -> SimulatorList {
+        try await relay(for: deviceId).call(method: "ListSimulators", params: [:], timeoutSeconds: 25)
+    }
+
+    /// Installs the streaming helper on the computer (npm; up to a few minutes).
+    func setUpSimulators(deviceId: String) async throws -> SimulatorList {
+        try await relay(for: deviceId).call(method: "SetUpSimulators", params: [:], timeoutSeconds: 900)
+    }
+
+    func bootSimulator(deviceId: String, simulatorId: String) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "BootSimulator",
+                                                        params: ["simulatorId": simulatorId],
+                                                        timeoutSeconds: 150)
+    }
+
+    func shutdownSimulator(deviceId: String, simulatorId: String) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "ShutdownSimulator",
+                                                        params: ["simulatorId": simulatorId],
+                                                        timeoutSeconds: 30)
+    }
+
+    /// The simulator's screen at most `maxFps` frames a second, newest frame first.
+    func simulatorScreen(deviceId: String, simulatorId: String, maxFps: Int) async throws
+        -> AsyncThrowingStream<SimulatorFrame, Error> {
+        try await relay(for: deviceId).stream(method: "WatchSimulatorScreen",
+                                              params: ["simulatorId": simulatorId, "maxFps": maxFps])
+    }
+
+    func simulatorInput(deviceId: String, simulatorId: String, input: SimulatorInput) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "SimulatorInput",
+                                                        params: ["simulatorId": simulatorId,
+                                                                 "input": input.params])
     }
 
     /// ListRefs on the target device — branches with current/worktree markers
@@ -1001,3 +1043,5 @@ final class WorkspaceStore {
         afterLocalWrite()
     }
 }
+
+extension WorkspaceStore: SimulatorHost {}

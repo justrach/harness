@@ -3,6 +3,14 @@
 use super::*;
 use harness_proto::Chat;
 
+fn search_icon(theme: &Theme, size: f32) -> gpui::Svg {
+    // SVG painting requires a local foreground; parent text color is not
+    // inherited by Svg::paint. Match the adjacent sidebar control icons.
+    icon(icons::MAGNIFER)
+        .size(px(size))
+        .text_color(theme.text_muted)
+}
+
 pub(super) struct SidebarSearch {
     input: Entity<ComposerInput>,
     focus: FocusHandle,
@@ -12,6 +20,7 @@ pub(super) struct SidebarSearch {
     project: Option<String>,
     active: usize,
     active_id: Option<String>,
+    keyboard_selection: bool,
     pressed_keys: std::collections::HashSet<String>,
     focus_pending: bool,
     scroll: gpui::ScrollHandle,
@@ -39,6 +48,7 @@ fn matching_chats<'a>(
                 .unwrap_or("New session")
                 .to_lowercase()
                 .contains(&query)
+                || chat.id.to_lowercase().contains(&query)
         })
         .collect();
     matches.sort_by(|left, right| spaces::compare_sidebar_chats(sort, left, right));
@@ -69,7 +79,7 @@ impl Shell {
             .border_color(theme.border.opacity(0.0))
             .focus_visible(|el| el.border_color(theme.border_strong))
             .cursor_pointer()
-            .text_color(if open { theme.accent } else { theme.text_muted })
+            .text_color(theme.text_muted)
             .bg(if open {
                 theme.glass_hover()
             } else {
@@ -89,12 +99,7 @@ impl Shell {
                     window.prevent_default();
                 }
             })
-            // An svg takes no color from its parent: name it, or it isn't drawn.
-            .child(icon(icons::MAGNIFER).size(px(16.0)).text_color(if open {
-                theme.accent
-            } else {
-                theme.text_muted
-            }))
+            .child(search_icon(theme, 16.0).debug_selector(|| "sidebar-search-trigger-icon".into()))
             .into_any_element()
     }
 
@@ -136,7 +141,7 @@ impl Shell {
             self.close_spaces_menu(cx);
             self.close_sidebar_view_menu(cx);
             let input = cx.new(|cx| {
-                ComposerInput::with_context("Search session names…", "PaletteSearch", cx)
+                ComposerInput::with_context("Search names or session IDs…", "PaletteSearch", cx)
                     .with_single_line()
                     .with_accessibility_role(gpui::Role::SearchInput)
                     .with_tab_stop(true)
@@ -169,6 +174,7 @@ impl Shell {
                 project: self.settings.space_filter.clone(),
                 active: 0,
                 active_id: None,
+                keyboard_selection: false,
                 pressed_keys: Default::default(),
                 focus_pending: true,
                 scroll: gpui::ScrollHandle::new(),
@@ -203,6 +209,7 @@ impl Shell {
         if let Some(search) = self.sidebar_search.as_mut() {
             search.active = 0;
             search.active_id = None;
+            search.keyboard_selection = false;
             search.scroll.set_offset(gpui::Point::default());
         }
         cx.notify();
@@ -211,10 +218,20 @@ impl Shell {
     /// Keep the cursor on a session, not its old position in a live sort.
     /// A disappearing target is reported so Enter before the next paint cannot
     /// silently open the row that happened to replace it.
-    fn reconcile_sidebar_search(&mut self, ids: &[String]) -> bool {
+    fn reconcile_sidebar_search(&mut self, ids: &[String], cx: &App) -> bool {
         let Some(search) = self.sidebar_search.as_mut() else {
             return false;
         };
+        // Archive-only browsing paints the current session as selected until
+        // the user navigates. Follow that session even when another tab changes
+        // selection, but never override an explicit keyboard choice.
+        if !search.keyboard_selection && search.input.read(cx).text().trim().is_empty() {
+            if let Some(selected) = self.state.read(cx).selected_chat.as_ref() {
+                if ids.contains(selected) {
+                    search.active_id = Some(selected.clone());
+                }
+            }
+        }
         let position = search
             .active_id
             .as_ref()
@@ -253,6 +270,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Only bare keys belong to result navigation. Modified keys remain
+        // available to text editing, platform shortcuts, and parent controls.
+        if event.keystroke.modifiers.modified() {
+            return;
+        }
         self.sync_sidebar_search_scope(cx);
         match event.keystroke.key.as_str() {
             "escape" => {
@@ -270,7 +292,7 @@ impl Shell {
             }
             "up" | "down" if self.sidebar_search_is_filtering(cx) => {
                 let ids = self.sidebar_search_ids(cx);
-                self.reconcile_sidebar_search(&ids);
+                self.reconcile_sidebar_search(&ids, cx);
                 let count = ids.len();
                 if let Some(search) = self.sidebar_search.as_mut() {
                     if count > 0 {
@@ -281,6 +303,7 @@ impl Shell {
                             (current + count - 1) % count
                         };
                         search.active_id = ids.get(search.active).cloned();
+                        search.keyboard_selection = true;
                         search.scroll.scroll_to_item(search.active);
                         cx.notify();
                     }
@@ -288,7 +311,7 @@ impl Shell {
             }
             "enter" if self.sidebar_search_is_filtering(cx) => {
                 let ids = self.sidebar_search_ids(cx);
-                let disappeared = self.reconcile_sidebar_search(&ids);
+                let disappeared = self.reconcile_sidebar_search(&ids, cx);
                 if disappeared {
                     cx.notify();
                 }
@@ -337,6 +360,7 @@ impl Shell {
             }))
             .child(
                 div()
+                    .debug_selector(|| "sidebar-search-field".into())
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -347,9 +371,8 @@ impl Shell {
                     .border_color(theme.border)
                     .bg(theme.surface)
                     .child(
-                        icon(icons::MAGNIFER)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
+                        search_icon(theme, 14.0)
+                            .debug_selector(|| "sidebar-search-field-icon".into()),
                     )
                     .child(
                         div()
@@ -412,10 +435,12 @@ impl Shell {
                     })
                     .track_focus(&archive_focus)
                     .h(px(28.0))
+                    .px(px(Theme::SPACE_SM))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .text_size(crate::typography::ui_rems(11.0))
+                    .line_height(px(16.0))
                     .text_color(theme.text_muted)
                     .cursor_pointer()
                     .on_click(cx.listener(|this, event, _, cx| {
@@ -435,7 +460,9 @@ impl Shell {
                     }))
                     .child(
                         div()
-                            .size(px(12.0))
+                            .debug_selector(|| "sidebar-search-checkbox".into())
+                            .size(px(14.0))
+                            .flex_none()
                             .rounded(px(3.0))
                             .border_1()
                             .border_color(if include_archived {
@@ -450,7 +477,11 @@ impl Shell {
                                 el.child(icon(icons::CHECK).size(px(10.0)).text_color(theme.accent))
                             }),
                     )
-                    .child("Include archived sessions"),
+                    .child(
+                        div()
+                            .debug_selector(|| "sidebar-search-archive-label".into())
+                            .child("Include archived sessions"),
+                    ),
             );
         Some(controls.into_any_element())
     }
@@ -505,9 +536,11 @@ impl Shell {
         };
         let count = data.len();
         let ids: Vec<_> = data.iter().map(|(chat, _, _)| chat.id.clone()).collect();
-        self.reconcile_sidebar_search(&ids);
+        self.reconcile_sidebar_search(&ids, cx);
         let search = self.sidebar_search.as_ref()?;
         let active = search.active;
+        let keyboard_selection = search.keyboard_selection;
+        let selected_chat = self.state.read(cx).selected_chat.clone();
         let rows = data
             .into_iter()
             .enumerate()
@@ -524,12 +557,16 @@ impl Shell {
                         .then(|| chat.config.as_ref().map(|c| c.harness))
                         .flatten(),
                     status,
-                    index == active,
+                    if query.is_empty() && !keyboard_selection {
+                        selected_chat.as_deref() == Some(chat.id.as_str())
+                    } else {
+                        index == active
+                    },
                     chat.archived,
                     false,
                     None,
                     None,
-                    Some(&query),
+                    Some(ChatRowSearch::Sidebar(&query)),
                     theme,
                     cx,
                 );
@@ -576,7 +613,7 @@ impl Shell {
                         .child(
                             div()
                                 .text_color(theme.text_muted)
-                                .child("Try another name or project."),
+                                .child("Try another name, session ID, or project."),
                         ),
                 )
             });

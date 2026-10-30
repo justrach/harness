@@ -236,6 +236,9 @@ impl Shell {
     /// open it just hides (detach, not close — the source chat's tabs and
     /// PTYs survive for the return trip).
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        let mut draft = self.current_canvas_draft(cx).fresh();
+        // The destination below follows the sidebar/defaults, not the old chat.
+        draft.target = None;
         self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -274,6 +277,7 @@ impl Shell {
             }
             s.select_chat(None, cx);
         });
+        self.adopt_canvas_draft(Some(draft), cx);
         // The canvas never restores a drawer: a previously opened canvas
         // terminal must not pop open on a fresh new chat.
         let key = self.panel_key(cx);
@@ -339,9 +343,9 @@ impl Shell {
             }
         };
 
-        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
-        // session is selected (`render_titlebar_cluster`) — this row budgets
-        // one button slot so the title never sits under it.
+        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER on both
+        // draft and established chat tabs — this row budgets one button slot
+        // so the title never sits under it or shifts after the first prompt.
         let sidebar_now = self.sidebar_now();
         // The update control, when shown, takes the next slot after it.
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx)

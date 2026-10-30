@@ -112,6 +112,7 @@ fn controls() -> RunControls {
         }),
         steering: rx,
         interrupt: CancellationToken::new(),
+        mcp_servers: Vec::new(),
     }
 }
 

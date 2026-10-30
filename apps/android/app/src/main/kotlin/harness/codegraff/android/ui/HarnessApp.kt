@@ -68,6 +68,8 @@ fun HarnessApp(model: AppModel, onSignOut: () -> Unit = {}) {
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showNewSpace by rememberSaveable { mutableStateOf(false) }
     var showHostPicker by rememberSaveable { mutableStateOf(false) }
+    /** The host picker opened for a plain chat rather than a projectless session. */
+    var hostPickerForChat by rememberSaveable { mutableStateOf(false) }
     val homeListState = rememberLazyListState()
     val p = Theme.palette
 
@@ -100,7 +102,7 @@ fun HarnessApp(model: AppModel, onSignOut: () -> Unit = {}) {
             onOpen = ::open,
             onShowSettings = { showSettings = true },
             onShowNewSpace = { showNewSpace = true },
-            onShowHostPicker = { showHostPicker = true },
+            onShowHostPicker = { chat -> hostPickerForChat = chat; showHostPicker = true },
             modifier = modifier,
         )
 
@@ -170,7 +172,10 @@ fun HarnessApp(model: AppModel, onSignOut: () -> Unit = {}) {
     if (showHostPicker) {
         SessionHostPickerSheet(
             state, selectedDeviceId = null,
-            onSelected = { deviceId -> path = listOf(Route.NewSession(NewSessionDestination.Projectless(deviceId))) },
+            onSelected = { deviceId ->
+                val destination = if (hostPickerForChat) NewSessionDestination.PlainChat(deviceId) else NewSessionDestination.Projectless(deviceId)
+                path = listOf(Route.NewSession(destination))
+            },
             onDismiss = { showHostPicker = false },
         )
     }

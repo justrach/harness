@@ -52,16 +52,15 @@ import harness.codegraff.android.model.SessionStatus
 import harness.codegraff.android.sync.LiveFeed
 import harness.codegraff.android.sync.LiveSync
 import harness.codegraff.android.sync.toModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -149,7 +148,7 @@ private class FakeCore : MobileCoreInterface {
 
 private fun chatRecord(id: String, lastMessageAt: Long? = null, seen: Long? = null) = ChatRecord(
     id = id, deviceId = "mac", title = "Title $id", archived = false, cwd = "/r", branch = "main", checkoutId = null,
-    config = ChatConfigRecord("graff", "m1", "high", mapOf("speed" to "fast"), null), lastMessagePreview = "hi",
+    config = ChatConfigRecord("graff", "m1", "high", mapOf("speed" to "fast"), null, false), lastMessagePreview = "hi",
     lastMessageAt = lastMessageAt, createdAt = 1, spaceId = "s1", lastSeenAt = seen, roomGen = 2, lastPromptAt = null,
 )
 
@@ -178,12 +177,21 @@ class LiveSyncTest {
 
     @Before fun setUp() = Dispatchers.setMain(dispatcher)
 
-    @After fun tearDown() = Dispatchers.resetMain()
+    @After fun tearDown() {
+        // A model's scope outlives its test unless it's cancelled before `Main` goes back.
+        models.forEach { it.viewModelScope.cancel() }
+        dispatcher.scheduler.advanceUntilIdle()
+        Dispatchers.resetMain()
+    }
+
+    private val models = mutableListOf<AppModel>()
 
     private fun live(): Triple<AppModel, FakeCore, LiveFeed> {
         val core = FakeCore()
         val feed = LiveFeed()
-        val model = AppModel(clock = { 1_000_000L }, tickMs = 1, liveSync = LiveSync(core, feed, "android-1"), writes = dispatcher)
+        // Core reads run on the test's dispatcher too, so no test waits on a real thread.
+        val model = AppModel(clock = { 1_000_000L }, tickMs = 1, liveSync = LiveSync(core, feed, "android-1"), writes = dispatcher, io = dispatcher)
+        models += model
         return Triple(model, core, feed)
     }
 
@@ -282,9 +290,8 @@ class LiveSyncTest {
     fun aSessionScreenOpensAndClosesTheChatAndOnlyThatChatIsRemapped() = runTest(dispatcher) {
         val (model, core, feed) = live()
         model.attachSession("a")
-        // The open runs on the IO dispatcher, outside the test's: wait for its snapshot, or it can land
-        // after the ones below and replace them.
-        withContext(Dispatchers.Default) { withTimeout(5_000) { feed.sessions.first { "a" in it } } }
+        advanceUntilIdle()
+        assertTrue("open a" in core.calls)
         model.detachSession("a")
         advanceUntilIdle()
         assertTrue("close a" in core.calls)
@@ -327,7 +334,6 @@ class LiveSyncTest {
         model.foregrounded()
         model.backgrounded()
         advanceUntilIdle()
-        Thread.sleep(50) // the flush runs on the IO dispatcher
         assertEquals(listOf("foreground", "flush"), core.calls.filter { it == "foreground" || it == "flush" })
     }
 

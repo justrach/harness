@@ -362,6 +362,8 @@ impl Harness for PiHarness {
             };
             let RunControls {
                 origin: _,
+                // Only ACP agents take host MCP servers so far.
+                mcp_servers: _,
                 request_input,
                 mut steering,
                 interrupt,

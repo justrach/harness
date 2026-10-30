@@ -30,6 +30,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -65,9 +66,12 @@ const PULSE_LEASE: Duration = Duration::from_millis(300);
 /// (every 2·N ticks) land inside [`PULSE_LEASE`] and keep it renewed.
 const BACKGROUND_TICK_DIVISOR: u64 = 3;
 
+type PulseNotifier = Rc<dyn Fn(&mut App)>;
+
 struct PulseClock {
     epoch: Instant,
     leases: HashMap<EntityId, PulseLease>,
+    background_views: HashMap<EntityId, PulseNotifier>,
     tick: u64,
     running: bool,
 }
@@ -101,6 +105,7 @@ impl Default for PulseClock {
         Self {
             epoch: Instant::now(),
             leases: HashMap::new(),
+            background_views: HashMap::new(),
             tick: 0,
             running: false,
         }
@@ -144,11 +149,48 @@ pub fn pulse_lease_slow(view: EntityId, cx: &mut App) {
     pulse_lease_every(view, 2, cx);
 }
 
+/// Route a background pane's passive motion through its shared repaint budget.
+/// Explicit input still notifies normally. Removing/replacing the route also
+/// retires its old lease, so promotion, hiding and release leave no stale tick.
+pub(crate) fn set_background_notifier(
+    view: EntityId,
+    notifier: Option<PulseNotifier>,
+    cx: &mut App,
+) {
+    let clock = cx.default_global::<PulseClock>();
+    clock.leases.remove(&view);
+    if let Some(notifier) = notifier {
+        clock.background_views.insert(view, notifier);
+    } else {
+        clock.background_views.remove(&view);
+    }
+}
+
+/// Transient tool reveals use the same pane budget as loaders and text veils.
+/// Defer out of paint before updating the owning transcript entity.
+pub(crate) fn request_view_frame(view: EntityId, window: &mut Window, cx: &mut App) {
+    if let Some(notify) = cx
+        .default_global::<PulseClock>()
+        .background_views
+        .get(&view)
+        .cloned()
+    {
+        cx.defer(move |cx| notify(cx));
+    } else {
+        window.on_next_frame(move |_, cx| cx.notify(view));
+    }
+}
+
 fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
     if cx.reduce_motion() {
         return;
     }
     let clock = cx.default_global::<PulseClock>();
+    let stride = if clock.background_views.contains_key(&view) {
+        stride.max(BACKGROUND_TICK_DIVISOR)
+    } else {
+        stride
+    };
     let now = Instant::now();
     clock
         .leases
@@ -213,7 +255,16 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
                         .filter_map(|(view, lease)| lease.take_tick(tick).then_some(*view))
                         .collect();
                     for view in views {
-                        cx.notify(view);
+                        let notify = cx
+                            .default_global::<PulseClock>()
+                            .background_views
+                            .get(&view)
+                            .cloned();
+                        if let Some(notify) = notify {
+                            notify(cx);
+                        } else {
+                            cx.notify(view);
+                        }
                     }
                     false
                 });

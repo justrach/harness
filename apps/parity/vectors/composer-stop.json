@@ -1,0 +1,12 @@
+{
+  "comment": "A Stop tap on the composer right after a question closes is ignored for graceMs (#149). The question panel takes the composer's place and its Submit sits where Stop shows up once the answer syncs back and the run goes on, so one more tap on Submit would stop the run it just resumed. `questionClosedAtMs` is when the panel last gave way to the composer (null: none has). A clock that went back never holds Stop off. The desktop checks the same rule in harness-ui's composer (`stop_allowed`).",
+  "graceMs": 1500,
+  "cases": [
+    { "name": "no question has closed", "nowMs": 10000, "questionClosedAtMs": null, "allowed": true },
+    { "name": "the same instant the panel closed", "nowMs": 10000, "questionClosedAtMs": 10000, "allowed": false },
+    { "name": "a tap just inside the grace", "nowMs": 11499, "questionClosedAtMs": 10000, "allowed": false },
+    { "name": "a tap once the grace is over", "nowMs": 11500, "questionClosedAtMs": 10000, "allowed": true },
+    { "name": "long after", "nowMs": 70000, "questionClosedAtMs": 10000, "allowed": true },
+    { "name": "the clock went back", "nowMs": 9000, "questionClosedAtMs": 10000, "allowed": true }
+  ]
+}

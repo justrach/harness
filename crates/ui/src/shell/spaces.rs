@@ -6583,6 +6583,20 @@ mod tests {
     }
 }
 
+/// Chat-mode stages for the isolated native screenshot fixture only.
+#[cfg(feature = "project-palette-fixture")]
+impl Shell {
+    pub fn fixture_chat_mode(&mut self, stage: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .read(cx)
+            .pickers()
+            .clone()
+            .update(cx, |pickers, cx| {
+                pickers.fixture_chat_mode(stage, window, cx)
+            });
+    }
+}
+
 /// Synthetic responses for the isolated native screenshot fixture only.
 #[cfg(feature = "project-palette-fixture")]
 impl Shell {

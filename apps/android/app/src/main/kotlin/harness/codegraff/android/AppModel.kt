@@ -11,6 +11,7 @@ import harness.codegraff.android.perf.PerfSpan
 import harness.codegraff.android.model.ChangeRequestSummary
 import harness.codegraff.android.model.Chat
 import harness.codegraff.android.model.ChatConfig
+import harness.codegraff.android.model.ChatMode
 import harness.codegraff.android.model.ChatIndicator
 import harness.codegraff.android.model.DeviceRow
 import harness.codegraff.android.model.HomeFilterNames
@@ -202,6 +203,8 @@ class AppModel(
     accountApi: AccountApi? = null,
     /** Where live writes run: off the main thread, one at a time, so they reach the doc in the order they were made. */
     private val writes: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
+    /** Where blocking core reads run (opening a chat from disk, a background flush). Tests pass their own dispatcher. */
+    private val io: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     private val _workspace: MutableStateFlow<WorkspaceState>
     private val _entries: MutableStateFlow<Map<String, List<MessageEntry>>>
@@ -805,7 +808,9 @@ class AppModel(
     }
 
     fun cachedModels(deviceId: String, harness: String): DeviceCatalog<ModelInfo> = if (live == null) {
-        DeviceCatalog(HarnessCatalog.models(harness), isLive = true)
+        // The demo gateway lists the chat-mode tiers for graff.
+        val tiers = if (harness == ChatMode.HARNESS) ChatMode.tiers.map { ModelInfo(it.id, it.label, null, emptyList()) } else emptyList()
+        DeviceCatalog(HarnessCatalog.models(harness) + tiers, isLive = true)
     } else modelCache.cached(deviceId to harness)
 
     /** The models offered by this agent on this execution device, never a different host's defaults. */
@@ -873,7 +878,7 @@ class AppModel(
     /** A session screen opened: the live core hydrates the chat from disk and joins its room. */
     fun attachSession(chatId: String) {
         val live = live ?: return
-        viewModelScope.launch(Dispatchers.IO) { live.feed.sessionChanged(live.core.openSession(chatId)) }
+        viewModelScope.launch(io) { live.feed.sessionChanged(live.core.openSession(chatId)) }
     }
 
     /** The session screen went away; the chat stays warm until it is among the coldest. */
@@ -890,7 +895,7 @@ class AppModel(
     fun backgrounded() {
         val live = live ?: return
         live.core.backgrounded()
-        viewModelScope.launch(Dispatchers.IO) { live.core.flush() }
+        viewModelScope.launch(io) { live.core.flush() }
     }
 
     override fun onCleared() {

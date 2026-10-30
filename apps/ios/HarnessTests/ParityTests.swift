@@ -400,6 +400,49 @@ final class ParityTests: XCTestCase {
         return DeviceAgents(id: d["id"] as! String, name: d["name"] as! String, online: d["online"] as! Bool, agents: agents)
     }
 
+    func testTheChatModeRulesMatch() throws {
+        let v = try load("vectors/chat-mode.json")
+        XCTAssertEqual(v["harness"] as? String, ChatMode.harness)
+        XCTAssertEqual(v["unavailableNote"] as? String, ChatMode.unavailableNote)
+        let tiers = try rows(v, "tiers")
+        XCTAssertEqual(tiers.map { $0["id"] as? String }, ChatMode.tiers.map(\.id))
+        XCTAssertEqual(tiers.map { $0["fallbackId"] as? String }, ChatMode.tiers.map(\.fallbackId))
+        XCTAssertEqual(tiers.map { $0["label"] as? String }, ChatMode.tiers.map(\.label))
+        XCTAssertEqual(tiers.map { $0["note"] as? String }, ChatMode.tiers.map(\.note))
+        XCTAssertEqual(tiers.map { $0["footerNote"] as? String }, ChatMode.tiers.map(\.footerNote))
+        for c in try rows(v, "cases") {
+            let name = "\(c["name"] ?? "")"
+            let catalog = (c["catalog"] as! [String]).map {
+                ModelInfo(id: $0, label: $0, description: nil, reasoningLevels: [])
+            }
+            let live = c["catalogLive"] as! Bool
+            let harnesses = (c["harnesses"] as? [String])?.map { HarnessInfo(id: $0, label: $0) }
+            let expected = try XCTUnwrap(c["expect"] as? [String: Any])
+            XCTAssertEqual(ChatMode.models(from: catalog).map { [$0.id, $0.label] },
+                           expected["offered"] as? [[String]], name)
+            XCTAssertEqual(ChatMode.availability(catalog: catalog, liveHarnesses: harnesses,
+                                                 liveModels: live ? catalog : nil).rawValue,
+                           expected["availability"] as? String, name)
+            XCTAssertEqual(ChatMode.selectedModel(storedId: c["stored"] as! String, catalog: catalog,
+                                                  loading: false).id,
+                           expected["selected"] as? String, name)
+        }
+        for n in try rows(v, "notes") {
+            XCTAssertEqual(ChatMode.note(for: n["model"] as? String), n["note"] as? String,
+                           "\(n["model"] ?? "nil")")
+        }
+    }
+
+    func testTheComposerStopGuardMatches() throws {
+        let v = try load("vectors/composer-stop.json")
+        XCTAssertEqual((v["graceMs"] as? NSNumber)?.int64Value, StopGuard.graceMs)
+        for c in try rows(v, "cases") {
+            let closed = (c["questionClosedAtMs"] as? NSNumber)?.int64Value
+            XCTAssertEqual(StopGuard.allows(nowMs: (c["nowMs"] as! NSNumber).int64Value, questionClosedAtMs: closed),
+                           c["allowed"] as? Bool, "\(c["name"] ?? "")")
+        }
+    }
+
     func testTheAgentReadinessRulesMatch() throws {
         let v = try load("vectors/agent-readiness.json")
         XCTAssertEqual(v["agents"] as? [String], OnboardingAgent.all.map(\.id))

@@ -103,7 +103,7 @@ fun HomeScreen(
     onOpen: (Route) -> Unit,
     onShowSettings: () -> Unit,
     onShowNewSpace: () -> Unit,
-    onShowHostPicker: () -> Unit,
+    onShowHostPicker: (chat: Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val p = Theme.palette
@@ -265,7 +265,7 @@ private fun NewButton(
     state: WorkspaceState,
     selectedSpaceId: String?,
     onOpen: (Route) -> Unit,
-    onShowHostPicker: () -> Unit,
+    onShowHostPicker: (chat: Boolean) -> Unit,
     onShowNewSpace: () -> Unit,
 ) {
     val p = Theme.palette
@@ -290,7 +290,8 @@ private fun NewButton(
                     }
                 }
             }
-            MenuRow("Session without a project…", null, false, glyph = Glyph.Close) { open = false; onShowHostPicker() }
+            MenuRow("New chat", null, false, glyph = Glyph.Chat) { open = false; onShowHostPicker(true) }
+            MenuRow("Session without a project…", null, false, glyph = Glyph.Close) { open = false; onShowHostPicker(false) }
             MenuRow("New space…", null, false, glyph = Glyph.FolderPlus) { open = false; onShowNewSpace() }
         }
     }

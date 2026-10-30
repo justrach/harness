@@ -78,6 +78,23 @@ const CURSOR_DEFAULT_BACKEND: &str = "https://api2.cursor.sh";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 
+// Tests point Claude's OAuth endpoints at a local server (never Anthropic).
+// Per thread, like the fake `security`: a `#[tokio::test]` runs on one thread.
+#[cfg(test)]
+thread_local! {
+    static CLAUDE_ENDPOINT_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn claude_endpoint(url: &'static str) -> String {
+    #[cfg(test)]
+    if let Some(base) = CLAUDE_ENDPOINT_OVERRIDE.with(|base| base.borrow().clone()) {
+        let path = url.splitn(4, '/').nth(3).unwrap_or_default();
+        return format!("{base}/{path}");
+    }
+    url.to_string()
+}
+
 /// Claude Code stores these next to `claudeAiOauth` in the same credential
 /// blob, but they are machine-shared (MCP server OAuth, plugin secrets) and
 /// rotate independently of any account slot. On activate the live copies win.
@@ -386,6 +403,7 @@ impl AgentAccounts {
                 message,
             });
         }
+        let live_claude = claude.clone();
         if let Some(detected) = claude {
             active_keys.insert(HarnessId::ClaudeCode, detected.account_key.clone());
             if detected.credentials.is_some() {
@@ -420,7 +438,11 @@ impl AgentAccounts {
             let slots = self.read_slots(harness);
             for slot in &slots {
                 let active = active_key.as_deref() == Some(slot.account_key.as_str());
-                let usage = self.usage_for(harness, slot, active, force_usage).await;
+                let may_refresh = harness == HarnessId::ClaudeCode
+                    && may_refresh_claude_slot(slot, live_claude.as_ref());
+                let usage = self
+                    .usage_for(harness, slot, may_refresh, force_usage)
+                    .await;
                 accounts.push(AgentAccount {
                     id: slot.id.clone(),
                     harness,
@@ -1547,7 +1569,7 @@ impl AgentAccounts {
         let token = self
             .inner
             .http
-            .post(CLAUDE_TOKEN_URL)
+            .post(claude_endpoint(CLAUDE_TOKEN_URL))
             .json(&serde_json::json!({
                 "grant_type": "authorization_code",
                 "code": auth_code,
@@ -2078,7 +2100,7 @@ impl AgentAccounts {
         &self,
         harness: HarnessId,
         slot: &Slot,
-        is_active: bool,
+        may_refresh: bool,
         force: bool,
     ) -> Option<UsageSnapshot> {
         let key = format!("{}:{}", harness_slug(harness), slot.account_key);
@@ -2092,7 +2114,7 @@ impl AgentAccounts {
             return None;
         }
         let usage = match harness {
-            HarnessId::ClaudeCode => self.claude_usage(slot, is_active).await,
+            HarnessId::ClaudeCode => self.claude_usage(slot, may_refresh).await,
             HarnessId::Codex => self.codex_usage(slot).await,
             HarnessId::Cursor => self.cursor_usage(slot).await,
             _ => None,
@@ -2101,7 +2123,7 @@ impl AgentAccounts {
         usage
     }
 
-    async fn claude_usage(&self, slot: &Slot, is_active: bool) -> Option<UsageSnapshot> {
+    async fn claude_usage(&self, slot: &Slot, may_refresh: bool) -> Option<UsageSnapshot> {
         let oauth = slot.credentials.get("claudeAiOauth")?;
         let access_token = str_field(oauth, "accessToken")?;
         match self.claude_usage_request(&access_token).await {
@@ -2109,9 +2131,9 @@ impl AgentAccounts {
             // The stored expiry metadata can lie (a Claude Code regression
             // wrote `expiresAt: 0` for fresh logins), so probe with the
             // stored token first and rotate the slot-owned pair only after
-            // the endpoint actually rejected it. The active login is never
-            // rotated: the running CLI may hold its single-use refresh token.
-            Err(_) if !is_active => {
+            // the endpoint actually rejected it, and only when the pair is
+            // the slot's alone (see `may_refresh_claude_slot`).
+            Err(_) if may_refresh => {
                 let fresh = self.refresh_claude_slot(slot).await?;
                 self.claude_usage_request(&fresh).await.ok().flatten()
             }
@@ -2125,7 +2147,7 @@ impl AgentAccounts {
         let response = self
             .inner
             .http
-            .get(CLAUDE_USAGE_URL)
+            .get(claude_endpoint(CLAUDE_USAGE_URL))
             .bearer_auth(access_token)
             .header("anthropic-beta", "oauth-2025-04-20")
             .send()
@@ -2242,7 +2264,7 @@ impl AgentAccounts {
     }
 
     /// Refresh a saved Claude slot's expired access token so its usage stays
-    /// queryable. NEVER called for the active login. Single-flight per slot:
+    /// queryable. Only for a slot `may_refresh_claude_slot` allows. Single-flight per slot:
     /// OAuth refresh tokens are commonly single-use, and a concurrent second
     /// POST of the same one would revoke the family and brick the slot.
     async fn refresh_claude_slot(&self, slot: &Slot) -> Option<String> {
@@ -2260,7 +2282,7 @@ impl AgentAccounts {
         let body: serde_json::Value = self
             .inner
             .http
-            .post(CLAUDE_TOKEN_URL)
+            .post(claude_endpoint(CLAUDE_TOKEN_URL))
             .json(&serde_json::json!({
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
@@ -2705,6 +2727,39 @@ fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
 
 /// Windows from Claude's `/api/oauth/usage`: the 5-hour session and weekly
 /// buckets, each a 0-100 `utilization` with an RFC3339 `resets_at`.
+/// Whether Harness may spend `slot`'s refresh token to read its usage.
+///
+/// Claude's refresh tokens are single-use. If Harness spends the one the
+/// running CLI also holds, the CLI's next refresh is refused once its access
+/// token expires, hours later, and every run fails with "Authentication
+/// failed" until someone signs in again. So a slot is refreshed only when the
+/// live login is known to be another account holding another token. A live
+/// login Harness couldn't read (a `~/.claude.json` caught mid-write, a
+/// Keychain that said no) leaves every slot alone, and so does a slot for
+/// the live login's email filed under another key.
+fn may_refresh_claude_slot(slot: &Slot, live: Option<&Detected>) -> bool {
+    let Some(live) = live else {
+        return false;
+    };
+    if slot.account_key == live.account_key
+        || slot.profile.email.eq_ignore_ascii_case(&live.profile.email)
+    {
+        return false;
+    }
+    let refresh_token = |credentials: &serde_json::Value| {
+        credentials
+            .get("claudeAiOauth")
+            .and_then(|oauth| str_field(oauth, "refreshToken"))
+    };
+    match (
+        refresh_token(&slot.credentials),
+        live.credentials.as_ref().and_then(refresh_token),
+    ) {
+        (Some(slot_token), Some(live_token)) => slot_token != live_token,
+        _ => false,
+    }
+}
+
 fn claude_usage_windows(body: &serde_json::Value) -> Option<UsageSnapshot> {
     let mut windows = Vec::new();
     for (key, label) in [("five_hour", "Session"), ("seven_day", "Week")] {
@@ -2952,6 +3007,163 @@ fn write_file_atomic(file: &Path, bytes: &[u8], secret: bool) -> Result<(), Engi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn claude_slot(key: &str, email: &str, refresh: &str) -> Slot {
+        Slot {
+            id: slot_id_for(HarnessId::ClaudeCode, key),
+            harness: HarnessId::ClaudeCode,
+            account_key: key.into(),
+            profile: SlotProfile {
+                email: email.into(),
+                display_name: None,
+                organization: None,
+                plan: None,
+                auth_kind: AgentAuthKind::Oauth,
+            },
+            credentials: serde_json::json!({
+                "claudeAiOauth": { "accessToken": format!("access-{refresh}"), "refreshToken": refresh },
+            }),
+            claude_config: None,
+            saved_at: 0,
+            created_at: None,
+        }
+    }
+
+    fn live_claude(key: &str, email: &str, refresh: Option<&str>) -> Detected {
+        let slot = claude_slot(key, email, refresh.unwrap_or_default());
+        Detected {
+            account_key: slot.account_key,
+            profile: slot.profile,
+            credentials: refresh.map(|_| slot.credentials),
+            claude_config: None,
+        }
+    }
+
+    /// Spending a refresh token the running CLI also holds signs the CLI out
+    /// when its access token next expires, so only a slot that is plainly
+    /// another account, with its own token, is ever refreshed.
+    #[test]
+    fn only_another_accounts_own_token_is_refreshed() {
+        let saved = claude_slot("uuid-a", "a@example.com", "token-a");
+        let other = live_claude("uuid-b", "b@example.com", Some("token-b"));
+        assert!(may_refresh_claude_slot(&saved, Some(&other)));
+
+        for (why, live) in [
+            ("live login unreadable", None),
+            (
+                "same account",
+                Some(live_claude("uuid-a", "a@example.com", Some("token-a2"))),
+            ),
+            (
+                "same email, older key",
+                Some(live_claude("uuid-a2", "A@example.com", Some("token-a2"))),
+            ),
+            (
+                "same token",
+                Some(live_claude("uuid-b", "b@example.com", Some("token-a"))),
+            ),
+            (
+                "live secret unreadable",
+                Some(live_claude("uuid-b", "b@example.com", None)),
+            ),
+        ] {
+            assert!(!may_refresh_claude_slot(&saved, live.as_ref()), "{why}");
+        }
+    }
+
+    /// A stand-in for Claude's OAuth endpoints: usage always answers 401 (an
+    /// expired access token) and every token request is counted.
+    async fn fake_claude_oauth() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let counted = refreshes.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let reply = if request.starts_with(b"POST /v1/oauth/token") {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    let body =
+                        r#"{"access_token":"fresh","refresh_token":"rotated","expires_in":28800}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .into()
+                };
+                let _ = stream.write_all(reply.as_bytes()).await;
+            }
+        });
+        (base, refreshes)
+    }
+
+    /// The daily "Authentication failed": a usage load that caught
+    /// `~/.claude.json` mid-write saw no live login, took the saved copy of
+    /// it for another account, and spent the refresh token Claude Code
+    /// was still holding.
+    #[tokio::test]
+    async fn usage_never_spends_the_live_logins_refresh_token() {
+        use std::sync::atomic::Ordering;
+        let (base, refreshes) = fake_claude_oauth().await;
+        CLAUDE_ENDPOINT_OVERRIDE.with(|url| *url.borrow_mut() = Some(base));
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let config = AgentAccountsConfig {
+            data_dir: home.join("data"),
+            claude_config_dir: home.join("claude"),
+            claude_config_file: home.join("claude.json"),
+            codex_home: home.join("codex"),
+            cursor_sdk_auth_file: home.join("cursor.json"),
+            graff_home: home.to_path_buf(),
+        };
+        let accounts = AgentAccounts::new(config.clone());
+        let live = claude_slot("uuid-a", "a@example.com", "token-a");
+        accounts.write_slot(&live).unwrap();
+        std::fs::create_dir_all(&config.claude_config_dir).unwrap();
+        std::fs::write(config.claude_creds_file(), live.credentials.to_string()).unwrap();
+
+        // Caught mid-write: Claude Code rewrites this file all the time.
+        std::fs::write(&config.claude_config_file, "{\"oauthAccount\": {\"emailAdd").unwrap();
+        accounts.list(true).await.unwrap();
+        assert_eq!(
+            refreshes.load(Ordering::SeqCst),
+            0,
+            "spent the live login's refresh token"
+        );
+
+        // Signed in to another account, the saved one is the slot's alone.
+        std::fs::write(
+            &config.claude_config_file,
+            serde_json::json!({ "oauthAccount": { "accountUuid": "uuid-b", "emailAddress": "b@example.com" } })
+                .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            config.claude_creds_file(),
+            serde_json::json!({ "claudeAiOauth": { "accessToken": "access-b", "refreshToken": "token-b" } })
+                .to_string(),
+        )
+        .unwrap();
+        accounts.list(true).await.unwrap();
+        assert_eq!(
+            refreshes.load(Ordering::SeqCst),
+            1,
+            "another account's slot still refreshes"
+        );
+
+        CLAUDE_ENDPOINT_OVERRIDE.with(|url| *url.borrow_mut() = None);
+    }
 
     /// A Keychain the engine can't use (the search and the write both
     /// refused, as from an engine outside the login session) must not leave

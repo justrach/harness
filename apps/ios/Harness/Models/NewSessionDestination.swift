@@ -5,12 +5,20 @@ import Foundation
 enum NewSessionDestination: Hashable {
     case project(spaceId: String)
     case projectless(deviceId: String)
+    /// A plain chat (chat mode): no project, hosted by this device.
+    case chat(deviceId: String)
+
+    var isChat: Bool {
+        if case .chat = self { return true }
+        return false
+    }
 
     /// Names this destination for the draft kept while its composer is away.
     var draftKey: String {
         switch self {
         case .project(let id): return "project:\(id)"
         case .projectless(let id): return "projectless:\(id)"
+        case .chat(let id): return "chat:\(id)"
         }
     }
 
@@ -23,7 +31,7 @@ enum NewSessionDestination: Hashable {
         switch self {
         case .project:
             return space(in: spaces)?.deviceId
-        case .projectless(let id):
+        case .projectless(let id), .chat(let id):
             // Offline hosts remain selectable: delivery is durable. iOS is
             // a viewer, so it can never be the execution target.
             return devices.first { $0.id == id && $0.canHostSessions }?.id

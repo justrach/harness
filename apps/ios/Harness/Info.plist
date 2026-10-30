@@ -63,6 +63,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Harness writes out what you record on your Apple Watch, so it can send it to a chat as text.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Harness uses the camera when you take a photo to attach to a message.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

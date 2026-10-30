@@ -38,6 +38,8 @@ struct SessionView: View {
     /// Follow intent belongs to the session, independent of composer focus.
     @State private var scroll = ScrollState()
     @State private var attachmentDraft = AttachmentDraft()
+    /// When the question panel last gave way to the composer (`StopGuard`).
+    @State private var questionClosedAtMs: Int64?
     @State private var hostLink: HostLink?
     @State private var renamingSession = false
     @State private var renameChatId: String?
@@ -333,7 +335,8 @@ struct SessionView: View {
                         }
                     } else {
                         ComposerView(store: store, chat: chat, runLive: status == .working,
-                                     attachmentDraft: attachmentDraft)
+                                     attachmentDraft: attachmentDraft,
+                                     questionClosedAtMs: questionClosedAtMs)
                             .id(chat.id)
                     }
                 }
@@ -407,6 +410,10 @@ struct SessionView: View {
         }
         .onChange(of: chatId) { _, _ in
             attachmentDraft = AttachmentDraft()
+            questionClosedAtMs = nil
+        }
+        .onChange(of: store.openInputRequest?.requestId) { old, new in
+            if old != nil, new == nil { questionClosedAtMs = nowMs() }
         }
         .motionAnimation(Motion.fadeQuick, value: store.openInputRequest?.requestId)
     }

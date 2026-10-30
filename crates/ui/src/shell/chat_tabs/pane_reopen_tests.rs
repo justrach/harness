@@ -113,8 +113,8 @@ fn reopen_closed_pane_and_tab_archive_shortcut_matrix(cx: &mut gpui::TestAppCont
     for scope in ["pane", "tab", "last session"] {
         for preference in [false, true] {
             for cmd_w in [false, true] {
-                // ⌘W follows the archive-on-close setting; ⌘⌥W never archives.
-                let archive = cmd_w && preference;
+                // Choose the opposite of the saved preference; ⌘⌥W never archives.
+                let archive = cmd_w && !preference;
                 for completed in [false, true] {
                     let (_dir, window) = fixture(cx, false, None);
                     cx.update(|cx| settings::set_archive_sessions_on_close(preference, cx));
@@ -141,6 +141,16 @@ fn reopen_closed_pane_and_tab_archive_shortcut_matrix(cx: &mut gpui::TestAppCont
                         })
                         .unwrap();
                     press(cx, window, if cmd_w { "mod-w" } else { "mod-alt-w" });
+                    if cmd_w {
+                        window
+                            .update(cx, |shell, window, cx| {
+                                assert!(shell.archive_choice_prompt);
+                                assert!(shell.choose_close_archiving(archive, window, cx));
+                                assert_eq!(settings::archive_sessions_on_close(cx), preference);
+                            })
+                            .unwrap();
+                        cx.run_until_parked();
+                    }
                     let closing = mutations(&mut requests);
                     assert_eq!(
                         closing.len(),
@@ -341,7 +351,7 @@ fn reopen_closed_pane_after_cmd_d_and_both_close_shortcuts(cx: &mut gpui::TestAp
         for close_key in ["mod-w", "mod-alt-w"] {
             for focus in [0, 1] {
                 let (_dir, window) = fixture(cx, false, None);
-                // Already chosen, so ⌘W closes instead of asking first.
+                // A saved preference does not bypass the per-close choice.
                 cx.update(|cx| settings::set_archive_sessions_on_close(false, cx));
                 press(cx, window, split_key);
                 let original = window
@@ -353,6 +363,13 @@ fn reopen_closed_pane_after_cmd_d_and_both_close_shortcuts(cx: &mut gpui::TestAp
                     })
                     .unwrap();
                 press(cx, window, close_key);
+                if close_key == "mod-w" {
+                    window
+                        .update(cx, |shell, window, cx| {
+                            assert!(shell.choose_close_archiving(false, window, cx));
+                        })
+                        .unwrap();
+                }
                 window
                     .update(cx, |shell, _, _| {
                         assert!(shell.chat_split.is_none(), "two panes collapse to one");

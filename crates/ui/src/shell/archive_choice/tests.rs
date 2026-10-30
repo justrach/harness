@@ -26,26 +26,32 @@ fn prompt_and_selection(
 }
 
 #[test]
-fn copy_names_both_shortcuts_and_the_settings_page() {
+fn copy_names_both_shortcuts_and_the_per_close_choice() {
     let (title, body) = archive_choice_copy("⌘W", "⌥⌘W");
-    assert_eq!(title, "When you close a chat with ⌘W");
+    assert_eq!(title, "Close this chat with ⌘W?");
     assert!(body.contains("⌥⌘W always just closes"), "{body}");
     assert!(
-        body.contains("Settings \u{2192} Archived sessions"),
+        body.contains("This choice applies only to this close"),
         "{body}"
     );
     assert_eq!(SettingsSection::Archived.label(), "Archived sessions");
 }
 
 #[gpui::test]
-fn first_cmd_w_asks_and_escape_cancels(cx: &mut gpui::TestAppContext) {
+fn cmd_w_asks_and_escape_cancels(cx: &mut gpui::TestAppContext) {
     let (dir, window) = fixture(cx, false, None);
     assert_eq!(chosen(cx), (false, false));
     press(cx, window, "mod-w");
     assert_eq!(
         prompt_and_selection(cx, window),
         (true, Some("current".into())),
-        "the first ⌘W asks and closes nothing yet"
+        "⌘W asks and closes nothing yet"
+    );
+    press(cx, window, "mod-w");
+    assert_eq!(
+        prompt_and_selection(cx, window),
+        (true, Some("current".into())),
+        "repeating ⌘W while the question is open still closes nothing"
     );
     press(cx, window, "escape");
     assert_eq!(
@@ -55,7 +61,7 @@ fn first_cmd_w_asks_and_escape_cancels(cx: &mut gpui::TestAppContext) {
     );
     assert_eq!(chosen(cx), (false, false), "and nothing is saved");
     assert!(!settings::UiSettings::load(dir.path()).archive_on_close_chosen);
-    // Asked again until answered.
+    // Cancelled questions are asked again.
     press(cx, window, "mod-w");
     assert!(prompt_and_selection(cx, window).0);
     press(cx, window, "escape");
@@ -90,14 +96,15 @@ fn close_buttons_never_ask(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn each_answer_closes_accordingly_and_is_remembered(cx: &mut gpui::TestAppContext) {
+fn each_answer_applies_only_to_this_close(cx: &mut gpui::TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     let _guard = runtime.enter();
-    for archive in [false, true] {
+    for (archive, preference) in [(false, false), (false, true), (true, false), (true, true)] {
         let (dir, window) = fixture(cx, false, None);
+        cx.update(|cx| settings::set_archive_sessions_on_close(preference, cx));
         let (out, mut requests) = tokio::sync::mpsc::channel(128);
         let (replies, inbound) = tokio::sync::mpsc::channel(128);
         let engine =
@@ -118,6 +125,7 @@ fn each_answer_closes_accordingly_and_is_remembered(cx: &mut gpui::TestAppContex
         window
             .update(cx, |shell, window, cx| {
                 assert!(shell.choose_close_archiving(archive, window, cx));
+                assert!(!shell.choose_close_archiving(!archive, window, cx));
             })
             .unwrap();
         cx.run_until_parked();
@@ -134,12 +142,12 @@ fn each_answer_closes_accordingly_and_is_remembered(cx: &mut gpui::TestAppContex
             reply(&runtime, &replies, &closing[0]);
             cx.run_until_parked();
         }
-        assert_eq!(chosen(cx), (true, archive));
+        assert_eq!(chosen(cx), (true, preference));
         let saved = settings::UiSettings::load(dir.path());
         assert!(saved.archive_on_close_chosen);
-        assert_eq!(saved.archive_sessions_on_close, archive);
+        assert_eq!(saved.archive_sessions_on_close, preference);
 
-        // The second ⌘W follows the answer without asking.
+        // The next ⌘W asks again and can choose the opposite action.
         window
             .update(cx, |shell, _, cx| {
                 shell.open_chat("peer".into(), cx);
@@ -149,16 +157,25 @@ fn each_answer_closes_accordingly_and_is_remembered(cx: &mut gpui::TestAppContex
         press(cx, window, "mod-w");
         assert_eq!(
             prompt_and_selection(cx, window),
-            (false, None),
-            "archive={archive}"
+            (true, Some("peer".into())),
+            "archive={archive}, preference={preference}"
         );
+        assert!(mutations(&mut requests).is_empty());
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(shell.choose_close_archiving(!archive, window, cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(prompt_and_selection(cx, window), (false, None));
         let closing = mutations(&mut requests);
-        assert_eq!(closing.len(), usize::from(archive), "archive={archive}");
-        if archive {
+        assert_eq!(closing.len(), usize::from(!archive), "archive={archive}");
+        if !archive {
             assert_eq!(closing[0]["params"]["chatId"], "peer");
             reply(&runtime, &replies, &closing[0]);
             cx.run_until_parked();
         }
+        assert_eq!(chosen(cx), (true, preference));
         window
             .update(cx, |_, window, _| window.remove_window())
             .unwrap();
@@ -166,17 +183,26 @@ fn each_answer_closes_accordingly_and_is_remembered(cx: &mut gpui::TestAppContex
 }
 
 #[gpui::test]
-fn the_settings_toggle_counts_as_the_choice(cx: &mut gpui::TestAppContext) {
-    let (dir, window) = fixture(cx, false, None);
-    cx.update(|cx| settings::set_archive_sessions_on_close(false, cx));
-    assert_eq!(chosen(cx), (true, false));
-    assert!(settings::UiSettings::load(dir.path()).archive_on_close_chosen);
-    press(cx, window, "mod-w");
-    assert_eq!(prompt_and_selection(cx, window), (false, None));
+fn cmd_w_asks_even_with_a_saved_close_preference(cx: &mut gpui::TestAppContext) {
+    for preference in [false, true] {
+        let (dir, window) = fixture(cx, false, None);
+        cx.update(|cx| settings::set_archive_sessions_on_close(preference, cx));
+        assert_eq!(chosen(cx), (true, preference));
+        assert!(settings::UiSettings::load(dir.path()).archive_on_close_chosen);
+        press(cx, window, "mod-w");
+        assert_eq!(
+            prompt_and_selection(cx, window),
+            (true, Some("current".into())),
+            "a saved close preference must not skip the question"
+        );
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+    }
 }
 
 #[gpui::test]
-fn an_install_that_already_archives_on_close_is_not_asked(cx: &mut gpui::TestAppContext) {
+fn an_existing_install_with_archiving_enabled_is_also_asked(cx: &mut gpui::TestAppContext) {
     let (dir, window) = fixture(cx, false, None);
     // A settings file from before the question existed, with the toggle on.
     std::fs::write(
@@ -188,5 +214,9 @@ fn an_install_that_already_archives_on_close_is_not_asked(cx: &mut gpui::TestApp
     assert!(loaded.archive_on_close_chosen);
     cx.update(|cx| settings::update(settings::SavePolicy::Immediate, cx, |s| *s = loaded));
     press(cx, window, "mod-w");
-    assert_eq!(prompt_and_selection(cx, window), (false, None));
+    assert_eq!(
+        prompt_and_selection(cx, window),
+        (true, Some("current".into()))
+    );
+    assert_eq!(chosen(cx), (true, true));
 }

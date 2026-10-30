@@ -18,6 +18,8 @@ use crate::settings::{self, widgets};
 use crate::state::AppState;
 use crate::theme::Theme;
 
+mod updates;
+
 /// A device that pinged within this window shows a presence dot (engines
 /// heartbeat every 15s; 70s tolerates a couple of missed beats).
 pub const DEVICE_ONLINE_WINDOW_SECS: i64 = 70;
@@ -177,13 +179,17 @@ pub struct DevicesPage {
     checking: Option<Option<harness_update::UpdateStatus>>,
     check_task: Option<Task<()>>,
     desktop_update: bool,
+    remote_update: updates::RemoteUpdate,
     _observe: Subscription,
     _observe_phase: Subscription,
 }
 
 impl DevicesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&state, |_, _, cx| cx.notify());
+        let observe = cx.observe(&state, |page: &mut Self, _, cx| {
+            page.reconcile_remote_update(cx);
+            cx.notify();
+        });
         let observe_phase = cx.observe_global::<SharedUpdatePhase>(|_, cx| cx.notify());
         Self {
             state,
@@ -197,6 +203,7 @@ impl DevicesPage {
             checking: None,
             check_task: None,
             desktop_update: harness_update::detect_install().supports_desktop_update(),
+            remote_update: updates::RemoteUpdate::default(),
             _observe: observe,
             _observe_phase: observe_phase,
         }
@@ -589,6 +596,8 @@ impl Render for DevicesPage {
                 let rename_name = device.name.clone();
                 let remove_id = device.id.clone();
                 let confirming_remove = confirm_remove.as_deref() == Some(device.id.as_str());
+                let update_controls =
+                    self.render_remote_update(&device, is_local, online, &theme, cx);
                 let platform_icon = match device.platform.as_str() {
                     "macos" | "darwin" => crate::icons::LAPTOP,
                     "web" => crate::icons::GLOBAL,
@@ -680,7 +689,7 @@ impl Render for DevicesPage {
                         .into_any_element(),
                 );
 
-                widgets::card_row(&theme, ix == 0)
+                let row = widgets::card_row(&theme, ix == 0)
                     .child(tile)
                     .child(
                         div()
@@ -753,7 +762,10 @@ impl Render for DevicesPage {
                                     "Remove"
                                 })),
                         )
-                    })
+                    });
+                div()
+                    .child(row)
+                    .children(update_controls)
                     .into_any_element()
             })
             .collect();
@@ -833,6 +845,7 @@ mod tests {
                 update_available: available,
                 checked_at: Some(now.timestamp_millis() - 120_000),
                 error: error.map(Into::into),
+                host: None,
             }
         };
         let up_to_date = status(Some("0.2.92"), false, None);
@@ -877,6 +890,7 @@ mod tests {
             update_available: true,
             checked_at: Some(now.timestamp_millis()),
             error: None,
+            host: None,
         };
         let summary =
             |phase: UpdatePhase, desktop| update_summary(Some(&newer), desktop, &phase, false, now);

@@ -1,5 +1,5 @@
 //! Close-and-archive evidence with isolated, synthetic data: Settings →
-//! Archived sessions, then the first ⌘W close of a chat on a fresh install.
+//! Archived sessions, then ⌘W with an already-saved close-only preference.
 //!
 //! `cargo run -p harness-ui --features appshots-fixture --example archive-choice-fixture -- <dir> [light]`
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -73,8 +73,9 @@ fn main() -> anyhow::Result<()> {
         .run(move |cx| {
             gpui_tokio::init(cx);
             gpui_base::init(cx);
-            // A fresh install: archive-on-close has never been chosen.
-            let settings = settings::UiSettings::default();
+            // A previous close chose not to archive; ⌘W must still ask again.
+            let mut settings = settings::UiSettings::default();
+            settings.archive_on_close_chosen = true;
             settings::init(settings.clone(), data.clone(), cx);
             let fonts = typography::register_fonts(cx);
             typography::init(

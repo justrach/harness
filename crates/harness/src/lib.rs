@@ -55,6 +55,33 @@ pub struct SteerMessage {
     pub attachments: Vec<String>,
 }
 
+/// An MCP server the host adds to a run, over HTTP (Harness's browse relay).
+/// Agents that advertise `mcpCapabilities.http` get it at session start.
+#[derive(Clone, PartialEq)]
+pub struct McpServer {
+    pub name: String,
+    pub url: String,
+    /// May carry the run's bearer token: never logged ([`Debug`] hides values).
+    pub headers: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for McpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServer")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| (name.as_str(), "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     /// The run sends questions and awaits answers (blocks the agent, mirrors harness).
@@ -67,6 +94,8 @@ pub struct RunControls {
     /// interrupt, then escalates to SIGTERM/SIGKILL on the child after a grace
     /// period. The run's stream ends with `Done { status: Interrupted }`.
     pub interrupt: CancellationToken,
+    /// Extra MCP servers for this run (empty for most).
+    pub mcp_servers: Vec<McpServer>,
     /// The chat this run belongs to. Drivers that can hand the agent MCP
     /// servers give it Harness's own (`harness mcp`: agent rooms, chat tools)
     /// speaking for this chat. None for title runs and tests.

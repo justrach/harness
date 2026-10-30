@@ -1,0 +1,7 @@
+{
+  "name": "harness-simulator-helper",
+  "private": true,
+  "dependencies": {
+    "expo-device-hub": "0.12.0"
+  }
+}

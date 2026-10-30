@@ -13,6 +13,7 @@
 //! - [`loaders`] — harness pulse loader, gradient spinner, boot splash.
 
 mod agent_message;
+pub mod agent_work;
 pub mod app_menus;
 pub mod appearance;
 pub mod appshots;
@@ -21,6 +22,7 @@ pub mod badges;
 pub mod browser;
 pub mod change_requests;
 pub mod changes;
+pub(crate) mod chat_mode;
 pub(crate) mod chatgpt_plan;
 pub mod codegraff_jobs;
 pub mod codegraff_runners;
@@ -30,7 +32,9 @@ pub mod comments;
 pub mod composer;
 mod composer_dock;
 mod composer_markdown;
-mod context_usage;
+pub mod context_trajectory;
+pub mod context_usage;
+pub mod context_window;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;

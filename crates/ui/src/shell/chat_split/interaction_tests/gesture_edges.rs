@@ -33,7 +33,7 @@ fn with_layout(
             shell.state.update(cx, |state, cx| {
                 state.transcript = vec![entry_for(&shell.transcript, text)];
                 state.transcript_revision += 1;
-                state.set_subagent_snapshot(
+                state.set_peer_chat_snapshot(
                     "peer".into(),
                     vec![entry_for(&shell.peer_chat_views["peer"].transcript, text)],
                 );
@@ -41,7 +41,7 @@ fn with_layout(
                     let mut third = state.chats[0].clone();
                     third.id = "third".into();
                     state.chats.push(third);
-                    state.set_subagent_snapshot("third".into(), vec![reply(text)]);
+                    state.set_peer_chat_snapshot("third".into(), vec![reply(text)]);
                 }
                 cx.notify();
             });
@@ -57,13 +57,15 @@ fn with_layout(
             }
             shell.sync_chat_panes(cx);
         });
-        // Let initial transcript preparation settle before replacing the new
-        // peer's fixture snapshot and promoting a source pane.
+        // Let preparation and the peer's 100ms passive-update budget settle
+        // before replacing its fixture snapshot and promoting a source pane.
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(100));
         draw(cx);
         shell.update(cx, |shell, cx| {
             if count == 3 {
                 shell.state.update(cx, |state, cx| {
-                    state.set_subagent_snapshot(
+                    state.set_peer_chat_snapshot(
                         "third".into(),
                         vec![entry_for(&shell.peer_chat_views["third"].transcript, text)],
                     );
@@ -79,6 +81,10 @@ fn with_layout(
             SplitAxis::Vertical => gpui::size(px(960.0), px(320.0 * count as f32)),
         };
         cx.simulate_resize(size);
+        // Finish fixture delivery before measuring gesture hit targets. No
+        // clocks advance during the gestures: direct input remains immediate.
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(100));
         draw(cx);
         run(shell, cx);
     });

@@ -61,7 +61,23 @@ name = "app-update-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "device-update-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "browse-link-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "error-cards-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "transcript-mermaid-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "final-answer-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -89,6 +105,10 @@ name = "markdown-math-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "composer-completion-fade-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "visuals-fixture"
 required-features = ["appshots-fixture"]
 
@@ -101,11 +121,19 @@ name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 
 [[example]]
+name = "chat-mode-fixture"
+required-features = ["project-palette-fixture"]
+
+[[example]]
 name = "sidebar-fixture"
 required-features = ["project-palette-fixture"]
 
 [[example]]
 name = "footer-fixture"
+required-features = ["appshots-fixture", "project-palette-fixture"]
+
+[[example]]
+name = "checkout-isolation-fixture"
 required-features = ["appshots-fixture", "project-palette-fixture"]
 
 [dependencies]

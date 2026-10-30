@@ -42,9 +42,11 @@ import harness.codegraff.android.ui.components.pressWashClickable
 @Composable
 fun projectLocation(chat: Chat, state: WorkspaceState): AnnotatedString {
     val palette = Theme.palette
-    return remember(chat.deviceId, chat.spaceId, chat.cwd, state.spaces, state.devices, palette) {
+    val isChat = chat.config?.chatMode == true
+    return remember(chat.deviceId, chat.spaceId, chat.cwd, isChat, state.spaces, state.devices, palette) {
         val device = state.deviceName(chat.deviceId)
-        val spaceId = chat.spaceId ?: return@remember AnnotatedString("No project @ $device")
+        // A plain chat names itself; other sessions without a project say so.
+        val spaceId = chat.spaceId ?: return@remember AnnotatedString(if (isChat) "Chat @ $device" else "No project @ $device")
         val project = state.space(chat)?.displayName ?: chat.cwd?.trimEnd('/')?.substringAfterLast('/') ?: "?"
         val tint = palette.projectTint(spaceId)
         buildAnnotatedString {

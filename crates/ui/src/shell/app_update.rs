@@ -286,6 +286,9 @@ pub(super) fn updated_confirmation(
 
 /// The shell's app-update UI state beyond the download flow itself.
 pub(super) struct AppUpdateUi {
+    /// Render an inert ready-update button for manual layout testing in a
+    /// debug build. This never stages an update or starts a restart watcher.
+    pub dev_preview: bool,
     /// "Later" was chosen for this version: no automatic restart for it (it
     /// still installs on quit).
     pub postponed: Option<String>,
@@ -305,6 +308,8 @@ pub(super) struct AppUpdateUi {
 impl AppUpdateUi {
     pub(super) fn new() -> Self {
         Self {
+            dev_preview: cfg!(debug_assertions)
+                && std::env::var("HARNESS_DEV_APP_UPDATE").as_deref() == Ok("1"),
             postponed: None,
             countdown_started: None,
             watch: None,
@@ -403,6 +408,15 @@ impl Shell {
     }
 
     fn update_control_now(&self, cx: &App) -> Option<(UpdateControl, String)> {
+        if self.app_update.dev_preview {
+            return Some((
+                UpdateControl::Ready {
+                    auto: false,
+                    on_quit: false,
+                },
+                "preview".into(),
+            ));
+        }
         update_control(
             self.state.read(cx).update.as_ref(),
             &self.update_flow,
@@ -428,10 +442,15 @@ impl Shell {
     pub(super) fn render_update_control(
         &mut self,
         theme: &Theme,
+        control_gap: f32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (control, version) = self.update_control_now(cx)?;
-        let label = update_control_label(&control, &version);
+        let label = if self.app_update.dev_preview {
+            "Update button preview — no download, install or restart.".into()
+        } else {
+            update_control_label(&control, &version)
+        };
         let tone = match control {
             UpdateControl::Downloading => theme.text_muted,
             UpdateControl::Failed(_) => theme.danger,
@@ -440,7 +459,8 @@ impl Shell {
             }
         };
         let ready = matches!(control, UpdateControl::Ready { .. });
-        let clickable = !matches!(control, UpdateControl::Downloading);
+        let clickable =
+            !self.app_update.dev_preview && !matches!(control, UpdateControl::Downloading);
         let fade_key = "window-control-titlebar-update";
         let mut button = div()
             .id("titlebar-update")
@@ -498,7 +518,7 @@ impl Shell {
         Some(
             div()
                 .flex_none()
-                .ml(px(TITLEBAR_GROUP_GAP))
+                .ml(px(control_gap))
                 .child(button)
                 .into_any_element(),
         )
@@ -822,6 +842,7 @@ mod tests {
             update_available: available,
             checked_at: None,
             error: None,
+            host: None,
         }
     }
 

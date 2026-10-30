@@ -60,9 +60,9 @@ fun DeviceRecord.toModel() = DeviceRow(id, name, platform, lastSeenAt, createdAt
 
 fun SpaceRecord.toModel() = Space(id, deviceId, path, name, gitDetected, createdAt)
 
-fun ChatConfigRecord.toModel() = ChatConfig(harness, model, reasoning, modelOptions, sandbox)
+fun ChatConfigRecord.toModel() = ChatConfig(harness, model, reasoning, modelOptions, sandbox, chatMode)
 
-fun ChatConfig.toNative() = NewChatConfig(harness, model, reasoning, modelOptions, sandbox)
+fun ChatConfig.toNative() = NewChatConfig(harness, model, reasoning, modelOptions, sandbox, chatMode)
 
 fun ChatRecord.toModel() = Chat(
     id = id, deviceId = deviceId, title = title, archived = archived, cwd = cwd, branch = branch,

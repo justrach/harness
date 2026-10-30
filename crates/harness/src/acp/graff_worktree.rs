@@ -97,6 +97,42 @@ fn outcome_for(code: Option<i32>, output: &str) -> GraffWorktreeOutcome {
     }
 }
 
+/// Materialize the selected base before `acp -w`, whose implicit creation
+/// chooses Graff's default base instead. Existing per-chat trees keep their work.
+pub(super) async fn ensure_worktree(
+    program: &Path,
+    root: &str,
+    name: &str,
+    base: &str,
+) -> Result<(), HarnessError> {
+    let path = harness_proto::graff_worktree::GraffWorktree::path_in(root, name);
+    if tokio::fs::try_exists(&path).await? {
+        return Ok(());
+    }
+    let mut command = crate::process::Command::new(program);
+    crate::compose_child_path(&mut command, program);
+    command
+        .args(["worktree", "create", name, base])
+        .current_dir(root)
+        .stdin(crate::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
+        .await
+        .map_err(|_| HarnessError::Protocol("Graff worktree creation timed out".into()))??;
+    // Some older Graff builds signal refusal only in stdout, with exit 0.
+    if !output.status.success()
+        || classify_worktree_output(&String::from_utf8_lossy(&output.stdout))
+            != GraffWorktreeOutcome::Done
+    {
+        return Err(HarnessError::Protocol(format!(
+            "Graff worktree creation failed: {} {}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    Ok(())
+}
+
 /// Run a `graff worktree` lifecycle command for tree `name` from its main
 /// checkout `root` (Graff resolves `.graff/worktrees/<name>` from there).
 pub async fn run_graff_worktree_action(

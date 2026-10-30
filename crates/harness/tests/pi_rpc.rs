@@ -33,6 +33,7 @@ fn controls() -> (RunControls, mpsc::Sender<SteerMessage>, CancellationToken) {
     (
         RunControls {
             origin: None,
+            mcp_servers: Vec::new(),
             steering: rx,
             interrupt: token.clone(),
             request_input: Box::new(|_| {
