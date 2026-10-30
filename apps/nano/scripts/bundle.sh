@@ -2,7 +2,10 @@
 # Builds harness-nano for release and wraps it as zig-out/Harness Nano.app.
 set -eu
 cd "$(dirname "$0")/.."
-zig build -Doptimize=ReleaseFast "$@"
+# ReleaseSafe: a bug panics with a stack trace in the crash log instead of
+# corrupting memory, for 0.1 MB and no CPU measurable in bench/resource.py's
+# replay (8.9% streaming against ReleaseFast's 9.7%, the same within noise).
+zig build -Doptimize=ReleaseSafe "$@"
 app="zig-out/Harness Nano.app/Contents"
 mkdir -p "$app/MacOS" "$app/Resources"
 cp zig-out/bin/harness-nano "$app/MacOS/"
