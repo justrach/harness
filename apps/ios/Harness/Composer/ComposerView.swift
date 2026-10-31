@@ -49,6 +49,12 @@ struct ComposerShell<Chips: View>: View {
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
     var autoFocus = false
+    /// iPhone Duo: focused, the composer stays one line (attach, text, one token for the chips, send).
+    var singleLine = false
+    /// The chips folded into one tappable token, shown on the one line (singleLine).
+    var token: AnyView? = nil
+    /// Bumped to put the cursor here from outside (Inspect's Ask for changes).
+    var focusTick = 0
     @ViewBuilder var chips: Chips
 
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -68,7 +74,7 @@ struct ComposerShell<Chips: View>: View {
     /// One animatable shape for background/glass/hairline: capsule-radius
     /// collapsed (46pt tall pill), 20pt card expanded (t3's 999↔20 morph).
     private var surfaceShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: expanded ? 20 : 24)
+        RoundedRectangle(cornerRadius: expanded && !singleLine ? 20 : 24)
     }
 
     // Switching between VStack/HStack via AnyLayout (rather than an if/else
@@ -76,7 +82,7 @@ struct ComposerShell<Chips: View>: View {
     // the compact↔expanded flip — an if/else here would tear down and rebuild
     // the TextField, dropping keyboard focus mid-type.
     private var shellLayout: AnyLayout {
-        expanded && !compact
+        expanded && !compact && !singleLine
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
             : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
     }
@@ -94,6 +100,7 @@ struct ComposerShell<Chips: View>: View {
                     focused = true
                 }
             }
+            .onChange(of: focusTick) { _, _ in focused = true }
             .onChange(of: focused) { _, focused in
                 stackedComposerFocus?(focused)
                 foldComposerFocus?(focused)
@@ -113,18 +120,26 @@ struct ComposerShell<Chips: View>: View {
     /// bottom edge — everything stays inside the glass.
     private var surface: some View {
         shellLayout {
-            if expanded, !attachments.isEmpty {
+            if expanded, !attachments.isEmpty, !singleLine {
                 AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
                     .padding(.bottom, 10)
             }
+            if singleLine, expanded, onAttach != nil {
+                attachButton
+            }
             input
-                .padding(.leading, expanded ? 4 : 13)
-                .padding(.trailing, expanded ? 4 : 0)
-                .padding(.vertical, expanded ? 4 : 5)
-                .frame(minWidth: compact ? 140 : nil,
-                       minHeight: expanded && !compact ? 64 : nil, alignment: .topLeading)
+                .padding(.leading, expanded && !singleLine ? 4 : (singleLine && expanded ? 0 : 13))
+                .padding(.trailing, expanded && !singleLine ? 4 : 0)
+                .padding(.vertical, expanded && !singleLine ? 4 : 5)
+                .frame(minWidth: compact || singleLine ? 140 : nil,
+                       minHeight: expanded && !compact && !singleLine ? 64 : nil, alignment: .topLeading)
                 .fixedSize(horizontal: false, vertical: true)
-            if expanded {
+            if singleLine {
+                if expanded, let token {
+                    token
+                }
+                actionButton
+            } else if expanded {
                 HStack(spacing: 8) {
                     if onAttach != nil {
                         attachButton
@@ -152,8 +167,8 @@ struct ComposerShell<Chips: View>: View {
                 actionButton
             }
         }
-        .padding(.horizontal, expanded ? 12 : 5)
-        .padding(.vertical, expanded ? 12 : 5)
+        .padding(.horizontal, expanded && !singleLine ? 12 : 5)
+        .padding(.vertical, expanded && !singleLine ? 12 : 5)
         // A bright writing plane on the glass, with an accent edge while
         // typing (the desktop composer's design).
         .background(Theme.composerPlane, in: surfaceShape)
@@ -174,7 +189,7 @@ struct ComposerShell<Chips: View>: View {
 
     private var input: some View {
         ComposerEditor(text: $draft, focused: $focused, placeholder: placeholder,
-                       maxLines: compact ? 2 : 7, controller: editor,
+                       maxLines: compact ? 2 : (singleLine ? 4 : 7), controller: editor,
                        attachmentDraft: attachmentDraft,
                        onModifiedSubmit: {
                            guard !busy else { return }
@@ -205,7 +220,7 @@ struct ComposerShell<Chips: View>: View {
             Image(systemName: "plus")
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Theme.textMuted)
-                .frame(width: 44, height: 44)
+                .frame(width: singleLine ? 40 : 44, height: singleLine ? 40 : 44)
                 .background(ink(0.06), in: Circle())
                 .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
                 .contentShape(Circle())
@@ -251,7 +266,7 @@ struct ComposerShell<Chips: View>: View {
                         .foregroundStyle(buttonActive ? Theme.onAccent : Theme.textFaint)
                 }
             }
-            .frame(width: 44, height: 44)
+            .frame(width: singleLine ? 40 : 44, height: singleLine ? 40 : 44)
             // One accent action anchors the row; its glyph is contrast-checked.
             .background(buttonActive ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(ink(0.10)),
                         in: Circle())
@@ -329,6 +344,37 @@ struct ComposerView: View {
     }
 
     private var harness: String { chat.config?.harness ?? "claude-code" }
+
+    /// iPhone Duo: the chips as one token on the composer's line. A tap opens the model picker, which also
+    /// sets the reasoning; a model's other options are a press and hold away.
+    private var chipToken: some View {
+        let label = ComposerToken.label(
+            pullRequest: model.changeRequest(for: chat)?.number,
+            model: currentModel.label,
+            reasoning: currentReasoning.map(HarnessCatalog.reasoningLabel))
+        return Button { showModelPicker = true } label: {
+            HStack(spacing: 4) {
+                Text(label).lineLimit(1).truncationMode(.middle)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .font(DuoType.sans(small: true))
+            .foregroundStyle(Theme.textMuted)
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(Theme.text.opacity(0.06), in: Capsule())
+            .contentShape(Capsule())
+            .frame(maxWidth: 220)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            ForEach(currentModel.options) { option in
+                Button("\(option.label): \(currentChoice(for: option).label)") { showOptionPicker = option }
+            }
+        }
+        .accessibilityLabel("Model and settings: \(label)")
+        .accessibilityIdentifier("composer-token")
+    }
 
     private var catalogKey: String { "\(chat.id)/\(chat.deviceId)/\(harness)" }
 
@@ -475,7 +521,10 @@ struct ComposerView: View {
                 onPasteImages: editingQueuedId == nil ? { stagePasted($0) } : nil,
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 attachmentDraft: attachmentDraft,
-                autoFocus: model.launchFocusComposer
+                autoFocus: model.launchFocusComposer,
+                singleLine: duoChat,
+                token: duoChat ? AnyView(chipToken) : nil,
+                focusTick: DuoComposerFocus.shared.tick(chat.id)
             ) {
                 if let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)

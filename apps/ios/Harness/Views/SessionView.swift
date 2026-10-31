@@ -31,8 +31,8 @@ struct SessionView: View {
     /// Laptop pose: how far the keyboard reaches into this view, and the header strip's height.
     @State private var keyboardOverlap: CGFloat = 0
     @State private var paneHeaderHeight: CGFloat = 0
-    /// Flat Duo: the composer has the keyboard, so Inspect folds to its one-line peek.
-    @State private var keyboardUp = false
+    /// Upright Duo: this view's top in the window (the fold is measured from the window's top).
+    @State private var viewMinY: CGFloat = 0
     /// Flat Duo: where the chat column starts and where the window's middle (the fold) is, in global space.
     @State private var columnMinX: CGFloat = 0
     @State private var windowMidX: CGFloat = 0
@@ -90,7 +90,8 @@ struct SessionView: View {
     }
 
     private var headerInset: CGFloat {
-        duoChat && horizontalSizeClass == .compact ? 32 : Self.headerChromeInset
+        // A Duo's back button is in the side bar (folded, or lying flat), so the title can start at the edge.
+        duoChat && (horizontalSizeClass == .compact || duoFlat) ? 32 : Self.headerChromeInset
     }
 
     /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
@@ -159,7 +160,7 @@ struct SessionView: View {
                 .accessibilityLabel("Back")
                 .accessibilityIdentifier("fold-back")
             }
-            if let showList = foldPaneHeader?.showList {
+            if duoLaptop == nil, let showList = foldPaneHeader?.showList {
                 Button(action: showList) {
                     Image(systemName: "list.bullet")
                         .frame(width: Theme.hitTarget, height: Theme.hitTarget)
@@ -261,6 +262,7 @@ struct SessionView: View {
                 // mode). Painted outside the clip, to the screen edges.
                 .background { if paneChrome { page.ignoresSafeArea() } }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { viewMinY = $0 }
             } else {
                 VStack(spacing: 12) {
                     HarnessPulse()
@@ -338,6 +340,12 @@ struct SessionView: View {
         .onAppear {
             model.attachSessionView(chatId: chatId)
             model.markSeen(chatId: chatId)
+            #if DEBUG
+            // Screenshot rig: open on Inspect (the wide Duo swaps the list for it).
+            if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-duo-inspect") {
+                InspectState.of(chatId).open = true
+            }
+            #endif
         }
         .onDisappear {
             model.markSeen(chatId: chatId)
@@ -383,72 +391,100 @@ struct SessionView: View {
         .accessibilityIdentifier(previous ? "session-page-previous" : "session-page-next")
     }
 
-    /// Laptop pose: the upper half watches (terminal or diff, read-only), the lower half acts (the newest
-    /// messages, the quick actions, the composer). Typing, the keyboard covers the lower half: the actions and
-    /// the composer sit right above it, the transcript steps aside and the watch pane takes what is left.
+    /// Approve answers the open question with its first option; nil while nothing waits for approval.
+    private func approveAction(_ store: SessionStore) -> (() -> Void)? {
+        guard let request = store.openInputRequest, let answers = QuickActions.approval(request.questions) else {
+            return nil
+        }
+        return { store.respondInput(requestId: request.requestId, answers: answers) }
+    }
+
+    private func inspectModel(_ store: SessionStore) -> InspectModel {
+        InspectModel.build(store.entries,
+                           source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
+    }
+
+    /// Upright (half open, the fold across): the chat above the hinge with the composer parked on it, Inspect
+    /// below. Typing, the keyboard takes the lower half: a one-line status strip and the composer sit right
+    /// above it and Inspect steps aside.
     private func laptopContent(chat: Chat, store: SessionStore, layout: DuoLaptopLayout) -> some View {
         let status = liveStatus(chat: chat)
         let running = status == .working
         let typing = keyboardOverlap > 0
         let inspect = InspectState.of(chat.id)
-        let inspectModel = InspectModel.build(store.entries,
-            source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
-        let approval = store.openInputRequest.flatMap { QuickActions.approval($0.questions) }
-        let lastPrompt = QuickActions.lastPrompt(store.entries)
-        let quickActions = QuickActionsRow(enabled: { action in
-                QuickActions.enabled(action, running: running, approvable: approval != nil,
-                                     hasPrompt: lastPrompt != nil)
-            }, perform: { action in
-                switch action {
-                case .approve:
-                    if let request = store.openInputRequest, let approval {
-                        store.respondInput(requestId: request.requestId, answers: approval)
-                    }
-                case .retry: if let lastPrompt { store.sendRun(prompt: lastPrompt, chat: chat) }
-                case .stop: store.sendInterrupt()
-                case .runTests: store.sendRun(prompt: QuickActions.runTestsPrompt, chat: chat)
-                }
-            })
+        let inspectModel = inspectModel(store)
+        // The fold, measured from this view's top (the header shares the status bar's row).
+        let upper = max(200, layout.top - viewMinY - paneHeaderHeight)
         return VStack(spacing: 0) {
-            LaptopWatchPane(model: inspectModel, state: inspect, running: running)
-                // Ends on the fold; typing, it gives the composer the room the keyboard took.
-                .frame(height: typing ? nil : max(120, layout.top - paneHeaderHeight))
-                .frame(maxHeight: typing ? .infinity : nil)
-                // Above the transcript, whose rows draw past its top edge.
-                .zIndex(1)
-            Color.clear.frame(height: typing ? 0 : layout.gap)
-            if !typing {
+            VStack(spacing: 0) {
                 TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
                                onHostLink: { hostLink = $0 }, chat: chat, runLive: running,
                                hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
-                               duoChat: duoChat)
+                               duoChat: duoChat,
+                               inspectDiff: { summary in
+                                   inspect.segment = .diff
+                                   inspect.selectedFile = summary.files.first
+                                   UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                               },
+                               inspectTool: { tool in
+                                   inspect.show(tool)
+                                   UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                               })
                     .frame(maxHeight: .infinity)
                     .clipped()
-                    .transition(.opacity)
-            }
-            if !typing { quickActions }
-            Group {
-                if let request = store.openInputRequest {
-                    QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
-                        store.respondInput(requestId: requestId, answers: answers)
+                    .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
+                if typing {
+                    DuoStatusStrip(model: inspectModel, activity: DuoStatusStrip.activity(inspectModel, running: running)) {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                     }
-                } else {
-                    ComposerView(store: store, chat: chat, runLive: running,
-                                 attachmentDraft: attachmentDraft,
-                                 questionClosedAtMs: questionClosedAtMs)
-                        .id(chat.id)
+                    .transition(.opacity)
                 }
+                Group {
+                    if let request = store.openInputRequest {
+                        QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
+                            store.respondInput(requestId: requestId, answers: answers)
+                        }
+                    } else {
+                        ComposerView(store: store, chat: chat, runLive: running,
+                                     attachmentDraft: attachmentDraft,
+                                     questionClosedAtMs: questionClosedAtMs)
+                            .id(chat.id)
+                    }
+                }
+                .padding(.bottom, 8)
             }
-            // Typing, the composer's chips fold into its one line (the compact composer).
-            .environment(\.verticalSizeClass, typing ? .compact : verticalSizeClass)
-            .padding(.bottom, typing ? 4 : 8)
-            // Typing, the actions sit in the row right above the keyboard.
-            if typing { quickActions }
+            // Parked on the hinge; typing, it follows the keyboard.
+            .frame(height: typing ? nil : upper)
+            .frame(maxHeight: typing ? .infinity : nil)
+            if !typing {
+                Color.clear.frame(height: layout.gap)
+                InspectCard(model: inspectModel, state: inspect, title: true,
+                            approve: approveAction(store),
+                            askForChanges: { DuoComposerFocus.shared.request(chat.id) })
+                    .frame(maxHeight: .infinity)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
         .padding(.bottom, keyboardOverlap)
         .modifier(KeyboardOverlap(overlap: $keyboardOverlap))
         .background(page.ignoresSafeArea())
         .accessibilityIdentifier("laptop-session")
+    }
+
+    @ViewBuilder
+    private func runPill(chat: Chat, store: SessionStore) -> some View {
+        if pillShows(chat) {
+            HStack(spacing: 8) {
+                RunStatusPill(chatId: chat.id, startedAtMs: sessionStartedAt(chat: chat),
+                              onStop: { store.sendInterrupt() })
+                // The turn's steps and agents beside it, a separate tap from the pill's Stop.
+                AgentWorkChip(store: store, glass: true)
+                ContextRing(store: store, glass: true)
+            }
+                .padding(.leading, 16)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+        }
     }
 
     private func content(chat: Chat, store: SessionStore) -> some View {
@@ -457,31 +493,25 @@ struct SessionView: View {
         // above it, so keyboard and glass morphs cannot cover the last row.
         let flat = flatSplit
         let inspect = InspectState.of(chat.id)
-        let inspectModel = flat
-            ? InspectModel.build(store.entries,
-                                 source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
-            : InspectModel()
+        let inspectModel = flat ? inspectModel(store) : InspectModel()
+        // Wide: Inspect takes the list's place once opened; until then the chat keeps a reading width.
+        let inspectOpen = flat && inspect.open
         // Flat Duo: two equal halves meet at the fold. The chat column keeps its place in the tree whether or
         // not Inspect shows, so the transcript (and its scroll) survives the keyboard and the fold.
         return HStack(spacing: 0) {
         VStack(spacing: 0) {
-            if flat, keyboardUp {
-                InspectPeek(model: inspectModel, state: inspect) {
-                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-                }
-                .transition(.move(edge: .top).combined(with: .opacity))
-                // Above the transcript, whose rows draw past its top edge.
-                .zIndex(1)
-            }
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
                            onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
                            hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
                            duoChat: duoChat,
                            inspectDiff: flat ? { summary in
-                               inspect.segment = .diff
-                               inspect.selectedFile = summary.files.first
+                               withAnimation(Motion.collapse) {
+                                   inspect.segment = .diff
+                                   inspect.selectedFile = summary.files.first
+                                   inspect.open = true
+                               }
                            } : nil,
-                           inspectTool: flat ? { inspect.show($0) } : nil)
+                           inspectTool: flat ? { tool in withAnimation(Motion.collapse) { inspect.show(tool) } } : nil)
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
@@ -493,20 +523,7 @@ struct SessionView: View {
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
-                .overlay(alignment: .bottomLeading) {
-                    if pillShows(chat) {
-                        HStack(spacing: 8) {
-                            RunStatusPill(chatId: chat.id, startedAtMs: sessionStartedAt(chat: chat),
-                                          onStop: { store.sendInterrupt() })
-                            // The turn's steps and agents beside it, a separate tap from the pill's Stop.
-                            AgentWorkChip(store: store, glass: true)
-                            ContextRing(store: store, glass: true)
-                        }
-                        .padding(.leading, 16)
-                        .padding(.bottom, 8)
-                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                    }
-                }
+                .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
                 .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
                 .overlay(alignment: .leading) {
                     // Swipe in from the edge to go back; the pager owns the rest of the width.
@@ -542,9 +559,6 @@ struct SessionView: View {
                             .id(chat.id)
                     }
                 }
-                .environment(\.foldComposerFocus, flat ? { up in
-                    withAnimation(Motion.collapse) { keyboardUp = up }
-                } : foldComposerFocus)
                 .padding(.bottom, 8)
             }
             .background {
@@ -562,17 +576,22 @@ struct SessionView: View {
                 .allowsHitTesting(false)
             }
         }
-        // Flat: the chat column ends on the fold (the window's middle), not the middle of what the side bar leaves.
-        .frame(width: flat && !keyboardUp && windowMidX - columnMinX > 240 ? windowMidX - columnMinX : nil)
-        .frame(maxWidth: flat && !keyboardUp ? nil : .infinity)
+        // Wide, beside the list: a reading width. With Inspect: the chat column ends on the fold (the window's
+        // middle), not the middle of what the side bar leaves.
+        .frame(maxWidth: flat && !inspectOpen ? DuoV3.readingWidth + 48 : nil)
+        .frame(maxWidth: flat && !inspectOpen ? .infinity : nil)
+        .frame(width: inspectOpen && windowMidX - columnMinX > 240 ? windowMidX - columnMinX : nil)
+        .frame(maxWidth: inspectOpen ? nil : .infinity)
         // Flat: the chat is the lifted page; Inspect beside it is the chrome it rounds against at the fold.
         .environment(\.liftedPlane, liftedPlane || flat)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { chatColumnWidth = $0 }
-            if flat, !keyboardUp {
-                InspectPane(model: inspectModel, state: inspect)
+            if inspectOpen {
+                // No divider: the chat page's rounded seam (below) draws the edge.
+                InspectCard(model: inspectModel, state: inspect,
+                            close: { withAnimation(Motion.collapse) { inspect.open = false } },
+                            approve: approveAction(store),
+                            askForChanges: { DuoComposerFocus.shared.request(chat.id) })
                     .frame(maxWidth: .infinity)
-                    .ignoresSafeArea(.container, edges: .bottom)
-                    .background(Theme.surface.ignoresSafeArea())
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
@@ -631,14 +650,14 @@ struct SessionView: View {
                 }
                 .offset(y: -geometry.safeAreaInsets.top)
             }
-            // Flat with Inspect beside it: the chat's own bar, so Inspect keeps its tone up to the screen's top.
-            .frame(width: flat && !keyboardUp && chatColumnWidth > 0 ? chatColumnWidth : nil)
+            // Flat with Inspect open beside it: the chat's own bar, so Inspect keeps its tone up to the screen's top.
+            .frame(width: inspectOpen && chatColumnWidth > 0 ? chatColumnWidth : nil)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
         }
         .overlay(alignment: .leading) {
             // The chat's page rounds at the fold, over its bar too (ContentPlane).
-            if flat, !keyboardUp, chatColumnWidth > 0 {
+            if inspectOpen, chatColumnWidth > 0 {
                 Color.clear.frame(width: chatColumnWidth).seam(.trailing, chrome: Theme.surface)
             }
         }
