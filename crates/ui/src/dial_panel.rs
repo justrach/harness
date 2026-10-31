@@ -2,7 +2,7 @@
 //! named presets instead of dropdowns, and a copy-as-code row. Two uses: the
 //! dev-only **Tune** panel for Harness's own motion and shape tokens (glass,
 //! it floats over the app), and the solid **Run settings** card for an agent
-//! run's options.
+//! run's options, with a hold-H walkthrough that explains one control.
 //!
 //! Pure render functions over plain data, so a fixture can render any state.
 //! Idea from DialKit (MIT, https://github.com/joshpuckett/dialkit) and the fork
@@ -15,7 +15,8 @@ use crate::typography::{
     TEXT_BODY, TEXT_CAPTION, TEXT_TITLE, TabularNums, WEIGHT_REGULAR, WEIGHT_STRONG,
 };
 use gpui::{
-    Div, Hsla, IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*, px, relative,
+    AnyElement, Div, Hsla, IntoElement, PathBuilder, SharedString, canvas, div, point, prelude::*,
+    px, relative,
 };
 
 /// Panel width: DialKit's panel is about this wide, and every row below is
@@ -555,6 +556,87 @@ pub fn code_row(theme: &Theme, code: impl Into<SharedString>) -> Div {
         )
         .child(icon_button(theme, icons::COPY))
 }
+
+/// Walkthrough: while H is held, the control under the pointer gets a wash
+/// and a one-line hint under it. Other rows render unchanged, so the panel
+/// does not grow a caption per row. The wash keeps the row's own edges and
+/// radius, so nothing shifts out of the panel's inset.
+pub fn explained(theme: &Theme, control: Div, hint: &str, active: bool) -> AnyElement {
+    if !active {
+        return control.into_any_element();
+    }
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(ROW_RADIUS))
+        .bg(theme.accent_wash)
+        .child(control)
+        .child(
+            div()
+                .h(px(ROW_HEIGHT - 4.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(TEXT_CAPTION))
+                .text_color(theme.text)
+                .child(
+                    icons::icon(icons::INFO_CIRCLE)
+                        .size(px(12.0))
+                        .text_color(theme.accent_strong),
+                )
+                .child(hint.to_string()),
+        )
+        .into_any_element()
+}
+
+/// The keyboard-led mode switch along the panel's foot, as in the fork lab:
+/// each mode is a key and a word.
+pub fn mode_bar(theme: &Theme, modes: &[(&str, &str)], selected: usize) -> Div {
+    div()
+        .mt(px(2.0))
+        .h(px(ROW_HEIGHT))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .children(modes.iter().enumerate().map(|(ix, (key, word))| {
+            let on = ix == selected;
+            div()
+                .h(px(ROW_HEIGHT - 6.0))
+                .pl(px(3.0))
+                .pr(px(8.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .when(on, |el| el.bg(theme.accent_wash))
+                .child(
+                    div()
+                        .size(px(16.0))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(theme.border_strong)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(if on {
+                            theme.accent_strong
+                        } else {
+                            theme.text_muted
+                        })
+                        .child(key.to_string()),
+                )
+                .child(
+                    div()
+                        .text_color(if on { theme.text } else { theme.text_muted })
+                        .child(word.to_string()),
+                )
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
