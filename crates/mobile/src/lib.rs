@@ -554,6 +554,18 @@ impl MobileCore {
             .await
     }
 
+    /// Switch one agent on or off on the device, for onboarding's optional extras.
+    pub async fn set_harness_enabled(
+        &self,
+        device_id: String,
+        harness: String,
+        enabled: bool,
+    ) -> Result<Vec<relay::AgentDescriptorRecord>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.set_harness_enabled(&device_id, &harness, enabled).await })
+            .await
+    }
+
     pub async fn list_models(
         &self,
         device_id: String,

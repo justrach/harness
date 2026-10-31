@@ -1,5 +1,7 @@
 package harness.codegraff.android.ui.settings
 
+import harness.codegraff.android.model.Autonomy
+import harness.codegraff.android.model.AutonomySetting
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -60,27 +62,38 @@ fun SettingsSheet(
     workspace: WorkspaceState? = null,
     loadCompactAt: suspend (deviceId: String) -> Int? = { null },
     saveCompactAt: suspend (deviceId: String, pct: Int?) -> Int? = { _, pct -> pct },
+    /** Settings > Autonomy: the computer's level and the call that changes it. */
+    loadAutonomy: suspend (deviceId: String) -> AutonomySetting = { AutonomySetting(Autonomy.FullAccess, false) },
+    saveAutonomy: suspend (deviceId: String, autonomy: Autonomy) -> AutonomySetting = { _, a -> AutonomySetting(a, true) },
+    /** Opens the first-run setup again; the row is hidden when null. */
+    onReplaySetup: (() -> Unit)? = null,
+    /** Opens straight on Autonomy (the screenshot rig). */
+    initialAutonomy: Boolean = false,
 ) {
     var showAppearance by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
     var showPerformance by rememberSaveable { mutableStateOf(false) }
     var showCompaction by rememberSaveable { mutableStateOf(false) }
+    var showAutonomy by rememberSaveable { mutableStateOf(initialAutonomy) }
     val version = LocalContext.current.let { c ->
         runCatching { c.packageManager.getPackageInfo(c.packageName, 0).versionName }.getOrNull() ?: "?"
     }
     HarnessSheet(
-        title = if (showAppearance) "Appearance" else if (showPerformance) "Performance" else if (showCompaction) "Graff compaction" else "Settings",
+        title = if (showAppearance) "Appearance" else if (showPerformance) "Performance" else if (showCompaction) "Graff compaction" else if (showAutonomy) "Autonomy" else "Settings",
         // The sheet stays put while the account is being deleted (interactiveDismissDisabled).
         onDismiss = { if (!deletion.busy) onDismiss() },
-        trailing = if (showAppearance || showPerformance || showCompaction) ({ BackButton { showAppearance = false; showPerformance = false; showCompaction = false } }) else null,
+        trailing = if (showAppearance || showPerformance || showCompaction || showAutonomy) ({ BackButton { showAppearance = false; showPerformance = false; showCompaction = false; showAutonomy = false } }) else null,
     ) {
         if (showAppearance) AppearanceContent()
         else if (showPerformance) PerformanceContent(version)
         else if (showCompaction && workspace != null) CompactionContent(workspace, loadCompactAt, saveCompactAt)
+        else if (showAutonomy && workspace != null) AutonomyContent(workspace, loadAutonomy, saveAutonomy)
         else SettingsContent(
             onOpenAppearance = { showAppearance = true },
             onOpenPerformance = { showPerformance = true },
             onOpenCompaction = if (workspace != null) ({ showCompaction = true }) else null,
+            onOpenAutonomy = if (workspace != null) ({ showAutonomy = true }) else null,
+            onReplaySetup = onReplaySetup?.let { replay -> { onDismiss(); replay() } },
             onSignOut = { onDismiss(); onSignOut() },
             canDeleteAccount = canDeleteAccount,
             deleting = deletion.busy,
@@ -131,6 +144,8 @@ private fun SettingsContent(
     onOpenAppearance: () -> Unit,
     onOpenPerformance: () -> Unit,
     onOpenCompaction: (() -> Unit)?,
+    onOpenAutonomy: (() -> Unit)?,
+    onReplaySetup: (() -> Unit)?,
     onSignOut: () -> Unit,
     canDeleteAccount: Boolean,
     deleting: Boolean,
@@ -158,9 +173,12 @@ private fun SettingsContent(
         Section("Appearance") {
             LinkRow("Theme", themeSummary, onOpenAppearance)
         }
-        if (onOpenCompaction != null) {
+        if (onOpenCompaction != null || onReplaySetup != null) {
             Section("Agents") {
-                LinkRow("Graff compaction", "", onOpenCompaction)
+                var first = true
+                if (onOpenAutonomy != null) { LinkRow("Autonomy", "", onOpenAutonomy); first = false }
+                if (onOpenCompaction != null) { if (!first) Divider(); LinkRow("Graff compaction", "", onOpenCompaction); first = false }
+                if (onReplaySetup != null) { if (!first) Divider(); LinkRow("Replay setup", "", onReplaySetup) }
             }
         }
         Section("Diagnostics") {

@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import harness.codegraff.android.demo.DemoDataset
 import harness.codegraff.android.model.AgentDescriptor
 import harness.codegraff.android.model.AgentReadiness
+import harness.codegraff.android.model.Autonomy
+import harness.codegraff.android.model.AutonomySetting
 import harness.codegraff.android.model.DeviceAgents
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfSpan
@@ -805,6 +807,37 @@ class AppModel(
     suspend fun setGraffCompactAt(deviceId: String, pct: Int?): Int? {
         val live = live ?: return pct
         return live.core.setGraffCompactAt(deviceId, pct?.toUByte())?.toInt()
+    }
+
+    /** The demo's autonomy level per computer (null: never chosen, which reads as full access). */
+    private val demoAutonomy = HashMap<String, Autonomy>()
+
+    /** How much agents on one computer may do without asking (Settings > Autonomy and setup). */
+    suspend fun autonomy(deviceId: String): AutonomySetting {
+        val live = live ?: return demoAutonomy[deviceId]?.let { AutonomySetting(it, true) } ?: AutonomySetting(Autonomy.FullAccess, false)
+        val record = live.core.autonomy(deviceId)
+        return AutonomySetting(Autonomy.fromWire(record.autonomy), record.chosen)
+    }
+
+    /** Answers with the level the computer kept. */
+    suspend fun setAutonomy(deviceId: String, autonomy: Autonomy): AutonomySetting {
+        val live = live ?: run {
+            demoAutonomy[deviceId] = autonomy
+            return AutonomySetting(autonomy, true)
+        }
+        val record = live.core.setAutonomy(deviceId, autonomy.wire)
+        return AutonomySetting(Autonomy.fromWire(record.autonomy), record.chosen)
+    }
+
+    /** Switch an agent on for setup's optional extras; the workspace picks up the computer's fresh list. */
+    suspend fun setHarnessEnabled(deviceId: String, harness: String, enabled: Boolean) {
+        val live = live
+        val agents = if (live == null) {
+            _workspace.value.agents[deviceId].orEmpty().map { if (it.id == harness) it.copy(enabled = enabled) else it }
+        } else {
+            live.core.setHarnessEnabled(deviceId, harness, enabled).map { it.toModel() }
+        }
+        _workspace.update { it.copy(agents = it.agents + (deviceId to agents)) }
     }
 
     fun cachedModels(deviceId: String, harness: String): DeviceCatalog<ModelInfo> = if (live == null) {

@@ -324,6 +324,32 @@ impl Relay {
             .collect())
     }
 
+    /// Switch one agent on or off on the device (Settings > Agents there); answers with the fresh list.
+    pub async fn set_harness_enabled(
+        &self,
+        device_id: &str,
+        harness: &str,
+        enabled: bool,
+    ) -> Result<Vec<AgentDescriptorRecord>, RelayError> {
+        let wire: Vec<WireHarness> = self
+            .call_as(
+                device_id,
+                "SetHarnessEnabled",
+                json!({ "harness": harness, "enabled": enabled }),
+                CALL_TIMEOUT,
+            )
+            .await?;
+        Ok(wire
+            .into_iter()
+            .map(|h| AgentDescriptorRecord {
+                id: h.id,
+                installed: h.installed.unwrap_or(true),
+                can_install: h.can_install.unwrap_or(false),
+                enabled: h.enabled,
+            })
+            .collect())
+    }
+
     pub async fn list_models(
         &self,
         device_id: &str,

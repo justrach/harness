@@ -1,5 +1,8 @@
 package harness.codegraff.android.ui
 
+import harness.codegraff.android.model.Onboarding
+import harness.codegraff.android.ui.onboarding.OnboardingScreen
+import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 import harness.codegraff.android.perf.Perf
 import harness.codegraff.android.perf.PerfSpan
@@ -59,13 +62,16 @@ private val SidebarWidth = 380.dp
  * replaces the detail instead of stacking behind it. When a hinge splits the screen, the sidebar ends at the fold.
  */
 @Composable
-fun HarnessApp(model: AppModel, onSignOut: () -> Unit = {}) {
+fun HarnessApp(model: AppModel, onSignOut: () -> Unit = {}, setupStep: Int? = null, openAutonomy: Boolean = false) {
     val state by model.workspace.collectAsState()
+    val context = LocalContext.current
+    // First-run setup: once after a fresh sign-in, again from Settings > Replay setup.
+    var showSetup by rememberSaveable { mutableStateOf(setupStep != null || Onboarding.isPending(context)) }
     // Keeps relative times and stale-session checks moving without tying them to every write.
     LaunchedEffect(model) { model.runClock() }
 
     var path by rememberSaveable(stateSaver = Route.PathSaver) { mutableStateOf(listOf<Route>()) }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(openAutonomy) }
     var showNewSpace by rememberSaveable { mutableStateOf(false) }
     var showHostPicker by rememberSaveable { mutableStateOf(false) }
     /** The host picker opened for a plain chat rather than a projectless session. */
@@ -164,6 +170,19 @@ fun HarnessApp(model: AppModel, onSignOut: () -> Unit = {}) {
             workspace = state,
             loadCompactAt = model::graffCompactAt,
             saveCompactAt = model::setGraffCompactAt,
+            loadAutonomy = model::autonomy,
+            saveAutonomy = model::setAutonomy,
+            onReplaySetup = { showSetup = true },
+            initialAutonomy = openAutonomy,
+        )
+    }
+    if (showSetup) {
+        OnboardingScreen(
+            state = state,
+            model = model,
+            onFinish = { showSetup = false },
+            onStart = { deviceId -> path = listOf(Route.NewSession(NewSessionDestination.Projectless(deviceId))) },
+            initialStep = setupStep ?: 0,
         )
     }
     if (showNewSpace) {
