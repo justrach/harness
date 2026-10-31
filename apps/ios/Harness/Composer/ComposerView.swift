@@ -57,6 +57,8 @@ struct ComposerShell<Chips: View>: View {
     @State private var editor = ComposerEditorController()
     /// Inside a stacked phone split: where this composer reports its keyboard focus (PhoneSplitContainer).
     @Environment(\.stackedComposerFocus) private var stackedComposerFocus
+    /// Above the fold in laptop pose: where this composer reports its keyboard focus (HomeView).
+    @Environment(\.foldComposerFocus) private var foldComposerFocus
 
     private var expanded: Bool {
         alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
@@ -92,9 +94,17 @@ struct ComposerShell<Chips: View>: View {
                     focused = true
                 }
             }
-            .onChange(of: focused) { _, focused in stackedComposerFocus?(focused) }
+            .onChange(of: focused) { _, focused in
+                stackedComposerFocus?(focused)
+                foldComposerFocus?(focused)
+            }
             // Leaving the session while typing (switching sessions, closing it) lets the split have its rest back.
-            .onDisappear { if focused { stackedComposerFocus?(false) } }
+            .onDisappear {
+                if focused {
+                    stackedComposerFocus?(false)
+                    foldComposerFocus?(false)
+                }
+            }
     }
 
     /// The glass surface: collapsed = editor + send in one capsule row;
@@ -268,6 +278,8 @@ struct ComposerView: View {
     let store: SessionStore
     let chat: Chat
     let runLive: Bool
+    /// iPhone Duo: Stop lives in the status pill (DuoChat), so Send never turns into Stop.
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let questionClosedAtMs: Int64?
 
     // What was typed and not sent comes back with the chat (DraftStore).
@@ -450,7 +462,8 @@ struct ComposerView: View {
                 sendLabel: editingQueuedId != nil ? "Save queued message"
                     : (runLive ? "Queue message" : "Send message"),
                 allowEmptySend: editingQueuedId != nil,
-                showStop: runLive,
+                // A Duo stops from the status pill above the composer, never next to Send.
+                showStop: runLive && !duoChat,
                 busy: uploading || queueEditBusy || attachmentDraft.loading,
                 keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil,
                 onSend: send,
