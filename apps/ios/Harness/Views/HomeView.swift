@@ -132,7 +132,7 @@ struct HomeView: View {
     /// The header the session above the fold draws (FoldPaneHeader); nil outside laptop pose.
     private var foldPaneHeader: FoldPaneHeader? {
         guard laptopPose else { return nil }
-        return FoldPaneHeader(showList: laptopTyping || laptopListShown ? {
+        return FoldPaneHeader(showList: laptopTyping || laptopListShown || laptopLayout != nil ? {
             withAnimation(Motion.collapse) { laptopListShown.toggle() }
         } : nil)
     }
@@ -146,6 +146,12 @@ struct HomeView: View {
             .padding(8)
             .transition(.move(edge: .top).combined(with: .opacity))
             .accessibilityIdentifier("fold-list-overlay")
+    }
+
+    /// Laptop pose with a session open: the session takes both halves (watch above the fold, act below it).
+    private var laptopLayout: DuoLaptopLayout? {
+        guard laptopPose, case .stacked(let top, let gap) = fold, case .chat = path.last else { return nil }
+        return DuoLaptopLayout(top: top, gap: gap)
     }
 
     private var searchInBar: Bool {
@@ -306,6 +312,7 @@ struct HomeView: View {
                     destination(route)
                         .environment(\.splitScreen, controls(for: .primary))
                         .environment(\.foldPaneHeader, foldPaneHeader)
+                        .environment(\.duoLaptop, laptopLayout)
                         .environment(\.stackedSplit, stackedSplitAction)
                         .environment(\.stackedClose, stackedSecond == nil ? nil : { closeStackedPrimary() })
                 }
@@ -340,16 +347,20 @@ struct HomeView: View {
                     primaryStack
                         // The keyboard sits below the fold; it must not squeeze the session above it.
                         .ignoresSafeArea(.keyboard)
-                        .frame(height: top)
+                        // An open session takes both halves (DuoLaptop); the list comes in from its header.
+                        .frame(height: laptopLayout == nil ? top : nil)
+                        .frame(maxHeight: laptopLayout == nil ? nil : .infinity)
                         .overlay(alignment: .top) {
-                            if laptopListShown { laptopListOverlay }
+                            if laptopListShown { laptopListOverlay.frame(maxHeight: top) }
                         }
                         .environment(\.foldComposerFocus) { focused in
                             laptopTyping = focused
                         }
-                    Color.clear.frame(height: gap)
-                    NavigationStack { sidebar }
-                        .frame(minHeight: 0)
+                    if laptopLayout == nil {
+                        Color.clear.frame(height: gap)
+                        NavigationStack { sidebar }
+                            .frame(minHeight: 0)
+                    }
                 }
                 // Anchored to the top: the keyboard must not push the upper half down off the fold.
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

@@ -267,6 +267,7 @@ private struct HostOnlyNote: View {
 struct InspectDiffView: View {
     let files: [InspectFile]
     @Bindable var state: InspectState
+    @Environment(\.inspectMono) private var mono
 
     private var selected: InspectFile? {
         files.first { $0.path == state.selectedFile } ?? files.first
@@ -292,7 +293,7 @@ struct InspectDiffView: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 ForEach(hunks) { hunk in
                                     Text(hunk.header)
-                                        .font(DuoType.mono)
+                                        .font(mono)
                                         .foregroundStyle(Theme.textFaint)
                                         .padding(.horizontal, 12)
                                         .padding(.vertical, 6)
@@ -338,7 +339,7 @@ struct InspectDiffView: View {
         case .context: sign = " "; tint = .clear
         }
         return Text(sign + " " + line.text)
-            .font(DuoType.mono)
+            .font(mono)
             .foregroundStyle(line.kind == .context ? Theme.textMuted : Theme.text)
             .fixedSize()
             .padding(.horizontal, 12)
@@ -351,6 +352,7 @@ struct InspectDiffView: View {
 struct InspectTerminalView: View {
     let commands: [TerminalCommand]
     @Bindable var state: InspectState
+    @Environment(\.inspectMono) private var mono
 
     var body: some View {
         if commands.isEmpty {
@@ -390,7 +392,7 @@ struct InspectTerminalView: View {
                     .foregroundStyle(Theme.textFaint)
             }
         }
-        .font(DuoType.mono)
+        .font(mono)
         .textSelection(.enabled)
     }
 }

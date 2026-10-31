@@ -22,6 +22,11 @@ struct SessionView: View {
     /// iPhone Duo lying flat: chat left of the fold, Inspect right (DuoInspect).
     @Environment(\.duoFlat) private var duoFlat
     @Environment(\.foldComposerFocus) private var foldComposerFocus
+    /// iPhone Duo half open like a laptop: watch above the fold, act below it (DuoLaptop).
+    @Environment(\.duoLaptop) private var duoLaptop
+    /// Laptop pose: how far the keyboard reaches into this view, and the header strip's height.
+    @State private var keyboardOverlap: CGFloat = 0
+    @State private var paneHeaderHeight: CGFloat = 0
     /// Flat Duo: the composer has the keyboard, so Inspect folds to its one-line peek.
     @State private var keyboardUp = false
     /// Flat Duo: where the chat column starts and where the window's middle (the fold) is, in global space.
@@ -227,7 +232,15 @@ struct SessionView: View {
                 VStack(spacing: 0) {
                     if paneChrome {
                         paneHeader(chat, controls: splitScreen ?? SplitScreenControls())
-                        content(chat: chat, store: store).clipped()
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { paneHeaderHeight = $0 }
+                        Group {
+                            if let duoLaptop, splitScreen == nil {
+                                laptopContent(chat: chat, store: store, layout: duoLaptop)
+                            } else {
+                                content(chat: chat, store: store)
+                            }
+                        }
+                        .clipped()
                     } else {
                         // Not clipped: the content's background and header cover reach under the status bar.
                         content(chat: chat, store: store)
@@ -358,6 +371,66 @@ struct SessionView: View {
         .opacity(enabled ? 1 : 0.3)
         .accessibilityLabel(previous ? "Previous session" : "Next session")
         .accessibilityIdentifier(previous ? "session-page-previous" : "session-page-next")
+    }
+
+    /// Laptop pose: the upper half watches (terminal or diff, read-only), the lower half acts (the newest
+    /// messages, the quick actions, the composer). Typing, the keyboard covers the lower half: the actions and
+    /// the composer sit right above it, the transcript steps aside and the watch pane takes what is left.
+    private func laptopContent(chat: Chat, store: SessionStore, layout: DuoLaptopLayout) -> some View {
+        let status = liveStatus(chat: chat)
+        let running = status == .working
+        let typing = keyboardOverlap > 0
+        let inspect = InspectState.of(chat.id)
+        let inspectModel = InspectModel.build(store.entries,
+            source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
+        let approval = store.openInputRequest.flatMap { QuickActions.approval($0.questions) }
+        let lastPrompt = QuickActions.lastPrompt(store.entries)
+        return VStack(spacing: 0) {
+            LaptopWatchPane(model: inspectModel, state: inspect, running: running)
+                // Ends on the fold; typing, it gives the composer the room the keyboard took.
+                .frame(height: typing ? nil : max(120, layout.top - paneHeaderHeight))
+                .frame(maxHeight: typing ? .infinity : nil)
+            Color.clear.frame(height: typing ? 0 : layout.gap)
+            if !typing {
+                TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
+                               onHostLink: { hostLink = $0 }, chat: chat, runLive: running,
+                               hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
+                               duoChat: duoChat)
+                    .frame(maxHeight: .infinity)
+                    .transition(.opacity)
+            }
+            QuickActionsRow(enabled: { action in
+                QuickActions.enabled(action, running: running, approvable: approval != nil,
+                                     hasPrompt: lastPrompt != nil)
+            }, perform: { action in
+                switch action {
+                case .approve:
+                    if let request = store.openInputRequest, let approval {
+                        store.respondInput(requestId: request.requestId, answers: approval)
+                    }
+                case .retry: if let lastPrompt { store.sendRun(prompt: lastPrompt, chat: chat) }
+                case .stop: store.sendInterrupt()
+                case .runTests: store.sendRun(prompt: QuickActions.runTestsPrompt, chat: chat)
+                }
+            })
+            Group {
+                if let request = store.openInputRequest {
+                    QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
+                        store.respondInput(requestId: requestId, answers: answers)
+                    }
+                } else {
+                    ComposerView(store: store, chat: chat, runLive: running,
+                                 attachmentDraft: attachmentDraft,
+                                 questionClosedAtMs: questionClosedAtMs)
+                        .id(chat.id)
+                }
+            }
+            .padding(.bottom, 8)
+        }
+        .padding(.bottom, keyboardOverlap)
+        .modifier(KeyboardOverlap(overlap: $keyboardOverlap))
+        .background(Theme.bg.ignoresSafeArea())
+        .accessibilityIdentifier("laptop-session")
     }
 
     private func content(chat: Chat, store: SessionStore) -> some View {
