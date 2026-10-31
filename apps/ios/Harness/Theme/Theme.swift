@@ -318,3 +318,30 @@ extension Theme {
         ThemeStore.shared.palette.isDark ? ink(0.04) : Color.white.opacity(0.62)
     }
 }
+
+// MARK: - The lifted session column (after the desktop's `content_plane`)
+
+extension Theme {
+    /// The session column's lift where it sits beside another column, extending the composer's contrast to
+    /// the page: light themes wash it toward white, so the list's tone reads as chrome around a bright page.
+    /// Dark themes keep the column flush (nil).
+    static var contentPlane: Color? { contentPlaneLift(dark: palette.isDark).map { Color.white.opacity($0) } }
+
+    /// How much white the plane lays over the page: 0.55 on light themes (the desktop's), none on dark.
+    static func contentPlaneLift(dark: Bool) -> Double? { dark ? nil : 0.55 }
+
+    /// The page under a lifted column as one opaque color, the plane composited over `background`, so the
+    /// transcript's fades blend into it.
+    static func liftedPage(_ background: HexColor, dark: Bool) -> HexColor {
+        guard let lift = contentPlaneLift(dark: dark) else { return background }
+        func up(_ c: Double) -> Double { c + (1 - c) * lift }
+        return HexColor(red: up(background.red), green: up(background.green), blue: up(background.blue),
+                        alpha: background.alpha)
+    }
+
+    /// The session's page: lifted beside another column, the plain background everywhere else.
+    static func sessionPage(lifted: Bool) -> Color { lifted ? palette.liftedBg : palette.bg }
+
+    /// Where the lifted column meets the column beside it, its corners round (the desktop's `SEAM_RADIUS`).
+    static let seamRadius: CGFloat = 12
+}

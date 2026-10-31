@@ -156,8 +156,9 @@ struct PhoneSplitContainer<List: View, Detail: View>: View {
         case .sideBySide:
             HStack(spacing: 0) {
                 list.frame(width: arrangement.listExtent)
-                Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(width: 0.5)
+                // The session's lifted page rounds where it meets the list, in place of a rule (ContentPlane).
                 detail.frame(maxWidth: .infinity)
+                    .seam(.leading, chrome: Theme.surface)
             }
         case .stacked:
             stacked

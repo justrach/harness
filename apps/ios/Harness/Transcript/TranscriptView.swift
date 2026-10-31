@@ -17,6 +17,12 @@ struct TranscriptView: View {
     /// The name of the computer the chat runs on, for the reconnect row and sheet. Passed in, so
     /// the transcript needs no app model in its environment.
     var hostName = "the execution device"
+    /// iPhone Duo: tool groups as chips with a diff card (DuoChat).
+    var duoChat = false
+    /// Open a group's changes in the Inspect pane, where there is one.
+    var inspectDiff: ((DiffSummary) -> Void)? = nil
+    /// Open one tool call in the Inspect pane (flat Duo).
+    var inspectTool: ((ToolItem) -> Void)? = nil
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -25,6 +31,8 @@ struct TranscriptView: View {
     @State var folds = ToolGroupFolds()
     @State private var userExpansionHeights: [String: CGFloat] = [:]
     @State private var reauthRequest: AgentReauthRequest?
+    /// Beside another column the page is lifted (ContentPlane).
+    @Environment(\.liftedPlane) private var liftedPlane
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
@@ -44,13 +52,17 @@ struct TranscriptView: View {
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,
             reduceMotion: reduceMotion,
             configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
-                ^ colorScheme.hashValue) { row in
+                ^ colorScheme.hashValue ^ duoChat.hashValue ^ (inspectDiff != nil).hashValue
+                ^ (inspectTool != nil).hashValue &* 31) { row in
                 AnyView(rowView(row, earlier: earlierErrors.contains(row.id))
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
                     .environment(\.colorScheme, ThemeStore.shared.colorScheme)
+                    .environment(\.duoChat, duoChat)
+                    .environment(\.inspectDiff, inspectDiff)
+                    .environment(\.inspectTool, inspectTool)
                     .environment(\.openURL, OpenURLAction { url in
                         guard let link = HostLink.classify(url, cwd: cwd) else { return .systemAction }
                         onHostLink(link)
@@ -58,7 +70,7 @@ struct TranscriptView: View {
                     }))
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
-            .background(Theme.bg)
+            .background(Theme.sessionPage(lifted: liftedPlane))
             .overlay(alignment: .bottom) {
                 if scroll.showJump {
                     Button {
@@ -628,6 +640,8 @@ struct ToolGroupView: View {
     let toggle: () -> Void
     var onDetailChanged: () -> Void = {}
     @State private var retainingDetails = false
+    @Environment(\.duoChat) private var duoChat
+    @Environment(\.inspectDiff) private var inspectDiff
 
     /// The tools actually rendered — the tail after the hidden prefix.
     private var visibleTools: ArraySlice<ToolItem> {
@@ -637,16 +651,23 @@ struct ToolGroupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) {
-                HStack(spacing: 10) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                        .frame(width: 26)
-                    Text(toolGroupSummary(tools))
-                        .font(Theme.sans(14))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    Spacer(minLength: 0)
+                Group {
+                    if duoChat {
+                        // A Duo reads the group as one line of chips (DuoChat).
+                        ToolChipStrip(tools: tools, open: open)
+                    } else {
+                        HStack(spacing: 10) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .rotationEffect(.degrees(open ? 90 : 0))
+                                .frame(width: 26)
+                            Text(toolGroupSummary(tools))
+                                .font(Theme.sans(14))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            Spacer(minLength: 0)
+                        }
+                    }
                 }
                 .foregroundStyle(Theme.textMuted)
                 .frame(minHeight: 44)
@@ -655,6 +676,11 @@ struct ToolGroupView: View {
             .buttonStyle(PressWashButtonStyle(cornerRadius: 8))
             .accessibilityValue(open ? "Expanded" : "Collapsed")
             .accessibilityHint("Shows or hides tool activity")
+
+            if duoChat, let summary = DiffSummary.from(tools) {
+                DiffSummaryCard(summary: summary, onTap: inspectDiff.map { inspect -> () -> Void in { inspect(summary) } })
+                    .padding(.bottom, 6)
+            }
 
             ToolRevealLayout(progress: open ? 1 : 0) {
                 if open || retainingDetails {
@@ -700,9 +726,12 @@ struct ToolChipRow: View {
     var onResize: () -> Void = {}
     @State private var expanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.inspectTool) private var inspectTool
 
     var body: some View {
         Button {
+            // Lying flat on a Duo, the row opens in the Inspect pane beside the chat.
+            if let inspectTool { inspectTool(tool); return }
             withAnimation(reduceMotion ? nil : Motion.resize) { expanded.toggle() }
             onResize()
         } label: {

@@ -14,7 +14,7 @@ final class ReasoningConfirmationUITests: XCTestCase {
         ]
         for (theme, appearance) in themes {
             let app = XCUIApplication()
-            app.launchArguments = ["-demo", "-route", "chat:chat-tabs",
+            app.launchArguments = ["-demo", "-route", "chat:chat-tabs", "-phoneSplit", "off",
                                    "-theme.mode", appearance, "-theme.\(appearance)", theme,
                                    "-theme.followDesktop", "NO"]
             app.launch()
@@ -28,11 +28,13 @@ final class ReasoningConfirmationUITests: XCTestCase {
             let confirm = app.buttons["reasoning-picker-confirm"]
             XCTAssertTrue(confirm.waitForExistence(timeout: 5))
             XCTAssertEqual(confirm.label, "Close", theme)
-            let initial = app.scrollViews.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "High,")).firstMatch
-            let alternate = app.scrollViews.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Low,")).firstMatch
-            initial.tap()
-            XCTAssertEqual(confirm.label, "Close", "Reselecting the opening value: \(theme)")
-            alternate.tap()
+            let slider = app.descendants(matching: .any)["reasoning-slider"].firstMatch
+            XCTAssertTrue(slider.waitForExistence(timeout: 5))
+            XCTAssertEqual(slider.value as? String, "High", theme)
+
+            // The track's left end is the fastest level; the thumb settles on it.
+            slider.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.5)).tap()
+            XCTAssertEqual(slider.value as? String, "Low", theme)
             XCTAssertEqual(confirm.label, "Done", theme)
             XCTAssertTrue(confirm.isHittable)
 
@@ -41,20 +43,10 @@ final class ReasoningConfirmationUITests: XCTestCase {
             attachment.name = "reasoning-confirmation-\(theme)"
             attachment.lifetime = .keepAlways
             add(attachment)
-            // Sample clear fill away from text, tick strokes, and rounded edges.
-            // Native toolbar compositing can slightly alter the same semantic color.
-            let circle = try pixel(screenshot.image, at: CGPoint(
-                x: confirm.frame.minX + confirm.frame.width * 0.15, y: confirm.frame.midY))
-            let row = try pixel(screenshot.image, at: CGPoint(
-                x: alternate.frame.maxX - 8, y: alternate.frame.midY))
-            for channel in 0..<3 {
-                XCTAssertLessThanOrEqual(abs(circle[channel] - row[channel]), 16,
-                                         "Confirmation fill must match selected row: \(theme)")
-            }
 
-            initial.tap()
+            try select("High", on: slider)
             XCTAssertEqual(confirm.label, "Close", "A → B → A restores X: \(theme)")
-            alternate.tap()
+            slider.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.5)).tap()
             XCTAssertEqual(confirm.label, "Done", theme)
             confirm.tap()
             let low = app.buttons["Low"]
@@ -67,17 +59,12 @@ final class ReasoningConfirmationUITests: XCTestCase {
         }
     }
 
-    private func pixel(_ image: UIImage, at point: CGPoint) throws -> [Int] {
-        let source = try XCTUnwrap(image.cgImage)
-        let x = Int(point.x * image.scale)
-        let y = Int(point.y * image.scale)
-        let sample = try XCTUnwrap(source.cropping(to: CGRect(x: x, y: y, width: 1, height: 1)))
-        var bytes = [UInt8](repeating: 0, count: 4)
-        let context = try XCTUnwrap(CGContext(data: &bytes, width: 1, height: 1,
-                                             bitsPerComponent: 8, bytesPerRow: 4,
-                                             space: CGColorSpaceCreateDeviceRGB(),
-                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-        context.draw(sample, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-        return bytes.prefix(3).map(Int.init)
+    /// Tap along the track until the thumb settles on `level`.
+    private func select(_ level: String, on slider: XCUIElement) throws {
+        for step in 1..<20 {
+            slider.coordinate(withNormalizedOffset: CGVector(dx: Double(step) / 20, dy: 0.5)).tap()
+            if slider.value as? String == level { return }
+        }
+        XCTFail("No point on the track settles on \(level)")
     }
 }
