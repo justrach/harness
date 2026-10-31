@@ -489,6 +489,7 @@ final class ParityTests: XCTestCase {
     func testRunErrorsReadTheSameAsTheDesktop() throws {
         let v = try load("vectors/run-errors.json")
         let labels = try XCTUnwrap(v["labels"] as? [String: String])
+        let actionLabels = try XCTUnwrap(v["actionLabels"] as? [String: String])
         let cases = try rows(v, "cases")
         XCTAssertFalse(cases.isEmpty)
         for c in cases {
@@ -497,7 +498,7 @@ final class ParityTests: XCTestCase {
             XCTAssertEqual(problem?.rawValue, c["expect"] as? String, message)
             if let problem {
                 XCTAssertEqual(problem.label, labels[problem.rawValue], message)
-                XCTAssertEqual(problem.actionLabel, v["actionLabel"] as? String)
+                XCTAssertEqual(problem.actionLabel, actionLabels[problem.rawValue], message)
             }
         }
     }

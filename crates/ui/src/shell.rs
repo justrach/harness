@@ -4242,6 +4242,7 @@ impl Shell {
                 self.on_reauth_action(chat_id, row_id, *provider, *action, cx);
             }
             TranscriptEvent::SignIn { chat_id } => self.sign_in_for_chat(chat_id, cx),
+            TranscriptEvent::UpdateKey { chat_id } => self.update_key_for_chat(chat_id, cx),
             TranscriptEvent::NewChatWithModel { model } => {
                 self.new_chat_with_model(model.clone(), cx);
             }
@@ -16945,6 +16946,27 @@ mod exit_regressions {
                 // graff's provider sign-ins are listed; none is guessed.
                 sign_in(shell, "local-chat", cx);
                 assert_eq!(page.read(cx).sign_in_state(), (None, None));
+                assert_eq!(page.read(cx).key_notice(), None);
+
+                // "Update key" on another computer's chat: its Accounts with
+                // where to replace the key, and no sign-in started.
+                shell.on_transcript_event(
+                    shell.transcript.clone(),
+                    &TranscriptEvent::UpdateKey {
+                        chat_id: "remote-chat".into(),
+                    },
+                    cx,
+                );
+                assert_eq!(shell.route, Route::Settings(SettingsSection::Agents));
+                assert_eq!(page.read(cx).sign_in_state(), (Some("remote-host"), None));
+                assert_eq!(
+                    page.read(cx).key_notice(),
+                    Some(crate::settings::accounts::KEY_REJECTED_NOTICE)
+                );
+
+                // A later "Log in" drops the key notice.
+                sign_in(shell, "local-chat", cx);
+                assert_eq!(page.read(cx).key_notice(), None);
             })
             .unwrap();
     }

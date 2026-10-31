@@ -790,8 +790,9 @@ struct ToolChipRow: View {
 /// instead of truncating, since the useful part of a provider or adapter
 /// error is rarely in its first few words.
 ///
-/// A refusal that signing in fixes (signed out, a usage limit) is labelled so,
-/// like the desktop card, with where to sign in below the message.
+/// A refusal the provider account fixes (signed out, a usage limit, a
+/// rejected API key) is labelled so, like the desktop card, with where to fix
+/// it below the message.
 struct ErrorChipView: View {
     let message: String
     var problem: ProviderProblem? = nil
