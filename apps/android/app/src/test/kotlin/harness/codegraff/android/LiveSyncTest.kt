@@ -15,6 +15,8 @@ import harness.codegraff.android.core.MessageEntryRecord
 import harness.codegraff.android.core.MessagePartRecord
 import harness.codegraff.android.core.MessageRoleRecord
 import harness.codegraff.android.core.MessageStatusRecord
+import harness.codegraff.android.core.AgentDescriptorRecord
+import harness.codegraff.android.core.AutonomyRecord
 import harness.codegraff.android.core.MobileCoreInterface
 import harness.codegraff.android.core.ModelInfoRecord
 import harness.codegraff.android.core.NewChatConfig
@@ -30,6 +32,8 @@ import harness.codegraff.android.core.TaskItemRecord
 import harness.codegraff.android.core.ToolFieldRecord
 import harness.codegraff.android.core.UserInputAnswerRecord
 import harness.codegraff.android.core.WorkspaceSnapshot
+import harness.codegraff.android.model.Autonomy
+import harness.codegraff.android.model.AutonomySetting
 import harness.codegraff.android.model.ChangeRequestState
 import harness.codegraff.android.model.ChatConfig
 import harness.codegraff.android.model.ChatIndicator
@@ -120,6 +124,24 @@ private class FakeCore : MobileCoreInterface {
         calls += "compact-at $deviceId $pct"
         compactAt = pct
         return compactAt
+    }
+    var autonomyWire = "full-access"
+    var autonomyChosen = false
+    override suspend fun autonomy(deviceId: String): AutonomyRecord {
+        if (!reachable) throw RelayException.Timeout()
+        return AutonomyRecord(autonomyWire, autonomyChosen)
+    }
+    override suspend fun setAutonomy(deviceId: String, autonomy: String): AutonomyRecord {
+        if (!reachable) throw RelayException.Timeout()
+        calls += "autonomy $deviceId $autonomy"
+        autonomyWire = autonomy
+        autonomyChosen = true
+        return AutonomyRecord(autonomyWire, autonomyChosen)
+    }
+    override suspend fun setHarnessEnabled(deviceId: String, harness: String, enabled: Boolean): List<AgentDescriptorRecord> {
+        if (!reachable) throw RelayException.Timeout()
+        calls += "harness-enabled $deviceId $harness $enabled"
+        return emptyList()
     }
     override fun setNetwork(online: Boolean, key: String) {}
     override suspend fun switchRef(deviceId: String, repoPath: String, refName: String) {}
@@ -409,6 +431,30 @@ class LiveSyncTest {
         assertEquals(listOf("compact-at mac 70", "compact-at mac null"), core.calls.filter { it.startsWith("compact-at") })
         core.reachable = false
         assertTrue(runCatching { model.graffCompactAt("mac") }.isFailure)
+    }
+
+    @Test
+    fun autonomyIsReadAndWrittenOnTheChosenComputer() = runTest(dispatcher) {
+        val (model, core, _) = live()
+        assertEquals("unset is full access, not yet chosen", AutonomySetting(Autonomy.FullAccess, false), model.autonomy("mac"))
+        assertEquals(AutonomySetting(Autonomy.Workspace, true), model.setAutonomy("mac", Autonomy.Workspace))
+        assertEquals(AutonomySetting(Autonomy.Workspace, true), model.autonomy("mac"))
+        assertEquals(listOf("autonomy mac workspace"), core.calls.filter { it.startsWith("autonomy") })
+        core.reachable = false
+        assertTrue(runCatching { model.autonomy("mac") }.isFailure)
+    }
+
+    @Test
+    fun autonomyWireNamesRoundTrip() {
+        Autonomy.entries.forEach { assertEquals(it, Autonomy.fromWire(it.wire)) }
+        assertEquals("an unknown level keeps full access", Autonomy.FullAccess, Autonomy.fromWire("bogus"))
+    }
+
+    @Test
+    fun anOptionalExtraIsSwitchedOnThroughTheEngine() = runTest(dispatcher) {
+        val (model, core, _) = live()
+        model.setHarnessEnabled("mac", "codex", true)
+        assertEquals(listOf("harness-enabled mac codex true"), core.calls.filter { it.startsWith("harness-enabled") })
     }
 
     @Test
