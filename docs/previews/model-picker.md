@@ -1,6 +1,6 @@
-# Model picker preview
+# Model picker
 
-Phil Hedayatnia's two-step model picker, behind the `harness-ui/model-picker-preview` feature and `HARNESS_MODEL_PICKER_PREVIEW=1` in debug builds. The live agent catalog supplies every model, option and reasoning level. The picker shows only what the catalog says: the earlier ratings, task shortlists, strengths and dollar ranges were placeholder data and are gone, not hidden.
+Phil Hedayatnia's two-step model picker is the default picker (the `harness-ui/model-picker-preview` feature is on by default). `HARNESS_MODEL_PICKER_PREVIEW=0` brings back the previous picker. The live agent catalog supplies every model, option and reasoning level, and the picker shows only what the catalog says: the earlier ratings, task shortlists, strengths and dollar ranges were placeholder data and are gone, not hidden.
 
 ## Run and review
 
@@ -68,10 +68,10 @@ Explicit references: [OpenAI Apps SDK primitives](https://github.com/openai/apps
 
 Additional provider marks use LobeHub Icons 1.98.0, alongside the existing 1.95.1 maker marks. MLX and oMLX use the upstream project SVGs. See `THIRD_PARTY_NOTICES.md` and the retained asset licenses.
 
-## Before it is on by default
+## Still to check
 
 1. Finish maker accent verification (including Meta and Qwen), review logo sizing and accessibility, and verify pointer and keyboard behavior in the full isolated app on each desktop platform.
-2. Then remove the experiment gate. Ratings, shortlists or prices come back only from reviewed, versioned data (evaluations, route prices and measured whole-task usage), never inferred from model names.
+2. Ratings, shortlists or prices come back only from reviewed, versioned data (evaluations, route prices and measured whole-task usage), never inferred from model names.
 
 ## Validation
 

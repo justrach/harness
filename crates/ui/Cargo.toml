@@ -6,6 +6,9 @@ license-file.workspace = true
 publish.workspace = true
 
 [features]
+# Phil Hedayatnia's two-step model picker is the default picker;
+# HARNESS_MODEL_PICKER_PREVIEW=0 switches back to the previous one.
+default = ["model-picker-preview"]
 model-picker-preview = []
 project-palette-fixture = []
 

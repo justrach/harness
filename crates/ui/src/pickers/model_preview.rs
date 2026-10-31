@@ -63,8 +63,11 @@ pub(super) struct Preview {
 impl Default for Preview {
     fn default() -> Self {
         Self {
-            enabled: cfg!(debug_assertions)
-                && std::env::var("HARNESS_MODEL_PICKER_PREVIEW").as_deref() == Ok("1"),
+            // On by default; HARNESS_MODEL_PICKER_PREVIEW=0 brings back the
+            // previous picker. Unit tests keep the previous picker unless a
+            // test turns this one on.
+            enabled: !cfg!(test)
+                && std::env::var("HARNESS_MODEL_PICKER_PREVIEW").as_deref() != Ok("0"),
             viewed: None,
             pending: None,
             slider: None,
