@@ -143,6 +143,7 @@ const PROVIDERS: &[(&str, &str, &str)] = &[
     ("omlx", "oMLX", icons::PROVIDER_OMLX),
     ("chatgpt-new", "ChatGPT plan", icons::OPENAI_MARK),
     ("codex", "Codex / ChatGPT", icons::OPENAI_MARK),
+    ("claude-agent", "Claude Agent", icons::CLAUDE_MARK),
 ];
 fn route(model: &Model) -> &str {
     model

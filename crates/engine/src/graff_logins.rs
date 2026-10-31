@@ -89,6 +89,13 @@ pub fn credential_path(home: &Path, provider: &str) -> Option<PathBuf> {
             if provider == "anthropic" {
                 return anthropic_credentials_path(home, |name| std::env::var_os(name));
             }
+            if provider == "claude-agent" {
+                // graff's marker for the choice; the login itself is Claude Code's.
+                return home
+                    .join(".graff")
+                    .join("credentials")
+                    .join("claude-agent.json");
+            }
             home.join(format!(".{provider}"))
                 .join("credentials")
                 .join("graff-oauth.json")
@@ -273,6 +280,12 @@ pub fn scan_failure(output: &str) -> Option<String> {
         let message = line.trim_start().strip_prefix('✗')?.trim();
         (!message.is_empty()).then(|| message.to_string())
     })
+}
+
+/// graff's Claude Agent sign-in found no Claude Code login: its
+/// `✗ Claude Code is not signed in…` line.
+pub fn claude_code_signed_out(output: &str) -> bool {
+    scan_failure(output).is_some_and(|message| message.starts_with("Claude Code is not signed in"))
 }
 
 /// Did graff print its `✓ logged in…` line?
@@ -685,7 +698,8 @@ mod tests {
                 ("kimi", false),
                 ("zai", false),
                 ("chatgpt-new", false),
-                ("anthropic", false)
+                ("anthropic", false),
+                ("claude-agent", false)
             ]
         );
         let path = credential_path(dir.path(), "kimi").unwrap();
@@ -701,7 +715,8 @@ mod tests {
                 ("Kimi", true),
                 ("Z.AI", false),
                 ("ChatGPT", false),
-                ("Anthropic Console", false)
+                ("Anthropic Console", false),
+                ("Claude Agent", false)
             ]
         );
     }

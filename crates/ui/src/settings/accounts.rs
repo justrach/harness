@@ -2729,7 +2729,11 @@ impl AccountsPage {
             } => {
                 let submitting = *submitting;
                 let relayed = start.mode == AgentLoginMode::RelayBrowser;
-                let body = if provider.as_deref() == Some("anthropic") {
+                let body = if provider.as_deref() == Some("claude-agent") {
+                    "Claude Code isn't signed in on this device yet. A browser window opened: \
+                     sign in to your Claude account, then paste the code Anthropic shows you \
+                     below. Claude Code keeps the login, and graff's Claude Agent uses it."
+                } else if provider.as_deref() == Some("anthropic") {
                     "A browser window opened. Sign in to your Anthropic Console account and \
                      pick a workspace, then paste the code Anthropic shows you below. graff \
                      will run Claude models on that workspace's API credits."
@@ -2824,6 +2828,11 @@ impl AccountsPage {
                             "Finish signing in to Cursor in your browser. This mints a \
                          harness-named API key you can revoke any time from Cursor's \
                          dashboard — it is separate from `cursor-agent login`."
+                                .into()
+                        }
+                        HarnessId::Graff if provider.as_deref() == Some("claude-agent") => {
+                            "Checking that Claude Code is signed in on this device. graff uses \
+                         that login; nothing is copied into Harness."
                                 .into()
                         }
                         HarnessId::Graff => format!(
