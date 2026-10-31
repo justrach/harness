@@ -70,6 +70,15 @@ fn main() -> anyhow::Result<()> {
                                     "createdAt": "2026-01-01T00:00:00Z",
                                     "config": {"harness": "graff", "model": "gpt-6-sol", "reasoning": "high", "modelOptions": {}, "sandbox": "workspace-write"}
                                 })).expect("synthetic chat")];
+                                state.context_usage = Some(harness_proto::ContextUsage {
+                                    tokens: Some(76_000),
+                                    window: Some(200_000),
+                                    savings: Some(harness_proto::ContextSavings {
+                                        handle_bytes: 16_000,
+                                        compacted_tokens: 8_000,
+                                        cache_read_tokens: 24_000,
+                                    }),
+                                });
                                 state.no_project = true;
                                 state
                             });
@@ -140,6 +149,50 @@ fn main() -> anyhow::Result<()> {
                                 window.draw(cx).clear();
                                 window.render_to_image()?.save(output.join(format!("{id}-reduced-motion.png")))?;
                                 harness_ui::motion::set_reduced_motion(cx, false);
+                                Ok(())
+                            })??;
+                        }
+                        if id.starts_with("codegraff") {
+                            let capture_window: gpui::AnyWindowHandle = window.into();
+                            let (pickers, position) = window.read_with(cx, |root, cx| {
+                                let composer = root.composer.read(cx);
+                                (composer.pickers().clone(), composer.fixture_model_bounds().expect("model bounds").center())
+                            })?;
+                            // Exercise the actual footer hit targets, including
+                            // the model menu after it moved out of the input.
+                            capture_window.update(cx, |_, window, cx| {
+                                window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                    position: point(px(width as f32 - 45.), px(356.)),
+                                    ..Default::default()
+                                }), cx);
+                            })?;
+                            cx.background_executor().timer(Duration::from_millis(900)).await;
+                            capture_window.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                                window.draw(cx).clear();
+                                window.render_to_image()?.save(output.join(format!("{id}-{width}-context-details.png")))?;
+                                Ok(())
+                            })??;
+                            capture_window.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                                window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                    position, ..Default::default()
+                                }), cx);
+                                window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                    button: gpui::MouseButton::Left, position, click_count: 1, ..Default::default()
+                                }), cx);
+                                window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                    button: gpui::MouseButton::Left, position, click_count: 1, ..Default::default()
+                                }), cx);
+                                anyhow::ensure!(pickers.read(cx).is_open(), "footer model click must open the menu");
+                                Ok(())
+                            })??;
+                            cx.background_executor().timer(Duration::from_millis(250)).await;
+                            capture_window.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                                window.draw(cx).clear();
+                                window.render_to_image()?.save(output.join(format!("{id}-{width}-model-menu.png")))?;
+                                window.dispatch_event(gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                                    keystroke: gpui::Keystroke::parse("escape")?, is_held: false, prefer_character_input: false,
+                                }), cx);
+                                anyhow::ensure!(!pickers.read(cx).is_open(), "Escape must close the model menu");
                                 Ok(())
                             })??;
                         }

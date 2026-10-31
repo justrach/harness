@@ -282,6 +282,43 @@ impl SidebarDisclosureMotion {
 /// the shared constructor makes left/right seams mirror each other and avoids
 /// relying on paint order when chrome crosses an animated pane boundary.
 const PANE_RESIZE_HITBOX_HALF_WIDTH: f32 = 10.0;
+/// The conversation column's corners where it meets the open sidebar: the
+/// material change rounds, as on the composer, instead of a straight seam.
+const SEAM_RADIUS: f32 = 12.0;
+
+/// The sidebar's tone in one corner the rounded column leaves open, so the
+/// sidebar's material reaches into the curve. `top` picks the top-left corner,
+/// otherwise the bottom-left.
+fn seam_fillet(top: bool, color: gpui::Hsla) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let r = SEAM_RADIUS;
+            let at = |x: f32, y: f32| gpui::point(bounds.left() + px(x), bounds.top() + px(y));
+            // The square's outer corner, then the quarter circle around the
+            // column's corner, centred one radius in from both edges.
+            let (corner, center_y, from, to) = if top {
+                (at(0.0, 0.0), 0.0 + r, 1.5, 1.0)
+            } else {
+                (at(0.0, r), 0.0, 0.5, 1.0)
+            };
+            let mut path = gpui::PathBuilder::fill();
+            path.move_to(corner);
+            let steps = 16;
+            for i in 0..=steps {
+                let turn = from + (to - from) * i as f32 / steps as f32;
+                let angle = std::f32::consts::PI * turn;
+                path.line_to(at(r + r * angle.cos(), center_y + r * angle.sin()));
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .absolute()
+    .size(px(SEAM_RADIUS))
+}
 const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 /// Corner radius of the floating Linux CSD window (macOS gets its native
 /// curve from the platform; maximized/tiled Linux windows go square).
@@ -13492,6 +13529,10 @@ impl Render for Shell {
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
                 let content_plane = Theme::of(cx).content_plane();
+                // Round the column where it meets the open sidebar; a
+                // collapsed sidebar keeps the straight edge.
+                let seam_rounded = self.sidebar_now() >= 2.0 * SEAM_RADIUS;
+                let seam_x = self.sidebar_now();
                 // No inset cards (user request): the conversation column sits
                 // flush and unbordered on the frost glass, lifted only by
                 // `Theme::content_plane`; the changes pane is a flush
@@ -13530,6 +13571,12 @@ impl Render for Shell {
                     .flex_row()
                     .overflow_hidden()
                     .when_some(content_plane, |el, plane| el.bg(plane))
+                    .when(seam_rounded, |el| {
+                        el.rounded_tl(px(SEAM_RADIUS))
+                            .rounded_bl(px(SEAM_RADIUS))
+                            .border_l_1()
+                            .border_color(border_color)
+                    })
                     .child(main)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (harness
@@ -13597,8 +13644,10 @@ impl Render for Shell {
                         }
                     })
                     .bg(crate::theme::wash(0.05))
-                    .border_r_1()
-                    .border_color(border_color);
+                    // A rounded column draws the seam itself, along its curve.
+                    .when(!seam_rounded, |el| {
+                        el.border_r_1().border_color(border_color)
+                    });
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -13635,6 +13684,23 @@ impl Render for Shell {
                                     .child(right_seam),
                             ),
                     )
+                    .when(seam_rounded, |page| {
+                        let tone = crate::theme::wash(0.05);
+                        page.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left(px(seam_x))
+                                .child(seam_fillet(true, tone)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .bottom(px(SEAM_RADIUS))
+                                .left(px(seam_x))
+                                .child(seam_fillet(false, tone)),
+                        )
+                    })
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
                     .child(self.render_titlebar_cluster(window, cx))
                     .children(overlays);
