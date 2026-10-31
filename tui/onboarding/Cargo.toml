@@ -1,0 +1,25 @@
+[package]
+name = "harness-tui-setup"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "harness-tui's first-run setup: agent, effort, autonomy and notifications, before the TUI starts."
+
+[lib]
+path = "src/lib.rs"
+
+# Draws the setup in a terminal by itself (for checks and screenshots):
+# `cargo run -- --step 1`.
+[[bin]]
+name = "harness-tui-setup"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-tungstenite = "0.28"
+toml_edit = "0.23"
+
+[workspace]

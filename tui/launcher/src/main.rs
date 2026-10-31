@@ -33,6 +33,10 @@ struct TopCli {
     #[arg(long, env = "HARNESS_TUI_BRIDGE", default_value = DEFAULT_BRIDGE)]
     bridge: String,
 
+    /// Ask the first-run setup again (agents, effort, autonomy, notifications).
+    #[arg(long)]
+    setup: bool,
+
     #[clap(flatten)]
     config_overrides: CliConfigOverrides,
 
@@ -51,8 +55,10 @@ fn main() -> anyhow::Result<()> {
             .config_overrides
             .raw_overrides
             .splice(0..0, top_cli.config_overrides.raw_overrides);
-        // Codegraff colors for the run; the guard puts the terminal's own back.
         let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+        // First run (or `--setup`): ask before the TUI takes the screen.
+        harness_tui_setup::run(codex_home.as_deref(), top_cli.setup).await;
+        // Codegraff colors for the run; the guard puts the terminal's own back.
         let mut theme = theme::apply(codex_home.as_deref());
         let exit_info = run_main(
             inner,
