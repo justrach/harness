@@ -2303,6 +2303,34 @@ impl Pickers {
         cx.notify();
     }
 
+    /// First-run setup's answers ([`crate::setup`]): the New session
+    /// harness, model and effort, remembered as if picked here.
+    pub fn apply_setup_defaults(
+        &mut self,
+        harness: HarnessId,
+        model: Option<(String, String)>,
+        reasoning: Option<ReasoningLevel>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.config.harness != Some(harness) {
+            self.config.model = None;
+            self.config.reasoning = None;
+        }
+        self.config.harness = Some(harness);
+        self.defaults.harness = Some(harness);
+        if let Some((id, label)) = model {
+            self.config.model = Some(id.clone());
+            self.defaults.remember_model(harness, id, label);
+        }
+        if let Some(level) = reasoning {
+            self.config.reasoning = Some(level);
+            self.defaults.reasoning = Some(level);
+        }
+        self.save_defaults();
+        self.ensure_models(harness, false, cx);
+        cx.notify();
+    }
+
     fn pick_model(&mut self, model_id: String, cx: &mut Context<Self>) {
         self.setting_menu = None;
         // The card stays open on a pick (user request): model and traits

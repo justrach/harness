@@ -70,6 +70,7 @@ pub mod reauth_recovery;
 pub mod rail;
 pub(crate) mod screen_access;
 pub mod settings;
+pub mod setup;
 pub mod shell;
 pub mod sound;
 pub mod stall_watch;

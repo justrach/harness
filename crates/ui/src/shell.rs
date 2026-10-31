@@ -2059,6 +2059,12 @@ pub struct Shell {
     settings_search: Option<SettingsSearch>,
     accounts_page: Option<Entity<AccountsPage>>,
     harnesses_page: Option<Entity<HarnessesPage>>,
+    harnesses_sub: Option<Subscription>,
+    /// First-run setup, over the whole window while it runs ([`crate::setup`]).
+    setup: Option<Entity<crate::setup::SetupView>>,
+    setup_sub: Option<Subscription>,
+    /// Setup is owed and opens once the app is ready: `Some(step)`.
+    setup_pending: Option<usize>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
     files_settings_sub: Option<Subscription>,
@@ -2393,6 +2399,7 @@ impl Shell {
         });
         let data_dir = boot.data_dir.clone();
         let settings = settings::current(cx);
+        let setup_pending = crate::setup::pending_at_launch(&data_dir);
         // PR metadata remains available in the composer and command palette.
         state.update(cx, |state, cx| state.set_change_requests_visible(true, cx));
         crate::appshots::set_enabled(settings.appshots_enabled);
@@ -2591,6 +2598,10 @@ impl Shell {
             settings_search: None,
             accounts_page: None,
             harnesses_page: None,
+            harnesses_sub: None,
+            setup: None,
+            setup_sub: None,
+            setup_pending,
             shortcuts_sub: None,
             notifications_sub: None,
             files_settings_sub: None,
@@ -5347,6 +5358,73 @@ impl Shell {
         true
     }
 
+    /// Open the owed first-run setup once the engine is up, and lay it over
+    /// the whole window while it runs.
+    fn render_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.setup.is_none()
+            && let Some(step) = self.setup_pending
+            && self.state.read(cx).engine().is_some()
+        {
+            self.setup_pending = None;
+            let notifications = self.settings.notifications_enabled;
+            let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
+            let remembered = (
+                defaults
+                    .model_for(harness_proto::HarnessId::Graff)
+                    .map(|m| m.id.clone()),
+                defaults.reasoning,
+            );
+            let state = self.state.clone();
+            let view = cx.new(|cx| {
+                crate::setup::SetupView::new(state, notifications, remembered, step, cx)
+            });
+            self.setup_sub = Some(cx.subscribe(
+                &view,
+                |this: &mut Shell, _, event: &crate::setup::SetupEvent, cx| {
+                    this.on_setup_event(event, cx);
+                },
+            ));
+            window.focus(&view.focus_handle(cx), cx);
+            self.setup = Some(view);
+        }
+        let view = self.setup.clone()?;
+        Some(
+            div()
+                .id("setup-overlay")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .child(view)
+                .into_any_element(),
+        )
+    }
+
+    fn on_setup_event(&mut self, event: &crate::setup::SetupEvent, cx: &mut Context<Self>) {
+        crate::setup::Gate::write(&self.data_dir, crate::setup::Gate::Done);
+        if let crate::setup::SetupEvent::Finished(outcome) = event {
+            let pickers = self.composer.read(cx).pickers().clone();
+            let (model, reasoning) = (outcome.model.clone(), outcome.reasoning);
+            pickers.update(cx, |pickers, cx| {
+                pickers.apply_setup_defaults(harness_proto::HarnessId::Graff, model, reasoning, cx)
+            });
+            if self.settings.notifications_enabled != outcome.notifications {
+                self.settings.notifications_enabled = outcome.notifications;
+                // The page caches its flags; rebuild it on the next visit.
+                self.notifications_page = None;
+                self.notifications_sub = None;
+                self.schedule_save(cx);
+            }
+            if let Some(starter) = outcome.starter.clone() {
+                self.composer
+                    .update(cx, |composer, cx| composer.set_text(starter, cx));
+            }
+        }
+        self.setup = None;
+        self.setup_sub = None;
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.route = Route::Chat;
         self.focus_composer(cx);
@@ -5418,7 +5496,20 @@ impl Shell {
             SettingsSection::Harnesses => {
                 if self.harnesses_page.is_none() {
                     let state = self.state.clone();
-                    self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
+                    let page = cx.new(|cx| HarnessesPage::new(state, cx));
+                    self.harnesses_sub = Some(cx.subscribe(
+                        &page,
+                        |this: &mut Shell, _, event: &crate::settings::harnesses::HarnessesEvent, cx| {
+                            match event {
+                                crate::settings::harnesses::HarnessesEvent::ReplaySetup => {
+                                    this.close_settings(cx);
+                                    this.setup_pending = Some(0);
+                                    cx.notify();
+                                }
+                            }
+                        },
+                    ));
+                    self.harnesses_page = Some(page);
                 }
                 match &self.harnesses_page {
                     Some(page) => page.clone().into_any_element(),
@@ -13703,7 +13794,8 @@ impl Render for Shell {
                     })
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
                     .child(self.render_titlebar_cluster(window, cx))
-                    .children(overlays);
+                    .children(overlays)
+                    .children(self.render_setup(window, cx));
                 root.child(sidebar_tone)
                     .child(motion::fade_in("phase-app", page))
             }
@@ -18476,6 +18568,15 @@ impl Shell {
     }
     pub fn fixture_readme_agents_settings(&mut self, cx: &mut Context<Self>) {
         self.open_settings(SettingsSection::Harnesses, cx);
+    }
+
+    /// First-run setup QA (`examples/setup-fixture.rs`): open setup at `step`
+    /// (`None` closes it, as Skip setup would).
+    pub fn fixture_setup(&mut self, step: Option<usize>, cx: &mut Context<Self>) {
+        self.setup = None;
+        self.setup_sub = None;
+        self.setup_pending = step;
+        cx.notify();
     }
 
     /// browse Connected apps QA (`examples/browse-link-fixture.rs`): Settings

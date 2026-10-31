@@ -21,14 +21,15 @@
 //! self-corrects from the RPC reply.
 
 use gpui::{
-    AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
-    px,
+    AnyElement, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Task, Window, div,
+    prelude::*, px,
 };
 
 use harness_engine::registry::TitleSettings;
 use harness_engine::registry::{HarnessDescriptor, default_on, descriptor_enabled};
 use std::time::Duration;
 
+use harness_proto::Autonomy;
 use harness_proto::Model;
 use harness_proto::{AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId};
 use harness_rpc::methods;
@@ -148,7 +149,19 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
+/// What the Agents page asks of the shell.
+pub enum HarnessesEvent {
+    /// Run first-run setup again ([`crate::setup`]).
+    ReplaySetup,
+}
+
+impl EventEmitter<HarnessesEvent> for HarnessesPage {}
+
 pub struct HarnessesPage {
+    /// The target device's default autonomy and whether anyone chose it.
+    autonomy: Loadable<(Autonomy, bool)>,
+    autonomy_task: Option<Task<()>>,
+    autonomy_saving: bool,
     graff_draft_subagents: Loadable<bool>,
     graff_draft_subagents_task: Option<Task<()>>,
     graff_draft_subagents_saving: bool,
@@ -231,6 +244,9 @@ impl SignInPhase {
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
+            autonomy: Loadable::Idle,
+            autonomy_task: None,
+            autonomy_saving: false,
             graff_draft_subagents: Loadable::Idle,
             graff_draft_subagents_task: None,
             graff_draft_subagents_saving: false,
@@ -288,6 +304,9 @@ impl HarnessesPage {
         self.graff_compact_at_task = None;
         self.graff_compact_at = Loadable::Idle;
         self.graff_compact_at_saving = false;
+        self.autonomy_task = None;
+        self.autonomy = Loadable::Idle;
+        self.autonomy_saving = false;
         self.title_settings = Loadable::Idle;
         self.title_models = Loadable::Idle;
         self.title_menu = None;
@@ -314,6 +333,7 @@ impl HarnessesPage {
         self.load_titles(None, cx);
         self.load_graff_draft_subagents(None, cx);
         self.load_graff_compact_at(None, cx);
+        self.load_autonomy(None, cx);
         self.harnesses = Loadable::Loading;
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::LIST_HARNESSES, params).await;
@@ -390,6 +410,157 @@ impl HarnessesPage {
                                 this.load_graff_draft_subagents(Some(!enabled), cx);
                             }))
                         })))
+            .into_any_element()
+    }
+
+    /// `save: Some(level)` writes the target device's default autonomy;
+    /// `None` only reads.
+    fn load_autonomy(&mut self, save: Option<Autonomy>, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let saving = save.is_some();
+        let method = if saving {
+            methods::SET_AUTONOMY
+        } else {
+            methods::GET_AUTONOMY
+        };
+        let params = self.with_target(match save {
+            Some(level) => serde_json::json!({ "autonomy": level }),
+            None => serde_json::json!({}),
+        });
+        self.autonomy_saving = saving;
+        if !saving {
+            self.autonomy = Loadable::Loading;
+        }
+        self.autonomy_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(method, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    let level = value
+                        .get("autonomy")
+                        .cloned()
+                        .ok_or_else(|| "no autonomy in reply".to_string())
+                        .and_then(|v| serde_json::from_value::<Autonomy>(v).map_err(|e| e.to_string()))?;
+                    let chosen = value.get("chosen").and_then(|v| v.as_bool()).unwrap_or(false);
+                    Ok((level, chosen))
+                });
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(reply) => {
+                        page.autonomy = Loadable::Ready(reply);
+                        page.error = None;
+                    }
+                    Err(error) if saving => page.error = Some(error),
+                    Err(error) => page.autonomy = Loadable::Error(error),
+                }
+                page.autonomy_saving = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn render_autonomy(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        const LEVELS: [(Autonomy, &str, &str); 3] = [
+            (Autonomy::ReadOnly, "Read only", "Reads and plans. Asks before it changes anything."),
+            (Autonomy::Workspace, "Workspace", "Edits the project. Asks before anything outside it."),
+            (Autonomy::FullAccess, "Full access", "Runs anything without asking."),
+        ];
+        let current = self.autonomy.ready().map(|(level, _)| *level);
+        let busy = current.is_none() || self.autonomy_saving;
+        let mut pills = div().flex().flex_wrap().items_center().gap(px(6.0));
+        for (index, (level, label, _)) in LEVELS.into_iter().enumerate() {
+            let selected = current == Some(level);
+            let pill = if selected {
+                widgets::badge_active(theme, label)
+            } else {
+                widgets::badge(theme, label)
+            };
+            pills = pills.child(
+                pill.id(("autonomy-level", index))
+                    .when(busy, |el| el.opacity(0.35))
+                    .when(!busy && !selected, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.text_color(theme.text))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.load_autonomy(Some(level), cx);
+                            }))
+                    }),
+            );
+        }
+        let note: SharedString = match &self.autonomy {
+            Loadable::Ready((level, chosen)) => {
+                let blurb = LEVELS
+                    .iter()
+                    .find(|(l, _, _)| l == level)
+                    .map(|(_, _, b)| *b)
+                    .unwrap_or_default();
+                if *chosen {
+                    blurb.into()
+                } else {
+                    format!("{blurb} The default until you pick one.").into()
+                }
+            }
+            Loadable::Error(_) => "Update Harness on that computer to set this.".into(),
+            _ => "".into(),
+        };
+        widgets::section_card(theme)
+            .mt(px(20.0))
+            .p(px(16.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(widgets::row_title(theme, "Autonomy"))
+                            .child(widgets::page_subtitle(
+                                theme,
+                                "How much agents on this device can do without asking. Applies to new runs of Codex, Claude Code and ACP agents.",
+                            ))
+                            .child(pills)
+                            .child(div().text_color(theme.text_muted).child(note)),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(14.0))
+                    .pt(px(12.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(theme, "First-run setup"))
+                            .child(widgets::page_subtitle(
+                                theme,
+                                "Agent, effort, autonomy and notifications, one question at a time.",
+                            )),
+                    )
+                    .child(
+                        widgets::ghost_action(theme)
+                            .id("replay-setup")
+                            .hover(|s| widgets::ghost_hover(theme, s))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(HarnessesEvent::ReplaySetup)))
+                            .child(SharedString::from("Replay setup")),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1576,6 +1747,7 @@ impl Render for HarnessesPage {
         let titles = self.render_titles(&theme, cx);
         let screen_access = self.render_screen_access(&theme, cx);
         let graff_draft_subagents = self.render_graff_draft_subagents(&theme, cx);
+        let autonomy = self.render_autonomy(&theme, cx);
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
         div()
@@ -1615,6 +1787,7 @@ impl Render for HarnessesPage {
                             // Above the agent list: a missing grant silently
                             // breaks screenshots for every agent below.
                             .children(screen_access)
+                            .child(autonomy)
                             .child(body)
                             .child(graff_draft_subagents)
                             .child(titles),
