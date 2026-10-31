@@ -37,6 +37,7 @@ mod composer_markdown;
 pub mod context_trajectory;
 pub mod context_usage;
 pub mod context_window;
+pub mod dial_panel;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
