@@ -4171,6 +4171,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TranscriptEvent::StageAnnotated(annotated) => {
+                let annotated = annotated.clone();
+                self.composer
+                    .update(cx, |composer, cx| composer.stage_annotated(annotated, cx));
+            }
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,

@@ -6107,7 +6107,7 @@ impl Composer {
                 && let Some(first) = staged.first()
                 && let Some(image) = first.image.clone()
             {
-                composer.preview = Some(attachments::PreviewImage::new(first.name.clone(), image));
+                composer.preview = Some(Self::staged_preview(first, image, cx));
                 composer.preview_focus_pending = true;
             }
             if !staged.is_empty() {
@@ -6336,6 +6336,64 @@ impl Composer {
         cx.notify();
     }
 
+    /// The lightbox for a staged image. Annotate's Done puts the annotated
+    /// copy in this attachment's place.
+    fn staged_preview(
+        att: &StagedAttachment,
+        image: std::sync::Arc<gpui::Image>,
+        cx: &mut Context<Self>,
+    ) -> attachments::PreviewImage {
+        let weak = cx.weak_entity();
+        let replaces = att.id.clone();
+        attachments::PreviewImage::new(att.name.clone(), image).annotatable(
+            move |annotated, window, cx| {
+                let replaces = replaces.clone();
+                weak.update(cx, |this, cx| {
+                    this.finish_annotate(Some(&replaces), annotated, window, cx);
+                })
+                .ok();
+            },
+        )
+    }
+
+    /// Stage an annotated image (crate::annotate). From a staged thumbnail
+    /// it takes the original's place in the strip; from the transcript it is
+    /// added. Closes the preview and puts focus back in the input.
+    pub fn finish_annotate(
+        &mut self,
+        replaces: Option<&str>,
+        annotated: crate::annotate::Annotated,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let staged = annotated.into_staged();
+        self.preview = None;
+        let slot = replaces.and_then(|id| {
+            self.attachments
+                .values_mut()
+                .find_map(|list| list.iter_mut().find(|att| att.id == id))
+        });
+        match slot {
+            Some(slot) => {
+                *slot = staged;
+                cx.notify();
+            }
+            None => self.add_staged(vec![staged], cx),
+        }
+        let focus = self.input.read(cx).focus_handle.clone();
+        window.focus(&focus, cx);
+    }
+
+    /// Stage an annotated transcript image; the input takes focus on the
+    /// next frame.
+    pub fn stage_annotated(
+        &mut self,
+        annotated: crate::annotate::Annotated,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_staged(vec![annotated.into_staged()], cx);
+    }
+
     fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
         self.add_staged_for(self.current_key.clone(), staged, cx);
     }
@@ -6543,7 +6601,7 @@ impl Composer {
                 .border_color(crate::theme::hairline(0.10));
             let tile = match att.image.clone() {
                 Some(image) => {
-                    let preview = attachments::PreviewImage::new(att.name.clone(), image.clone());
+                    let preview = Self::staged_preview(att, image.clone(), cx);
                     frame
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -6633,7 +6691,29 @@ impl Composer {
                                     .size(px(14.0))
                                     .text_color(theme.text_muted),
                             ),
-                    )),
+                    ))
+                    // Annotated (crate::annotate): its numbered notes go
+                    // with the prompt. Same layer rule as the remove button.
+                    .when(att.annotations.is_some(), |el| {
+                        el.child(crate::frost::layered(
+                            div()
+                                .absolute()
+                                .left(px(4.0))
+                                .bottom(px(4.0))
+                                .size(px(18.0))
+                                .rounded_full()
+                                .bg(theme.bg)
+                                .shadow_sm()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    crate::icons::icon(crate::icons::PEN)
+                                        .size(px(11.0))
+                                        .text_color(theme.text),
+                                ),
+                        ))
+                    }),
             );
         }
         Some(strip)
@@ -8694,6 +8774,11 @@ impl Composer {
         });
         let typed = text.clone();
         let text = crate::comments::with_comments(&text, &comments);
+        let notes: Vec<&str> = staged
+            .iter()
+            .filter_map(|att| att.annotations.as_deref())
+            .collect();
+        let text = crate::annotate::with_annotations(&text, &notes);
         self.preview = None;
         let message_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().timestamp_millis();
@@ -17816,6 +17901,53 @@ impl Composer {
             input.reset_blink();
             cx.notify();
         });
+    }
+
+    /// Enter annotate mode on the open preview, as its Annotate button does.
+    pub fn fixture_open_annotate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(preview) = self.preview.clone() {
+            preview.open_annotate(cx.entity_id(), self.preview_focus.clone(), window, cx);
+        }
+    }
+
+    /// The open annotate editor, if any.
+    pub fn fixture_annotate_editor(
+        &self,
+    ) -> Option<Entity<crate::annotate::editor::AnnotateEditor>> {
+        self.preview.as_ref().and_then(|p| p.annotate_editor())
+    }
+
+    /// Open the first staged image's preview, as clicking its thumbnail does.
+    pub fn fixture_preview_first_staged(&mut self, cx: &mut Context<Self>) {
+        let first = self
+            .attachments
+            .get(&self.current_key)
+            .and_then(|list| list.first().cloned());
+        if let Some(att) = first
+            && let Some(image) = att.image.clone()
+        {
+            self.preview = Some(Self::staged_preview(&att, image, cx));
+            self.preview_focus_pending = true;
+            cx.notify();
+        }
+    }
+
+    /// Staged attachments: name, encoded bytes and annotation notes.
+    pub fn fixture_staged(&self) -> Vec<(String, Vec<u8>, Option<String>)> {
+        self.attachments
+            .get(&self.current_key)
+            .map(|list| {
+                list.iter()
+                    .map(|att| {
+                        (
+                            att.name.clone(),
+                            att.bytes().to_vec(),
+                            att.annotations.as_deref().map(str::to_string),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {
