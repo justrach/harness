@@ -550,8 +550,6 @@ enum ModelRail {
 /// list's CONTENT (not its highlight/selection, which render per-row).
 #[derive(Clone, PartialEq, Eq)]
 struct ModelRowsKey {
-    #[cfg(feature = "model-picker-preview")]
-    preview_category: Option<model_preview::TaskKind>,
     query: String,
     rail: ModelRail,
     effective: Option<HarnessId>,
@@ -2535,8 +2533,6 @@ impl Pickers {
             return self.preview_rows(cx);
         }
         let key = ModelRowsKey {
-            #[cfg(feature = "model-picker-preview")]
-            preview_category: None,
             query: self.search.read(cx).text().trim().to_string(),
             rail: self.model_rail,
             effective: self.effective_harness(cx),

@@ -84,6 +84,7 @@ pub mod transcript;
 mod transcript_paint_check;
 pub mod typography;
 pub mod visuals;
+pub mod wake_slider;
 mod workspace_links;
 
 use std::path::PathBuf;

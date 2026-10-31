@@ -1,5 +1,7 @@
-//! Private model picker experiment. Never enabled in release builds.
-//! Ratings, task shortlists and dollar ranges are fixtures, not measurements.
+//! The two-step model picker (after Phil Hedayatnia's preview): a model list
+//! grouped by provider with a floating detail card, then a reasoning step on
+//! wake bars (crate::wake_slider). It states only what the catalog says: no
+//! ratings, shortlists or prices are made up.
 use super::*;
 use crate::icons;
 use gpui::{relative, rgb};
@@ -12,6 +14,9 @@ use std::time::{Duration, Instant};
 pub(super) const PICKER_WIDTH: f32 = 356.0;
 const DETAIL_WIDTH: f32 = 276.0;
 const SLIDER_SETTLE: Duration = Duration::from_millis(150);
+/// The bar track's width, for the drag speed that sets a wake's lift: the
+/// picker less its padding and the track's inset.
+const WAKE_TRACK_WIDTH: f32 = PICKER_WIDTH - 60.0;
 
 #[derive(Clone, Copy)]
 struct SliderMotion {
@@ -33,43 +38,6 @@ impl SliderMotion {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum TaskKind {
-    #[default]
-    All,
-    Everyday,
-    Quick,
-    Debug,
-    Design,
-}
-impl TaskKind {
-    const ALL: [Self; 5] = [
-        Self::All,
-        Self::Everyday,
-        Self::Quick,
-        Self::Debug,
-        Self::Design,
-    ];
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Everyday => "Everyday",
-            Self::Quick => "Quick edits",
-            Self::Debug => "Debugging",
-            Self::Design => "UI / design",
-        }
-    }
-    fn icon(self) -> &'static str {
-        match self {
-            Self::All => icons::WIDGET,
-            Self::Everyday => icons::CHECKLIST,
-            Self::Quick => icons::FAST_TIER,
-            Self::Debug => icons::ACTION_DEBUG,
-            Self::Design => icons::MAGIC_STICK_3,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct Pending {
     harness: HarnessId,
@@ -82,12 +50,13 @@ pub(super) struct Preview {
     pub enabled: bool,
     pub viewed: Option<HarnessId>,
     pub pending: Option<Pending>,
-    category: TaskKind,
     slider: Option<Entity<SliderState>>,
     slider_events: Option<Subscription>,
     slider_observer: Option<Subscription>,
     slider_motion: Option<SliderMotion>,
     slider_dragging: bool,
+    /// The bars a fast drag lifted (crate::wake_slider).
+    wake: crate::wake_slider::Wake,
     detail: Option<usize>,
     detail_hovered: bool,
     hover_target: Option<usize>,
@@ -103,12 +72,12 @@ impl Default for Preview {
                 && std::env::var("HARNESS_MODEL_PICKER_PREVIEW").as_deref() == Ok("1"),
             viewed: None,
             pending: None,
-            category: TaskKind::All,
             slider: None,
             slider_events: None,
             slider_observer: None,
             slider_motion: None,
             slider_dragging: false,
+            wake: Default::default(),
             detail: None,
             detail_hovered: false,
             hover_target: None,
@@ -128,8 +97,8 @@ impl Preview {
         self.slider_observer = None;
         self.slider_motion = None;
         self.slider_dragging = false;
+        self.wake = Default::default();
         self.hide_detail();
-        self.category = TaskKind::All;
         self.error = None;
     }
     pub(super) fn hide_detail(&mut self) {
@@ -145,7 +114,8 @@ impl Preview {
         })
     }
     pub fn animating(&self, reduced: bool) -> bool {
-        !reduced && self.slider_motion.is_some_and(|m| m.active(Instant::now()))
+        let now = Instant::now();
+        !reduced && (self.slider_motion.is_some_and(|m| m.active(now)) || self.wake.active(now))
     }
 }
 
@@ -236,103 +206,30 @@ fn brand_accent(model: &Model, theme: &Theme) -> gpui::Hsla {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Profile {
-    speed: u8,
-    coding: u8,
-    reasoning: u8,
-    strength: &'static str,
-    tradeoff: &'static str,
-    cost: (f32, f32),
-}
-fn profile(model: &Model) -> Option<Profile> {
-    let name = model.label.to_lowercase();
-    let (speed, coding, reasoning, strength, tradeoff, cost) =
-        if name.contains("haiku") || name.contains("mini") || name.contains("flash") {
-            (
-                5,
-                3,
-                3,
-                "Fast, focused edits",
-                "Less depth on complex tasks",
-                (0.02, 0.08),
-            )
-        } else if name.contains("opus") || name.contains("astra") {
-            (
-                2,
-                5,
-                5,
-                "Complex code and deep investigation",
-                "More time and spend",
-                (0.35, 1.20),
-            )
-        } else if name.contains("sonnet") || name.contains("gpt") || name.contains("codex") {
-            (
-                4,
-                5,
-                4,
-                "Everyday coding and UI work",
-                "Less depth than the largest models",
-                (0.12, 0.48),
-            )
-        } else if name.contains("kimi")
-            || name.contains("deepseek")
-            || name.contains("mimo")
-            || name.contains("qwen")
-            || name.contains("glm")
-        {
-            (
-                3,
-                4,
-                4,
-                "Code and multi-step tasks",
-                "Profile needs benchmarking",
-                (0.05, 0.24),
-            )
-        } else {
-            return None;
-        };
-    Some(Profile {
-        speed,
-        coding,
-        reasoning,
-        strength,
-        tradeoff,
-        cost,
+/// "Low – High": the reasoning levels the catalog lists for `model`.
+fn reasoning_range(model: &Model) -> Option<String> {
+    let (first, last) = (
+        model.reasoning_levels.first()?,
+        model.reasoning_levels.last()?,
+    );
+    Some(if first == last {
+        reasoning_label(*first).to_string()
+    } else {
+        format!("{} – {}", reasoning_label(*first), reasoning_label(*last))
     })
 }
-fn belongs(model: &Model, category: TaskKind) -> bool {
-    if category == TaskKind::All {
-        return true;
+
+/// The catalog's billing tag, in words.
+fn billing_label(billing: &str) -> String {
+    match billing {
+        "plan" => "Your plan".into(),
+        "credits" => "Credits".into(),
+        "api" => "API usage".into(),
+        "local" => "Runs locally".into(),
+        other => other.to_string(),
     }
-    profile(model).is_some_and(|p| match category {
-        TaskKind::Everyday => p.speed >= 3 && p.coding >= 4,
-        TaskKind::Quick => p.speed >= 4,
-        TaskKind::Debug => p.reasoning >= 4,
-        TaskKind::Design => p.coding == 5,
-        TaskKind::All => true,
-    })
 }
-fn cost_text(model: &Model, level: Option<ReasoningLevel>) -> String {
-    match model.billing.as_deref() {
-        Some("plan") => return "Plan · usage varies".into(),
-        Some("local") => return "Local · no API estimate".into(),
-        _ => {}
-    }
-    let Some(p) = profile(model) else {
-        return "Not estimated".into();
-    };
-    // Deliberately synthetic; this is NOT a pricing or token estimator.
-    let index = level
-        .and_then(|l| model.reasoning_levels.iter().position(|x| *x == l))
-        .unwrap_or(0);
-    let fixture_multiplier = 1.0 + index as f32 * 0.4;
-    format!(
-        "${:.2}–{:.2}",
-        p.cost.0 * fixture_multiplier,
-        p.cost.1 * fixture_multiplier
-    )
-}
+
 fn validate_pending(pending: &Pending, live: Option<&Model>) -> bool {
     let Some(live) = live else {
         return false;
@@ -371,14 +268,18 @@ impl Pickers {
     }
     pub(super) fn preview_rows(&self, cx: &App) -> std::sync::Arc<Vec<ModelRowData>> {
         let key = ModelRowsKey {
-            preview_category: Some(self.preview.category),
             query: self.search.read(cx).text().trim().to_string(),
             rail: self.model_rail,
             effective: self.preview_viewed(cx),
             locked: self.harness_locked(cx),
             catalog_rev: self.catalog_rev,
             selected: self.effective_model_id(cx).map(str::to_owned),
+            chat_mode: self.chat_mode(cx),
         };
+        // A plain chat offers only its auto tiers, as the standard list does.
+        if key.chat_mode {
+            return std::sync::Arc::new(self.visible_model_rows(cx));
+        }
         if let Some((old, rows)) = self.model_rows_cache.borrow().as_ref()
             && *old == key
         {
@@ -394,9 +295,6 @@ impl Pickers {
                     if self.model_rail == ModelRail::Favorites
                         && !self.defaults.is_favorite(d.id, &model.id)
                     {
-                        continue;
-                    }
-                    if !belongs(model, self.preview.category) {
                         continue;
                     }
                     let haystack = format!(
@@ -419,9 +317,7 @@ impl Pickers {
                 }
             }
         }
-        let grouped = self.preview.category == TaskKind::All
-            && self.model_rail == ModelRail::Harness
-            && key.query.is_empty();
+        let grouped = self.model_rail == ModelRail::Harness && key.query.is_empty();
         let rows = if grouped {
             let mut routes = Vec::<String>::new();
             for row in &flat {
@@ -519,9 +415,16 @@ impl Pickers {
                 SliderEvent::Change(_) => {
                     this.preview.slider_dragging = true;
                     this.preview.slider_motion = None;
+                    if !cx.reduce_motion() {
+                        let at = slider.read(cx).percentage().end;
+                        this.preview
+                            .wake
+                            .sweep(at, WAKE_TRACK_WIDTH, Instant::now());
+                    }
                 }
                 SliderEvent::Release(_) => {
                     this.preview.slider_dragging = false;
+                    this.preview.wake.release();
                     this.preview.slider_motion = Some(SliderMotion {
                         from: slider.read(cx).percentage().end,
                         to: target,
@@ -730,20 +633,12 @@ impl Pickers {
     }
     pub(super) fn render_model_preview(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
-        let footer = div()
-            .flex_none()
-            .px(px(14.0))
-            .py(px(8.0))
-            .text_size(crate::typography::ui_rems(10.0))
-            .text_color(theme.text_muted)
-            .child("Preview · Dummy data · Do not merge");
         if let Some(p) = self.preview.pending.clone() {
             return div()
                 .size_full()
                 .flex()
                 .flex_col()
                 .child(self.preview_reasoning(p, &theme, cx))
-                .child(footer)
                 .into_any_element();
         }
         let viewed = self.preview_viewed(cx);
@@ -755,44 +650,6 @@ impl Pickers {
             &theme,
             cx,
         );
-        let categories = div()
-            .id("preview-categories")
-            .flex_none()
-            .flex()
-            .flex_wrap()
-            .gap(px(4.0))
-            .p(px(8.0))
-            .children(TaskKind::ALL.into_iter().enumerate().map(|(ix, category)| {
-                div()
-                    .id(("preview-category", ix))
-                    .role(gpui::Role::Button)
-                    .aria_label(category.label())
-                    .flex_none()
-                    .h(px(30.0))
-                    .px(px(10.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .cursor_pointer()
-                    .bg(if category == self.preview.category {
-                        theme.surface_raised
-                    } else {
-                        theme.surface_overlay.opacity(0.0)
-                    })
-                    .hover(|s| s.bg(theme.surface_raised))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.preview.category = category;
-                        this.preview_reset_rows(cx);
-                    }))
-                    .child(
-                        icons::icon(category.icon())
-                            .size(px(13.0))
-                            .text_color(theme.text),
-                    )
-                    .child(category.label())
-            }));
         let rows = self.model_rows(cx);
         let grouped = rows.iter().any(|r| r.header.is_some());
         let entity = cx.entity();
@@ -819,9 +676,6 @@ impl Pickers {
                 &theme,
                 cx,
             ),
-            Some(Loadable::Ready(_)) if self.preview.category != TaskKind::All => {
-                empty_list_note(&theme, "No curated matches. Try All.")
-            }
             Some(Loadable::Ready(_)) => empty_list_note(&theme, "No models found"),
             _ => empty_list_note(&theme, "Loading models…"),
         };
@@ -831,7 +685,6 @@ impl Pickers {
             .flex_col()
             .text_color(theme.text)
             .child(tabs)
-            .child(categories)
             .child(
                 div()
                     .h(px(36.0))
@@ -858,7 +711,6 @@ impl Pickers {
                         .when(!rows.is_empty(), |el| el.child(list)),
                 ),
             )
-            .child(footer)
             .into_any_element()
     }
     fn preview_row(
@@ -1009,7 +861,7 @@ impl Pickers {
     }
     fn preview_detail(&self, row: &ModelRowData, theme: &Theme) -> AnyElement {
         let model = &row.model;
-        let mut panel = popover::popover_card(theme)
+        let panel = popover::popover_card(theme)
             .id("preview-detail")
             .w(px(DETAIL_WIDTH))
             .flex_none()
@@ -1037,49 +889,21 @@ impl Pickers {
                     .text_color(theme.text_muted)
                     .child(format!("via {}", provider(route(model)).0)),
             );
-        if let Some(p) = profile(model) {
-            for (label, value) in [
-                ("Speed", p.speed),
-                ("Coding", p.coding),
-                ("Reasoning", p.reasoning),
-            ] {
-                panel = panel.child(
+        // Only what the catalog says: no ratings or prices are made up.
+        let facts = [
+            ("Reasoning", reasoning_range(model)),
+            ("Billing", model.billing.as_deref().map(billing_label)),
+        ];
+        panel
+            .children(facts.into_iter().filter_map(|(label, value)| {
+                value.map(|value| {
                     div()
                         .flex()
-                        .items_center()
                         .justify_between()
                         .child(label)
-                        .child(div().flex().gap(px(3.0)).children((0..5).map(|i| {
-                            div()
-                                .w(px(12.0))
-                                .h(px(4.0))
-                                .rounded(px(2.5))
-                                .bg(if i < value {
-                                    theme.text_muted
-                                } else {
-                                    theme.surface_raised
-                                })
-                        }))),
-                );
-            }
-            panel = panel
-                .child(div().child(p.strength))
-                .child(div().text_color(theme.text_muted).child(p.tradeoff));
-        } else {
-            panel = panel.child(
-                div()
-                    .text_color(theme.text_muted)
-                    .child("Profile not rated yet"),
-            );
-        }
-        panel
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child("Task cost")
-                    .child(cost_text(model, None)),
-            )
+                        .child(div().text_color(theme.text_muted).child(value))
+                })
+            }))
             .when_some(model.description.clone(), |el, description| {
                 el.child(
                     div()
@@ -1178,68 +1002,56 @@ impl Pickers {
                 .map(|m| m.position(Instant::now(), cx.reduce_motion()))
                 .unwrap_or(raw);
             let count = p.model.reasoning_levels.len();
-            let thumb = if self.preview.slider_dragging {
-                30.0
-            } else {
-                28.0
+            // Thumbless wake bars (crate::wake_slider): the accent fills
+            // the bars up to the level, stops stand taller, and a fast drag
+            // lifts the bars it passes.
+            use crate::wake_slider::{
+                BAR_WIDTH, BARS, LIFT_HEIGHT, REST_HEIGHT, STOP_HEIGHT, bar_fraction, stop_bars,
             };
+            let now = Instant::now();
+            let reduced = cx.reduce_motion();
+            let stops = stop_bars(count, BARS);
+            let rest = theme.text_muted.opacity(0.28);
+            let bars = (0..BARS).map(|bar| {
+                let at = bar_fraction(bar, BARS);
+                let lift = if reduced {
+                    0.0
+                } else {
+                    self.preview.wake.height(bar, now)
+                };
+                let height = REST_HEIGHT
+                    + if stops.contains(&bar) {
+                        STOP_HEIGHT
+                    } else {
+                        0.0
+                    }
+                    + lift * LIFT_HEIGHT;
+                div()
+                    .absolute()
+                    .bottom(px(2.0))
+                    .left(relative(at))
+                    .ml(px(-BAR_WIDTH / 2.0))
+                    .w(px(BAR_WIDTH))
+                    .h(px(height.max(4.0)))
+                    .rounded(px(BAR_WIDTH / 2.0))
+                    .bg(if at <= percent + 1e-4 { accent } else { rest })
+            });
             let track = SliderTrack::new(slider)
                 .relative()
                 .size_full()
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(5.0))
-                        .left(px(-14.0))
-                        .right(px(-14.0))
-                        .h(px(24.0))
-                        .rounded(px(12.0))
-                        .bg(theme.surface_raised),
-                )
-                .child(
-                    SliderIndicator::new(slider)
-                        .absolute()
-                        .top(px(5.0))
-                        .w_full()
-                        .h(px(24.0))
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left(px(-14.0))
-                                .right(relative(1.0 - percent))
-                                .mr(px(-14.0))
-                                .rounded(px(12.0))
-                                .bg(accent),
-                        ),
-                )
-                .children((0..count).map(|i| {
-                    div()
-                        .absolute()
-                        .top(px(15.0))
-                        .left(relative(i as f32 / (count - 1) as f32))
-                        .ml(px(-2.0))
-                        .size(px(4.0))
-                        .rounded(px(2.0))
-                        .bg(if i as f32 / (count - 1) as f32 <= percent {
-                            theme.on_solid.opacity(0.55)
-                        } else {
-                            theme.text_muted.opacity(0.4)
-                        })
-                }))
+                // Invisible: it records the bounds the value maps onto.
+                .child(SliderIndicator::new(slider).absolute().inset_0())
+                .children(bars)
+                // No visible thumb: it stays as the drag handle and the
+                // keyboard target over the current level.
                 .child(
                     SliderThumb::new(slider)
                         .absolute()
-                        .top(px((34.0 - thumb) / 2.0))
+                        .top(px(3.0))
                         .left(relative(percent))
-                        .ml(px(-thumb / 2.0))
-                        .size(px(thumb))
-                        .rounded(px(thumb / 2.0))
-                        .bg(rgb(0xfffefa))
-                        .border_1()
-                        .border_color(theme.border)
-                        .shadow_sm(),
+                        .ml(px(-14.0))
+                        .size(px(28.0))
+                        .rounded(px(14.0)),
                 );
             body = body
                 .child(
@@ -1315,23 +1127,14 @@ impl Pickers {
                     .child(div().flex().flex_wrap().gap(px(4.0)).children(choices)),
             );
         }
-        body = body
-            .child(
+        body = body.when_some(self.preview.error.clone(), |el, error| {
+            el.child(
                 div()
-                    .flex()
-                    .justify_between()
                     .text_size(crate::typography::ui_rems(12.0))
-                    .child("Example task cost")
-                    .child(cost_text(&p.model, p.reasoning)),
+                    .text_color(theme.danger)
+                    .child(error),
             )
-            .when_some(self.preview.error.clone(), |el, error| {
-                el.child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .child(error),
-                )
-            });
+        });
         div()
             .flex_1()
             .min_h_0()
@@ -1764,19 +1567,6 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn preview_reopening_all_does_not_reuse_a_shortlist_cache(cx: &mut gpui::TestAppContext) {
-        let (_, picker) = fixture(cx, false);
-        picker.update(cx, |p, cx| {
-            let all = p.model_rows(cx).len();
-            p.preview.category = TaskKind::Quick;
-            let quick = p.model_rows(cx).len();
-            assert!(quick > 0 && quick < all);
-            p.preview.reset();
-            assert_eq!(p.model_rows(cx).len(), all);
-        });
-    }
-
-    #[gpui::test]
     fn preview_binary_and_fixed_models_use_only_advertised_levels(cx: &mut gpui::TestAppContext) {
         let (_, picker) = fixture(cx, false);
         picker.update(cx, |p, cx| {
@@ -1919,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_unknown_usage_is_not_zero_and_plans_are_not_api_costs() {
+    fn the_detail_card_states_only_what_the_catalog_says() {
         let mut model = Model {
             id: "custom/model".into(),
             label: "Custom".into(),
@@ -1929,11 +1719,31 @@ mod tests {
             maker: None,
             billing: None,
         };
-        assert_eq!(cost_text(&model, None), "Not estimated");
-        model.label = "GPT example".into();
-        model.billing = Some("plan".into());
-        assert!(!cost_text(&model, None).contains('$'));
-        model.billing = Some("local".into());
-        assert!(!cost_text(&model, None).contains('$'));
+        // Nothing listed: no row rather than a made-up value.
+        assert_eq!(reasoning_range(&model), None);
+        model.reasoning_levels = vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+        ];
+        assert_eq!(
+            reasoning_range(&model).as_deref(),
+            Some(
+                format!(
+                    "{} – {}",
+                    reasoning_label(ReasoningLevel::Low),
+                    reasoning_label(ReasoningLevel::High)
+                )
+                .as_str()
+            )
+        );
+        model.reasoning_levels = vec![ReasoningLevel::High];
+        assert_eq!(
+            reasoning_range(&model).as_deref(),
+            Some(reasoning_label(ReasoningLevel::High))
+        );
+        assert_eq!(billing_label("plan"), "Your plan");
+        assert_eq!(billing_label("local"), "Runs locally");
+        assert_eq!(billing_label("something-new"), "something-new");
     }
 }

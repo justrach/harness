@@ -1,6 +1,6 @@
-# Model picker preview — DO NOT MERGE
+# Model picker preview
 
-This is an internal native interaction experiment, not a public release. The live agent catalog supplies selectable model IDs, available options and reasoning levels. Ratings, strengths/tradeoffs, category membership, and dollar ranges are **dummy data**, including their relationship to effort. They are not benchmarks or price quotes.
+Phil Hedayatnia's two-step model picker, behind the `harness-ui/model-picker-preview` feature and `HARNESS_MODEL_PICKER_PREVIEW=1` in debug builds. The live agent catalog supplies every model, option and reasoning level. The picker shows only what the catalog says: the earlier ratings, task shortlists, strengths and dollar ranges were placeholder data and are gone, not hidden.
 
 ## Run and review
 
@@ -17,13 +17,13 @@ For integration in a separately configured development app, build `cargo build -
 
 ## Behavior
 
-- Provider logos appear once per group. Mixed shortlists and search results carry maker logos per row. The model maker supplies the reasoning accent; the detail card separately names the serving route.
-- All live models remain selectable, including unknown/custom providers. Icons and profile metadata are presentation only; they never whitelist model IDs. Unrated models say so and remain in All.
-- Search, arrow navigation, favorites and model shortcuts share the same cached, virtualized rows. The 356px picker opens without a detail pane. A floating card appears beside a hovered row after 180ms (or on explicit keyboard navigation), with 160ms grace to enter the card. It flips sides when there is room and stays within the window on narrow screens. Context appears in that card, not model rows.
-- The separate reasoning screen uses the app's shared type, surfaces, and buttons. A neutral thumb follows the pointer continuously over the provider-colored track, then eases to the nearest supported stop over 150ms. Keyboard changes use the same settling motion; reduced motion snaps immediately.
+- Provider logos appear once per group. Search results carry maker logos per row. The model maker supplies the reasoning accent; the detail card separately names the serving route.
+- All live models remain selectable, including unknown/custom providers. Icons are presentation only; they never whitelist model IDs.
+- Search, arrow navigation, favorites and model shortcuts share the same cached, virtualized rows. The 356px picker opens without a detail pane. A floating card appears beside a hovered row after 180ms (or on explicit keyboard navigation), with 160ms grace to enter the card. It flips sides when there is room and stays within the window on narrow screens. The card names the serving route, the model's reasoning range and its billing (plan, credits, API or local), each only when the catalog lists it.
+- The separate reasoning screen uses the app's shared type, surfaces, and buttons. The level is a thumbless row of 36 bars (`crate::wake_slider`, after bencho.dev's wake slider): bars up to the level take the maker's accent and each supported stop stands taller. A fast drag lifts the bars it sweeps past, scaled by pointer speed, and they spring back within 420 ms; a slow drag leaves them still. On release the level eases to the nearest stop over 150ms. Keyboard changes use the same settling motion; reduced motion keeps the bars still and snaps.
 - Choosing a model stages it. The second screen offers only its advertised reasoning ladder and model options. Binary ladders say Off/On; an empty ladder has no slider.
 - Back/Escape from reasoning discards the staged selection. Use model applies model, reasoning and options together. A chat's agent stays fixed. Catalog changes are revalidated before applying.
-- Subscription/local routes do not display fictional API charges. Unknown estimates are not zero.
+- No prices are shown: the catalog has none, and an estimate would be made up.
 
 ## Provider audit
 
@@ -68,14 +68,11 @@ Explicit references: [OpenAI Apps SDK primitives](https://github.com/openai/apps
 
 Additional provider marks use LobeHub Icons 1.98.0, alongside the existing 1.95.1 maker marks. MLX and oMLX use the upstream project SVGs. See `THIRD_PARTY_NOTICES.md` and the retained asset licenses.
 
-## Public merge blockers
+## Before it is on by default
 
-1. Replace dummy ratings, shortlists and strengths/tradeoffs with reviewed, versioned metadata backed by evaluations. Do not infer recommendations from model-name substrings in public builds.
-2. Replace dummy dollar ranges with an estimator using effective route prices and measured whole-task usage, including retries, tools, child agents, caching and effort. Keep unknown usage distinct from zero; avoid counting reasoning tokens twice. Subscription plan limits and API charges need separate treatment.
-3. Calibrate ranges on held-out tasks across providers, model versions and reasoning levels. Track coverage/error and handle missing pricing explicitly. The current linear fixture multiplier is not an assertion about how reasoning affects real cost.
-4. Finish remaining maker accent verification (including Meta and Qwen), review logo sizing and accessibility, and verify pointer/keyboard behavior in the full isolated app on supported desktop platforms.
-5. Remove the experiment gate only after those requirements pass. A draft PR and this warning are review safeguards, not an automated merge prohibition.
+1. Finish maker accent verification (including Meta and Qwen), review logo sizing and accessibility, and verify pointer and keyboard behavior in the full isolated app on each desktop platform.
+2. Then remove the experiment gate. Ratings, shortlists or prices come back only from reviewed, versioned data (evaluations, route prices and measured whole-task usage), never inferred from model names.
 
 ## Validation
 
-All 61 picker tests pass, including ten preview tests covering staged cancellation, browsing agents without changing run configuration, atomic existing-chat updates, changed catalog capabilities, binary/fixed reasoning, subscription/local cost labels, pointer drag and keyboard changes, hover-card timing and pointer transfer, intermediate slider settling frames and reduced motion, reopening All after a shortlist, and all built-in plus custom routes in a 7,000-model catalog. The default UI library also passes `cargo check` with the feature off. Native fixture captures cover light/dark at 860 × 680 and light at 540 × 680; all use synthetic data. Full-app and other-platform verification remain public merge blockers.
+`cargo test -p harness-ui --lib --features model-picker-preview,appshots-fixture -- model_preview wake_slider pickers::` passes (71 tests): staged cancellation, browsing agents without changing run configuration, atomic existing-chat updates, changed catalog capabilities, binary and fixed reasoning, the detail card's catalog-only facts, pointer drag and keyboard changes on the bars, hover-card timing, settling frames and reduced motion, every route in a 7,000-model catalog, and the wake's rules (stops, sweeps, speed to lift, the spring). The fixture's `--record` run drags slowly (the bars stay still) and then flicks (they lift and settle). All captures use synthetic data.
