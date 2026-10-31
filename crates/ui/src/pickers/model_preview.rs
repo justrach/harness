@@ -247,6 +247,21 @@ fn validate_pending(pending: &Pending, live: Option<&Model>) -> bool {
 }
 
 impl Pickers {
+    /// `model` as the picker offers it: a model whose catalog entry lists no
+    /// reasoning levels takes its agent's ladder, as the traits summary on the
+    /// model button and the previous picker do. Agents that report per-model
+    /// levels (graff) keep them; agents with no ladder offer no slider.
+    fn with_agent_ladder(&self, harness: HarnessId, mut model: Model) -> Model {
+        if model.reasoning_levels.is_empty()
+            && let Some(descriptor) = self
+                .harnesses
+                .ready()
+                .and_then(|list| list.iter().find(|d| d.id == harness))
+        {
+            model.reasoning_levels = descriptor.reasoning_levels.clone();
+        }
+        model
+    }
     pub(super) fn preview_viewed(&self, cx: &App) -> Option<HarnessId> {
         if self.harness_locked(cx) {
             self.effective_harness(cx)
@@ -307,7 +322,7 @@ impl Pickers {
                     flat.push(ModelRowData {
                         harness: d.id,
                         harness_name: d.name.clone().into(),
-                        model: model.clone(),
+                        model: self.with_agent_ladder(d.id, model.clone()),
                         selected_only: false,
                         header: None,
                     });
@@ -453,8 +468,9 @@ impl Pickers {
             .models
             .get(&p.harness)
             .and_then(|l| l.ready())
-            .and_then(|models| models.iter().find(|m| m.id == p.model.id));
-        if !validate_pending(&p, live)
+            .and_then(|models| models.iter().find(|m| m.id == p.model.id))
+            .map(|m| self.with_agent_ladder(p.harness, m.clone()));
+        if !validate_pending(&p, live.as_ref())
             || (self.harness_locked(cx) && self.effective_harness(cx) != Some(p.harness))
         {
             self.preview.error =
@@ -1148,6 +1164,7 @@ impl Pickers {
                 div().flex_none().px(px(16.0)).pb(px(12.0)).child(
                     popover::btn_primary(theme, "Use model")
                         .id("preview-use-model")
+                        .debug_selector(|| "preview-use-model".into())
                         .role(gpui::Role::Button)
                         .aria_label("Use model")
                         .w_full()
@@ -1171,6 +1188,20 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::new(state, cx);
+        this.fixture_catalog(legacy, large, true, cx);
+        this
+    }
+    /// Loads the fixture's synthetic catalog into an existing picker (for
+    /// example, the one a composer owns), opening it when asked.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_catalog(
+        &mut self,
+        legacy: bool,
+        large: bool,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let this = self;
         this.preview.enabled = !legacy && cfg!(debug_assertions);
         this.config.harness = Some(HarnessId::Graff);
         this.config.model = Some("anthropic/claude-sonnet-4.6".into());
@@ -1285,15 +1316,16 @@ impl Pickers {
             .insert(HarnessId::Codex, Loadable::Ready(models[3..5].to_vec()));
         this.models
             .insert(HarnessId::Graff, Loadable::Ready(models));
-        this.open.open(PickerKind::HarnessModel);
+        if open {
+            this.open.open(PickerKind::HarnessModel);
+            this.boot_focus_pending = true;
+        }
         this.open_model_height = if legacy {
             model_menu_height(this.setting_groups(cx).len())
         } else {
             480.0
         };
-        this.boot_focus_pending = true;
         this.active = this.selected_model_index(cx);
-        this
     }
     #[cfg(feature = "appshots-fixture")]
     pub fn fixture_preview_model(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1317,6 +1349,35 @@ impl Pickers {
             .iter()
             .position(|row| row.header.is_none() && row.model.id == id);
         cx.notify();
+    }
+    /// Strips `id`'s own reasoning levels and gives its agent (graff in the
+    /// fixture) a ladder, as agents that report levels per agent do.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_agent_ladder_only(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(Loadable::Ready(models)) = self.models.get_mut(&HarnessId::Graff)
+            && let Some(model) = models.iter_mut().find(|m| m.id == id)
+        {
+            model.reasoning_levels.clear();
+        }
+        if let Loadable::Ready(descriptors) = &mut self.harnesses
+            && let Some(graff) = descriptors.iter_mut().find(|d| d.id == HarnessId::Graff)
+        {
+            graff.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ];
+        }
+        self.catalog_rev += 1;
+        cx.notify();
+    }
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_pending(&self) -> Option<(String, Option<ReasoningLevel>)> {
+        self.preview
+            .pending
+            .as_ref()
+            .map(|p| (p.model.id.clone(), p.reasoning))
     }
     #[cfg(feature = "appshots-fixture")]
     pub fn fixture_model_position(&self, id: &str, cx: &App) -> Option<gpui::Point<gpui::Pixels>> {
@@ -1577,14 +1638,60 @@ mod tests {
                 &p.preview.pending.as_ref().unwrap().model
             )));
             p.preview_back(cx);
+            // No levels on the model and none on its agent: no slider, no level.
             p.fixture_preview_model("anthropic/claude-haiku-4.5", cx);
             assert!(p.preview.pending.as_ref().unwrap().reasoning.is_none());
-            // An agent-wide ladder must not invent options for this model.
-            if let Loadable::Ready(descriptors) = &mut p.harnesses {
-                descriptors[0].reasoning_levels = vec![ReasoningLevel::High];
-            }
+            assert!(
+                p.preview
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .model
+                    .reasoning_levels
+                    .is_empty()
+            );
             p.preview_commit(cx);
+            assert_eq!(p.preview.error, None);
             assert_eq!(p.resolved(cx).reasoning, None);
+        });
+    }
+
+    /// Claude Code, Codex and other agents can report their reasoning ladder
+    /// for the agent rather than per model. The second step must still offer
+    /// it (the model button already shows a level from it), or those agents
+    /// get a screen with no slider. Failed before the agent ladder fallback.
+    #[gpui::test]
+    fn a_model_without_its_own_levels_takes_its_agents_ladder(cx: &mut gpui::TestAppContext) {
+        let (_, picker) = fixture(cx, false);
+        picker.update(cx, |p, cx| {
+            let ladder = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ];
+            if let Loadable::Ready(descriptors) = &mut p.harnesses {
+                let codex = descriptors
+                    .iter_mut()
+                    .find(|d| d.id == HarnessId::Codex)
+                    .unwrap();
+                codex.reasoning_levels = ladder.clone();
+            }
+            if let Some(Loadable::Ready(models)) = p.models.get_mut(&HarnessId::Codex) {
+                for model in models.iter_mut() {
+                    model.reasoning_levels.clear();
+                }
+            }
+            p.catalog_rev += 1;
+            p.pick_harness(HarnessId::Codex, cx);
+            p.fixture_preview_model("openai/gpt-5.4", cx);
+            let pending = p.preview.pending.as_ref().expect("reasoning step");
+            assert_eq!(pending.model.reasoning_levels, ladder);
+            assert!(p.preview.slider.is_some(), "the step offers a slider");
+            p.preview.pending.as_mut().unwrap().reasoning = Some(ReasoningLevel::Low);
+            p.preview_commit(cx);
+            assert_eq!(p.preview.error, None);
+            assert_eq!(p.resolved(cx).harness, Some(HarnessId::Codex));
+            assert_eq!(p.resolved(cx).reasoning, Some(ReasoningLevel::Low));
         });
     }
     #[gpui::test]
@@ -1708,6 +1815,231 @@ mod tests {
                 Some("anthropic/claude-sonnet-4.6")
             );
         });
+    }
+
+    #[gpui::test]
+    fn clicking_a_model_then_the_track_picks_a_level(cx: &mut gpui::TestAppContext) {
+        struct ClickFixture(Entity<Pickers>);
+        impl Render for ClickFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .p(px(20.0))
+                    .child(self.0.update(cx, |p, cx| {
+                        let content = p.render_model_preview(cx);
+                        p.popover_frame_flush(PICKER_WIDTH, content, cx)
+                    }))
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::light()));
+        let handle = cx.add_window(|window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let picker = cx.new(|cx| Pickers::model_picker_fixture(state, false, false, cx));
+            picker.update(cx, |p, cx| {
+                p.menu_geometry.insert(
+                    PickerKind::HarnessModel,
+                    popover::MenuGeometry {
+                        height: 480.0,
+                        below: false,
+                    },
+                );
+                window.focus(&p.focus, cx);
+            });
+            ClickFixture(picker)
+        });
+        let picker = handle.read_with(cx, |f, _| f.0.clone()).unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        let click = |cx: &mut gpui::TestAppContext, position| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                for input in [
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                ] {
+                    window.dispatch_event(input, cx);
+                }
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        draw(cx);
+        // Hover long enough for the details card, as a pointer does, then click.
+        let row = picker.read_with(cx, |p, cx| {
+            p.fixture_model_position("openai/gpt-5.4", cx).unwrap()
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: row,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_millis(250));
+        cx.run_until_parked();
+        draw(cx);
+        assert!(picker.read_with(cx, |p, _| p.preview.detail.is_some()));
+        click(cx, row);
+        draw(cx);
+        let bounds = picker.read_with(cx, |p, cx| {
+            assert_eq!(
+                p.preview.pending.as_ref().map(|p| p.model.id.as_str()),
+                Some("openai/gpt-5.4"),
+                "clicking a model opens its reasoning step"
+            );
+            p.preview.slider.as_ref().unwrap().read(cx).bounds()
+        });
+        // A click on the track's start, without dragging the thumb, picks the lowest level.
+        click(cx, gpui::point(bounds.left() + px(1.0), bounds.center().y));
+        draw(cx);
+        let lowest = picker.read_with(cx, |p, _| {
+            let pending = p.preview.pending.as_ref().unwrap();
+            assert_eq!(
+                pending.reasoning,
+                pending.model.reasoning_levels.first().copied()
+            );
+            pending.reasoning
+        });
+        let use_model = gpui::VisualTestContext::from_window(handle.into(), cx)
+            .debug_bounds("preview-use-model")
+            .expect("Use model button")
+            .center();
+        click(cx, use_model);
+        picker.read_with(cx, |p, cx| {
+            assert_eq!(p.preview.error, None);
+            assert_eq!(p.effective_model_id(cx), Some("openai/gpt-5.4"));
+            assert_eq!(p.resolved(cx).reasoning, lowest);
+        });
+    }
+
+    #[gpui::test]
+    fn the_footer_picker_opens_a_model_and_drags_its_level(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::light()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::model_picker_fixture(state, false, false, cx)
+        });
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let press = |cx: &mut gpui::TestAppContext, from, to| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position: from,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: from,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                if from != to {
+                    for _ in 0..2 {
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position: to,
+                                pressed_button: Some(gpui::MouseButton::Left),
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.draw(cx).clear();
+                    }
+                }
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position: to,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        // The fixture opens with the picker up, anchored to its model button.
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(400));
+        draw(cx);
+        assert!(handle.read_with(cx, |p, _| p.open.is_open()).unwrap());
+        let row = handle
+            .read_with(cx, |p, cx| p.fixture_model_position("openai/gpt-5.4", cx))
+            .unwrap()
+            .expect("model row in the open picker");
+        press(cx, row, row);
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(400));
+        draw(cx);
+        let (from, to) = handle
+            .read_with(cx, |p, cx| {
+                assert_eq!(
+                    p.preview.pending.as_ref().map(|p| p.model.id.as_str()),
+                    Some("openai/gpt-5.4"),
+                    "clicking a model opens its reasoning step"
+                );
+                (
+                    p.fixture_slider_position(None, cx).unwrap(),
+                    p.fixture_slider_position(Some(0.0), cx).unwrap(),
+                )
+            })
+            .unwrap();
+        press(cx, from, to);
+        draw(cx);
+        let lowest = handle
+            .read_with(cx, |p, _| {
+                let pending = p.preview.pending.as_ref().unwrap();
+                assert_eq!(
+                    pending.reasoning,
+                    pending.model.reasoning_levels.first().copied(),
+                    "dragging the thumb to the start picks the lowest level"
+                );
+                pending.reasoning
+            })
+            .unwrap();
+        let use_model = gpui::VisualTestContext::from_window(handle.into(), cx)
+            .debug_bounds("preview-use-model")
+            .expect("Use model button")
+            .center();
+        press(cx, use_model, use_model);
+        handle
+            .read_with(cx, |p, cx| {
+                assert_eq!(p.preview.error, None);
+                assert_eq!(p.effective_model_id(cx), Some("openai/gpt-5.4"));
+                assert_eq!(p.resolved(cx).reasoning, lowest);
+            })
+            .unwrap();
     }
 
     #[test]

@@ -11,7 +11,7 @@ cargo run -p harness-ui --example model-picker-fixture \
   --features model-picker-preview,appshots-fixture
 ```
 
-Fixture switches: `--legacy`, `--dark`, `--narrow` (540 × 680), `--large` (7,000 extra models), `--model=openai/gpt-5.4`, `--hover=anthropic/claude-sonnet-4.6`, and `--output=/tmp/model-picker.png`. Combine `--model` with `--record=/tmp/picker-frames` to capture native pointer-driven drag and release frames. An output run saves its rendered window and exits. The normal fixture is interactive at 860 × 680. Example model names and capabilities are synthetic fixtures, not a claim about today's availability.
+Fixture switches: `--legacy`, `--dark`, `--narrow` (540 × 680), `--large` (7,000 extra models), `--model=openai/gpt-5.4`, `--hover=anthropic/claude-sonnet-4.6`, `--agent-ladder` (with `--model`: the model lists no levels of its own and takes its agent's ladder), and `--output=/tmp/model-picker.png`. Combine `--model` with `--record=/tmp/picker-frames` to capture native pointer-driven drag and release frames. An output run saves its rendered window and exits. The normal fixture is interactive at 860 × 680. Example model names and capabilities are synthetic fixtures, not a claim about today's availability.
 
 For integration in a separately configured development app, build `cargo build -p harness --features harness-ui/model-picker-preview` and launch with the preview environment variable plus its own `HARNESS_DATA_DIR` and `HARNESS_IPC_PORT`. Do not reuse the production data directory or an already running development instance.
 
@@ -21,7 +21,7 @@ For integration in a separately configured development app, build `cargo build -
 - All live models remain selectable, including unknown/custom providers. Icons are presentation only; they never whitelist model IDs.
 - Search, arrow navigation, favorites and model shortcuts share the same cached, virtualized rows. The 356px picker opens without a detail pane. A floating card appears beside a hovered row after 180ms (or on explicit keyboard navigation), with 160ms grace to enter the card. It flips sides when there is room and stays within the window on narrow screens. The card names the serving route, the model's reasoning range and its billing (plan, credits, API or local), each only when the catalog lists it.
 - The separate reasoning screen uses the app's shared type, surfaces, and buttons. A neutral thumb follows the pointer continuously over the provider-colored track, then eases to the nearest supported stop over 150ms. Keyboard changes use the same settling motion; reduced motion snaps immediately.
-- Choosing a model stages it. The second screen offers only its advertised reasoning ladder and model options. Binary ladders say Off/On; an empty ladder has no slider.
+- Choosing a model stages it. The second screen offers its advertised reasoning ladder and model options; a model that lists no levels of its own takes its agent's ladder, as the model button does. Binary ladders say Off/On; with no ladder from either, there is no slider.
 - Back/Escape from reasoning discards the staged selection. Use model applies model, reasoning and options together. A chat's agent stays fixed. Catalog changes are revalidated before applying.
 - No prices are shown: the catalog has none, and an estimate would be made up.
 

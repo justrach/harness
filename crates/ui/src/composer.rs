@@ -13465,6 +13465,116 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(feature = "model-picker-preview")]
+    #[gpui::test]
+    fn the_model_picker_in_the_composer_takes_a_model_and_level(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let pickers = handle
+            .read_with(cx, |composer, _| composer.pickers.clone())
+            .unwrap();
+        handle
+            .update(cx, |composer, window, cx| {
+                composer.pickers.update(cx, |pickers, cx| {
+                    pickers.fixture_catalog(false, false, false, cx)
+                });
+                composer
+                    .pickers
+                    .update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+            })
+            .unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..2 {
+                cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+            }
+        };
+        let press = |cx: &mut gpui::TestAppContext, from: Point<Pixels>, to: Point<Pixels>| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                        position: from,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: from,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                if from != to {
+                    for _ in 0..2 {
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                position: to,
+                                pressed_button: Some(MouseButton::Left),
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.draw(cx).clear();
+                    }
+                }
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: to,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        draw(cx);
+        let row = pickers
+            .read_with(cx, |p, cx| p.fixture_model_position("openai/gpt-5.4", cx))
+            .expect("model row in the open picker");
+        press(cx, row, row);
+        draw(cx);
+        assert_eq!(
+            pickers
+                .read_with(cx, |p, _| p.fixture_pending())
+                .map(|p| p.0),
+            Some("openai/gpt-5.4".to_string()),
+            "clicking a model opens its reasoning step"
+        );
+        let (from, to) = pickers.read_with(cx, |p, cx| {
+            (
+                p.fixture_slider_position(None, cx).unwrap(),
+                p.fixture_slider_position(Some(0.0), cx).unwrap(),
+            )
+        });
+        press(cx, from, to);
+        draw(cx);
+        let reasoning = pickers.read_with(cx, |p, _| p.fixture_pending().unwrap().1);
+        assert_eq!(
+            reasoning,
+            Some(harness_proto::ReasoningLevel::Low),
+            "dragging the thumb to the start picks the lowest level"
+        );
+        let use_model = gpui::VisualTestContext::from_window(handle.into(), cx)
+            .debug_bounds("preview-use-model")
+            .expect("Use model button")
+            .center();
+        press(cx, use_model, use_model);
+        pickers.read_with(cx, |p, cx| {
+            assert_eq!(p.resolved(cx).model.as_deref(), Some("openai/gpt-5.4"));
+            assert_eq!(
+                p.resolved(cx).reasoning,
+                Some(harness_proto::ReasoningLevel::Low)
+            );
+        });
+    }
+
     #[gpui::test]
     fn composer_picker_escape_restores_focus_but_click_away_does_not(
         cx: &mut gpui::TestAppContext,
