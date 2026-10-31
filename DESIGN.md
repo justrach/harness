@@ -37,7 +37,7 @@ Usage belongs **inside the existing account row**. Each window uses a short labe
 
 ## Conversation and interaction
 
-The conversation is the primary work surface. User messages and agent output have distinct alignment and hierarchy; tool calls, code, files, errors, and timestamps remain readable within the same transcript. The composer shows the selected agent, model, and reasoning level without hiding the prompt. Once a chat exists, its agent is fixed; model and reasoning changes stay within that agent. Popovers and dialogs use the same theme roles and compact controls as the rest of the shell.
+The conversation is the primary work surface. User messages and agent output have distinct alignment and hierarchy; tool calls, code, files, errors, and timestamps remain readable within the same transcript. The composer shows the selected agent, model, and reasoning level without hiding the prompt. Once a chat exists, its agent is fixed; model and reasoning changes stay within that agent. Popovers and dialogs use the same theme roles and compact controls as the rest of the shell. The context ring and percentage stay at the bottom-right of the composer footer, with token savings and detailed counts in the hover card. The context indicator stays muted until the warning and danger thresholds. This follows Phil Hedayatnia's composer work in the [hedayatnia/harness](https://github.com/hedayatnia/harness/tree/codex/dia-composer) fork.
 
 Use plain, specific copy for actions with data consequences. Local versus synced workspace state belongs in the account area. Importing existing chats into sync requires an explicit choice, and the interface should state when another signed-in device can request access to the host's workspace.
 
