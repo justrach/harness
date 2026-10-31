@@ -833,6 +833,9 @@ impl Theme {
     pub const PANEL_RADIUS: f32 = 10.0;
     /// Small control radius (buttons, chips).
     pub const CONTROL_RADIUS: f32 = 6.0;
+    /// The smallest pointer target for an icon-sized control. The visible
+    /// glyph or pill stays its own size; the hit area around it grows.
+    pub const HIT_TARGET: f32 = 32.0;
     /// Base spacing steps.
     pub const SPACE_XS: f32 = 4.0;
     pub const SPACE_SM: f32 = 8.0;

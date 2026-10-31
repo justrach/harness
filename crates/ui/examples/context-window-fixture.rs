@@ -17,7 +17,7 @@ use gpui::{
     div, prelude::*, px, size,
 };
 use harness_doc::SessionMessageEntry;
-use harness_proto::{CompactionKind, CompactionMeta, ContextUsage};
+use harness_proto::{CompactionKind, CompactionMeta, ContextSavings, ContextUsage};
 use harness_ui::context_trajectory::Trajectory;
 use harness_ui::*;
 
@@ -67,6 +67,11 @@ fn simulate(kind: CompactionKind) -> (Trajectory, HashMap<&'static str, Snapshot
     let mut history = 0u64; // tokens of the item standing in for older chat
     let mut done = 0;
     let mut after_second = 0;
+    // graff's savings meta, synthetic like the rest: tokens freed by the
+    // compactions so far, and tool output graff parked in files (a quarter
+    // of what the tools printed).
+    let mut freed = 0u64;
+    let mut parked_bytes = 0u64;
     let observe = |rows: &[serde_json::Value], tokens: u64, t: &mut Trajectory| {
         let entries: Vec<SessionMessageEntry> =
             serde_json::from_value(rows.to_vec().into()).unwrap();
@@ -78,9 +83,20 @@ fn simulate(kind: CompactionKind) -> (Trajectory, HashMap<&'static str, Snapshot
         t.observe(Some(usage), &entries);
         usage
     };
-    let snap = |rows: &[serde_json::Value], usage: ContextUsage, t: &Trajectory| Snapshot {
+    let snap = |rows: &[serde_json::Value],
+                usage: ContextUsage,
+                t: &Trajectory,
+                freed: u64,
+                parked_bytes: u64| Snapshot {
         rows: rows.to_vec(),
-        usage,
+        usage: ContextUsage {
+            savings: Some(ContextSavings {
+                handle_bytes: parked_bytes,
+                compacted_tokens: freed,
+                cache_read_tokens: 0,
+            }),
+            ..usage
+        },
         trajectory: t.clone(),
     };
     for turn in 0..60 {
@@ -100,13 +116,17 @@ fn simulate(kind: CompactionKind) -> (Trajectory, HashMap<&'static str, Snapshot
             };
             rows.push(tool(&format!("tool-{turn}-{call}"), call_json, bytes, true));
             since += bytes;
+            parked_bytes += bytes / 4;
         }
         let tokens = SYSTEM + history + since.div_ceil(4);
         let usage = observe(&rows, tokens, &mut trajectory);
         if done == 2 {
             after_second += 1;
             if after_second == 1 {
-                stages.insert("compacted", snap(&rows, usage, &trajectory));
+                stages.insert(
+                    "compacted",
+                    snap(&rows, usage, &trajectory, freed, parked_bytes),
+                );
             }
             if after_second == 4 {
                 break;
@@ -116,7 +136,7 @@ fn simulate(kind: CompactionKind) -> (Trajectory, HashMap<&'static str, Snapshot
             continue;
         }
         if done == 1 {
-            stages.insert("full", snap(&rows, usage, &trajectory));
+            stages.insert("full", snap(&rows, usage, &trajectory, freed, parked_bytes));
         }
         let id = format!("compact-{done}");
         let mut meta = CompactionMeta::new(kind);
@@ -130,7 +150,10 @@ fn simulate(kind: CompactionKind) -> (Trajectory, HashMap<&'static str, Snapshot
         ));
         if done == 1 {
             observe(&rows, tokens, &mut trajectory);
-            stages.insert("compacting", snap(&rows, usage, &trajectory));
+            stages.insert(
+                "compacting",
+                snap(&rows, usage, &trajectory, freed, parked_bytes),
+            );
         }
         // Synthetic sizes: the item keeps about 6% of what it replaces.
         let item = (history + since.div_ceil(4)) * 6 / 100;
@@ -144,6 +167,7 @@ fn simulate(kind: CompactionKind) -> (Trajectory, HashMap<&'static str, Snapshot
             0,
             true,
         ));
+        freed += tokens.saturating_sub(SYSTEM + item);
         history = item;
         since = 0;
         observe(&rows, SYSTEM + item, &mut trajectory);
@@ -253,7 +277,7 @@ fn main() -> anyhow::Result<()> {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                         gpui::point(px(0.), px(0.)),
-                        size(px(560.), px(400.)),
+                        size(px(560.), px(520.)),
                     ))),
                     ..Default::default()
                 },
