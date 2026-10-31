@@ -298,6 +298,7 @@ mod completion_tests {
                 Default::default(),
                 false,
                 Default::default(),
+                crate::settings::FollowUpBehavior::default(),
                 false,
                 false,
                 crate::appshots::AppshotDestination::Automatic,

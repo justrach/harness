@@ -213,14 +213,11 @@ see [mobile polish and simulator coverage](../../docs/mobile-polish.md).
 ### Shared message queue
 
 Messages submitted during an active turn use the host's shared queue when it
-advertises support. The composer toolbar's **Queue / Steer** menu persists the
-phone's preference; **Queue** remains the default. Steer allows automatic
-mid-turn delivery when the provider supports it. Attachments wait for a turn
-that can accept files.
+advertises support. They wait until the current turn ends, including messages
+with attachments. The phone does not expose a Queue/Steer preference.
 
-Rows offer **Steer** for a host-advertised mid-turn provider and text-only
-messages, or **Send now** (interrupt) otherwise. Unknown provider capabilities
-leave delivery actions unavailable. Edits require a host lease; removal waits
+Rows offer **Send now**, which interrupts the current turn before dispatching
+the selected message. Edits require a host lease; removal waits
 for the host's acknowledgement and keeps the row inert while pending. Failed
 or unconfirmed actions show an error above the composer and trigger sync repair.
 Deleting an actively edited row discards it without first releasing its lease.

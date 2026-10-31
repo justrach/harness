@@ -977,6 +977,7 @@ impl Pickers {
             | ComposerInputEvent::HistoryNavigate(_)
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
+            | ComposerInputEvent::FollowUpSubmitted
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
@@ -1336,6 +1337,26 @@ impl Pickers {
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
+    /// Whether the selected chat's own host catalog advertises safe
+    /// step-boundary steering for its configured harness. Draft picker
+    /// overrides are deliberately ignored, and a catalog fetched for another
+    /// host (or one that has not loaded) cannot enable the action.
+    pub(crate) fn selected_chat_supports_steering(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        let Some(chat) = state.selected_chat_row() else {
+            return false;
+        };
+        let Some(harness) = chat.config.as_ref().map(|config| config.harness) else {
+            return false;
+        };
+        catalog_supports_chat_steering(
+            &chat.device_id,
+            self.device_owner.as_deref(),
+            harness,
+            self.harnesses.ready().map(Vec::as_slice),
+        )
+    }
+
     /// Effective harness: picked, or the chat's config, or the first listed.
     fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
         if self.chat_mode(cx) {
@@ -1504,6 +1525,35 @@ impl Pickers {
                     None => None,
                 }
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_step_boundary_steering_for_test(&mut self, cx: &App) {
+        let Some((device_id, harness)) = ({
+            let state = self.state.read(cx);
+            state.selected_chat_row().map(|chat| {
+                (
+                    chat.device_id.clone(),
+                    chat.config
+                        .as_ref()
+                        .map(|config| config.harness)
+                        .unwrap_or(HarnessId::Codex),
+                )
+            })
+        }) else {
+            return;
+        };
+        self.device_owner = Some(device_id);
+        self.harnesses = Loadable::Ready(vec![HarnessDescriptor {
+            id: harness,
+            name: "Test harness".into(),
+            supports_steering: true,
+            steering_mode: harness_proto::SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: Some(true),
+        }]);
     }
 
     /// The explicit (non-default) option picks: the chat's persisted
@@ -5926,6 +5976,24 @@ impl Pickers {
     }
 }
 
+fn catalog_supports_chat_steering(
+    chat_host: &str,
+    catalog_host: Option<&str>,
+    harness: HarnessId,
+    descriptors: Option<&[HarnessDescriptor]>,
+) -> bool {
+    if catalog_host != Some(chat_host) {
+        return false;
+    }
+    descriptors
+        .and_then(|descriptors| {
+            descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == harness)
+        })
+        .is_some_and(HarnessDescriptor::steers_mid_turn)
+}
+
 /// The floating-scrollbar treatment for every picker list
 /// ([`popover::rail`] folds the note/hide/metrics/render + pointer listeners
 /// into one call): one shared rail state, fed by whichever handle
@@ -8950,6 +9018,48 @@ mod tests {
             steering_mode: harness_proto::SteeringMode::StepBoundary,
             supports_steering: false,
         }
+    }
+
+    #[test]
+    fn steering_requires_provider_support_and_step_boundary_mode() {
+        let mut descriptor = descriptor(HarnessId::Codex, "Codex");
+        descriptor.supports_steering = true;
+        let catalog = [descriptor.clone()];
+        assert!(catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            Some(&catalog),
+        ));
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-b"),
+            HarnessId::Codex,
+            Some(&catalog),
+        ));
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            None,
+        ));
+
+        descriptor.supports_steering = false;
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            Some(&[descriptor.clone()]),
+        ));
+
+        descriptor.supports_steering = true;
+        descriptor.steering_mode = harness_proto::SteeringMode::TurnBoundary;
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            Some(&[descriptor]),
+        ));
     }
 
     #[test]

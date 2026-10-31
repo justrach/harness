@@ -57,6 +57,10 @@ use harness_syntax::LanguageId as Lang;
 mod cadence;
 
 #[cfg(test)]
+#[path = "transcript/steer_echo_tests.rs"]
+mod steer_echo_tests;
+
+#[cfg(test)]
 #[path = "transcript/bottom_flicker_tests.rs"]
 mod bottom_flicker_tests;
 #[cfg(test)]

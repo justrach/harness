@@ -505,6 +505,14 @@ impl EngineHandle {
     /// replies are made up (examples/ui-scenes.rs `replies`).
     #[cfg(any(test, feature = "ui-scenes"))]
     pub fn from_test_client(client: RpcClient) -> Self {
+        Self::from_test_client_with_capabilities(client, Vec::new())
+    }
+
+    #[cfg(any(test, feature = "ui-scenes"))]
+    pub(crate) fn from_test_client_with_capabilities(
+        client: RpcClient,
+        capabilities: Vec<String>,
+    ) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -515,7 +523,7 @@ impl EngineHandle {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: Vec::new(),
+                capabilities,
             },
             deferred_state: None,
         }
@@ -1695,6 +1703,51 @@ impl AppState {
                 self.transcript_revision = self.transcript_revision.wrapping_add(1);
             }
         }
+    }
+
+    /// Replace a provisional optimistic id with the queue's durable message id.
+    /// The transcript can confirm the durable id before the queue ack arrives.
+    pub(crate) fn rekey_echo(&mut self, chat_id: &str, provisional_id: &str, message_id: &str) {
+        let authoritative = self
+            .selected_chat
+            .as_deref()
+            .filter(|selected| *selected == chat_id)
+            .is_some_and(|_| self.transcript.iter().any(|entry| entry.id == message_id))
+            || self
+                .sub_transcripts
+                .get(chat_id)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.id == message_id));
+
+        let Some(echoes) = self.echoes.get_mut(chat_id) else {
+            return;
+        };
+        let had_provisional = echoes.iter().any(|entry| entry.id == provisional_id);
+        if !had_provisional {
+            return;
+        }
+
+        let final_echo_exists =
+            provisional_id != message_id && echoes.iter().any(|entry| entry.id == message_id);
+        if authoritative || final_echo_exists {
+            echoes.retain(|entry| entry.id != provisional_id);
+        } else if let Some(entry) = echoes.iter_mut().find(|entry| entry.id == provisional_id) {
+            entry.id = message_id.to_owned();
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    /// Whether an id is already visible as an optimistic or authoritative
+    /// message for this chat.
+    pub(crate) fn message_is_in_transcript(&self, chat_id: &str, message_id: &str) -> bool {
+        self.echoes
+            .get(chat_id)
+            .is_some_and(|echoes| echoes.iter().any(|entry| entry.id == message_id))
+            || (self.selected_chat.as_deref() == Some(chat_id)
+                && self.transcript.iter().any(|entry| entry.id == message_id))
+            || self
+                .sub_transcripts
+                .get(chat_id)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.id == message_id))
     }
 
     /// Composer send fired: overlay the chat as Working until the host writes
@@ -5205,6 +5258,61 @@ mod tests {
             },
         );
         assert!(state.pending_echoes().is_empty());
+    }
+
+    #[test]
+    fn rekeyed_steer_echo_survives_ack_order_and_is_chat_scoped() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        let mut echo = user_entry("provisional");
+        echo.created_at = 42;
+        let expected = SessionMessageEntry {
+            id: "queued-id".into(),
+            ..echo.clone()
+        };
+        state.push_echo("c1", echo);
+
+        state.rekey_echo("c1", "provisional", "queued-id");
+        assert_eq!(state.pending_echoes(), &[expected.clone()]);
+        assert!(state.message_is_in_transcript("c1", "queued-id"));
+        assert!(!state.message_is_in_transcript("other", "queued-id"));
+
+        // Once the transcript confirms the durable id, it prunes the echo.
+        state.apply_transcript(vec![expected.clone()]);
+        assert!(state.pending_echoes().is_empty());
+        assert!(state.message_is_in_transcript("c1", "queued-id"));
+
+        // A transcript can land before the queue acknowledgement while the
+        // optimistic echo still has its provisional id. Rekey removes it.
+        let mut doc_first_echo = user_entry("doc-first-provisional");
+        doc_first_echo.created_at = 43;
+        let doc_first_expected = SessionMessageEntry {
+            id: "doc-first-queued".into(),
+            ..doc_first_echo.clone()
+        };
+        state.push_echo("c1", doc_first_echo.clone());
+        state.apply_transcript(vec![doc_first_expected.clone()]);
+        assert_eq!(state.pending_echoes(), &[doc_first_echo]);
+        state.rekey_echo("c1", "doc-first-provisional", "doc-first-queued");
+        assert!(state.pending_echoes().is_empty());
+        assert!(state.message_is_in_transcript("c1", "doc-first-queued"));
+
+        // If a final-id echo already exists, rekeying must not leave both.
+        state.push_echo("c1", user_entry("duplicate-provisional"));
+        let duplicate_final = user_entry("duplicate-final");
+        state.push_echo("c1", duplicate_final.clone());
+        state.rekey_echo("c1", "duplicate-provisional", "duplicate-final");
+        assert_eq!(state.pending_echoes(), &[duplicate_final]);
+
+        // Failed queued sends remove only their own pending echo.
+        state.push_echo("c1", user_entry("failed-id"));
+        state.remove_echo("c1", "failed-id");
+        assert!(!state.message_is_in_transcript("c1", "failed-id"));
+
+        // Same ids in another chat do not make this chat appear to contain it.
+        state.push_echo("other", user_entry("other-id"));
+        assert!(!state.message_is_in_transcript("c1", "other-id"));
+        assert!(state.message_is_in_transcript("other", "other-id"));
     }
 
     #[test]

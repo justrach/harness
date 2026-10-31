@@ -4,7 +4,7 @@
 //! The rows live on the session doc ([`harness_doc::QueuedMessage`]), so the phone
 //! shows the same queue and either device can reorder it.
 //!
-//! Each row exposes a `Send now` control that interrupts the active response.
+//! Each row exposes separate stop-and-send and non-interrupting steer controls.
 //! Editing moves the message into the composer while its leased row reserves
 //! its position.
 
@@ -85,27 +85,57 @@ const PANEL_PAD_TOP: f32 = 0.0;
 /// render them slightly larger to preserve the previous optical weight.
 const QUEUE_ICON_SIZE: f32 = 13.0;
 
-/// The single trailing action a queue row advertises and executes.
+/// A delivery action a queue row advertises and executes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueuePrimaryAction {
-    SendNow,
+    StopAndSend,
+    Steer,
 }
 
 impl QueuePrimaryAction {
     fn tooltip(self) -> &'static str {
         match self {
-            Self::SendNow => "Send now (interrupt)",
+            Self::StopAndSend => "Stop and send",
+            Self::Steer => "Steer queued message",
+        }
+    }
+
+    fn method(self) -> &'static str {
+        match self {
+            Self::StopAndSend => methods::SEND_QUEUED_MESSAGE_NOW,
+            Self::Steer => methods::STEER_QUEUED_MESSAGE_NOW,
         }
     }
 }
 
-/// All providers use Send now. Only host support and edit/review gates
-/// determine whether the action is available.
+/// Stop-and-send is available on any host with safe queue actions.
 fn available_queue_primary_action(
     delivery_blocked: bool,
     host_supports_actions: bool,
 ) -> Option<QueuePrimaryAction> {
-    (!delivery_blocked && host_supports_actions).then_some(QueuePrimaryAction::SendNow)
+    (!delivery_blocked && host_supports_actions).then_some(QueuePrimaryAction::StopAndSend)
+}
+
+fn queue_steer_available(
+    delivery_blocked: bool,
+    being_removed: bool,
+    text_only: bool,
+    queue_actions_supported: bool,
+    provider_supports_steering: bool,
+) -> bool {
+    !delivery_blocked
+        && !being_removed
+        && text_only
+        && queue_actions_supported
+        && provider_supports_steering
+}
+
+fn queue_message_is_text_only(text: &str, attachments: &[String]) -> bool {
+    attachments.is_empty()
+        && crate::attachments::parse_user_message_images(text)
+            .attachments
+            .is_empty()
+        && !text.contains(crate::appshots::CONTEXT_MARKER)
 }
 
 fn queue_latest_shortcut_visible(
@@ -144,10 +174,38 @@ fn queue_drag_offsets(ix: usize, from: usize, prev_over: usize, over: usize) -> 
     }
 }
 
+fn visible_move_target(
+    queue: &[QueuedMessage],
+    visible: &[(usize, QueuedMessage)],
+    id: &str,
+    to_visible: usize,
+) -> Option<(usize, usize)> {
+    let from = queue.iter().position(|item| item.id == id)?;
+    if visible
+        .iter()
+        .position(|(_, item)| item.id == id)
+        .is_some_and(|position| position == to_visible)
+    {
+        return Some((from, from));
+    }
+    let remaining: Vec<_> = visible
+        .iter()
+        .filter(|(_, item)| item.id != id)
+        .map(|(index, _)| index.saturating_sub(usize::from(from < *index)))
+        .collect();
+    let target = remaining
+        .get(to_visible)
+        .copied()
+        .or_else(|| remaining.last().map(|index| index + 1))
+        .unwrap_or(queue.len().saturating_sub(1));
+    Some((from, target))
+}
+
 /// A queue row being dragged (gpui drag-and-drop). Scoped to its chat so a
 /// drag can't land in a queue it didn't come from.
 pub struct QueueDragPayload {
     chat: String,
+    id: String,
     from: usize,
 }
 
@@ -278,6 +336,19 @@ fn visible_queue_rows(offset: f32, height: f32, count: usize) -> std::ops::Range
     first.min(count)..last.min(count)
 }
 
+fn visible_queue_items(
+    state: &crate::state::AppState,
+    chat_id: &str,
+) -> Vec<(usize, QueuedMessage)> {
+    state
+        .queue
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !state.message_is_in_transcript(chat_id, &item.id))
+        .map(|(index, item)| (index, item.clone()))
+        .collect()
+}
+
 impl Composer {
     /// The queue panel, or `None` when nothing is waiting. Like the composer,
     /// it is one frosted surface; rows use spacing and hover wash rather than
@@ -293,16 +364,26 @@ impl Composer {
         if self.queue_drag.is_some() && !cx.has_active_drag() {
             self.queue_drag = None;
         }
-        let (items, chat_id, host_supports_actions) = {
+        let (items, chat_id, host_supports_actions, queue_actions_supported) = {
             let state = self.state.read(cx);
             let chat_id = state.selected_chat.clone()?;
-            let host_supports_actions = state.chat_host_supports(
-                &chat_id,
-                harness_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1,
-            );
-            (state.queue.clone(), chat_id, host_supports_actions)
+            let capability = harness_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1;
+            let local_supports_actions = state
+                .engine()
+                .is_some_and(|engine| engine.engine_info().supports(capability));
+            let host_supports_actions = state.chat_host_supports(&chat_id, capability);
+            (
+                visible_queue_items(state, &chat_id),
+                chat_id,
+                host_supports_actions,
+                local_supports_actions && host_supports_actions,
+            )
         };
-        self.prepare_queue_previews(&items, window, cx);
+        let preview_items = items
+            .iter()
+            .map(|(_, item)| item.clone())
+            .collect::<Vec<_>>();
+        self.prepare_queue_previews(&preview_items, window, cx);
         if items.is_empty() {
             return None;
         }
@@ -313,13 +394,14 @@ impl Composer {
             .as_ref()
             .map(|d| (d.from, d.over, d.prev_over, d.epoch));
         let editing = self.editing_queued.clone();
+        let host_supports_steering = self.pickers().read(cx).selected_chat_supports_steering(cx);
 
         let list_chat = chat_id.clone();
         let drop_chat = chat_id.clone();
         let rows = queue_rows(
             &self.queue_scroll,
             window.viewport_size().height * 0.3,
-            items.iter().enumerate().map(|(ix, item)| {
+            items.iter().enumerate().map(|(ix, (_, item))| {
                 self.queue_row(
                     &chat_id,
                     ix,
@@ -328,6 +410,8 @@ impl Composer {
                     drag,
                     &editing,
                     host_supports_actions,
+                    queue_actions_supported,
+                    host_supports_steering,
                     show_latest_shortcut,
                     &theme,
                     cx,
@@ -375,7 +459,14 @@ impl Composer {
                         .map(|d| d.over)
                         .unwrap_or(payload.from);
                     this.queue_drag = None;
-                    this.move_queued(payload.from, to, cx);
+                    let target = {
+                        let state = this.state.read(cx);
+                        let visible = visible_queue_items(state, &drop_chat);
+                        visible_move_target(&state.queue, &visible, &payload.id, to)
+                    };
+                    if let Some((from, to)) = target {
+                        this.move_queued(from, to, cx);
+                    }
                 },
             ))
             .on_mouse_up_out(
@@ -386,8 +477,8 @@ impl Composer {
         Some(crate::frost::frosted(PANEL_RADIUS, crate::frost::MENU_BLUR, panel).into_any_element())
     }
 
-    /// One queued message: a quiet queue marker, the text, edit controls, and
-    /// one explicit primary delivery action.
+    /// One queued message: a quiet queue marker, the text, and explicit
+    /// delivery and edit controls.
     #[allow(clippy::too_many_arguments)]
     fn queue_row(
         &self,
@@ -398,6 +489,8 @@ impl Composer {
         drag: Option<(usize, usize, usize, usize)>,
         editing: &Option<String>,
         host_supports_actions: bool,
+        queue_actions_supported: bool,
+        host_supports_steering: bool,
         show_latest_shortcut: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -470,7 +563,7 @@ impl Composer {
         );
         let resolved_primary =
             available_queue_primary_action(interaction_blocked, host_supports_actions);
-        let primary_action = resolved_primary.unwrap_or(QueuePrimaryAction::SendNow);
+        let primary_action = resolved_primary.unwrap_or(QueuePrimaryAction::StopAndSend);
         let primary_id = item.id.clone();
         let primary = self.queue_primary_action_button(
             &key,
@@ -486,6 +579,25 @@ impl Composer {
             cx.listener(move |this, _, window, cx| {
                 window.focus(&this.input.focus_handle(cx), cx);
                 this.activate_queued_primary(primary_id.clone(), primary_action, cx);
+            }),
+        );
+        let steer_enabled = queue_steer_available(
+            interaction_blocked || editing.is_some(),
+            being_removed,
+            queue_message_is_text_only(&item.text, &item.attachments),
+            queue_actions_supported,
+            host_supports_steering,
+        );
+        let steer_id = item.id.clone();
+        let steer = self.queue_primary_action_button(
+            &key,
+            QueuePrimaryAction::Steer,
+            true,
+            false,
+            theme,
+            cx.listener(move |this, _, window, cx| {
+                window.focus(&this.input.focus_handle(cx), cx);
+                this.steer_queued_now(steer_id.clone(), cx);
             }),
         );
         let save = self.queue_action(
@@ -559,6 +671,7 @@ impl Composer {
                 el.on_drag(
                     QueueDragPayload {
                         chat: drag_chat,
+                        id: item.id.clone(),
                         from: ix,
                     },
                     move |_payload, _point, _, cx| {
@@ -674,6 +787,7 @@ impl Composer {
                         .gap(px(3.0))
                         .child(discard)
                         .when(agent_message.is_none(), |el| el.child(edit).child(attach))
+                        .when(steer_enabled, |el| el.child(steer))
                         .child(primary),
                 )
             });
@@ -1017,7 +1131,7 @@ impl Composer {
             .into_any_element()
     }
 
-    /// Send now interrupts the current response before delivering the row.
+    /// Render the stop-and-send or non-interrupting steer action.
     fn queue_primary_action_button(
         &self,
         key: &SharedString,
@@ -1035,12 +1149,24 @@ impl Composer {
         let accent = theme.accent;
         let compact = self.queue_preview_limit() == 1;
         div()
-            .id(SharedString::from(format!("{key}-primary")))
+            .id(SharedString::from(format!(
+                "{key}-{}",
+                match action {
+                    QueuePrimaryAction::StopAndSend => "stop-and-send",
+                    QueuePrimaryAction::Steer => "steer",
+                }
+            )))
             .role(gpui::Role::Button)
             .aria_label(tooltip)
             // Both labels occupy the same slot; modifier previews never move
             // the message text, thumbnails, or adjacent actions.
-            .w(px(if compact { 28.0 } else { 72.0 }))
+            .w(px(if compact && action != QueuePrimaryAction::Steer {
+                28.0
+            } else if action == QueuePrimaryAction::Steer {
+                42.0
+            } else {
+                96.0
+            }))
             .h(px(28.0))
             .flex_none()
             .flex()
@@ -1080,13 +1206,18 @@ impl Composer {
                         modifier_send_label(cfg!(target_os = "macos"))
                     })
                     .into_any_element()
-            } else if compact {
+            } else if compact && action != QueuePrimaryAction::Steer {
                 icon(icons::QUEUE_SEND)
                     .size(px(QUEUE_ICON_SIZE))
                     .text_color(theme.text_muted)
                     .into_any_element()
             } else {
-                div().child("Send now").into_any_element()
+                div()
+                    .child(match action {
+                        QueuePrimaryAction::StopAndSend => "Stop and send",
+                        QueuePrimaryAction::Steer => "Steer",
+                    })
+                    .into_any_element()
             })
             .into_any_element()
     }
@@ -1243,17 +1374,59 @@ impl Composer {
         .detach();
     }
 
-    /// Send one now: the host stops the turn and hands this message over. Not
-    /// optimistic — the row leaves the queue when the host has actually taken
-    /// it, so a failed interrupt doesn't lose the text.
+    /// Stop the current turn and send this row. The queue RPC only removes it
+    /// after the host acknowledges taking the message.
     pub(crate) fn send_queued_now(&mut self, id: String, cx: &mut Context<Self>) {
         if self.editing_queued.as_deref() == Some(id.as_str()) {
             self.clear_queue_edit(cx);
         }
         self.queue_rpc(
-            methods::SEND_QUEUED_MESSAGE_NOW,
+            QueuePrimaryAction::StopAndSend.method(),
             serde_json::json!({ "id": id }),
             "Couldn't send that message",
+            cx,
+        );
+    }
+
+    /// Steer the active run with a text-only queue row. This RPC is explicitly
+    /// non-interrupting; recheck every capability and row gate at activation.
+    pub(crate) fn steer_queued_now(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.editing_queued.is_some() {
+            return;
+        }
+        let eligible = {
+            let state = self.state.read(cx);
+            let Some(chat_id) = state.selected_chat.as_deref() else {
+                return;
+            };
+            let Some(item) = state.queue.iter().find(|item| item.id == id) else {
+                return;
+            };
+            if state.message_is_in_transcript(chat_id, &item.id) {
+                return;
+            }
+            let queue_capability = harness_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1;
+            let local_supports_actions = state
+                .engine()
+                .is_some_and(|engine| engine.engine_info().supports(queue_capability));
+            let queue_actions_supported =
+                local_supports_actions && state.chat_host_supports(chat_id, queue_capability);
+            let eligible = queue_steer_available(
+                item.delivery_gate.is_some(),
+                self.queue_removing.contains(&item.id),
+                queue_message_is_text_only(&item.text, &item.attachments),
+                queue_actions_supported,
+                self.pickers().read(cx).selected_chat_supports_steering(cx),
+            );
+            eligible
+        };
+        if !eligible {
+            return;
+        }
+        self.queue_rpc(
+            QueuePrimaryAction::Steer.method(),
+            serde_json::json!({ "id": id }),
+            "Couldn't steer that message",
             cx,
         );
     }
@@ -1267,12 +1440,13 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         match action {
-            QueuePrimaryAction::SendNow => self.send_queued_now(id, cx),
+            QueuePrimaryAction::StopAndSend => self.send_queued_now(id, cx),
+            QueuePrimaryAction::Steer => self.steer_queued_now(id, cx),
         }
     }
 
-    /// Cmd/Ctrl+Enter on an empty composer activates the same action shown on
-    /// the most recently queued row: Send now, interrupting the current response.
+    /// Cmd/Ctrl+Enter on an empty composer activates the stop-and-send action
+    /// on the most recently queued row, interrupting the current response.
     /// An edit/review gate or an old chat host makes it a no-op.
     pub(crate) fn activate_latest_queued(&mut self, cx: &mut Context<Self>) -> bool {
         if self.editing_queued.is_some() {
@@ -1283,7 +1457,13 @@ impl Composer {
             let Some(chat_id) = state.selected_chat.as_deref() else {
                 return false;
             };
-            let Some(item) = latest_queued_message(&state.queue) else {
+            let available = state
+                .queue
+                .iter()
+                .filter(|item| !state.message_is_in_transcript(chat_id, &item.id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let Some(item) = latest_queued_message(&available) else {
                 return false;
             };
             (
@@ -1817,11 +1997,46 @@ impl Composer {
                 .map(str::to_owned)
         })
         .flatten();
+        let steer_echo = (method == methods::STEER_QUEUED_MESSAGE_NOW)
+            .then(|| {
+                let id = pending_message.as_deref()?;
+                let state = self.state.read(cx);
+                if state.message_is_in_transcript(&chat_id, id) {
+                    return None;
+                }
+                let item = state.queue.iter().find(|item| item.id == id)?;
+                Some((id.to_owned(), item.text.clone()))
+            })
+            .flatten();
         if let Some(id) = &pending_message {
             self.state.update(cx, |state, cx| {
+                if let Some((echo_id, text)) = &steer_echo {
+                    state.push_echo(
+                        &chat_id,
+                        harness_doc::SessionMessageEntry {
+                            id: echo_id.clone(),
+                            role: harness_doc::MessageRole::User,
+                            parts: vec![harness_doc::MessagePart::Text {
+                                id: "t0".into(),
+                                text: text.clone(),
+                            }],
+                            created_at: chrono::Utc::now().timestamp_millis(),
+                            device_id: "local".into(),
+                            status: None,
+                            continuation_of: None,
+                            duration_ms: None,
+                        },
+                    );
+                }
                 state.begin_pending_send(&chat_id, id, chrono::Utc::now());
                 cx.notify();
             });
+            if steer_echo.is_some() {
+                cx.emit(crate::composer::ComposerEvent::Sent {
+                    chat_id: chat_id.clone(),
+                    message_id: id.clone(),
+                });
+            }
         }
         let mut params = params;
         if let Some(object) = params.as_object_mut() {
@@ -1858,8 +2073,17 @@ impl Composer {
                     this.update(cx, |composer, cx| {
                         if let Some(id) = &pending_message {
                             composer.state.update(cx, |state, cx| {
+                                if steer_echo.is_some() {
+                                    state.remove_echo(&chat_id, id);
+                                }
                                 state.end_pending_send(&chat_id, id);
                                 cx.notify();
+                            });
+                        }
+                        if let Some((id, _)) = &steer_echo {
+                            cx.emit(crate::composer::ComposerEvent::Queued {
+                                chat_id: chat_id.clone(),
+                                message_id: id.clone(),
                             });
                         }
                         composer
@@ -1873,8 +2097,17 @@ impl Composer {
                     this.update(cx, |composer, cx| {
                         if let Some(id) = &pending_message {
                             composer.state.update(cx, |state, cx| {
+                                if steer_echo.is_some() {
+                                    state.remove_echo(&chat_id, id);
+                                }
                                 state.end_pending_send(&chat_id, id);
                                 cx.notify();
+                            });
+                        }
+                        if let Some((id, _)) = &steer_echo {
+                            cx.emit(crate::composer::ComposerEvent::Queued {
+                                chat_id: chat_id.clone(),
+                                message_id: id.clone(),
                             });
                         }
                         composer.failure = Some(failure.into());
@@ -1896,10 +2129,11 @@ mod tests {
     use harness_rpc::methods;
 
     use super::{
-        PANEL_PAD_TOP, QueuePrimaryAction, ROW_SLOT, available_queue_primary_action,
+        PANEL_PAD_TOP, QueuePrimaryAction, QueuedMessage, ROW_SLOT, available_queue_primary_action,
         latest_queued_message, one_line, queue_action_needs_host, queue_drag_offsets,
-        queue_drop_index, queue_latest_shortcut_visible, queue_mutation_acknowledged,
-        queue_visible_text, visible_queue_rows,
+        queue_drop_index, queue_latest_shortcut_visible, queue_message_is_text_only,
+        queue_mutation_acknowledged, queue_steer_available, queue_visible_text,
+        visible_move_target, visible_queue_rows,
     };
 
     #[test]
@@ -1919,7 +2153,7 @@ mod tests {
     fn available_primary_action_obeys_row_and_host_gates() {
         assert_eq!(
             available_queue_primary_action(false, true),
-            Some(QueuePrimaryAction::SendNow)
+            Some(QueuePrimaryAction::StopAndSend)
         );
         assert_eq!(available_queue_primary_action(true, true), None);
         assert_eq!(available_queue_primary_action(false, false), None);
@@ -1945,6 +2179,110 @@ mod tests {
         assert_eq!(latest_queued_message(&items).unwrap().id, "older");
         items.pop();
         assert!(latest_queued_message(&items).is_none());
+    }
+
+    #[test]
+    fn hidden_head_row_keeps_latest_shortcut_and_drag_indices_dense() {
+        let queue = vec![
+            QueuedMessage::new("hidden", "steering", "host"),
+            QueuedMessage::new("middle", "second", "host"),
+            QueuedMessage::new("latest", "third", "host"),
+        ];
+        let visible = vec![(1, queue[1].clone()), (2, queue[2].clone())];
+        assert!(queue_latest_shortcut_visible(1, visible.len(), true, true));
+        assert_eq!(
+            visible_move_target(&queue, &visible, "middle", 0),
+            Some((1, 1)),
+            "dropping on its own visible slot does not cross the hidden head"
+        );
+        assert_eq!(
+            visible_move_target(&queue, &visible, "latest", 0),
+            Some((2, 1)),
+            "visual slot zero maps before the visible middle row after removal"
+        );
+        assert_eq!(
+            visible_move_target(&queue, &visible, "middle", visible.len()),
+            Some((1, 2)),
+            "the visible end slot maps after the last visible row"
+        );
+
+        let without_hidden = vec![
+            QueuedMessage::new("first", "first", "host"),
+            QueuedMessage::new("second", "second", "host"),
+            QueuedMessage::new("third", "third", "host"),
+        ];
+        let visible = without_hidden
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, item)| (index, item))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visible_move_target(&without_hidden, &visible, "first", 2),
+            Some((0, 2)),
+            "a downward drag keeps the original final index when nothing is hidden"
+        );
+
+        let hidden_middle = vec![
+            QueuedMessage::new("first", "first", "host"),
+            QueuedMessage::new("hidden", "steering", "host"),
+            QueuedMessage::new("second", "second", "host"),
+            QueuedMessage::new("third", "third", "host"),
+        ];
+        let visible = vec![
+            (0, hidden_middle[0].clone()),
+            (2, hidden_middle[2].clone()),
+            (3, hidden_middle[3].clone()),
+        ];
+        assert_eq!(
+            visible_move_target(&hidden_middle, &visible, "first", 2),
+            Some((0, 3)),
+            "a downward drag lands after the last visible row"
+        );
+        assert_eq!(
+            visible_move_target(&hidden_middle, &visible, "third", 0),
+            Some((3, 0)),
+            "an upward drag lands before the first visible row"
+        );
+    }
+
+    #[test]
+    fn steer_is_limited_to_text_only_ungated_rows_with_both_capability_sets() {
+        assert!(queue_steer_available(false, false, true, true, true));
+        assert!(!queue_steer_available(true, false, true, true, true));
+        assert!(!queue_steer_available(false, true, true, true, true));
+        assert!(!queue_steer_available(false, false, false, true, true));
+        assert!(!queue_steer_available(false, false, true, false, true));
+        assert!(!queue_steer_available(false, false, true, true, false));
+    }
+
+    #[test]
+    fn only_plain_queue_text_is_steerable() {
+        assert!(queue_message_is_text_only("hello", &[]));
+        assert!(!queue_message_is_text_only("hello", &["/tmp/a.png".into()]));
+        let legacy = crate::attachments::with_attachments("hello", &["/tmp/a.png".into()]);
+        assert!(!queue_message_is_text_only(&legacy, &[]));
+        assert!(!queue_message_is_text_only(
+            crate::appshots::CONTEXT_MARKER,
+            &[],
+        ));
+    }
+
+    #[test]
+    fn row_actions_select_distinct_rpc_methods_and_empty_shortcut_stays_interrupting() {
+        assert_eq!(
+            QueuePrimaryAction::Steer.method(),
+            methods::STEER_QUEUED_MESSAGE_NOW
+        );
+        assert_eq!(
+            QueuePrimaryAction::StopAndSend.method(),
+            methods::SEND_QUEUED_MESSAGE_NOW
+        );
+        assert_eq!(
+            available_queue_primary_action(false, true),
+            Some(QueuePrimaryAction::StopAndSend),
+            "the empty-composer shortcut keeps selecting the interrupting action"
+        );
     }
 
     #[test]
@@ -2214,5 +2552,160 @@ mod appshot_edit_tests {
             assert_eq!(composer.staged_appshots()[1].id, "during-save");
             assert!(composer.editing_queued.is_none());
         });
+    }
+}
+
+#[cfg(test)]
+mod steer_delivery_tests {
+    use super::*;
+    use gpui::AppContext as _;
+    use harness_rpc::{ClientFrame, ServerFrame};
+
+    #[derive(Clone, Copy)]
+    enum ReplyKind {
+        Accepted,
+        Rejected,
+        Error,
+    }
+
+    fn next_request(
+        cx: &mut gpui::TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        requests: &mut tokio::sync::mpsc::Receiver<String>,
+    ) -> ClientFrame {
+        cx.run_until_parked();
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        serde_json::from_str(&requests.try_recv().expect("expected RPC request")).unwrap()
+    }
+
+    fn answer(
+        replies: &tokio::sync::mpsc::Sender<String>,
+        request: &ClientFrame,
+        kind: ReplyKind,
+    ) {
+        let frame = match kind {
+            ReplyKind::Accepted => ServerFrame {
+                id: request.id,
+                ok: Some(serde_json::json!({ "sent": true })),
+                ..Default::default()
+            },
+            ReplyKind::Rejected => ServerFrame {
+                id: request.id,
+                ok: Some(serde_json::json!({ "sent": false })),
+                ..Default::default()
+            },
+            ReplyKind::Error => ServerFrame {
+                id: request.id,
+                err: Some("host unavailable".into()),
+                ..Default::default()
+            },
+        };
+        replies.try_send(serde_json::to_string(&frame).unwrap()).unwrap();
+    }
+
+    fn run_row_steer(cx: &mut gpui::TestAppContext, kind: ReplyKind) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(32);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(32);
+        let state = cx.new(|_| crate::state::AppState::new());
+        state.update(cx, |state, _| {
+            state.set_test_engine(
+                crate::state::EngineHandle::from_test_client_with_capabilities(
+                    harness_rpc::RpcClient::new(out, inbound),
+                    vec![harness_proto::capabilities::MESSAGE_QUEUE_ACTIONS_V1.into()],
+                ),
+            );
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "steer-chat",
+                    "deviceId": "local",
+                    "archived": false,
+                    "cwd": "/repo",
+                    "createdAt": chrono::Utc::now(),
+                    "config": { "harness": "codex", "sandbox": "workspace-write" }
+                }))
+                .unwrap(),
+            ];
+            state.local_device_id = Some("local".into());
+            state.selected_chat = Some("steer-chat".into());
+            state.queue = vec![QueuedMessage::new(
+                "queued-id",
+                "Review the latest tool result",
+                "local",
+            )];
+        });
+        let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        cx.run_until_parked();
+        while let Ok(raw) = requests.try_recv() {
+            let request: ClientFrame = serde_json::from_str(&raw).unwrap();
+            answer(&replies, &request, ReplyKind::Accepted);
+        }
+        cx.run_until_parked();
+        while let Ok(raw) = requests.try_recv() {
+            let request: ClientFrame = serde_json::from_str(&raw).unwrap();
+            answer(&replies, &request, ReplyKind::Accepted);
+        }
+        cx.run_until_parked();
+        composer.update(cx, |composer, cx| {
+            composer.pickers().update(cx, |pickers, cx| {
+                pickers.seed_step_boundary_steering_for_test(cx)
+            });
+            composer.steer_queued_now("queued-id".into(), cx);
+        });
+        let steer = next_request(cx, &runtime, &mut requests);
+        assert_eq!(
+            steer.method.as_deref(),
+            Some(methods::STEER_QUEUED_MESSAGE_NOW)
+        );
+        assert_eq!(
+            state.read_with(cx, |state, _| state.pending_echoes()[0].parts[0].clone()),
+            harness_doc::MessagePart::Text {
+                id: "t0".into(),
+                text: "Review the latest tool result".into(),
+            }
+        );
+        assert!(state.read_with(cx, |state, _| {
+            state.message_is_in_transcript("steer-chat", "queued-id")
+        }));
+        assert!(state.read_with(cx, |state, _| {
+            visible_queue_items(state, "steer-chat").is_empty()
+        }));
+        composer.update(cx, |composer, cx| {
+            composer.steer_queued_now("queued-id".into(), cx)
+        });
+        assert!(
+            requests.try_recv().is_err(),
+            "an in-flight row must not steer twice"
+        );
+        answer(&replies, &steer, kind);
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        match kind {
+            ReplyKind::Accepted => assert!(state.read_with(cx, |state, _| {
+                state.message_is_in_transcript("steer-chat", "queued-id")
+            })),
+            ReplyKind::Rejected | ReplyKind::Error => {
+                assert!(state.read_with(cx, |state, _| {
+                    !state.message_is_in_transcript("steer-chat", "queued-id")
+                }));
+                assert_eq!(state.read_with(cx, |state, _| {
+                    visible_queue_items(state, "steer-chat").len()
+                }), 1);
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn queued_row_steer_echoes_before_reply_and_cleans_up_rejections_and_errors(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        run_row_steer(cx, ReplyKind::Accepted);
+        run_row_steer(cx, ReplyKind::Rejected);
+        run_row_steer(cx, ReplyKind::Error);
     }
 }
