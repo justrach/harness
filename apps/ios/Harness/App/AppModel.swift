@@ -465,6 +465,7 @@ final class AppModel {
         // A new instance, so a reply still in flight lands in the old one.
         folderListings = FolderListingCache()
         config = nil
+        CrashReports.shared.connect(nil)
         demo = nil
         demoPinnedSessionIds = []
         DraftStore.wipeAll()
@@ -537,6 +538,7 @@ final class AppModel {
         setupPresented = Onboarding.isPending
         PushNotifications.shared.signedIn(model: self)
         WatchBridge.shared.modelReady()
+        CrashReports.shared.connect(config)
     }
 
     /// The live sign-in, for the edge calls notifications make (none in demo mode).
@@ -1227,6 +1229,7 @@ final class AppModel {
         refreshSignInIfDue()
         kickAllRooms()
         probeEdgeHealth()
+        CrashReports.shared.uploadPending()
         // A recording waiting on the speech permission can ask now.
         WatchBridge.shared.modelReady()
     }
