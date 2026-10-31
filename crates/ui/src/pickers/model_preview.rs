@@ -1,7 +1,7 @@
 //! The two-step model picker (after Phil Hedayatnia's preview): a model list
-//! grouped by provider with a floating detail card, then a reasoning step on
-//! wake bars (crate::wake_slider). It states only what the catalog says: no
-//! ratings, shortlists or prices are made up.
+//! grouped by provider with a floating detail card, then a reasoning slider.
+//! It states only what the catalog says: no ratings, shortlists or prices are
+//! made up.
 use super::*;
 use crate::icons;
 use gpui::{relative, rgb};
@@ -14,9 +14,6 @@ use std::time::{Duration, Instant};
 pub(super) const PICKER_WIDTH: f32 = 356.0;
 const DETAIL_WIDTH: f32 = 276.0;
 const SLIDER_SETTLE: Duration = Duration::from_millis(150);
-/// The bar track's width, for the drag speed that sets a wake's lift: the
-/// picker less its padding and the track's inset.
-const WAKE_TRACK_WIDTH: f32 = PICKER_WIDTH - 60.0;
 
 #[derive(Clone, Copy)]
 struct SliderMotion {
@@ -55,8 +52,6 @@ pub(super) struct Preview {
     slider_observer: Option<Subscription>,
     slider_motion: Option<SliderMotion>,
     slider_dragging: bool,
-    /// The bars a fast drag lifted (crate::wake_slider).
-    wake: crate::wake_slider::Wake,
     detail: Option<usize>,
     detail_hovered: bool,
     hover_target: Option<usize>,
@@ -77,7 +72,6 @@ impl Default for Preview {
             slider_observer: None,
             slider_motion: None,
             slider_dragging: false,
-            wake: Default::default(),
             detail: None,
             detail_hovered: false,
             hover_target: None,
@@ -97,7 +91,6 @@ impl Preview {
         self.slider_observer = None;
         self.slider_motion = None;
         self.slider_dragging = false;
-        self.wake = Default::default();
         self.hide_detail();
         self.error = None;
     }
@@ -114,8 +107,7 @@ impl Preview {
         })
     }
     pub fn animating(&self, reduced: bool) -> bool {
-        let now = Instant::now();
-        !reduced && (self.slider_motion.is_some_and(|m| m.active(now)) || self.wake.active(now))
+        !reduced && self.slider_motion.is_some_and(|m| m.active(Instant::now()))
     }
 }
 
@@ -415,16 +407,9 @@ impl Pickers {
                 SliderEvent::Change(_) => {
                     this.preview.slider_dragging = true;
                     this.preview.slider_motion = None;
-                    if !cx.reduce_motion() {
-                        let at = slider.read(cx).percentage().end;
-                        this.preview
-                            .wake
-                            .sweep(at, WAKE_TRACK_WIDTH, Instant::now());
-                    }
                 }
                 SliderEvent::Release(_) => {
                     this.preview.slider_dragging = false;
-                    this.preview.wake.release();
                     this.preview.slider_motion = Some(SliderMotion {
                         from: slider.read(cx).percentage().end,
                         to: target,
@@ -1002,56 +987,68 @@ impl Pickers {
                 .map(|m| m.position(Instant::now(), cx.reduce_motion()))
                 .unwrap_or(raw);
             let count = p.model.reasoning_levels.len();
-            // Thumbless wake bars (crate::wake_slider): the accent fills
-            // the bars up to the level, stops stand taller, and a fast drag
-            // lifts the bars it passes.
-            use crate::wake_slider::{
-                BAR_WIDTH, BARS, LIFT_HEIGHT, REST_HEIGHT, STOP_HEIGHT, bar_fraction, stop_bars,
+            let thumb = if self.preview.slider_dragging {
+                30.0
+            } else {
+                28.0
             };
-            let now = Instant::now();
-            let reduced = cx.reduce_motion();
-            let stops = stop_bars(count, BARS);
-            let rest = theme.text_muted.opacity(0.28);
-            let bars = (0..BARS).map(|bar| {
-                let at = bar_fraction(bar, BARS);
-                let lift = if reduced {
-                    0.0
-                } else {
-                    self.preview.wake.height(bar, now)
-                };
-                let height = REST_HEIGHT
-                    + if stops.contains(&bar) {
-                        STOP_HEIGHT
-                    } else {
-                        0.0
-                    }
-                    + lift * LIFT_HEIGHT;
-                div()
-                    .absolute()
-                    .bottom(px(2.0))
-                    .left(relative(at))
-                    .ml(px(-BAR_WIDTH / 2.0))
-                    .w(px(BAR_WIDTH))
-                    .h(px(height.max(4.0)))
-                    .rounded(px(BAR_WIDTH / 2.0))
-                    .bg(if at <= percent + 1e-4 { accent } else { rest })
-            });
             let track = SliderTrack::new(slider)
                 .relative()
                 .size_full()
-                // Invisible: it records the bounds the value maps onto.
-                .child(SliderIndicator::new(slider).absolute().inset_0())
-                .children(bars)
-                // No visible thumb: it stays as the drag handle and the
-                // keyboard target over the current level.
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(5.0))
+                        .left(px(-14.0))
+                        .right(px(-14.0))
+                        .h(px(24.0))
+                        .rounded(px(12.0))
+                        .bg(theme.surface_raised),
+                )
+                .child(
+                    SliderIndicator::new(slider)
+                        .absolute()
+                        .top(px(5.0))
+                        .w_full()
+                        .h(px(24.0))
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(-14.0))
+                                .right(relative(1.0 - percent))
+                                .mr(px(-14.0))
+                                .rounded(px(12.0))
+                                .bg(accent),
+                        ),
+                )
+                .children((0..count).map(|i| {
+                    div()
+                        .absolute()
+                        .top(px(15.0))
+                        .left(relative(i as f32 / (count - 1) as f32))
+                        .ml(px(-2.0))
+                        .size(px(4.0))
+                        .rounded(px(2.0))
+                        .bg(if i as f32 / (count - 1) as f32 <= percent {
+                            theme.on_solid.opacity(0.55)
+                        } else {
+                            theme.text_muted.opacity(0.4)
+                        })
+                }))
                 .child(
                     SliderThumb::new(slider)
                         .absolute()
-                        .top(px(3.0))
+                        .top(px((34.0 - thumb) / 2.0))
                         .left(relative(percent))
-                        .ml(px(-14.0))
-                        .size(px(28.0))
-                        .rounded(px(14.0)),
+                        .ml(px(-thumb / 2.0))
+                        .size(px(thumb))
+                        .rounded(px(thumb / 2.0))
+                        .bg(rgb(0xfffefa))
+                        .border_1()
+                        .border_color(theme.border)
+                        .shadow_sm(),
                 );
             body = body
                 .child(

@@ -168,19 +168,16 @@ fn main() -> anyhow::Result<()> {
                         for frame in 0..60 {
                             handle
                                 .update(cx, |_, window, cx| {
-                                    // A slow drag down (the bars stay still), then a
-                                    // flick back up that leaves a wake.
                                     let percent = match frame {
                                         10 => None,
                                         11..=35 => Some(0.85 - (frame - 11) as f32 / 24.0 * 0.43),
-                                        41.. => Some(0.95),
                                         _ => Some(0.42),
                                     };
                                     let position = picker
                                         .read(cx)
                                         .fixture_slider_position(percent, cx)
                                         .expect("reasoning slider");
-                                    if frame == 10 || frame == 40 {
+                                    if frame == 10 {
                                         window.dispatch_event(
                                             gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
                                                 position,
@@ -197,24 +194,6 @@ fn main() -> anyhow::Result<()> {
                                             }),
                                             cx,
                                         );
-                                    } else if frame == 41 {
-                                        // A flick: several moves within one frame, as a
-                                        // fast pointer delivers them.
-                                        for step in [0.5, 0.6, 0.7, 0.8, 0.9, 0.95] {
-                                            let position = picker
-                                                .read(cx)
-                                                .fixture_slider_position(Some(step), cx)
-                                                .expect("reasoning slider");
-                                            window.dispatch_event(
-                                                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                                                    position,
-                                                    pressed_button: Some(gpui::MouseButton::Left),
-                                                    ..Default::default()
-                                                }),
-                                                cx,
-                                            );
-                                            std::thread::sleep(Duration::from_millis(8));
-                                        }
                                     } else if (11..=35).contains(&frame) {
                                         window.dispatch_event(
                                             gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
@@ -224,7 +203,7 @@ fn main() -> anyhow::Result<()> {
                                             }),
                                             cx,
                                         );
-                                    } else if frame == 36 || frame == 42 {
+                                    } else if frame == 36 {
                                         window.dispatch_event(
                                             gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
                                                 position,
