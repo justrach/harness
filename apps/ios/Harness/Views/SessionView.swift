@@ -500,6 +500,7 @@ struct SessionView: View {
                                           onStop: { store.sendInterrupt() })
                             // The turn's steps and agents beside it, a separate tap from the pill's Stop.
                             AgentWorkChip(store: store, glass: true)
+                            ContextRing(store: store, glass: true)
                         }
                         .padding(.leading, 16)
                         .padding(.bottom, 8)
@@ -519,9 +520,14 @@ struct SessionView: View {
                     || model.sendState(for: chat) != nil || model.connectivity.state != .connected) {
                     statusStrip(chat: chat, status: status, store: store)
                         .allowsHitTesting(model.sendState(for: chat).map { $0 == .failed || $0 == .waiting } ?? false)
-                        // The turn's steps and agents, at the strip's far end; it takes taps, the strip doesn't.
+                        // The turn's steps and agents, then the context ring, at the strip's far end (the
+                        // desktop footer's order); they take taps, the strip doesn't.
                         .overlay(alignment: .trailing) {
-                            AgentWorkChip(store: store).padding(.trailing, 20)
+                            HStack(spacing: 4) {
+                                AgentWorkChip(store: store)
+                                ContextRing(store: store)
+                            }
+                            .padding(.trailing, 20)
                         }
                 }
                 Group {

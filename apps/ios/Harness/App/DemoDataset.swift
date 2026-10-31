@@ -289,6 +289,12 @@ final class DemoDataset {
                 entries += Self.agentWorkTurn(now: nowMs())
             }
             store.setEntries(entries)
+            // Rig: the agent's context meter with graff's savings, for the context ring and card.
+            if chatId == "chat-veil", ProcessInfo.processInfo.arguments.contains("-demo-context") {
+                store.contextUsage = ContextUsage(
+                    tokens: 131_400, window: 200_000,
+                    savings: ContextSavings(handleBytes: 182_000, compactedTokens: 41_000, cacheReadTokens: 260_000))
+            }
         }
         store.demoResponder = { [weak self, weak store] prompt in
             guard let self, let store else { return }
@@ -355,12 +361,12 @@ final class DemoDataset {
             MessageEntry(id: "aw-1", role: .assistant, parts: [todo(0)],
                          createdAt: now - 300_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             MessageEntry(id: "aw-2", role: .assistant, parts: [
-                .tool(id: "aw-read", call: RenderToolCall(tag: "readFile", fields: ["path": "crates/ui/src/markdown/veil.rs"]),
+                .tool(id: "aw-read", call: RenderToolCall(tag: "readFile", fields: ["path": "crates/ui/src/markdown/veil.rs", RenderToolCall.outputBytesKey: Int64(38_400)]),
                       isError: false, resolved: true),
                 todo(1),
             ], createdAt: now - 228_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             MessageEntry(id: "aw-3", role: .assistant, parts: [
-                .tool(id: "aw-curve", call: RenderToolCall(tag: "editFile", fields: ["path": "Harness/Transcript/Veil.swift"]),
+                .tool(id: "aw-curve", call: RenderToolCall(tag: "editFile", fields: ["path": "Harness/Transcript/Veil.swift", RenderToolCall.outputBytesKey: Int64(6_200)]),
                       isError: false, resolved: true),
                 todo(2),
                 spawn("aw-agent-1", "Agent: audit veil timing on iPad", status: "running",
@@ -368,7 +374,7 @@ final class DemoDataset {
                 spawn("aw-agent-2", "Agent: check the reduced motion path", status: "done"),
                 .tool(id: "aw-edit", call: RenderToolCall(tag: "editFile", fields: ["path": "Harness/Transcript/TranscriptRows.swift"]),
                       isError: false, resolved: true),
-                .tool(id: "aw-test", call: RenderToolCall(tag: "exec", fields: ["command": "xcodebuild test -only-testing:VeilTests"]),
+                .tool(id: "aw-test", call: RenderToolCall(tag: "exec", fields: ["command": "xcodebuild test -only-testing:VeilTests", RenderToolCall.outputBytesKey: Int64(54_000)]),
                       isError: false, resolved: false),
             ], createdAt: now - 85_000, deviceId: "dev-mac", status: .streaming, continuationOf: nil),
         ]

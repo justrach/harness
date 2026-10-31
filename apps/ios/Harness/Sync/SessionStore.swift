@@ -58,6 +58,8 @@ final class SessionStore {
     /// (crates/doc/src/queue.rs). Shared with every other device on the chat:
     /// what the Mac queued shows up here, and reordering here reorders there.
     private(set) var queue: [QueuedMessage] = []
+    /// The agent's context meter, from the doc's `meta.contextUsage` (ContextWindow). The demo sets it directly.
+    var contextUsage: ContextUsage?
     var queueActionsPending: Set<String> = []
     var queueActionError: String?
     /// Local submission only; remote user entries never pull a reader to a new turn.
@@ -642,8 +644,8 @@ final class SessionStore {
         let cache = started ? entryCache : nil
         let generation = lifecycleGeneration
         Task { @MainActor [weak self] in
-            let decoded = await Task.detached(priority: .userInitiated) {
-                Self.decodeEntries(from: doc, cache: cache)
+            let (decoded, usage) = await Task.detached(priority: .userInitiated) {
+                (Self.decodeEntries(from: doc, cache: cache), Self.contextUsage(from: doc))
             }.value
             guard let self, !self.stopped,
                   self.lifecycleGeneration == generation else { return }
@@ -652,6 +654,7 @@ final class SessionStore {
             if let decoded {
                 self.apply(decoded.entries, queue: decoded.queue)
             }
+            if usage != self.contextUsage { self.contextUsage = usage }
             if self.projectPending {
                 if self.viewAttached {
                     self.projectPending = false
@@ -727,6 +730,12 @@ final class SessionStore {
         return (joinContinuations(raw), queue)
     }
 
+    /// The agent's context meter: one JSON string at `meta.contextUsage`, written whole so tokens and window
+    /// never tear on sync (schema.rs `write_context_usage`).
+    nonisolated static func contextUsage(from doc: LoroDoc) -> ContextUsage? {
+        doc.getMap(id: "meta").get(key: "contextUsage")?.asValue()?.stringValue.flatMap(ContextUsage.decode)
+    }
+
     /// Same decode as `entryFrom(_:)` but reading the message map's scalar
     /// fields directly and taking already-decoded parts — EntryCache uses it
     /// to skip the deep-value walk on messages whose parts are memoized.
@@ -798,6 +807,18 @@ final class SessionStore {
             // A spawn's lifecycle and live tail ride the part, not the call (schema.rs set_subagent_*).
             if let status = m["subagentStatus"]?.stringValue { fields[RenderToolCall.subagentStatusKey] = status }
             if let tail = m["subagentTail"]?.stringValue { fields[RenderToolCall.subagentTailKey] = tail }
+            // The output's full length, for the context card's estimate (ContextWindow).
+            if let bytes = m["outputBytes"]?.i64Value ?? m["output"]?.stringValue.map({ Int64($0.utf8.count) }) {
+                fields[RenderToolCall.outputBytesKey] = bytes
+            }
+            // A compaction chip's record rides its call's input (proto CompactionMeta).
+            if tag == "unknown", fields["name"] as? String == "Compact context",
+               let input = callMap["input"]?.mapValue, let kind = input["kind"]?.stringValue {
+                fields[RenderToolCall.compactionKindKey] = kind
+                for key in ["tokensBefore", "tokensAfter", "itemTokens"] {
+                    if let n = input[key]?.i64Value { fields["compaction.\(key)"] = n }
+                }
+            }
             // isError presence IS the resolution marker (schema.rs:96).
             let isError = m["isError"]?.boolValue
             return .tool(id: id, call: RenderToolCall(tag: tag, fields: fields),
