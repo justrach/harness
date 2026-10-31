@@ -21,6 +21,8 @@ mod link_interaction;
 mod link_presentation;
 pub mod links;
 mod math;
+mod math_flow;
+mod math_layout;
 pub mod mend;
 pub mod parser;
 pub mod render;

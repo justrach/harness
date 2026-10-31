@@ -177,6 +177,11 @@ impl Shell {
                     {
                         this.add_file_surface(path.clone(), window, cx);
                     }
+                    FilesEvent::OpenFileAtAnchor { path, anchor }
+                        if this.accepts_file_navigation(&owner, &source, cx) =>
+                    {
+                        this.add_file_surface_at_anchor(path.clone(), anchor.clone(), window, cx);
+                    }
                     FilesEvent::OpenWebLink(activation) => {
                         if let crate::markdown::render::LinkOutcome::External(url) =
                             this.activate_session_link(activation, window, cx)
@@ -470,6 +475,37 @@ mod tests {
                 assert_eq!(shell.file_surfaces.len(), 1);
                 assert_eq!(shell.right_surface_rows(cx).len(), 1);
                 assert!(shell.right_pane_open(cx));
+                shell.add_file_surface_at_anchor(
+                    "notes/Cheatsheet.md".into(),
+                    "fractions".into(),
+                    window,
+                    cx,
+                );
+                let key = ("first".into(), "notes/Cheatsheet.md".into());
+                let id = shell.file_surface_keys[&key];
+                assert_eq!(
+                    shell.file_surfaces[&id]
+                        .read(cx)
+                        .test_pending_markdown_anchor(),
+                    Some(("notes/Cheatsheet.md".into(), "fractions".into()))
+                );
+                shell.add_file_surface_at_anchor(
+                    "notes/Cheatsheet.md".into(),
+                    "roots".into(),
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    shell.file_surface_keys[&key], id,
+                    "section links must reuse the document tab"
+                );
+                assert_eq!(
+                    shell.file_surfaces[&id]
+                        .read(cx)
+                        .test_pending_markdown_anchor(),
+                    Some(("notes/Cheatsheet.md".into(), "roots".into()))
+                );
+                shell.close_right_surface(RightSurface::File(id), window, cx);
                 shell.toggle_files_panel(window, cx);
                 assert!(!shell.files_panel_open(cx));
                 assert!(shell.right_pane_open(cx));

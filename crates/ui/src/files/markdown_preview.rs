@@ -45,6 +45,40 @@ fn comment_block(lines: &[u32], line: u32) -> Option<usize> {
     })
 }
 
+/// Containers are virtualized as one row, so nested headings navigate to
+/// their containing row while sharing the document's heading-slug order.
+fn index_heading_anchors(block: &Block, row: usize, anchors: &mut HashMap<String, usize>) {
+    match block {
+        Block::Heading { runs, .. } => {
+            let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+            let slug: String = text
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+                .map(|c| if c == ' ' { '-' } else { c })
+                .collect();
+            let mut unique = slug.clone();
+            let mut n = 1;
+            while anchors.contains_key(&unique) {
+                unique = format!("{slug}-{n}");
+                n += 1;
+            }
+            anchors.insert(unique, row);
+        }
+        Block::BlockQuote { children } => {
+            for child in children {
+                index_heading_anchors(child, row, anchors);
+            }
+        }
+        Block::List { items, .. } => {
+            for child in items.iter().flatten() {
+                index_heading_anchors(child, row, anchors);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn is_markdown(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
@@ -73,7 +107,7 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
     }
     let (path, anchor) = target
         .split_once('#')
-        .map_or((target, None), |(p, a)| (p, Some(a.to_string())));
+        .map_or((target, None), |(p, a)| (p, Some(a)));
     let decode = |s: &str| -> Option<String> {
         let mut bytes = Vec::new();
         let mut chars = s.as_bytes().iter().copied();
@@ -86,14 +120,22 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
                 bytes.push(c);
             }
         }
-        String::from_utf8(bytes).ok()
+        String::from_utf8(bytes)
+            .ok()
+            .filter(|value| !value.chars().any(char::is_control))
     };
     let path = decode(path)?;
+    // A malformed fragment invalidates the whole destination, rather than
+    // silently turning a section link into an unanchored file open.
+    let anchor = match anchor {
+        Some(anchor) => Some(decode(anchor)?),
+        None => None,
+    };
     if path.contains(['\\', ':', '\0']) || path.starts_with('/') {
         return None;
     }
     if path.is_empty() {
-        return Some((document.into(), anchor.and_then(|a| decode(&a))));
+        return Some((document.into(), anchor));
     }
     let mut parts: Vec<&str> = document.split('/').collect();
     parts.pop();
@@ -109,7 +151,7 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
     if parts.is_empty() {
         return None;
     }
-    Some((parts.join("/"), anchor.and_then(|a| decode(&a))))
+    Some((parts.join("/"), anchor))
 }
 
 pub(super) struct MarkdownPreview {
@@ -131,6 +173,8 @@ pub(super) struct MarkdownPreview {
     anchors: HashMap<String, usize>,
     parse_task: Option<Task<()>>,
     epoch: u64,
+    parsed_epoch: u64,
+    pending_anchor: Option<String>,
     loading: bool,
     truncated: bool,
     pub media_client: Option<(super::client::WorkspaceFilesClient, String)>,
@@ -159,7 +203,7 @@ pub(super) struct MarkdownPreview {
     zoom_source: Option<crate::image_media::MediaImage>,
     zoom_render: Option<crate::image_media::MediaImage>,
     preview_focus: FocusHandle,
-    open_file: Rc<dyn Fn(String, &mut gpui::App)>,
+    open_file: Rc<dyn Fn(String, Option<String>, &mut gpui::App)>,
     open_web_link: Option<WebLinkHandler>,
 }
 
@@ -330,7 +374,7 @@ impl MarkdownPreview {
 
     pub fn new(
         path: String,
-        open_file: Rc<dyn Fn(String, &mut gpui::App)>,
+        open_file: Rc<dyn Fn(String, Option<String>, &mut gpui::App)>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.on_release(|view, cx| {
@@ -389,6 +433,8 @@ impl MarkdownPreview {
             anchors: HashMap::new(),
             parse_task: None,
             epoch: 0,
+            parsed_epoch: 0,
+            pending_anchor: None,
             loading: false,
             truncated: false,
             open_file,
@@ -440,22 +486,7 @@ impl MarkdownPreview {
                                 highlights.insert(ix, Arc::new(doc));
                             }
                         }
-                        if let Block::Heading { runs, .. } = &top.block {
-                            let text: String = runs.iter().map(|r| r.text.as_str()).collect();
-                            let slug: String = text
-                                .to_lowercase()
-                                .chars()
-                                .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
-                                .map(|c| if c == ' ' { '-' } else { c })
-                                .collect();
-                            let mut unique = slug.clone();
-                            let mut n = 1;
-                            while anchors.contains_key(&unique) {
-                                unique = format!("{slug}-{n}");
-                                n += 1;
-                            }
-                            anchors.insert(unique, ix);
-                        }
+                        index_heading_anchors(&top.block, ix, &mut anchors);
                     }
                     (tree, highlights, anchors, block_lines)
                 })
@@ -492,6 +523,8 @@ impl MarkdownPreview {
                 view.block_lines = block_lines;
                 view.highlights = highlights;
                 view.anchors = anchors;
+                view.parsed_epoch = epoch;
+                view.apply_pending_anchor();
                 view.cache.borrow_mut().clear();
                 view.loading = false;
                 view.load_images(cx);
@@ -679,6 +712,49 @@ impl MarkdownPreview {
         })
     }
 
+    pub(super) fn request_anchor(&mut self, anchor: String, cx: &mut Context<Self>) {
+        self.pending_anchor = Some(anchor);
+        self.apply_pending_anchor();
+        cx.notify();
+    }
+
+    fn apply_pending_anchor(&mut self) {
+        // The old tree stays visible during debounce, but navigation belongs to
+        // the requested source version, not its retired heading map.
+        if self.parsed_epoch != self.epoch {
+            return;
+        }
+        let Some(anchor) = self.pending_anchor.take() else {
+            return;
+        };
+        let ix = if anchor.is_empty() {
+            Some(0)
+        } else {
+            self.anchors.get(&anchor).copied()
+        };
+        if let Some(ix) = ix.filter(|ix| *ix < self.tree.len()) {
+            self.list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(0.0),
+            });
+        }
+    }
+
+    pub(super) fn rename_path(&mut self, path: &str, cx: &mut Context<Self>) {
+        // This is still the same buffer: preserve its pending section and
+        // suspension state, but reload relative media against the new path.
+        self.path = path.to_string();
+        self.version = None;
+        self.image_generation = self.image_generation.wrapping_add(1);
+        self.image_task = None;
+        self.close_media_preview(cx);
+        release_media(
+            self.images.drain().filter_map(|(_, result)| result.ok()),
+            cx,
+        );
+        self.media_dirty = true;
+    }
+
     pub fn activate(
         &mut self,
         path: &str,
@@ -686,17 +762,9 @@ impl MarkdownPreview {
         cx: &mut Context<Self>,
     ) {
         if self.path != path || self.media_location.as_ref() != Some(location) {
-            self.path = path.to_string();
+            self.pending_anchor = None;
             self.media_location = Some(location.clone());
-            self.version = None;
-            self.image_generation = self.image_generation.wrapping_add(1);
-            self.image_task = None;
-            self.close_media_preview(cx);
-            release_media(
-                self.images.drain().filter_map(|(_, result)| result.ok()),
-                cx,
-            );
-            self.media_dirty = true;
+            self.rename_path(path, cx);
         }
         if self.suspended {
             self.suspended = false;
@@ -710,6 +778,7 @@ impl MarkdownPreview {
             return;
         }
         self.suspended = true;
+        self.pending_anchor = None;
         self.media_dirty = true;
         self.epoch = self.epoch.wrapping_add(1);
         self.parse_task = None;
@@ -937,6 +1006,11 @@ impl MarkdownPreview {
     }
 
     #[cfg(test)]
+    pub(super) fn test_scroll_top(&self) -> ListOffset {
+        self.list.logical_scroll_top()
+    }
+
+    #[cfg(test)]
     pub(super) fn test_block_bounds(&self, ix: usize) -> gpui::Bounds<gpui::Pixels> {
         let mut bounds = self.list.bounds_for_item(ix).unwrap();
         // GPUI's bounds_for_item omits the list padding applied during paint.
@@ -977,15 +1051,11 @@ impl MarkdownPreview {
                         return preview_link_outcome(activation);
                     };
                     if path == view.path {
-                        if let Some(ix) = anchor.as_ref().and_then(|a| view.anchors.get(a)) {
-                            view.list.scroll_to(ListOffset {
-                                item_ix: *ix,
-                                offset_in_item: px(0.0),
-                            });
-                            cx.notify();
+                        if let Some(anchor) = anchor {
+                            view.request_anchor(anchor, cx);
                         }
                     } else {
-                        (view.open_file)(path, cx);
+                        (view.open_file)(path, anchor, cx);
                     }
                     render::LinkOutcome::Internal
                 })
@@ -1292,8 +1362,9 @@ impl Render for MarkdownPreview {
                     }
                 }),
             )
-            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "c"
+            .on_key_down(cx.listener(|view, event: &gpui::KeyDownEvent, _, cx| {
+                if view.owns_selection()
+                    && event.keystroke.key == "c"
                     && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
                 {
                     if let Some(text) = crate::markdown::selection::selected_text() {
@@ -1387,6 +1458,71 @@ mod tests {
         assert_eq!(comment_block(&[], 1), None);
     }
     #[test]
+    fn relative_links_decode_once_and_reject_invalid_fragments_atomically() {
+        for (target, path, anchor) in [
+            (
+                "Cheat%73heet.md#caf%C3%A9",
+                "notes/Cheatsheet.md",
+                Some("café"),
+            ),
+            ("a%23b.md#section", "notes/a#b.md", Some("section")),
+            (
+                "a%2520b.md#percent%2520",
+                "notes/a%20b.md",
+                Some("percent%20"),
+            ),
+            ("Cheatsheet.md#", "notes/Cheatsheet.md", Some("")),
+            ("#caf%C3%A9-1", "notes/Week 9.md", Some("café-1")),
+            ("Cheatsheet.md", "notes/Cheatsheet.md", None),
+        ] {
+            assert_eq!(
+                relative_target("notes/Week 9.md", target),
+                Some((path.into(), anchor.map(String::from))),
+                "{target}"
+            );
+        }
+        for target in [
+            "Cheatsheet.md#%",
+            "Cheatsheet.md#%2",
+            "Cheatsheet.md#%GG",
+            "Cheatsheet.md#%FF",
+            "#%C3%28",
+        ] {
+            assert_eq!(
+                relative_target("notes/Week 9.md", target),
+                None,
+                "a malformed fragment must not silently open an unanchored file: {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_links_reject_raw_and_encoded_control_characters() {
+        for control in [
+            '\0', '\t', '\n', '\r', '\u{b}', '\u{c}', '\u{1f}', '\u{7f}', '\u{85}',
+        ] {
+            let encoded: String = control
+                .to_string()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("%{byte:02X}"))
+                .collect();
+            for suffix in [control.to_string(), encoded] {
+                for target in [
+                    format!("Cheat{suffix}sheet.md"),
+                    format!("Cheatsheet.md#part{suffix}two"),
+                ] {
+                    assert_eq!(
+                        relative_target("notes/Week 9.md", &target),
+                        None,
+                        "control characters must not reach file routing: {target:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn markdown_paths_and_links() {
         assert!(is_markdown("docs/README.MD"));
         assert!(is_markdown("x.markdown"));
@@ -1407,6 +1543,10 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "markdown_preview_math_tests.rs"]
+mod math_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod layout_tests {
@@ -1452,7 +1592,7 @@ mod layout_tests {
                     |_, cx| {
                         cx.new(|cx| {
                             let mut view =
-                                MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                                MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                             view.tree = parser::parse_full(&code);
                             view.list.reset(1);
                             view.diagram_style = crate::theme::style_generation();
@@ -1529,7 +1669,7 @@ mod layout_tests {
                 "changing the persistent mode resets ephemeral offsets"
             );
             let second =
-                cx.new(|cx| MarkdownPreview::new("SECOND.md".into(), Rc::new(|_, _| {}), cx));
+                cx.new(|cx| MarkdownPreview::new("SECOND.md".into(), Rc::new(|_, _, _| {}), cx));
             let second_row: SharedString = format!("{}0", second.read(cx).scope).into();
             assert!(
                 second
@@ -1553,7 +1693,7 @@ mod layout_tests {
                     });
                     let preview = cx.new(|cx| {
                         let mut view =
-                            MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                            MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                         view.tree = parser::parse_full(source);
                         view.parsed_source = Arc::from(source);
                         view.editor = Some(editor.downgrade());
@@ -1677,7 +1817,8 @@ mod layout_tests {
             cx.set_global(Theme::dark());
             let make = |text: &str, cx: &mut gpui::App| {
                 cx.new(|cx| {
-                    let mut view = MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                    let mut view =
+                        MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                     view.tree = parser::parse_full(text);
                     view.list.reset(view.tree.len());
                     view.diagram_style = crate::theme::style_generation();
@@ -1731,7 +1872,7 @@ mod layout_tests {
             cx.set_global(Theme::dark());
             let window = cx.open_window(gpui::WindowOptions { window_bounds: Some(gpui::WindowBounds::Windowed(Bounds::new(Point::default(), gpui::size(px(1200.0), px(600.0))))), ..Default::default() }, |_, cx| {
                 cx.new(|cx| {
-                    let mut view = MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx);
+                    let mut view = MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx);
                     view.tree = parser::parse_full("![Example](example.svg)"); view.list.reset(1);
                     view.diagram_style = crate::theme::style_generation();
                     let media = crate::image_media::decode_image("image/svg+xml", br##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="#468"/></svg>"##.to_vec()).unwrap();
@@ -1779,7 +1920,7 @@ mod layout_tests {
                         cx.new(|cx| {
                             let mut view = MarkdownPreview::new(
                                 "README.md".into(),
-                                Rc::new(|_, _| {}),
+                                Rc::new(|_, _, _| {}),
                                 cx,
                             );
                             view.tree = parser::parse_full(
@@ -1893,7 +2034,7 @@ mod async_tests {
     #[gpui::test]
     fn edits_and_suspension_cancel_obsolete_preview_work(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx));
         view.update(cx, |view, cx| {
             view.set_source("# Old".into(), false, cx);
             view.set_source("# Current".into(), false, cx);
@@ -1928,7 +2069,7 @@ mod async_tests {
     #[gpui::test]
     fn raster_admission_accounts_for_cpu_pixels_and_gpu_texture(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _| {}), cx));
+        let view = cx.new(|cx| MarkdownPreview::new("README.md".into(), Rc::new(|_, _, _| {}), cx));
         // The compressed source and one pixel buffer fit, but retaining both
         // decoded CPU pixels and the GPU texture exceeds the document budget.
         let raster = image::RgbaImage::new(3000, 3000);
@@ -1945,7 +2086,7 @@ mod async_tests {
     fn referenced_image_change_invalidates_cache_and_memory_is_bounded(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let view =
-            cx.new(|cx| MarkdownPreview::new("docs/README.md".into(), Rc::new(|_, _| {}), cx));
+            cx.new(|cx| MarkdownPreview::new("docs/README.md".into(), Rc::new(|_, _, _| {}), cx));
         view.update(cx, |view, cx| {
             view.tree = parser::parse_full("![a](../image.png)");
             let mut media = crate::image_media::decode_image(

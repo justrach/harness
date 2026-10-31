@@ -100,6 +100,7 @@ pub(super) struct FilePreviewState {
     documents: HashMap<String, FileDocument>,
     document_recency: VecDeque<String>,
     active: Option<String>,
+    pending_markdown_anchor: Option<(String, String)>,
     highlights: HashMap<String, HighlightedFile>,
     syntax_cache: SyntaxHighlightCache,
     list: ListState,
@@ -128,6 +129,7 @@ impl FilePreviewState {
             documents: HashMap::new(),
             document_recency: VecDeque::new(),
             active: None,
+            pending_markdown_anchor: None,
             highlights: HashMap::new(),
             syntax_cache: SyntaxHighlightCache::default(),
             list: ListState::new(0, ListAlignment::Top, px(520.0)),
@@ -149,6 +151,7 @@ impl FilePreviewState {
         self.documents.clear();
         self.document_recency.clear();
         self.active = None;
+        self.pending_markdown_anchor = None;
         self.highlights.clear();
         self.list.reset(0);
         self.reload_confirmation = None;
@@ -215,6 +218,13 @@ impl FilePreviewState {
             return false;
         }
         self.document_recency.retain(|candidate| candidate != path);
+        if self
+            .pending_markdown_anchor
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == path)
+        {
+            self.pending_markdown_anchor = None;
+        }
         self.highlights.remove(path);
         if let Some(anchors) = self.comment_anchors.remove(path)
             && self
@@ -1723,6 +1733,12 @@ impl FilesSurface {
                     .map(|renamed| (path.clone(), renamed))
             })
             .collect::<Vec<_>>();
+        if let Some((path, _)) = self.preview.pending_markdown_anchor.as_mut()
+            && let Some(renamed) = renamed_document_path(path, old_path, &new_path)
+        {
+            *path = renamed;
+            cx.notify();
+        }
         let image_renames: HashSet<_> = renames
             .iter()
             .filter(|(old, new)| {
@@ -1736,6 +1752,9 @@ impl FilesSurface {
             };
             if let Some(view) = document.image.take() {
                 view.update(cx, |view, cx| view.suspend(cx));
+            }
+            if let Some(view) = &document.markdown {
+                view.update(cx, |view, cx| view.rename_path(new_document_path, cx));
             }
             document.generation = document.generation.wrapping_add(1);
             let needs_review =
@@ -2370,6 +2389,22 @@ impl FilesSurface {
         })
     }
 
+    pub(crate) fn navigate_markdown_anchor(
+        &mut self,
+        path: String,
+        anchor: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !super::markdown_preview::is_markdown(&path) {
+            return;
+        }
+        if let Some(document) = self.preview.documents.get_mut(&path) {
+            document.show_markdown = true;
+        }
+        self.preview.pending_markdown_anchor = Some((path, anchor));
+        cx.notify();
+    }
+
     fn prepare_markdown_preview(
         &mut self,
         path: &str,
@@ -2397,9 +2432,10 @@ impl FilesSurface {
                 cx.new(|cx| {
                     let mut view = super::markdown_preview::MarkdownPreview::new(
                         path.to_string(),
-                        Rc::new(move |path, cx| {
-                            let _ =
-                                owner.update(cx, |surface, cx| surface.open_tree_file(path, cx));
+                        Rc::new(move |path, anchor, cx| {
+                            let _ = owner.update(cx, |surface, cx| {
+                                surface.open_markdown_file(path, anchor, cx)
+                            });
                         }),
                         cx,
                     );
@@ -2444,6 +2480,15 @@ impl FilesSurface {
                 view.version = Some(version);
                 view.set_source(source, truncated, cx);
             });
+        }
+        if self
+            .preview
+            .pending_markdown_anchor
+            .as_ref()
+            .is_some_and(|(pending, _)| pending == path)
+        {
+            let (_, anchor) = self.preview.pending_markdown_anchor.take().unwrap();
+            view.update(cx, |view, cx| view.request_anchor(anchor, cx));
         }
         self.sync_markdown_comments(path, cx);
         Some(view)
@@ -3556,6 +3601,10 @@ impl FilesSurface {
             .clone()
     }
 
+    pub(crate) fn test_pending_markdown_anchor(&self) -> Option<(String, String)> {
+        self.preview.pending_markdown_anchor.clone()
+    }
+
     pub(crate) fn test_document_phase(&self, path: &str) -> Option<String> {
         Some(format!("{:?}", self.preview.documents.get(path)?.phase))
     }
@@ -4251,6 +4300,311 @@ mod markdown_buffer_tests {
     }
 
     #[gpui::test]
+    fn markdown_pending_anchor_follows_a_directory_rename(cx: &mut TestAppContext) {
+        assert_markdown_anchor_survives_rename(cx, false);
+    }
+
+    #[gpui::test]
+    fn markdown_parsing_anchor_follows_a_directory_rename(cx: &mut TestAppContext) {
+        assert_markdown_anchor_survives_rename(cx, true);
+    }
+
+    fn assert_markdown_anchor_survives_rename(cx: &mut TestAppContext, start_parse: bool) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let preview = window
+            .update(cx, |surface, _, cx| {
+                let old = "notes/Cheatsheet.md";
+                let new = "handouts/Cheatsheet.md";
+                let source = format!(
+                    "# Start\n\n{}## Formulas\n\n$\\frac{{1}}{{n}}$\n\n{}",
+                    "Filler paragraph.\n\n".repeat(40),
+                    "Trailing paragraph.\n\n".repeat(40)
+                );
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "owner".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: old.into(),
+                });
+                document.set_loaded(harness_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: old.into(),
+                    size: source.len() as u64,
+                    text: Some(source),
+                    content_hash: Some("hash".into()),
+                    modified_at: None,
+                    encoding: harness_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(harness_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: None,
+                    truncated: false,
+                });
+                surface.preview.documents.insert(old.into(), document);
+                surface.preview.active = Some(old.into());
+                surface.navigate_markdown_anchor(old.into(), "formulas".into(), cx);
+                if start_parse {
+                    surface.prepare_markdown_preview(old, None, cx).unwrap();
+                    assert!(surface.test_pending_markdown_anchor().is_none());
+                }
+                surface.rename_documents("notes", "handouts".into(), cx);
+                assert_eq!(surface.preview.active.as_deref(), Some(new));
+                if !start_parse {
+                    assert_eq!(
+                        surface.test_pending_markdown_anchor(),
+                        Some((new.into(), "formulas".into())),
+                        "a document rename must carry its queued section request"
+                    );
+                }
+                surface.prepare_markdown_preview(new, None, cx).unwrap()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        preview.read_with(cx, |view, _| assert_eq!(view.test_scroll_top().item_ix, 41));
+    }
+
+    #[gpui::test]
+    fn markdown_anchor_waits_for_loading_and_parsing_then_applies_once(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let path = "notes/Cheatsheet.md";
+        let preview = window
+            .update(cx, |surface, _, cx| {
+                surface.navigate_markdown_anchor(path.into(), "obsolete".into(), cx);
+                surface.navigate_markdown_anchor(path.into(), "formulas".into(), cx);
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "owner".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: path.into(),
+                });
+                // An explicit section link also works for a previously source-only tab.
+                document.show_markdown = false;
+                surface.preview.documents.insert(path.into(), document);
+                surface.navigate_markdown_anchor(path.into(), "formulas".into(), cx);
+                assert!(surface.prepare_markdown_preview(path, None, cx).is_none());
+                assert!(
+                    surface
+                        .prepare_markdown_preview("other.md", None, cx)
+                        .is_none()
+                );
+                assert_eq!(
+                    surface.test_pending_markdown_anchor(),
+                    Some((path.into(), "formulas".into()))
+                );
+                let source = format!(
+                    "# Start\n\n{}## Formulas\n\n$\\frac{{a}}{{b}}$",
+                    "Filler paragraph.\n\n".repeat(40)
+                );
+                surface.preview.documents.get_mut(path).unwrap().set_loaded(
+                    harness_proto::WorkspaceFileText {
+                        checkout_id: "checkout".into(),
+                        path: path.into(),
+                        size: source.len() as u64,
+                        text: Some(source),
+                        content_hash: Some("hash".into()),
+                        modified_at: None,
+                        encoding: harness_proto::WorkspaceTextEncoding::Utf8,
+                        line_ending: Some(harness_proto::WorkspaceLineEnding::Lf),
+                        read_only_reason: None,
+                        truncated: false,
+                    },
+                );
+                let preview = surface.prepare_markdown_preview(path, None, cx).unwrap();
+                assert!(surface.test_pending_markdown_anchor().is_none());
+                preview
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        preview.update(cx, |view, cx| {
+            assert_eq!(view.test_scroll_top().item_ix, 41);
+            view.request_anchor(String::new(), cx);
+        });
+        window
+            .update(cx, |surface, _, cx| {
+                assert_eq!(
+                    surface.prepare_markdown_preview(path, None, cx).as_ref(),
+                    Some(&preview)
+                );
+                assert_eq!(
+                    preview.read(cx).test_scroll_top().item_ix,
+                    0,
+                    "ordinary renders must not replay a consumed anchor"
+                );
+                surface.navigate_markdown_anchor("image.png".into(), "ignored".into(), cx);
+                assert!(surface.test_pending_markdown_anchor().is_none());
+                surface.navigate_markdown_anchor(path.into(), "formulas".into(), cx);
+                surface.preview.reset();
+                assert!(surface.test_pending_markdown_anchor().is_none());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn working_notes_checkbox_undo_and_unsaved_formula_survive_preview_switches(
+        cx: &mut TestAppContext,
+    ) {
+        let _guard = crate::markdown::selection::test_state_lock();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| crate::state::AppState::new());
+            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+        });
+        let source =
+            "# Study notes\n\n- [ ] Revise fractions $\\frac{a}{b}$.\n\nFormula $\\sqrt{x+y}$.\n";
+        let (preview, editor) = window
+            .update(cx, |surface, window, cx| {
+                let mut document = FileDocument::loading(DocumentKey {
+                    chat_id: "owner".into(),
+                    checkout_id: Some("checkout".into()),
+                    path: "Study.md".into(),
+                });
+                document.set_loaded(harness_proto::WorkspaceFileText {
+                    checkout_id: "checkout".into(),
+                    path: "Study.md".into(),
+                    text: Some(source.into()),
+                    content_hash: Some("hash".into()),
+                    size: source.len() as u64,
+                    modified_at: None,
+                    encoding: harness_proto::WorkspaceTextEncoding::Utf8,
+                    line_ending: Some(harness_proto::WorkspaceLineEnding::Lf),
+                    read_only_reason: None,
+                    truncated: false,
+                });
+                surface
+                    .preview
+                    .documents
+                    .insert("Study.md".into(), document);
+                surface.preview.active = Some("Study.md".into());
+                let theme = Theme::of(cx).clone();
+                let editor = surface
+                    .ensure_editor("Study.md", &theme, window, cx)
+                    .unwrap();
+                let preview = surface
+                    .prepare_markdown_preview("Study.md", Some(&editor), cx)
+                    .unwrap();
+                (preview, editor)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+            let bounds = preview.read(cx).test_block_bounds(1);
+            let gutter = ((bounds.size.width - px(900.)) / 2.).max(px(24.));
+            let position = gpui::point(bounds.left() + gutter + px(8.), bounds.top() + px(11.));
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let checked = source.replacen("[ ]", "[x]", 1);
+        editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), checked));
+        // Return to source view, as a user would to continue editing the notes.
+        window
+            .update(cx, |surface, window, cx| {
+                surface
+                    .preview
+                    .documents
+                    .get_mut("Study.md")
+                    .unwrap()
+                    .show_markdown = false;
+                preview.update(cx, |view, cx| view.suspend(cx));
+                window.focus(&editor.focus_handle(cx), cx);
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        })
+        .unwrap();
+        cx.simulate_keystrokes(window.into(), "cmd-z");
+        editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), source));
+        cx.simulate_keystrokes(window.into(), "cmd-shift-z");
+        editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), checked));
+        window
+            .update(cx, |surface, window, cx| {
+                editor.update(cx, |editor, cx| {
+                    let start = editor.value().find("x+y").unwrap();
+                    editor.set_selected_range(start..start + 3, cx);
+                    editor.replace("u+v", window, cx);
+                });
+                surface
+                    .preview
+                    .documents
+                    .get_mut("Study.md")
+                    .unwrap()
+                    .show_markdown = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        preview.read_with(cx, |view, _| {
+            let crate::markdown::parser::Block::Paragraph { runs } =
+                &view.test_tree().blocks[2].block
+            else {
+                panic!("missing formula paragraph");
+            };
+            assert!(runs.iter().any(|run| {
+                run.style
+                    .math
+                    .as_ref()
+                    .is_some_and(|math| math.source == r"\sqrt{u+v}")
+            }));
+        });
+        window
+            .update(cx, |surface, _, _| {
+                let document = &surface.preview.documents["Study.md"];
+                assert!(document.is_dirty());
+                assert!(document.save_task.is_none() && document.autosave_task.is_none());
+                assert_eq!(
+                    document.file.as_ref().unwrap().text.as_deref(),
+                    Some(source),
+                    "preview must use the unsaved editor without replacing the disk baseline"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn preview_reads_unsaved_buffer_without_starting_a_save(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -4281,7 +4635,7 @@ mod markdown_buffer_tests {
                 });
                 let theme = Theme::of(cx).clone();
                 document.editor = Some(super::super::editor::new_file_editor(
-                    "# Unsaved",
+                    "# Unsaved\n\nInline \\(\\frac{a+b}{n}\\).",
                     "README.md",
                     false,
                     &theme,
@@ -4316,6 +4670,17 @@ mod markdown_buffer_tests {
                 panic!("missing heading");
             };
             assert_eq!(runs[0].text, "Unsaved");
+            let crate::markdown::parser::Block::Paragraph { runs } =
+                &preview.test_tree().blocks[1].block
+            else {
+                panic!("missing unsaved math paragraph");
+            };
+            assert!(runs.iter().any(|run| {
+                run.style
+                    .math
+                    .as_ref()
+                    .is_some_and(|math| math.source == r"\frac{a+b}{n}" && !math.display)
+            }));
         });
         let weak = preview.downgrade();
         drop(preview);

@@ -48,6 +48,16 @@ Harness also vendors the GPUI editor foundations below. Each crate is Apache-2.0
 
 Harness's own source code is licensed under the terms in `LICENSE`. Bundled third-party components retain their respective licenses and notices.
 
+## Mathematical typesetting
+
+Native Markdown equations use [LaTeX-Rust 2.1.1](https://github.com/jscarr64/latex-rust/tree/v2.1.1),
+Copyright 2026 Jeffrey S Carr, under MIT OR Apache-2.0. Its embedded STIX Two
+Math 2.13 font is SIL OFL-1.1; its modified dvips color-name table is
+LPPL-1.3c-or-later. The upstream notice, MIT license, font license and modified
+color-table header are retained in
+[`third_party/licenses/LaTeX-Rust-NOTICES.txt`](third_party/licenses/LaTeX-Rust-NOTICES.txt).
+The notice identifies the original LaTeX graphics bundle and its source.
+
 ## Symbols
 
 Harness bundles the SVG icon set and filename/folder associations from

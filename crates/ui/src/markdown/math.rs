@@ -2,8 +2,9 @@
 //! `$$`…`$$`. CommonMark reads `\(` and `\[` as escaped punctuation, so
 //! `\(w_0\)` used to show as `(w_0)`, and underscores inside formulas could
 //! turn into emphasis. These spans are found before Markdown parsing (see
-//! `content_reference::rewrite`) and shown as readable Unicode: `w₀`,
-//! `h(x) = w₀ + w₁x`, `≤`, `∑`, `a/b`. Display math gets its own line.
+//! `content_reference::rewrite`). The parser retains their source for native
+//! equation layout; this module also supplies readable Unicode for plain-text
+//! consumers: `w₀`, `h(x) = w₀ + w₁x`, `≤`, `∑`, `a/b`.
 //!
 //! Single-dollar inline math follows currency-aware delimiter rules: no
 //! whitespace just inside either delimiter, no digit after the closing dollar,
@@ -762,10 +763,20 @@ mod tests {
             text(&paragraphs[0]),
             "the parameters w₀ and w₁, not the inputs x₀."
         );
-        assert!(
+        assert_eq!(
             paragraphs[0]
                 .iter()
-                .any(|r| r.text == "w₀ and w₁" && r.style.bold)
+                .filter(|r| r.style.bold)
+                .map(|r| r.text.as_str())
+                .collect::<String>(),
+            "w₀ and w₁"
+        );
+        assert_eq!(
+            paragraphs[0]
+                .iter()
+                .filter(|r| r.style.math.is_some())
+                .count(),
+            3
         );
         assert_eq!(
             text(&paragraphs[1]),
