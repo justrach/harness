@@ -13465,7 +13465,7 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(feature = "model-picker-preview")]
+    #[cfg(all(feature = "model-picker-preview", feature = "appshots-fixture"))]
     #[gpui::test]
     fn the_model_picker_in_the_composer_takes_a_model_and_level(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
