@@ -33,7 +33,11 @@ concurrency:
 jobs:
   upload:
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-latest
+    # Xcode 27.1 (the xcode-27 image, a GitHub public preview): an app built
+    # with an older SDK runs in compatibility mode on iPhone Duo's inner
+    # display, and the project only compiles its hinge code (HINGE_API) with
+    # the iOS 27.1 SDK or later.
+    runs-on: xcode-27
     timeout-minutes: 45
     env:
       # The iOS team's Admin key, kept apart from the Developer-role
@@ -183,7 +187,15 @@ jobs:
 
       - name: Xcode version
         if: inputs.ci_certificates != 'list'
-        run: xcodebuild -version
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+          sdk=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "iOS SDK $sdk"
+          case "$sdk" in
+            2[7-9].[1-9]*|2[8-9].*|[3-9][0-9].*) ;;
+            *) echo "::error::iOS SDK $sdk predates iPhone Duo (27.1)"; exit 1 ;;
+          esac
 
       - name: Compile iOS app and tests
         if: inputs.ci_certificates != 'list'
