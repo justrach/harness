@@ -363,6 +363,10 @@ struct HomeView: View {
                 }
             }
         }
+        // Laptop pose: the keyboard lands on the lower half, below the fold. The whole layout ignores it (the
+        // fold is measured on the full window and the session above the fold keeps its height); otherwise the
+        // window's keyboard avoidance squeezes the session into a strip under its header.
+        .ignoresSafeArea(.keyboard, edges: laptopPose ? .all : [])
         .onFoldChange { next in
             // Both columns stay up in book pose: each half of the fold holds one.
             if case .sideBySide = next { columnVisibility = .all }

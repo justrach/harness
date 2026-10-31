@@ -224,8 +224,6 @@ struct SessionView: View {
                 .background(Theme.bg)
             }
         }
-        // Laptop pose: the keyboard is on the lower half, below the fold. It must not push this session down.
-        .ignoresSafeArea(.keyboard, edges: foldPaneHeader != nil ? .all : [])
         .navigationTitle(chat?.displayTitle ?? "Session")  // feeds the back menu
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(removing: .title)  // the leading header owns the bar
