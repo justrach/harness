@@ -103,7 +103,8 @@ impl Preview {
     }
     pub fn preferred_height(&self) -> f32 {
         self.pending.as_ref().map_or(480.0, |p| {
-            (380.0 + p.model.options.len() as f32 * 60.0).min(480.0)
+            // No cost row: the card is a line shorter than the preview was.
+            (330.0 + p.model.options.len() as f32 * 60.0).min(480.0)
         })
     }
     pub fn animating(&self, reduced: bool) -> bool {
