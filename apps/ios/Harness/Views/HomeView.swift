@@ -157,8 +157,12 @@ struct HomeView: View {
     /// Laptop pose with a session open: the session takes both halves (watch above the fold, act below it).
     private var laptopLayout: DuoLaptopLayout? {
         guard laptopPose, case .stacked(let top, let gap) = fold, case .chat = path.last else { return nil }
-        return DuoLaptopLayout(top: top, gap: gap)
+        // In window coordinates: the session above it reaches up into the status bar's row.
+        return DuoLaptopLayout(top: homeMinY + top, gap: gap)
     }
+
+    /// Home's top in the window; the fold is measured from it.
+    @State private var homeMinY: CGFloat = 0
 
     private var searchInBar: Bool {
         SessionSearchPlacement.inBar(phoneSplit: phoneArrangement != nil, fold: fold)
@@ -353,6 +357,8 @@ struct HomeView: View {
                     primaryStack
                         // The keyboard sits below the fold; it must not squeeze the session above it.
                         .ignoresSafeArea(.keyboard)
+                        // Upright with a session open, its header shares the status bar's row.
+                        .ignoresSafeArea(.container, edges: laptopLayout != nil ? .top : [])
                         // An open session takes both halves (DuoLaptop); the list comes in from its header.
                         .frame(height: laptopLayout == nil ? top : nil)
                         .frame(maxHeight: laptopLayout == nil ? nil : .infinity)
@@ -397,6 +403,8 @@ struct HomeView: View {
                 HStack(spacing: 0) {
                     if flatSidebar {
                         NavigationStack { sidebar }
+                            // The narrow column lays the list out as a phone's.
+                            .environment(\.horizontalSizeClass, .compact)
                             .frame(width: DuoV3.sidebarWidth)
                             .transition(.move(edge: .leading).combined(with: .opacity))
                             .accessibilityIdentifier("wide-sidebar")
@@ -428,6 +436,7 @@ struct HomeView: View {
         .onGeometryChange(for: CGSize.self) { $0.size } action: {
             containerSize = PhoneSplit.layoutSize(previous: containerSize, measured: $0)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { homeMinY = $0 }
         .onChange(of: containerSize) { refreshSplitOffer() }
         .onChange(of: phoneSplitRaw) { refreshSplitOffer() }
         .onAppear {

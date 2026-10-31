@@ -155,7 +155,7 @@ struct InspectCard: View {
         .padding(.horizontal, 16)
         .padding(.top, 12)
         .padding(.bottom, 8)
-        .background(Theme.surface)
+        .background(Theme.surface.ignoresSafeArea(.container, edges: .bottom))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("inspect-pane")
     }

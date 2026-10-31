@@ -346,13 +346,12 @@ struct ComposerView: View {
     private var harness: String { chat.config?.harness ?? "claude-code" }
 
     /// iPhone Duo: the chips as one token on the composer's line. A tap opens the model picker, which also
-    /// sets the reasoning.
+    /// sets the reasoning; a model's other options are a press and hold away.
     private var chipToken: some View {
         let label = ComposerToken.label(
             pullRequest: model.changeRequest(for: chat)?.number,
             model: currentModel.label,
-            reasoning: currentReasoning.map(HarnessCatalog.reasoningLabel),
-            options: currentModel.options.map { currentChoice(for: $0).label })
+            reasoning: currentReasoning.map(HarnessCatalog.reasoningLabel))
         return Button { showModelPicker = true } label: {
             HStack(spacing: 4) {
                 Text(label).lineLimit(1).truncationMode(.middle)
@@ -368,6 +367,11 @@ struct ComposerView: View {
             .fixedSize(horizontal: false, vertical: true)
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            ForEach(currentModel.options) { option in
+                Button("\(option.label): \(currentChoice(for: option).label)") { showOptionPicker = option }
+            }
+        }
         .accessibilityLabel("Model and settings: \(label)")
         .accessibilityIdentifier("composer-token")
     }

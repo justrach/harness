@@ -88,7 +88,8 @@ struct SessionView: View {
     }
 
     private var headerInset: CGFloat {
-        duoChat && horizontalSizeClass == .compact ? 32 : Self.headerChromeInset
+        // A Duo's back button is in the side bar (folded, or lying flat), so the title can start at the edge.
+        duoChat && (horizontalSizeClass == .compact || duoFlat) ? 32 : Self.headerChromeInset
     }
 
     /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
@@ -457,7 +458,6 @@ struct SessionView: View {
                             approve: approveAction(store),
                             askForChanges: { DuoComposerFocus.shared.request(chat.id) })
                     .frame(maxHeight: .infinity)
-                    .ignoresSafeArea(.container, edges: .bottom)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -571,7 +571,6 @@ struct SessionView: View {
                             approve: approveAction(store),
                             askForChanges: { DuoComposerFocus.shared.request(chat.id) })
                     .frame(maxWidth: .infinity)
-                    .ignoresSafeArea(.container, edges: .bottom)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
