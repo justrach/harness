@@ -16031,7 +16031,7 @@ mod exit_regressions {
             )
         });
         let windows = |cx: &mut TestAppContext| cx.update(|cx| cx.windows().len());
-        // A saved preference must not bypass the per-close question.
+        // Already chosen, so ⌘W closes instead of asking first.
         cx.update(|cx| settings::set_archive_sessions_on_close(false, cx));
         // A fresh, unprompted chat (the new-session canvas): nothing closes.
         cx.update(|cx| crate::app_menus::close_tab_in(window, cx));
@@ -16069,10 +16069,8 @@ mod exit_regressions {
         cx.update(|cx| crate::app_menus::close_tab_in(window, cx));
         assert_eq!(windows(cx), 1);
         window
-            .update(cx, |shell, window, cx| {
-                assert!(shell.archive_choice_prompt);
-                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
-                assert!(shell.choose_close_archiving(false, window, cx));
+            .update(cx, |shell, _, cx| {
+                assert!(!shell.archive_choice_prompt);
                 assert_eq!(shell.state.read(cx).selected_chat, None, "the chat closed");
             })
             .unwrap();
@@ -18406,6 +18404,12 @@ impl Shell {
             page.update(cx, |page, cx| page.fixture_browse_link(status, cx));
         }
         cx.notify();
+    }
+
+    /// First-close QA without depending on native app activation.
+    pub fn fixture_first_chat_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        assert!(!self.close_chat_view_by_shortcut(window, cx));
+        assert!(self.archive_choice_prompt);
     }
 
     /// Close-and-archive QA (`examples/archive-choice-fixture.rs`).

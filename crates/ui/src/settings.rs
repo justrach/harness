@@ -451,15 +451,15 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
-/// Whether a session's tab or pane ✕ button archives it. ⌘W asks each time.
+/// Whether closing a session's tab or pane with ⌘W or its ✕ archives it.
 pub fn archive_sessions_on_close(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.archive_sessions_on_close)
         .unwrap_or_default()
 }
 
-/// Legacy saved-choice marker, retained for settings compatibility.
-/// ⌘W now asks each time, regardless of this value.
+/// Whether the user has picked what ⌘W does to a session; until then the
+/// first ⌘W close asks (`shell/archive_choice.rs`).
 pub fn archive_on_close_chosen(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .is_some_and(|store| store.current.archive_on_close_chosen)
@@ -480,7 +480,8 @@ pub fn close_shortcut_badges(cx: &App) -> (String, String) {
     (badge_combo(close), close_only)
 }
 
-/// Set the ✕-button preference. Per-close ⌘W answers do not change it.
+/// The Settings toggle and the first-close question both land here, so
+/// either one counts as the choice.
 pub fn set_archive_sessions_on_close(enabled: bool, cx: &mut App) {
     update(SavePolicy::Immediate, cx, |settings| {
         settings.archive_sessions_on_close = enabled;
@@ -789,13 +790,14 @@ pub struct UiSettings {
     /// The split chat layout at quit; launch restores it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_layout: Option<SavedChatLayout>,
-    /// Closing a session's tab or pane with its ✕ button also archives the
-    /// session (off by default). ⌘W asks each time; ⌘⌥W never archives, and
-    /// neither does quitting or closing the window.
+    /// Closing a session's tab or pane with ⌘W or its ✕ button also archives
+    /// the session (off by default). The close-without-archiving shortcut
+    /// (⌘⌥W) never does, and neither does quitting or closing the window.
     #[serde(alias = "archiveSessionsOnTabClose")]
     pub archive_sessions_on_close: bool,
-    /// Legacy marker for [`Self::archive_sessions_on_close`], retained for
-    /// settings compatibility. It no longer suppresses the ⌘W question.
+    /// The user has chosen [`Self::archive_sessions_on_close`], in Settings or
+    /// by answering the question the first ⌘W close asks. A file that already
+    /// has the setting on counts as chosen.
     pub archive_on_close_chosen: bool,
     /// The Settings section last viewed — reopened by the generic entry points
     /// (⌘, the account menu, the palette). Kept as a string so an unknown or

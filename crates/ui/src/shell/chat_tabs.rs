@@ -755,7 +755,7 @@ impl Shell {
     }
 
     /// The ✕-button archive path, under the archive-on-close setting.
-    /// ⌘W supplies its per-close choice to `archive_closed_session_if_idle`.
+    /// ⌘W supplies the saved preference to `archive_closed_session_if_idle`.
     /// No archive runs on window exit.
     pub(super) fn archive_closed_session(
         &mut self,
