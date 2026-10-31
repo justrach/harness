@@ -303,7 +303,7 @@ pub fn updateKey(a: *App, target_device: ?[]const u8) void {
 }
 
 /// `KEY_REJECTED_NOTICE`.
-pub const key_rejected_notice = "graff's API key for this provider was rejected. Your sign-in is not affected. Replace the key on this computer with `graff key set <provider> <key>`, or remove it (or its <PROVIDER>_API_KEY variable) so graff uses the sign-in. The error says which key it used.";
+pub const key_rejected_notice = "graff's API key for this provider was rejected. Your sign-in is not affected. Replace the key on this computer with `graff key set <provider> <key>`, or remove it (or its <PROVIDER>_API_KEY variable) so graff uses the sign-in; or, if it came from the Console sign-in, run `graff login console` again. The error says which key it used.";
 
 /// Switch (`ActivateAgentAccount`) or Forget (`ForgetAgentAccount`).
 fn accountAction(a: *App, method: []const u8, acc: accounts.Account) void {

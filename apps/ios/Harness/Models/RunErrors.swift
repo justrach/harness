@@ -45,7 +45,7 @@ enum ProviderProblem: String, Equatable, Sendable {
         case .limitReached:
             return "Wait for the limit to reset, or add another account on \(hostName) in Harness's Settings → Accounts."
         case .keyRejected:
-            return "Replace or remove the API key on \(hostName) (graff key set). Your sign-in is not affected."
+            return "Replace or remove the API key on \(hostName) (graff key set), or, if it came from the Console sign-in, run `graff login console` there again. Your sign-in is not affected."
         }
     }
 }
