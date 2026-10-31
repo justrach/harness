@@ -377,10 +377,9 @@ struct NewSpaceSheet: View {
                 if entry.isRepo {
                     Text("git")
                         .font(Theme.mono(10))
-                        .foregroundStyle(Theme.accent.opacity(0.85))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .background(Theme.accent.opacity(0.12), in: Capsule())
+                        .tintedChip(Theme.accent)
                 }
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold))

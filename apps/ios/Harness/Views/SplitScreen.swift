@@ -11,9 +11,12 @@ import SwiftUI
 enum SplitScreen {
     static let maxPanes = 2
 
-    /// A Max-class iPhone: a phone whose window is regular width. iPad is excluded on purpose.
-    static func isAvailable(idiom: UIUserInterfaceIdiom, sizeClass: UserInterfaceSizeClass?) -> Bool {
-        idiom == .phone && sizeClass == .regular
+    /// A window that is wide but short: regular width with compact height, the shape of a Max-class iPhone
+    /// in landscape. Decided by size classes alone, never by idiom: on iPhone Duo and in resizable iPhone
+    /// Mirroring an iPhone app can have any combination. A window that is regular both ways (iPad, or iPhone
+    /// Duo's inner display) gets the full sidebar instead.
+    static func isAvailable(horizontal: UserInterfaceSizeClass?, vertical: UserInterfaceSizeClass?) -> Bool {
+        horizontal == .regular && vertical == .compact
     }
 
     /// The session a new pane opens: the most recently used one that is not already on screen.
