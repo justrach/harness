@@ -2442,10 +2442,6 @@ impl Pickers {
             {
                 config.model_options =
                     offered_options(model, std::mem::take(&mut config.model_options));
-                #[cfg(feature = "model-picker-preview")]
-                if self.preview.enabled {
-                    config.reasoning = clamp_reasoning(config.reasoning, &model.reasoning_levels);
-                }
             }
         }
         self.state.update(cx, |state, cx| {
@@ -2472,13 +2468,6 @@ impl Pickers {
     /// The traits popover's reasoning ladder (model levels, falling back to
     /// the harness's advertised ladder) — shared by render and keyboard nav.
     fn trait_ladder(&self, cx: &App) -> Vec<ReasoningLevel> {
-        #[cfg(feature = "model-picker-preview")]
-        if self.preview.enabled {
-            return self
-                .selected_model(cx)
-                .map(|m| m.reasoning_levels.clone())
-                .unwrap_or_default();
-        }
         let Some(model) = self.selected_model(cx) else {
             return Vec::new();
         };
