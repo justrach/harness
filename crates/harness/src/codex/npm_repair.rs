@@ -183,6 +183,7 @@ async fn run(npm: &Path, args: &[&str]) -> Result<std::process::Output, String> 
 /// The same PATH a Codex run gets (npm launchers are `env node` scripts).
 fn command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
+    crate::apply_run_environment(&mut cmd, None);
     crate::compose_child_path(&mut cmd, program);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())

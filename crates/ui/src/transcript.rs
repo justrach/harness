@@ -60,6 +60,9 @@ mod cadence;
 #[path = "transcript/bottom_flicker_tests.rs"]
 mod bottom_flicker_tests;
 #[cfg(test)]
+#[path = "transcript/build_wait_tests.rs"]
+mod build_wait_tests;
+#[cfg(test)]
 #[path = "transcript/final_answer_tests.rs"]
 mod final_answer_tests;
 #[cfg(test)]
@@ -7901,6 +7904,16 @@ impl Transcript {
         }
     }
 
+    fn confirmed_build_wait_since(&self, cx: &gpui::App) -> Option<i64> {
+        let state = self.state.read(cx);
+        let chat_id = match &self.doc_override {
+            Some(doc_id) if self.doc_live && state.doc_has_chat_consumer(doc_id) => doc_id,
+            Some(_) => return None,
+            None => self.chat_id.as_ref()?,
+        };
+        state.build_wait_since_for_chat(chat_id, chrono::Utc::now())
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // A pending question owns the surface, even if the run still streams
         // or a steer follows it. Check this pane's doc, not the focused chat:
@@ -8015,6 +8028,29 @@ impl Transcript {
             };
             (sending, queued, elapsed, flavour_seed(&chat_id))
         };
+        if let Some(since) = self.confirmed_build_wait_since(cx) {
+            let theme = Theme::of(cx).clone();
+            // A separate, noninteractive row: historical tool disclosures stay
+            // where they are, and this status has no dropdown or actions.
+            return Some(
+                div()
+                    .id("build-wait-status")
+                    .debug_selector(|| "build-wait-status".into())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(Theme::SPACE_SM))
+                    .pt(px(Theme::SPACE_LG))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(crate::loaders::build_wait_dot(&theme, cx.entity_id(), cx))
+                    .child(SharedString::from(crate::build_wait::label(
+                        since,
+                        now.timestamp(),
+                    )))
+                    .into_any_element(),
+            );
+        }
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
@@ -8071,6 +8107,7 @@ impl Transcript {
             });
         let line = {
             div()
+                .debug_selector(|| "thinking-status".into())
                 .flex()
                 .flex_row()
                 .items_center()
@@ -9159,17 +9196,18 @@ impl Transcript {
                 .sum::<f32>();
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
-        let shimmer_phase = if active && !reduce_motion {
-            // The soft 3.4s sweep reads the same at 15Hz, and it runs for as
-            // long as a tool does.
-            motion::pulse_lease_slow(cx.entity_id(), cx);
-            self.tool_group_reveals
-                .get(row_id)
-                .and_then(|reveal| reveal.shimmer_started_at)
-                .map(|start| tool_title_shimmer_phase(start, now))
-        } else {
-            None
-        };
+        let shimmer_phase =
+            if active && !reduce_motion && self.confirmed_build_wait_since(cx).is_none() {
+                // The soft 3.4s sweep reads the same at 15Hz, and it runs for as
+                // long as a tool does.
+                motion::pulse_lease_slow(cx.entity_id(), cx);
+                self.tool_group_reveals
+                    .get(row_id)
+                    .and_then(|reveal| reveal.shimmer_started_at)
+                    .map(|start| tool_title_shimmer_phase(start, now))
+            } else {
+                None
+            };
         let disclosure_progress = if reduce_motion {
             if open { 1.0 } else { 0.0 }
         } else {

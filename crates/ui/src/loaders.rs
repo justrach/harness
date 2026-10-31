@@ -9,8 +9,9 @@
 //! cell to its rest state automatically (gpui `reduce_motion`).
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EntityId, IntoElement, ParentElement,
-    PathBuilder, Render, RenderOnce, SharedString, Styled, Window, canvas, div, point, px,
+    AnyElement, App, AppContext, Context, Entity, EntityId, InteractiveElement, IntoElement,
+    ParentElement, PathBuilder, Render, RenderOnce, SharedString, Styled, Window, canvas, div,
+    point, px,
 };
 
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, HARNESS_PULSE};
@@ -21,6 +22,42 @@ use crate::theme::{GlyphPalette, Theme};
 pub use harness_proto::motion::{
     MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, HARNESS_CELLS, mark_cell_stagger,
 };
+
+/// Confirmed queue wait: a quiet 1.9-second breath on the bounded shared
+/// clock, not the working spinner. Reduced motion schedules no animation.
+pub(crate) fn build_wait_dot(theme: &Theme, view: EntityId, cx: &mut App) -> impl IntoElement {
+    const WAIT_PULSE: motion::MotionSpec = motion::MotionSpec::new(1900, motion::EASE);
+    let reduced = motion::reduced_motion(cx);
+    let phase = motion::pulse_delta_slow(&WAIT_PULSE, view, cx);
+    let pulse = crate::build_wait::pulse(phase, reduced);
+    let ring_size = 12.0 * pulse.ring_scale;
+    div()
+        .debug_selector(|| "build-wait-dot".into())
+        .relative()
+        .size(px(16.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .absolute()
+                .left(px((16.0 - ring_size) / 2.0))
+                .top(px((16.0 - ring_size) / 2.0))
+                .size(px(ring_size))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.text_muted)
+                .opacity(pulse.ring_opacity),
+        )
+        .child(
+            div()
+                .size(px(6.0 * pulse.dot_scale))
+                .rounded_full()
+                .bg(theme.text_muted)
+                .opacity(pulse.dot_opacity),
+        )
+}
 
 /// The animated harness mark (harness-loader.tsx `HarnessLoader`): the full logo
 /// pixel grid with a light wave sweeping tail→head. Each cell rests dim

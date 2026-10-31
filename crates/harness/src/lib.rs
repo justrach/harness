@@ -103,9 +103,12 @@ pub struct RunControls {
 }
 
 /// See [`RunControls::origin`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunOrigin {
     pub chat_id: String,
+    /// Per-run directory for build-wrapper wait markers (`<pid>` files whose
+    /// contents are Unix seconds). Never inherited from the host process.
+    pub build_wait_dir: Option<std::path::PathBuf>,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -241,6 +244,8 @@ mod model_context;
 pub mod opencode;
 pub mod pi;
 pub mod process;
+mod run_environment;
+pub(crate) use run_environment::apply_run_environment;
 mod scratch;
 pub mod shell_env;
 pub mod tui_bundle;

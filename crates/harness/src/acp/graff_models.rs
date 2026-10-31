@@ -214,8 +214,9 @@ fn extension_unavailable(error: &HarnessError) -> bool {
 
 async fn discover_acp(harness: &AcpHarness, timeout: Duration) -> Result<Value, HarnessError> {
     let cwd = crate::scratch::ScratchDir::new("graff-model-discovery")?;
-    let (_scratch, mut child, _stderr) =
-        harness.spawn_agent(cwd.path().to_str(), false, &[]).await?;
+    let (_scratch, mut child, _stderr) = harness
+        .spawn_agent(cwd.path().to_str(), false, &[], None)
+        .await?;
     let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
         (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
         _ => {
@@ -350,6 +351,7 @@ fn no_authenticated_models() -> HarnessError {
 
 async fn run(exe: &Path, args: &[&str], timeout: Duration) -> Result<String, HarnessError> {
     let mut cmd = Command::new(exe);
+    crate::apply_run_environment(&mut cmd, None);
     cmd.args(args);
     crate::compose_child_path(&mut cmd, exe);
     cmd.stdin(Stdio::null())

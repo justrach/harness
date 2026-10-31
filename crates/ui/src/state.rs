@@ -806,6 +806,9 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    /// Only chat panes watch live progress; child docs never inherit a parent's wait.
+    peer_progress_tasks: HashMap<String, Task<()>>,
+    peer_tool_progress: HashMap<String, Vec<harness_proto::ToolProgressItem>>,
     // A peer and a child may read the same document. Single-flight watches
     // share work, not lifetime; each kind of consumer releases independently.
     sub_doc_consumers: HashSet<String>,
@@ -892,6 +895,8 @@ impl AppState {
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            peer_progress_tasks: HashMap::new(),
+            peer_tool_progress: HashMap::new(),
             sub_doc_consumers: HashSet::new(),
             peer_doc_consumers: HashSet::new(),
             cloud_sandboxes: Default::default(),
@@ -1508,6 +1513,63 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// Explicit, live host signal only. A stale record cannot leak into a later
+    /// turn or survive a settled/cancelled session. An unavailable watch is empty.
+    pub(crate) fn build_wait_since_for_chat(
+        &self,
+        chat_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<i64> {
+        if self.indicator_for(chat_id, now) != Indicator::Working {
+            return None;
+        }
+        let items = if self.selected_chat.as_deref() == Some(chat_id) {
+            &self.tool_progress
+        } else {
+            self.peer_tool_progress.get(chat_id)?
+        };
+        let since = harness_proto::build_wait_since(items)?;
+        if self
+            .session_for(chat_id)
+            .and_then(|s| s.started_at)
+            .is_some_and(|start| since < start.timestamp())
+        {
+            return None;
+        }
+        Some(since)
+    }
+
+    pub(crate) fn receive_tool_progress(
+        &mut self,
+        chat_id: &str,
+        items: Vec<harness_proto::ToolProgressItem>,
+    ) -> bool {
+        let mut changed = false;
+        if self.selected_chat.as_deref() == Some(chat_id) && self.tool_progress != items {
+            self.tool_progress = items.clone();
+            changed = true;
+        }
+        if self.peer_doc_consumers.contains(chat_id)
+            && self.peer_tool_progress.get(chat_id) != Some(&items)
+        {
+            self.peer_tool_progress.insert(chat_id.to_owned(), items);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Synthetic production capture hook; never reads user data or opens a watch.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_tool_progress(
+        &mut self,
+        chat_id: &str,
+        items: Vec<harness_proto::ToolProgressItem>,
+        cx: &mut Context<Self>,
+    ) {
+        self.receive_tool_progress(chat_id, items);
+        cx.notify();
+    }
+
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
@@ -1556,7 +1618,16 @@ impl AppState {
     /// same doc watch subagent tabs use (`WatchDocMessages` takes any doc id).
     pub fn watch_peer_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.peer_doc_consumers.insert(chat_id.clone());
-        self.watch_doc(chat_id, cx);
+        self.watch_doc(chat_id.clone(), cx);
+        if !self.peer_progress_tasks.contains_key(&chat_id)
+            && let Some(handle) = self.engine.clone()
+            && handle
+                .engine_info()
+                .supports(harness_proto::capabilities::TOOL_PROGRESS_V1)
+        {
+            let task = spawn_tool_progress_watch(cx, handle, chat_id.clone());
+            self.peer_progress_tasks.insert(chat_id, task);
+        }
     }
 
     /// Drop an unfocused pane's feed. A chat that just became the selected
@@ -1564,6 +1635,8 @@ impl AppState {
     /// feed, so those stay; only the peer rows and watch go.
     pub fn unwatch_peer_chat(&mut self, chat_id: &str) {
         self.peer_doc_consumers.remove(chat_id);
+        self.peer_progress_tasks.remove(chat_id);
+        self.peer_tool_progress.remove(chat_id);
         self.release_doc_if_unused(chat_id);
     }
 
@@ -2230,6 +2303,13 @@ impl AppState {
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
+        self.tool_progress.clear();
+        self.tool_progress_task = None;
+        self.peer_progress_tasks.clear();
+        self.peer_tool_progress.clear();
+        for chat_id in self.peer_doc_consumers.clone() {
+            self.watch_peer_chat(chat_id, cx);
+        }
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
@@ -3278,10 +3358,7 @@ fn spawn_tool_progress_watch(
                     continue;
                 };
                 let alive = this.update(cx, |state, cx| {
-                    if state.selected_chat.as_deref() == Some(chat_id.as_str())
-                        && state.tool_progress != frame.items
-                    {
-                        state.tool_progress = frame.items;
+                    if state.receive_tool_progress(&chat_id, frame.items) {
                         cx.notify();
                     }
                 });
@@ -3290,7 +3367,11 @@ fn spawn_tool_progress_watch(
                 }
             }
             if this
-                .update(cx, |state, _| state.tool_progress.clear())
+                .update(cx, |state, cx| {
+                    if state.receive_tool_progress(&chat_id, Vec::new()) {
+                        cx.notify();
+                    }
+                })
                 .is_err()
             {
                 return;

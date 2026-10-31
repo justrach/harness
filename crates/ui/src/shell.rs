@@ -7618,8 +7618,8 @@ impl Shell {
         // FAILED (explicit, with the transcript's retry affordance); a send
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
+        let now = Utc::now();
         let (queued, undelivered) = {
-            let now = Utc::now();
             let state = self.state.read(cx);
             (
                 state.send_queued(&id, now),
@@ -7633,10 +7633,17 @@ impl Shell {
         } else {
             spaces::status_dot_color(status, theme)
         };
+        let build_waiting = self
+            .state
+            .read(cx)
+            .build_wait_since_for_chat(&id, now)
+            .is_some();
         let status_label: Option<&'static str> = if undelivered {
             Some("Failed")
         } else if queued {
             Some("Queued")
+        } else if build_waiting {
+            Some("Waiting")
         } else {
             match status {
                 harness_proto::ChatIndicator::Working => Some("Working"),
@@ -7650,7 +7657,9 @@ impl Shell {
         let queued = queued && !undelivered;
         let working = status == harness_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let glyph = if working {
+            let glyph = if build_waiting {
+                loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx).into_any_element()
+            } else if working {
                 loaders::mini_glyph_spinner(
                     format!("{row_id}-working"),
                     2.0,
@@ -7773,6 +7782,9 @@ impl Shell {
                             .size(px(11.0))
                             .flex_none()
                             .text_color(status_color)
+                            .into_any_element()
+                    } else if build_waiting {
+                        loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx)
                             .into_any_element()
                     } else if working {
                         loaders::mini_glyph_spinner(

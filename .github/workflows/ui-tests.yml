@@ -9,6 +9,8 @@ on:
       - 'crates/**'
       - 'protocol/**'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/heavy-build.sh'
+      - 'scripts/test-heavy-build.py'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
@@ -23,6 +25,8 @@ on:
       - 'crates/**'
       - 'protocol/**'
       - 'scripts/test-linux-browser.sh'
+      - 'scripts/heavy-build.sh'
+      - 'scripts/test-heavy-build.py'
       - 'scripts/run-macos-browser-fixture.sh'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
@@ -58,12 +62,18 @@ jobs:
         run: |
           cargo test --locked -p harness-adapters --lib opencode::
           cargo test --locked -p harness-adapters --test opencode
+      - name: Build queue signals and run attribution
+        run: |
+          python3 scripts/test-heavy-build.py
+          cargo test --locked -p harness-proto --lib build_wait_
+          cargo test --locked -p harness-adapters --lib run_environment::tests
+          cargo test --locked -p harness-adapters --test claude build_wait_environment_is_scoped_to_the_launched_run
       - name: Durable session publication and recovery
         run: |
           cargo test --locked -p harness-sync --lib
           cargo test --locked -p harness-sync --test chat2_vectors
           cargo test --locked -p harness-update --lib
-          cargo test --locked -p harness-engine --lib --test e2e --test session_publication --test restart_resume --test orphaned_steers --test acp_orphaned_steers --test codex_subagents --test local_profiles --test diff_sync_idle --test show_visual --test branch_drift --test graff_worktree_run --test m5c_accounts_uploads_titles --test worktree_on_run --test graff_login
+          cargo test --locked -p harness-engine --lib --test e2e --test session_publication --test restart_resume --test orphaned_steers --test acp_orphaned_steers --test codex_subagents --test local_profiles --test diff_sync_idle --test build_wait --test show_visual --test branch_drift --test graff_worktree_run --test m5c_accounts_uploads_titles --test worktree_on_run --test graff_login
       - name: graff trace observer
         run: cargo test --locked -p harness-observe
       - name: Desktop parity vectors (protocol/desktop, shared with apps/nano)

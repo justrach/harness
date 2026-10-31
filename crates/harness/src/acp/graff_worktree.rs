@@ -110,6 +110,7 @@ pub(super) async fn ensure_worktree(
         return Ok(());
     }
     let mut command = crate::process::Command::new(program);
+    crate::apply_run_environment(&mut command, None);
     crate::compose_child_path(&mut command, program);
     command
         .args(["worktree", "create", name, base])
@@ -145,6 +146,7 @@ pub async fn run_graff_worktree_action(
     }
     let (program, _) = super::AcpHarness::graff().resolve_program(false).await?;
     let output = tokio::process::Command::new(&program)
+        .env_remove("HARNESS_BUILD_WAIT_DIR")
         .args(action.args(name))
         .current_dir(root)
         .env("NO_COLOR", "1")
