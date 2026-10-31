@@ -13461,10 +13461,11 @@ impl Render for Shell {
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
+                let content_plane = Theme::of(cx).content_plane();
                 // No inset cards (user request): the conversation column sits
-                // flush and unbordered, the transcript directly on the frost
-                // glass; the changes pane is a flush left-bordered glass panel
-                // (built inside `render_right_pane`).
+                // flush and unbordered on the frost glass, lifted only by
+                // `Theme::content_plane`; the changes pane is a flush
+                // left-bordered glass panel (built inside `render_right_pane`).
                 let main = if main_transition.is_some() {
                     div()
                         .h_full()
@@ -13498,6 +13499,7 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
+                    .when_some(content_plane, |el, plane| el.bg(plane))
                     .child(main)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (harness
