@@ -278,6 +278,8 @@ struct ComposerView: View {
     let store: SessionStore
     let chat: Chat
     let runLive: Bool
+    /// iPhone Duo: Stop lives in the status pill (DuoChat), so Send never turns into Stop.
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let questionClosedAtMs: Int64?
 
     // What was typed and not sent comes back with the chat (DraftStore).
@@ -460,7 +462,8 @@ struct ComposerView: View {
                 sendLabel: editingQueuedId != nil ? "Save queued message"
                     : (runLive ? "Queue message" : "Send message"),
                 allowEmptySend: editingQueuedId != nil,
-                showStop: runLive,
+                // A Duo stops from the status pill above the composer, never next to Send.
+                showStop: runLive && !duoChat,
                 busy: uploading || queueEditBusy || attachmentDraft.loading,
                 keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil,
                 onSend: send,

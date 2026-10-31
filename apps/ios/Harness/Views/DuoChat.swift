@@ -109,7 +109,7 @@ struct ToolChipStrip: View {
                 .padding(.horizontal, 8)
                 .frame(height: 24)
                 .foregroundStyle(chip.failed ? Theme.danger : Theme.textMuted)
-                .background(chip.failed ? Theme.dangerSoft : Theme.text.opacity(0.06), in: Capsule())
+                .background(chip.failed ? Theme.danger.opacity(0.12) : Theme.text.opacity(0.06), in: Capsule())
             }
         }
     }

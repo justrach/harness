@@ -66,10 +66,14 @@ struct SessionView: View {
         let entries = SessionPaging.entries(model: model, including: chat.id)
         let represented = pageSession == nil ? entries : SessionPaging.pageSet(of: chat.id, in: entries)
         let chats = represented.compactMap { model.chat(id: $0.id) }
-        let available = headerWidth > 0 ? headerWidth : viewWidth - Self.headerChromeInset
+        let available = headerWidth > 0 ? headerWidth : viewWidth - headerInset
         let limit = SessionStatusWindow.visibleLimit(availableWidth: available, total: chats.count,
                                                    hasPager: pageSession != nil && chats.count > 1)
         return headerControls(chat, chats: chats, maxVisible: limit)
+    }
+
+    private var headerInset: CGFloat {
+        duoChat && horizontalSizeClass == .compact ? 32 : Self.headerChromeInset
     }
 
     /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
@@ -252,7 +256,8 @@ struct SessionView: View {
                         // trailing buttons: the title expands before the
                         // fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).
-                        .frame(width: max(140, viewWidth - Self.headerChromeInset - stackedButtonsWidth),
+                        // A folded Duo's back button is in the side bar, so the title can start at the edge.
+                        .frame(width: max(140, viewWidth - headerInset - stackedButtonsWidth),
                                alignment: .leading)
                 }
                 // Bare text on the bar, not a glass capsule.
