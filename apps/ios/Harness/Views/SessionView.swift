@@ -15,6 +15,9 @@ struct SessionView: View {
     @Environment(\.stackedSplit) private var stackedSplit
     /// Close this pane of the stacked split, while two are shown.
     @Environment(\.stackedClose) private var stackedClose
+    /// Above the fold in laptop pose: draw the header strip here, with a back button (FoldPaneHeader).
+    @Environment(\.foldPaneHeader) private var foldPaneHeader
+    @Environment(\.dismiss) private var dismiss
     let chatId: String
 
     /// Reserve the back button and native bar margins. Anchor the rest to the
@@ -50,7 +53,9 @@ struct SessionView: View {
     /// bar is hidden. The bar's fixed-width header kept being evicted into the "…" menu in the narrow columns a
     /// Max uses (a session beside the list, or two panes of about 478pt), and on a landscape Max the bar is also
     /// a lot of lost height. Everywhere else the bar and its header are exactly as before.
-    private var paneChrome: Bool { splitScreen != nil }
+    /// iPhone Duo in laptop pose draws the strip too: the bar shares its row with the status bar there and
+    /// clipped the title under the back arrow.
+    private var paneChrome: Bool { splitScreen != nil || foldPaneHeader != nil }
 
     /// Rename and paging are sibling controls: tapping an arrow must never rename.
     private func headerTitle(_ chat: Chat) -> some View {
@@ -108,6 +113,30 @@ struct SessionView: View {
     /// Swipe it to page to a neighbouring session.
     private func paneHeader(_ chat: Chat, controls: SplitScreenControls) -> some View {
         HStack(spacing: 8) {
+            if foldPaneHeader != nil {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("fold-back")
+            }
+            if let showList = foldPaneHeader?.showList {
+                Button(action: showList) {
+                    Image(systemName: "list.bullet")
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show the session list")
+                .accessibilityIdentifier("fold-show-list")
+            }
             if let toggleList = controls.toggleList {
                 Button(action: toggleList) {
                     Image(systemName: "sidebar.leading")
@@ -171,8 +200,8 @@ struct SessionView: View {
                 // under it), so it is neither dimmed nor overlapped, and the content is clipped to its own
                 // rectangle.
                 VStack(spacing: 0) {
-                    if paneChrome, let splitScreen {
-                        paneHeader(chat, controls: splitScreen)
+                    if paneChrome {
+                        paneHeader(chat, controls: splitScreen ?? SplitScreenControls())
                         content(chat: chat, store: store).clipped()
                     } else {
                         // Not clipped: the content's background and header cover reach under the status bar.

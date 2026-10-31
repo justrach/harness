@@ -57,6 +57,8 @@ struct ComposerShell<Chips: View>: View {
     @State private var editor = ComposerEditorController()
     /// Inside a stacked phone split: where this composer reports its keyboard focus (PhoneSplitContainer).
     @Environment(\.stackedComposerFocus) private var stackedComposerFocus
+    /// Above the fold in laptop pose: where this composer reports its keyboard focus (HomeView).
+    @Environment(\.foldComposerFocus) private var foldComposerFocus
 
     private var expanded: Bool {
         alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
@@ -92,9 +94,17 @@ struct ComposerShell<Chips: View>: View {
                     focused = true
                 }
             }
-            .onChange(of: focused) { _, focused in stackedComposerFocus?(focused) }
+            .onChange(of: focused) { _, focused in
+                stackedComposerFocus?(focused)
+                foldComposerFocus?(focused)
+            }
             // Leaving the session while typing (switching sessions, closing it) lets the split have its rest back.
-            .onDisappear { if focused { stackedComposerFocus?(false) } }
+            .onDisappear {
+                if focused {
+                    stackedComposerFocus?(false)
+                    foldComposerFocus?(false)
+                }
+            }
     }
 
     /// The glass surface: collapsed = editor + send in one capsule row;
