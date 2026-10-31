@@ -180,6 +180,8 @@ final class AppModel {
             override("-setnewsessionharness") { UserDefaults.standard.set($0, forKey: "newSessionHarness") }
             override("-setnewsessionmodel") { UserDefaults.standard.set($0, forKey: "newSessionModel") }
             override("-setnewsessionreasoning") { UserDefaults.standard.set($0, forKey: "newSessionReasoning") }
+            // Pinned sessions for the pinned row: comma-separated chat ids.
+            override("-pin") { demoPinnedSessionIds = $0.split(separator: ",").map(String.init) }
             if args.contains("-no-projects") {
                 demo?.spaces = []
                 demo?.chats = []

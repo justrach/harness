@@ -62,6 +62,28 @@ enum Theme {
     static let spaceSM: CGFloat = 8
     static let spaceMD: CGFloat = 12
     static let spaceLG: CGFloat = 16
+
+    // ---- Home and session list (iOS) ----
+    /// Side gutter of the session list and its title, chips and pinned row.
+    static let gutter: CGFloat = 24
+    /// Height of the filter chips above the list. Fully round (a capsule).
+    static let chipHeight: CGFloat = 36
+    /// The agent avatar at the head of each session row.
+    static let rowAvatar: CGFloat = 44
+    /// A pinned session's avatar in the pinned row.
+    static let pinnedAvatar: CGFloat = 56
+    /// Minimum tap target, per DESIGN.md.
+    static let hitTarget: CGFloat = 44
+
+    // ---- type scale for Home and the session rows: four sizes, two weights ----
+    /// The large Home title.
+    static let titleSize: CGFloat = 27
+    /// A session's name.
+    static let nameSize: CGFloat = 16
+    /// The line under the name: project and device.
+    static let previewSize: CGFloat = 14
+    /// Times, status words and the branch.
+    static let metaSize: CGFloat = 12
 }
 
 // MARK: - Fonts
@@ -224,5 +246,38 @@ extension View {
     /// A grouped list section's rows on the theme's raised card surface.
     func harnessListRow() -> some View {
         listRowBackground(Theme.surfaceRaised)
+    }
+}
+
+// MARK: Status and tag chips
+
+/// A status or tag chip: a soft tint of its hue behind darker, saturated text in that same hue, never a solid
+/// saturated fill with white text (DESIGN.md "Status and tag chips"). Light: the hue at 12% over the surface,
+/// text mixed 35% toward black. Dark: the hue at 16%, text mixed 20% toward white. On both Codegraff
+/// appearances every status hue (danger, warning, success, accent) clears 4.5:1 that way.
+struct TintedChipStyle: ViewModifier {
+    let hue: Color
+    let shape: AnyShape
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(TintedChipStyle.text(hue, dark: colorScheme == .dark))
+            .background(TintedChipStyle.fill(hue, dark: colorScheme == .dark), in: shape)
+    }
+
+    static func text(_ hue: Color, dark: Bool) -> Color {
+        dark ? hue.mix(with: .white, by: 0.2, in: .device) : hue.mix(with: .black, by: 0.35, in: .device)
+    }
+
+    static func fill(_ hue: Color, dark: Bool) -> Color {
+        hue.opacity(dark ? 0.16 : 0.12)
+    }
+}
+
+extension View {
+    /// Style this as a status or tag chip in `hue` (see `TintedChipStyle`). Capsule unless a shape is given.
+    func tintedChip(_ hue: Color, in shape: some Shape = Capsule()) -> some View {
+        modifier(TintedChipStyle(hue: hue, shape: AnyShape(shape)))
     }
 }

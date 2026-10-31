@@ -284,29 +284,45 @@ extension ChatIndicator {
     }
 }
 
-/// The session row's top-right status glyph (shell.rs `render_chat_row`
-/// corner slot): a 6pt dot with the status word beside it in the same color;
-/// Done trades the dot for a check. Idle rows render time-ago instead — the
-/// caller handles that branch, since only it knows the timestamp.
+/// The session row's status chip (shell.rs `render_chat_row` corner slot): the status word on a soft tint
+/// of its color, in darker text of the same hue (DESIGN.md "Status and tag chips"). Idle rows, and finished
+/// rows with an unread reply, render their time instead; the caller handles that, since only it knows the
+/// timestamp.
 struct StatusCorner: View {
     let indicator: ChatIndicator
 
     var body: some View {
-        HStack(spacing: 4) {
-            if indicator == .completed {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(indicator.dotColor)
-            } else {
-                Circle()
-                    .fill(indicator.dotColor)
-                    .frame(width: 6, height: 6)
-            }
-            if let label = indicator.label {
-                Text(label)
-                    .font(Theme.sans(10, weight: .medium))
-                    .foregroundStyle(indicator.dotColor)
-            }
+        if let label = indicator.label {
+            StatusChip(label: label, hue: indicator.chipHue)
+        }
+    }
+}
+
+/// A short status word as a tinted chip.
+struct StatusChip: View {
+    let label: String
+    let hue: Color
+
+    var body: some View {
+        Text(label)
+            .font(Theme.sans(Theme.metaSize, weight: .semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .tintedChip(hue)
+            .fixedSize()
+    }
+}
+
+extension ChatIndicator {
+    /// The full-strength hue behind a status chip (`dotColor` is a dimmed dot tone).
+    var chipHue: Color {
+        switch self {
+        case .working: return Theme.statusWorking
+        case .awaitingInput: return Theme.warning
+        case .errored: return Theme.danger
+        case .completed: return Theme.statusCompleted
+        case .idle: return Theme.textMuted
         }
     }
 }

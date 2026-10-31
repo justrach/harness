@@ -7,9 +7,9 @@ final class SplitSuggestionTests: XCTestCase {
     private let landscape = CGSize(width: 874, height: 402)
     private let portrait = CGSize(width: 393, height: 852)
 
-    private func context(mode: PhoneSplit = .off, isPhone: Bool = true, compact: Bool = true,
+    private func context(mode: PhoneSplit = .off, compact: Bool = true,
                          size: CGSize? = nil, largeText: Bool = false) -> SplitSuggestion.Context {
-        .init(mode: mode, isPhone: isPhone, compactWidth: compact, size: size ?? landscape, largeText: largeText)
+        .init(mode: mode, compactWidth: compact, size: size ?? landscape, largeText: largeText)
     }
 
     private func juggling(opens: Int = 3, secondsAgo: TimeInterval = 30) -> SplitSuggestion {
@@ -53,9 +53,8 @@ final class SplitSuggestionTests: XCTestCase {
         for mode in [PhoneSplit.auto, .sideBySide, .stacked] {
             XCTAssertFalse(juggling().shouldOffer(context(mode: mode), now: now), "\(mode) is already chosen")
         }
-        XCTAssertFalse(juggling().shouldOffer(context(isPhone: false), now: now), "iPad already splits")
         XCTAssertFalse(juggling().shouldOffer(context(compact: false), now: now),
-                       "a regular-width phone (a Pro Max in landscape) already has the sidebar")
+                       "a regular-width window (iPad, iPhone Duo's inner display, a Pro Max in landscape) already has the sidebar")
     }
 
     func testLargeTextIsLeftAlone() {

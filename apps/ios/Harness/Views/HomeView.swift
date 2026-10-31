@@ -41,6 +41,7 @@ struct HomeView: View {
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     private var selectedSpace: Space? {
         model.spaces.first { $0.id == spaceFilter }
@@ -50,6 +51,8 @@ struct HomeView: View {
     /// room for the chosen shape; the single stack otherwise. Off by default.
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
     @State private var containerSize: CGSize = .zero
+    /// How iPhone Duo's fold divides the window, while it is partly folded (see FoldLayout).
+    @State private var fold: FoldSplit = .none
     @State private var splitSuggestion = SplitSuggestion.load()
     @State private var showSplitOffer = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -58,7 +61,6 @@ struct HomeView: View {
     private func refreshSplitOffer() {
         let context = SplitSuggestion.Context(
             mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off,
-            isPhone: UIDevice.current.userInterfaceIdiom == .phone,
             compactWidth: horizontalSizeClass == .compact,
             size: containerSize,
             largeText: dynamicTypeSize.isAccessibilitySize)
@@ -92,7 +94,10 @@ struct HomeView: View {
 
     /// The second session shown beside the first. The first is the navigation stack's own.
     @State private var secondChatId: String?
-    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
+    /// Both columns from the start: on a portrait-shaped regular window (iPhone Duo's inner display, an iPad
+    /// in portrait) `.automatic` hid the list behind the open session; the point of the wide window is the two
+    /// side by side. The sidebar button still hides it.
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     /// The session header on a Max is drawn in the pane, so the system's sidebar button is gone; this brings
     /// the list in and out.
@@ -101,7 +106,7 @@ struct HomeView: View {
     }
 
     private var splitScreenAvailable: Bool {
-        SplitScreen.isAvailable(idiom: UIDevice.current.userInterfaceIdiom, sizeClass: horizontalSizeClass)
+        SplitScreen.isAvailable(horizontal: horizontalSizeClass, vertical: verticalSizeClass)
     }
 
     private var panes: SplitPanes {
@@ -257,11 +262,23 @@ struct HomeView: View {
             // two panes need regular width, the phone split compact.
             if splitScreenAvailable, let second = secondChatId {
                 twoPanes(second: second)
+            } else if horizontalSizeClass == .regular, case .stacked(let top, let gap) = fold {
+                // iPhone Duo folded like a laptop: nothing may cross the fold, so the open session takes the
+                // upper half (its composer, and the keyboard, land on the lower half) and the list the lower.
+                VStack(spacing: 0) {
+                    primaryStack.frame(height: top)
+                    Color.clear.frame(height: gap)
+                    NavigationStack { sidebar }
+                }
             } else if horizontalSizeClass == .regular {
+                // iPad, iPhone Duo's inner display and other wide windows: the list beside the session. Folded
+                // like a book, the list's column ends on the fold line and each side keeps its 20pt margin.
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
+                        .modifier(FoldColumn(fold: fold, side: .leading))
                 } detail: {
                     primaryStack
+                        .modifier(FoldColumn(fold: fold, side: .trailing))
                 }
                 .navigationSplitViewStyle(.balanced)
             } else if stackedSplitAvailable, stackedSecond != nil, !path.isEmpty {
@@ -280,6 +297,12 @@ struct HomeView: View {
                 }
             }
         }
+        .onFoldChange { next in
+            // Both columns stay up in book pose: each half of the fold holds one.
+            if case .sideBySide = next { columnVisibility = .all }
+            withAnimation(Motion.resort) { fold = next }
+        }
+        .avoidingOcclusions()
         // The keyboard must not reshape the split under the person typing (see PhoneSplit.layoutSize).
         .onGeometryChange(for: CGSize.self) { $0.size } action: {
             containerSize = PhoneSplit.layoutSize(previous: containerSize, measured: $0)
@@ -480,6 +503,7 @@ struct HomeView: View {
                 } label: {
                     Label("Settings", systemImage: "gearshape")
                 }
+                .fontWeight(.semibold)
                 .accessibilityLabel("Settings")
                 .accessibilityIdentifier("home-settings")
             }
@@ -489,6 +513,7 @@ struct HomeView: View {
                 } label: {
                     Label("Profile", systemImage: "person.circle")
                 }
+                .fontWeight(.semibold)
                 .accessibilityLabel("Profile")
                 .accessibilityIdentifier("home-profile")
             }
@@ -681,6 +706,8 @@ struct HomeView: View {
             // overflow menu on a foldable's side bar needs the title.
             Label("New session", systemImage: "plus")
         }
+        // A slightly heavier symbol than the bar's default; the bar gives it glass.
+        .fontWeight(.semibold)
         .accessibilityLabel("New session")
         .accessibilityIdentifier("new-session")
     }
@@ -691,6 +718,28 @@ struct HomeView: View {
         let scoped = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
         let chats = HomeFilter.apply(scoped, query: searchText, names: model.homeFilterNames)
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
+        // The large title, then the pinned people row, then the chips. Not in
+        // the phone split: a narrow pane keeps its rows for sessions.
+        if phoneArrangement == nil {
+            Section {
+                Text("Sessions")
+                    .font(Theme.sans(Theme.titleSize, weight: .semibold, relativeTo: .largeTitle))
+                    .foregroundStyle(Theme.text)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("home-title")
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: Theme.gutter, bottom: 6, trailing: Theme.gutter))
+                let pinnedChats = scoped.filter { model.isPinned(chatId: $0.id) }
+                if searchText.isEmpty, !pinnedChats.isEmpty {
+                    PinnedRow(chats: pinnedChats) { open(.chat($0)) }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 8, trailing: 0))
+                }
+            }
+            .listSectionSeparator(.hidden)
+        }
         if HomeListControls.showsRow(hasSessions: !model.overviewChats.isEmpty,
                                      hasProjects: !model.spaces.isEmpty,
                                      projectSelected: selectedSpace != nil) {
@@ -698,7 +747,7 @@ struct HomeView: View {
                 listControls(showsGrouping: HomeListControls.showsGrouping(sessionsInScope: scoped.count))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 2, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: 0, leading: Theme.gutter, bottom: 4, trailing: Theme.gutter))
             }
             .listSectionSeparator(.hidden)
         }
@@ -708,7 +757,7 @@ struct HomeView: View {
                                  notNow: { answerSplitOffer(tryIt: false) })
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: 6, leading: Theme.gutter, bottom: 6, trailing: Theme.gutter))
             }
             .listSectionSeparator(.hidden)
         }
@@ -764,7 +813,7 @@ struct HomeView: View {
                         HomeGroupHeader(group: group, collapsed: collapsed) {
                             withAnimation(Motion.resort) { toggleGroup(group.id) }
                         }
-                        .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 2, trailing: 12))
+                        .listRowInsets(EdgeInsets(top: 8, leading: Theme.gutter - 8, bottom: 2, trailing: Theme.gutter - 8))
                     }
                 }
                 .listSectionSeparator(.hidden)
@@ -791,11 +840,14 @@ struct HomeView: View {
             open(.chat(chat.id))
         }
         .listRowBackground(selectedChatId == chat.id
-            ? AnyView(RoundedRectangle(cornerRadius: 10).fill(Theme.elementActive)
-                .padding(.horizontal, 8))
+            ? AnyView(RoundedRectangle(cornerRadius: ChatRow.washRadius, style: .continuous)
+                .fill(Theme.elementActive)
+                .padding(.horizontal, Theme.gutter - ChatRow.insetH))
             : AnyView(Color.clear))
         .listRowSeparator(.hidden)
-        .listRowInsets(EdgeInsets(top: 1, leading: 12, bottom: 1, trailing: 12))
+        // The row pads its content by insetH, so the avatar and text sit on the 24pt gutter.
+        .listRowInsets(EdgeInsets(top: 1, leading: Theme.gutter - ChatRow.insetH,
+                                  bottom: 1, trailing: Theme.gutter - ChatRow.insetH))
         .sessionPinAction(chat: chat, model: model)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button {
@@ -833,23 +885,23 @@ struct HomeView: View {
 
 // MARK: - Rows
 
-/// The desktop session row (shell.rs `render_chat_row`), line for line: a
-/// muted context line with the status word in the corner (dot + word, muted;
-/// Done keeps its pop with a check; Idle rows carry the time-ago there
-/// instead); the title on its own line; harness mark and branch close it out,
-/// with the mini spinner riding the row's bottom-right while Working.
+/// A session row, laid out like a messages list: the agent's avatar, then the
+/// session name with its time or status word in the corner, the project and
+/// device under it, and the branch below that. The Working spinner rides the
+/// bottom-right. A finished run with an unread reply shows its time and a dot in
+/// the accent color, never red.
 ///
 /// The one addition the phone needs: the desktop row names only the space
 /// because its sidebar sits on the machine running the work. Here the Sessions
 /// list interleaves every device, and a session whose host has gone offline
-/// can't be driven at all — so the context line reads "space @ device".
+/// can't be driven at all, so the line under the name reads "space @ device".
 struct ChatRow: View {
     @Environment(AppModel.self) private var model
     let chat: Chat
     var showLocation: Bool
     let onSelect: () -> Void
 
-    private var subline: Color { Theme.textMuted.opacity(0.5) }
+    private var subline: Color { Theme.textMuted.opacity(0.7) }
 
     var body: some View {
         // The 1Hz pulse (live only while something is degraded or pending)
@@ -863,19 +915,26 @@ struct ChatRow: View {
                 content(indicator: indicator, sendState: sendState,
                         reservesPullRequest: pullRequest != nil)
             }
-            .buttonStyle(PressWashButtonStyle())
+            .buttonStyle(PressWashButtonStyle(cornerRadius: ChatRow.washRadius))
             if let pullRequest {
                 PullRequestBadge(summary: pullRequest)
                     .padding(.trailing, 8)
-                    .padding(.bottom, 6)
+                    .padding(.bottom, 10)
                     .zIndex(1)
             }
         }
     }
 
+    /// The pressed and selected wash. Concentric with the avatar: its 22pt
+    /// radius plus the row's 12pt inset, rounded to the list's rhythm.
+    static let washRadius: CGFloat = 18
+    /// Inside the wash: horizontal and vertical padding around the content.
+    static let insetH: CGFloat = 8
+    static let insetV: CGFloat = 12
+
     /// Undelivered-send override for the corner slot (shell.rs precedence:
     /// Failed > Queued > the normal indicator). Suppresses the Working
-    /// spinner too — no fake progress on a send that hasn't left.
+    /// spinner too, so there is no fake progress on a send that hasn't left.
     private func sendBadge(_ state: SendState) -> (label: String, color: Color)? {
         switch state {
         case .failed: return ("Not delivered", Theme.danger)
@@ -888,84 +947,121 @@ struct ChatRow: View {
     private func content(indicator: ChatIndicator, sendState: SendState?,
                          reservesPullRequest: Bool) -> some View {
         let badge = sendState.flatMap(sendBadge)
-        return VStack(alignment: .leading, spacing: 2) {
-            // Line 1: space @ device, status corner (time-ago when idle).
-            HStack(spacing: 8) {
-                if showLocation {
-                    location
-                        .font(Theme.sans(13))
-                        .foregroundStyle(subline)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Spacer(minLength: 4)
-                }
-                if let badge {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(badge.color)
-                            .frame(width: 6, height: 6)
-                        Text(badge.label)
-                            .font(Theme.sans(12, weight: .medium))
-                            .foregroundStyle(badge.color)
+        let unread = indicator == .completed && badge == nil
+        return HStack(alignment: .top, spacing: 12) {
+            AgentAvatar(harness: chat.config?.harness, size: Theme.rowAvatar)
+            VStack(alignment: .leading, spacing: 3) {
+                // Line 1: the session name, and its time or status in the corner.
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if model.isPinned(chatId: chat.id) {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.textMuted)
+                            .accessibilityLabel("Pinned")
                     }
-                } else if indicator == .idle {
-                    Text(relativeTime(chat.lastMessageAt ?? chat.createdAt))
-                        .font(Theme.sans(12, weight: .medium))
-                        .foregroundStyle(subline)
-                        .fixedSize()
-                } else {
-                    StatusCorner(indicator: indicator)
-                }
-            }
-
-            // Line 2: the session title.
-            HStack(spacing: 6) {
-                if model.isPinned(chatId: chat.id) {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Theme.textMuted)
-                }
-                Text(chat.displayTitle)
-                    .font(Theme.sans(17, weight: .medium))
-                    .foregroundStyle(Theme.text)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            // Line 3: harness brand mark, then the branch when the engine
-            // stamped one; the Working spinner rides bottom-right.
-            HStack(spacing: 4) {
-                if let harness = chat.config?.harness {
-                    HarnessBadge(harness: harness, size: 11, neutral: subline)
-                }
-                if let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
-                    LineIconView(.gitBranch, size: 11, color: subline)
-                    Text(branch)
-                        .font(Theme.sans(13))
-                        .foregroundStyle(subline)
+                    Text(chat.displayTitle)
+                        .font(Theme.sans(Theme.nameSize, weight: .semibold))
+                        .foregroundStyle(Theme.text)
                         .lineLimit(1)
-                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    corner(indicator: indicator, badge: badge, unread: unread)
                 }
-                Spacer(minLength: 0)
-                if indicator == .working, badge == nil {
-                    MiniSpinner()
+
+                // Line 2: space @ device, and the unread dot.
+                HStack(spacing: 8) {
+                    if showLocation {
+                        location
+                            .font(Theme.sans(Theme.previewSize))
+                            .foregroundStyle(subline)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Spacer(minLength: 4)
+                    }
+                    if unread {
+                        Circle()
+                            .fill(Theme.accent)
+                            .frame(width: 10, height: 10)
+                            .accessibilityHidden(true)
+                    }
                 }
+
+                // Line 3: the branch when the engine stamped one; the Working
+                // spinner rides bottom-right. Always laid out, so every row is
+                // the same height.
+                HStack(spacing: 4) {
+                    if let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
+                        LineIconView(.gitBranch, size: 11, color: subline)
+                        Text(branch)
+                            .font(Theme.sans(Theme.metaSize))
+                            .foregroundStyle(subline)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } else {
+                        Text(" ").font(Theme.sans(Theme.metaSize)).accessibilityHidden(true)
+                    }
+                    Spacer(minLength: 0)
+                    if indicator == .working, badge == nil {
+                        MiniSpinner()
+                    }
+                }
+                .padding(.trailing, reservesPullRequest ? 46 : 0)
             }
-            .padding(.trailing, reservesPullRequest ? 46 : 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, ChatRow.insetH)
+        .padding(.vertical, ChatRow.insetV)
+        .contentShape(RoundedRectangle(cornerRadius: ChatRow.washRadius, style: .continuous))
+        .accessibilityValue(unread ? "Finished, unread reply" : "")
+    }
+
+    @ViewBuilder
+    private func corner(indicator: ChatIndicator, badge: (label: String, color: Color)?, unread: Bool) -> some View {
+        if let badge {
+            StatusChip(label: badge.label, hue: badge.color)
+        } else if indicator == .idle || unread {
+            // Unread: the time in the accent, like a messages list; idle: muted.
+            Text(relativeTime(chat.lastMessageAt ?? chat.createdAt))
+                .font(Theme.sans(Theme.metaSize, weight: unread ? .semibold : .regular))
+                .foregroundStyle(unread ? Theme.accent : subline)
+                .monospacedDigit()
+                .fixedSize()
+        } else {
+            StatusCorner(indicator: indicator)
+                .fixedSize()
+        }
     }
 
     /// "space @ device" (the session header's format). The space name (not
-    /// the cwd basename) is what the desktop row shows — they differ once a
+    /// the cwd basename) is what the desktop row shows; they differ once a
     /// space has been renamed, or when the session runs in a worktree off to
     /// the side. No offline marker: the dropdown carries device liveness.
     private var location: Text {
         projectLocation(chat: chat, model: model)
+    }
+}
+
+/// A session's agent as an avatar: its brand mark on a quiet round plate. The
+/// agent is who you are talking to, so it stands where a person's photo would.
+/// Sessions with no agent recorded yet get a neutral mark.
+struct AgentAvatar: View {
+    let harness: String?
+    var size: CGFloat = Theme.rowAvatar
+
+    var body: some View {
+        ZStack {
+            Circle().fill(ink(0.06))
+            Circle().strokeBorder(hairline(0.06), lineWidth: 0.5)
+            if let harness {
+                HarnessBadge(harness: harness, size: size * 0.46, neutral: Theme.text)
+            } else {
+                Image(systemName: "sparkle")
+                    .font(.system(size: size * 0.38, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
 }
 
@@ -1045,5 +1141,29 @@ private struct SplitDetailPlaceholder: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bg.ignoresSafeArea())
+    }
+}
+
+/// A split view column in iPhone Duo's book pose: the list's column is pinned to end on the fold line, and each
+/// side keeps the division's margin clear. Does nothing without an active vertical fold.
+private struct FoldColumn: ViewModifier {
+    enum Side { case leading, trailing }
+    let fold: FoldSplit
+    let side: Side
+
+    func body(content: Content) -> some View {
+        if case .sideBySide(let leading, let gap) = fold {
+            switch side {
+            case .leading:
+                let width = leading + gap / 2
+                content
+                    .safeAreaPadding(.trailing, gap / 2)
+                    .navigationSplitViewColumnWidth(min: width, ideal: width, max: width)
+            case .trailing:
+                content.safeAreaPadding(.leading, gap / 2)
+            }
+        } else {
+            content
+        }
     }
 }
