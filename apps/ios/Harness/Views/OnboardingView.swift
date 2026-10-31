@@ -18,7 +18,13 @@ struct OnboardingView: View {
 
     enum Step: Int, CaseIterable { case agent, effort, autonomy, notify, ready }
 
-    @State private var step: Step = .agent
+    /// Screenshot rig: `-setup-step N` opens on step N (0 to 4) in demo mode.
+    @State private var step: Step = {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.contains("-demo"), let ix = args.firstIndex(of: "-setup-step"), ix + 1 < args.count,
+              let n = Int(args[ix + 1]), let step = Step(rawValue: n) else { return .agent }
+        return step
+    }()
     @State private var hostId: String?
     @State private var agents: [AgentDescriptor] = []
     @State private var agentsLoaded = false
