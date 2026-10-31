@@ -499,10 +499,12 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     // docs/chat2-sync.md A2). Full text lives only in the
                     // host's run journal. Inline diffs die the same way:
                     // stats only, never text. `is_error` still folds so
-                    // failed chips read as failed.
-                    let _ = output; // journal-only
+                    // failed chips read as failed. The output's SIZE stays:
+                    // the context card attributes the agent's reported total
+                    // to files, commands and search from it, and without it
+                    // every tool result counted as "System & other".
                     *out_slot = None;
-                    *output_bytes = None;
+                    *output_bytes = output.as_ref().map(|o| o.len() as u64);
                     *diff_slot = None;
                     *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
                 }
@@ -685,6 +687,7 @@ pub fn apply_sidecar_refs(chat_id: &str, parts: &mut [MessagePart]) {
         if let MessagePart::Tool {
             id,
             resolved: true,
+            output,
             output_ref,
             output_bytes,
             diff_ref,
@@ -692,7 +695,9 @@ pub fn apply_sidecar_refs(chat_id: &str, parts: &mut [MessagePart]) {
             ..
         } = part
         {
-            if output_ref.is_none() && output_bytes.is_some() {
+            // A size alone is not content: the live fold keeps every
+            // output's size (for the context card) but no output text.
+            if output_ref.is_none() && output.is_some() && output_bytes.is_some() {
                 *output_ref = Some(format!("{chat_id}/{id}"));
             }
             if diff_ref.is_none() && diff_stats.is_some() {
@@ -1345,10 +1350,11 @@ mod tests {
                 diff_stats,
                 ..
             } => {
-                // One-liner chips: outputs never enter the doc at all
-                // (journal-only); diff text neither — stats survive.
+                // One-liner chips: output text never enters the doc
+                // (journal-only); diff text neither — stats survive. The
+                // output's size does, for the context card's split.
                 assert_eq!(output.as_deref(), None);
-                assert_eq!(*output_bytes, None);
+                assert_eq!(*output_bytes, Some(full.len() as u64));
                 assert!(diff.is_none(), "inline diff text must not enter the doc");
                 let stats = diff_stats.as_ref().unwrap();
                 assert_eq!(stats.len(), 1);
