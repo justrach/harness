@@ -1364,6 +1364,33 @@ impl AgentAccounts {
                 code: None,
             });
         }
+        if provider == "claude-agent" {
+            // No link to open: graff asks Claude Code (`claude auth status`)
+            // whether it is signed in and records the choice; the login
+            // itself belongs to `claude`. A refusal is graff's `✗` line.
+            while lock(&exit).is_none() {
+                if Instant::now() > deadline {
+                    self.cancel_login(&login_id);
+                    return Err(EngineError::Other(
+                        "Claude Code did not answer in time. Check that `claude` runs on this device."
+                            .into(),
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let text = lock(&output).clone();
+            if !graff_logins::saw_success(&text) {
+                self.cancel_login(&login_id);
+                return Err(EngineError::Other(graff_logins::failure_message(&text)));
+            }
+            // Already done: the first poll reports it.
+            return Ok(AgentLoginStart {
+                login_id,
+                url: String::new(),
+                mode: AgentLoginMode::Browser,
+                code: None,
+            });
+        }
         let url = loop {
             if let Some(url) = graff_logins::scan_login_url(&lock(&output)) {
                 break Some(url);

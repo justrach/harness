@@ -64,6 +64,16 @@ zai)
   printf '\nTo log in to Z.AI Coding Plan, open this URL (browser should open automatically):\n\n  https://chat.z.ai/cli/authorize?flow=f1\n\nwaiting for authorization…\n'
   exec sleep 30
   ;;
+claude-agent)
+  # Like graff: ask Claude Code, then record the choice or refuse with `✗`.
+  if [ -f "$HOME/no-claude-login" ]; then
+    printf '✗ Claude Code is not signed in. Run `claude auth login` in a terminal, then sign in to Claude Agent again.\n'
+    exit 1
+  fi
+  mkdir -p "$HOME/.graff/credentials"
+  printf '{"claude":"claude"}\n' > "$HOME/.graff/credentials/claude-agent.json"
+  printf '✓ Claude Agent is ready: graff runs your Claude Code login.\n'
+  ;;
 chatgpt-new)
   printf 'waiting for the sign-in on the execution device …\n'
   sleep 1
@@ -125,7 +135,8 @@ async fn graff_provider_sign_ins_end_to_end() {
             ("kimi".into(), false),
             ("zai".into(), false),
             ("chatgpt-new".into(), false),
-            ("anthropic".into(), false)
+            ("anthropic".into(), false),
+            ("claude-agent".into(), false)
         ]
     );
     let names: Vec<_> = accounts
@@ -135,7 +146,14 @@ async fn graff_provider_sign_ins_end_to_end() {
         .collect();
     assert_eq!(
         names,
-        ["xAI", "Kimi", "Z.AI", "ChatGPT", "Anthropic Console"]
+        [
+            "xAI",
+            "Kimi",
+            "Z.AI",
+            "ChatGPT",
+            "Anthropic Console",
+            "Claude Agent"
+        ]
     );
 
     // xAI: the link and code come back, graff's own opener is muted, and the
@@ -156,7 +174,8 @@ async fn graff_provider_sign_ins_end_to_end() {
             ("kimi".into(), false),
             ("zai".into(), false),
             ("chatgpt-new".into(), false),
-            ("anthropic".into(), false)
+            ("anthropic".into(), false),
+            ("claude-agent".into(), false)
         ]
     );
     let opener =
@@ -276,6 +295,33 @@ async fn graff_provider_sign_ins_end_to_end() {
     assert!(!rows[2].signed_in);
     assert!(!zai_credential.exists());
     assert!(accounts.poll_login(&start.login_id).await.is_err());
+
+    // Claude Agent: no link; graff's answer comes back at once. A Claude Code
+    // with no login is refused in graff's words, and nothing is recorded.
+    std::fs::write(home.join("no-claude-login"), "").unwrap();
+    let refused = accounts
+        .start_graff_login("claude-agent")
+        .await
+        .expect_err("no Claude Code login");
+    assert!(
+        refused.to_string().contains("claude auth login"),
+        "{refused}"
+    );
+    assert!(!home.join(".graff/credentials/claude-agent.json").exists());
+    std::fs::remove_file(home.join("no-claude-login")).unwrap();
+    let start = accounts
+        .start_graff_login("claude-agent")
+        .await
+        .expect("start Claude Agent");
+    assert!(start.url.is_empty() && start.code.is_none());
+    let poll = settle(&accounts, &start.login_id).await;
+    assert_eq!(poll.status, AgentLoginStatus::Done, "{:?}", poll.message);
+    let rows = accounts
+        .sign_out_graff_login("claude-agent")
+        .await
+        .expect("sign out Claude Agent");
+    assert!(!rows[5].signed_in);
+    assert!(!home.join(".graff/credentials/claude-agent.json").exists());
 
     // Sign out of xAI: gone, and the others are untouched.
     let rows = accounts

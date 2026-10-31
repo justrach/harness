@@ -1021,6 +1021,9 @@ pub const GRAFF_LOGIN_PROVIDERS: &[(&str, &str)] = &[
     // An Anthropic Console account, through Anthropic's own `ant` CLI; graff
     // spends that workspace's API credits (graff ADR 0281).
     ("anthropic", "Anthropic Console"),
+    // Claude through the user's own Claude Code (`claude`) and its login:
+    // graff never sees a token, it records the choice (graff ADR 0309).
+    ("claude-agent", "Claude Agent"),
 ];
 
 /// Where a person manages their ChatGPT plan's usage (OpenAI's UI guidelines

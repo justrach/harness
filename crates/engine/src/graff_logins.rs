@@ -89,6 +89,13 @@ pub fn credential_path(home: &Path, provider: &str) -> Option<PathBuf> {
             if provider == "anthropic" {
                 return anthropic_credentials_path(home, |name| std::env::var_os(name));
             }
+            if provider == "claude-agent" {
+                // graff's marker for the choice; the login itself is Claude Code's.
+                return home
+                    .join(".graff")
+                    .join("credentials")
+                    .join("claude-agent.json");
+            }
             home.join(format!(".{provider}"))
                 .join("credentials")
                 .join("graff-oauth.json")
@@ -685,7 +692,8 @@ mod tests {
                 ("kimi", false),
                 ("zai", false),
                 ("chatgpt-new", false),
-                ("anthropic", false)
+                ("anthropic", false),
+                ("claude-agent", false)
             ]
         );
         let path = credential_path(dir.path(), "kimi").unwrap();
@@ -701,7 +709,8 @@ mod tests {
                 ("Kimi", true),
                 ("Z.AI", false),
                 ("ChatGPT", false),
-                ("Anthropic Console", false)
+                ("Anthropic Console", false),
+                ("Claude Agent", false)
             ]
         );
     }

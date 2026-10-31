@@ -2826,6 +2826,11 @@ impl AccountsPage {
                          dashboard — it is separate from `cursor-agent login`."
                                 .into()
                         }
+                        HarnessId::Graff if provider.as_deref() == Some("claude-agent") => {
+                            "Checking that Claude Code is signed in on this device. graff uses \
+                         that login; nothing is copied into Harness."
+                                .into()
+                        }
                         HarnessId::Graff => format!(
                             "Finish signing in to {} in your browser. graff saves the login \
                          itself, so nothing is copied into Harness.",
