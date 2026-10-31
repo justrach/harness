@@ -13,7 +13,9 @@ name: release
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
-# workflow_dispatch (builds + uploads artifacts, no release/R2 publish).
+# workflow_dispatch (on a branch: builds + uploads artifacts, no release/R2
+# publish; on a `v*` tag: publishes, as cut-release.yml does after a release
+# pull request merges).
 
 on:
   push:
@@ -235,7 +237,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.macos.outputs.signed == 'true'
+    # A tag push, or a dispatch on a tag (cut-release.yml: a tag pushed with the
+    # workflow token triggers nothing). A dispatch on a branch never publishes.
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/tags/v') && needs.macos.outputs.signed == 'true'
     needs: [cursor-compatibility, linux, arch-install-test, macos, windows]
     runs-on: ubuntu-latest
     env:

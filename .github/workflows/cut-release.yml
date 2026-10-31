@@ -1,0 +1,81 @@
+name: cut release
+
+# Merging a release pull request (head branch `release/v<version>`) into main
+# cuts that release: it tags the merge commit `v<version>`, then starts the
+# desktop release (release.yml) on the tag and an internal TestFlight build
+# from main. The branch name must match the workspace version in Cargo.toml,
+# and docs/releases/v<version>.md must exist.
+#
+# A tag pushed with the workflow token does not trigger other workflows, so
+# both runs are started with workflow_dispatch; release.yml publishes a
+# dispatch whose ref is a `v*` tag the same as a tag push.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+      MERGED_BY_ID: ${{ github.event.pull_request.merged_by.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: check version and notes
+        id: version
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          if [ "$HEAD_REF" != "release/v$ver" ]; then
+            echo "::error::branch $HEAD_REF does not match the Cargo.toml version $ver"
+            exit 1
+          fi
+          test -f "docs/releases/v$ver.md" \
+            || { echo "::error::missing docs/releases/v$ver.md (the release notes)"; exit 1; }
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: tag the merge commit
+        id: tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            # Its own push already started the release.
+            echo "$tag already exists; leaving it and its release as they are"
+            exit 0
+          fi
+          # The tag carries the identity of whoever merged the release.
+          name=$(gh api "users/$MERGED_BY" --jq '.name // .login')
+          git -c user.name="$name" \
+              -c user.email="$MERGED_BY_ID+$MERGED_BY@users.noreply.github.com" \
+              tag -a "$tag" -m "Harness $tag" "$MERGE_SHA"
+          git push origin "refs/tags/$tag"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: start the desktop release and TestFlight
+        if: steps.tag.outputs.created == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref "v$VERSION"
+          gh workflow run testflight.yml --ref main -f audience=internal -f ci_certificates=keep
