@@ -17,7 +17,7 @@ use std::sync::{
 use serde::{Deserialize, Serialize};
 
 use harness_adapters::{Harness, HarnessError, mock::MockHarness};
-use harness_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use harness_proto::{AgentEvent, Autonomy, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +120,11 @@ struct HarnessPrefsFile {
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "known_harnesses")]
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
+    /// The default autonomy stamped onto every run on this device. `None`
+    /// (every prefs file written before the setting existed) keeps today's
+    /// full access, so existing users see no change until they pick one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    autonomy: Option<Autonomy>,
     graff_draft_subagents: bool,
     /// graff's automatic compaction point, percent of the context window.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -381,6 +386,25 @@ impl HarnessRegistry {
 
     pub fn title_settings(&self) -> TitleSettings {
         self.prefs().titles.clone()
+    }
+
+    /// This device's default autonomy (full access until the user picks).
+    pub fn autonomy(&self) -> Autonomy {
+        self.prefs().autonomy.unwrap_or_default()
+    }
+
+    /// Whether the user ever picked an autonomy level (onboarding or
+    /// Settings); clients use it to tell a fresh choice from the fallback.
+    pub fn autonomy_chosen(&self) -> bool {
+        self.prefs().autonomy.is_some()
+    }
+
+    /// Persist the default autonomy. Applies to runs dispatched after the
+    /// change; a live runtime is replaced on its next send because its
+    /// baked sandbox no longer matches.
+    pub fn set_autonomy(&self, autonomy: Autonomy) {
+        self.prefs().autonomy = Some(autonomy);
+        self.persist_prefs();
     }
 
     pub fn graff_draft_subagents(&self) -> bool {
@@ -1525,6 +1549,22 @@ mod title_tests {
             .unwrap();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.title_settings(), TitleSettings::default());
+    }
+
+    #[test]
+    fn autonomy_defaults_to_full_access_and_persists() {
+        let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":[]}"#).unwrap();
+        assert_eq!(prefs.autonomy, None);
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.autonomy(), Autonomy::FullAccess);
+        assert!(!registry.autonomy_chosen());
+        registry.set_autonomy(Autonomy::Workspace);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.autonomy(), Autonomy::Workspace);
+        assert!(reloaded.autonomy_chosen());
     }
 
     #[test]

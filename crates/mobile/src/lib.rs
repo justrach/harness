@@ -584,6 +584,26 @@ impl MobileCore {
             .await
     }
 
+    /// The device's default autonomy: read only, workspace, or full access.
+    pub async fn autonomy(
+        &self,
+        device_id: String,
+    ) -> Result<relay::AutonomyRecord, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.autonomy(&device_id).await })
+            .await
+    }
+
+    pub async fn set_autonomy(
+        &self,
+        device_id: String,
+        autonomy: String,
+    ) -> Result<relay::AutonomyRecord, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.set_autonomy(&device_id, &autonomy).await })
+            .await
+    }
+
     pub async fn list_refs(
         &self,
         device_id: String,
