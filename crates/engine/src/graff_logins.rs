@@ -282,6 +282,12 @@ pub fn scan_failure(output: &str) -> Option<String> {
     })
 }
 
+/// graff's Claude Agent sign-in found no Claude Code login: its
+/// `✗ Claude Code is not signed in…` line.
+pub fn claude_code_signed_out(output: &str) -> bool {
+    scan_failure(output).is_some_and(|message| message.starts_with("Claude Code is not signed in"))
+}
+
 /// Did graff print its `✓ logged in…` line?
 pub fn saw_success(output: &str) -> bool {
     output

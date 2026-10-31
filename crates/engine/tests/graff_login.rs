@@ -296,18 +296,23 @@ async fn graff_provider_sign_ins_end_to_end() {
     assert!(!zai_credential.exists());
     assert!(accounts.poll_login(&start.login_id).await.is_err());
 
-    // Claude Agent: no link; graff's answer comes back at once. A Claude Code
-    // with no login is refused in graff's words, and nothing is recorded.
+    // Claude Agent: no link; graff's answer comes back at once. With no
+    // Claude Code login, Harness's own Claude Code sign-in takes over (the
+    // pasted code finishes it, then graff records the choice), and nothing
+    // is recorded yet.
     std::fs::write(home.join("no-claude-login"), "").unwrap();
-    let refused = accounts
+    let handoff = accounts
         .start_graff_login("claude-agent")
         .await
-        .expect_err("no Claude Code login");
+        .expect("hand off to the Claude Code sign-in");
+    assert_eq!(handoff.mode, AgentLoginMode::PasteCode);
     assert!(
-        refused.to_string().contains("claude auth login"),
-        "{refused}"
+        handoff.url.starts_with("https://claude.ai/oauth/authorize"),
+        "{}",
+        handoff.url
     );
     assert!(!home.join(".graff/credentials/claude-agent.json").exists());
+    accounts.cancel_login(&handoff.login_id);
     std::fs::remove_file(home.join("no-claude-login")).unwrap();
     let start = accounts
         .start_graff_login("claude-agent")
