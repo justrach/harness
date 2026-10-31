@@ -73,7 +73,6 @@ struct SessionView: View {
     /// clipped the title under the back arrow.
     private var paneChrome: Bool { splitScreen != nil || foldPaneHeader != nil }
     /// Upright Duo with the session on both halves: the header moves up into the status bar's row.
-    private var uprightHeader: Bool { duoLaptop != nil && splitScreen == nil && foldPaneHeader != nil }
 
     /// Rename and paging are sibling controls: tapping an arrow must never rename.
     private func headerTitle(_ chat: Chat) -> some View {
@@ -235,9 +234,6 @@ struct SessionView: View {
                 VStack(spacing: 0) {
                     if paneChrome {
                         paneHeader(chat, controls: splitScreen ?? SplitScreenControls())
-                            // Upright Duo: the header shares the status bar's row, clear of the clock on its right.
-                            .padding(.top, uprightHeader ? 18 : 0)
-                            .padding(.trailing, uprightHeader ? 150 : 0)
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { paneHeaderHeight = $0 }
                         Group {
                             if let duoLaptop, splitScreen == nil {
@@ -255,7 +251,6 @@ struct SessionView: View {
                 // The clip above also cuts off the content's own background, which reaches under the side and
                 // bottom safe areas; without this the system's backing showed there (white, or black in dark
                 // mode). Painted outside the clip, to the screen edges.
-                .ignoresSafeArea(.container, edges: uprightHeader ? .top : [])
                 .background { if paneChrome { Theme.bg.ignoresSafeArea() } }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { viewMinY = $0 }

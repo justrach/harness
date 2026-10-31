@@ -357,8 +357,6 @@ struct HomeView: View {
                     primaryStack
                         // The keyboard sits below the fold; it must not squeeze the session above it.
                         .ignoresSafeArea(.keyboard)
-                        // Upright with a session open, its header shares the status bar's row.
-                        .ignoresSafeArea(.container, edges: laptopLayout != nil ? .top : [])
                         // An open session takes both halves (DuoLaptop); the list comes in from its header.
                         .frame(height: laptopLayout == nil ? top : nil)
                         .frame(maxHeight: laptopLayout == nil ? nil : .infinity)
@@ -402,7 +400,11 @@ struct HomeView: View {
                 // Duo lying flat), the list stands beside an open session until Inspect takes its place.
                 HStack(spacing: 0) {
                     if flatSidebar {
-                        NavigationStack { sidebar }
+                        NavigationStack {
+                            // A switcher beside the chat: new, settings and profile stay on the full list, and in
+                            // a column this narrow the bar's buttons stood in a rail over the rows.
+                            sidebar.toolbar(.hidden, for: .navigationBar)
+                        }
                             // The narrow column lays the list out as a phone's.
                             .environment(\.horizontalSizeClass, .compact)
                             .frame(width: DuoV3.sidebarWidth)
