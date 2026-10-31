@@ -239,6 +239,17 @@ final class AppConfig: @unchecked Sendable {
         return request
     }
 
+    /// POST /diagnostics/crash-reports — the MetricKit reports CrashReports
+    /// saved, as a JSON array (the caller sets the body).
+    func crashReportsRequest() async -> URLRequest? {
+        guard let token = await currentToken() else { return nil }
+        var request = URLRequest(url: edgeURL.appending(path: "diagnostics/crash-reports"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
     /// POST /chat2/{chatId}/rows?batchId= — push over plain HTTPS (batchId
     /// dedupe makes replays no-ops); body is the raw update batch.
     func chat2PushRequest(chatId: String, batchId: String) async -> URLRequest? {

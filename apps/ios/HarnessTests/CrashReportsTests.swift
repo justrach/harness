@@ -55,4 +55,32 @@ final class CrashReportsTests: XCTestCase {
         XCTAssertEqual(kept.count, CrashReports.keep)
         XCTAssertEqual(kept.first?.summary.headline, "Hang (\(CrashReports.keep + 4) sec)", "newest first")
     }
+
+    func testUploadsGoInBatchesTheEdgeTakes() {
+        let small = (0..<23).map { (id: "r\($0)", data: Data(repeating: 0x20, count: 100)) }
+        XCTAssertEqual(CrashReports.batches(small).map(\.count), [10, 10, 3])
+        let big = (0..<3).map { (id: "b\($0)", data: Data(repeating: 0x20, count: 400_000)) }
+        XCTAssertEqual(CrashReports.batches(big).map(\.count), [2, 1], "about 900 KB a request")
+        let huge = [(id: "h", data: Data(repeating: 0x20, count: 2_000_000))] + small.prefix(2)
+        XCTAssertEqual(CrashReports.batches(huge).map(\.count), [1, 2], "an oversized report goes alone")
+        XCTAssertTrue(CrashReports.batches([]).isEmpty)
+    }
+
+    func testTheUploadBodyIsAJSONArrayOfTheReports() throws {
+        let body = CrashReports.body([json(["a": 1]), json(["b": 2])])
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [[String: Int]])
+        XCTAssertEqual(parsed, [["a": 1], ["b": 2]])
+    }
+
+    func testSentReportsAreRememberedOnlyWhileTheyAreKept() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("crash-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let reports = CrashReports()
+        reports.save([json(["hangDiagnostics": [[:]]]), json(["crashDiagnostics": [[:]]])], in: folder)
+        let ids = reports.reports(in: folder).map(\.id)
+        XCTAssertTrue(CrashReports.sentNames(in: folder).isEmpty)
+        CrashReports.markSent(Set(ids + ["gone-123.json"]), in: folder)
+        XCTAssertEqual(CrashReports.sentNames(in: folder), Set(ids), "a deleted report is forgotten")
+        XCTAssertEqual(reports.reports(in: folder).count, 2, "the sent list is not a report")
+    }
 }
