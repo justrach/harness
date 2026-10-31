@@ -171,6 +171,8 @@ final class InspectState {
     var selectedFile: String?
     /// The terminal's scrollback position (the command block at the top of the view).
     var terminalAnchor: String?
+    /// Wide Duo: Inspect has taken the session list's place (a diff card or a tool row was opened).
+    var open = false
 
     private static var bySession: [String: InspectState] = [:]
 
@@ -182,6 +184,7 @@ final class InspectState {
     }
 
     func show(_ tool: ToolItem) {
+        open = true
         switch tool.call.tag {
         case "exec": segment = .terminal
         case let tag where DiffSummary.editTags.contains(tag):
@@ -230,28 +233,6 @@ struct InspectSwitcher: View {
     }
 }
 
-struct InspectPane: View {
-    let model: InspectModel
-    @Bindable var state: InspectState
-
-    var body: some View {
-        VStack(spacing: 0) {
-            InspectSwitcher(selection: $state.segment)
-                .padding(.vertical, 10)
-            Group {
-                switch state.segment {
-                case .diff: InspectDiffView(files: model.files, state: state)
-                case .terminal: InspectTerminalView(commands: model.commands, state: state)
-                case .files: InspectFilesView(rows: model.tree, detailed: model.detailed, state: state)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .background(Theme.surface)
-        .accessibilityIdentifier("inspect-pane")
-    }
-}
-
 /// A note where a stubbed detail would go.
 private struct HostOnlyNote: View {
     let text: String
@@ -278,13 +259,7 @@ struct InspectDiffView: View {
             HostOnlyNote(text: "No edits in this session yet.")
         } else {
             VStack(alignment: .leading, spacing: 0) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(files) { file in fileChip(file) }
-                    }
-                    .padding(.horizontal, 12)
-                }
-                .padding(.bottom, 8)
+                if let file = selected { fileHeader(file) }
                 Rectangle().fill(Theme.border).frame(height: 1)
                 if let file = selected {
                     if let hunks = file.hunks {
@@ -297,7 +272,10 @@ struct InspectDiffView: View {
                                         .foregroundStyle(Theme.textFaint)
                                         .padding(.horizontal, 12)
                                         .padding(.vertical, 6)
-                                    ForEach(hunk.lines) { line in diffLine(line) }
+                                    let numbers = DiffNumbers.numbers(hunk)
+                                    ForEach(hunk.lines) { line in
+                                        diffLine(line, number: numbers.indices.contains(line.id) ? numbers[line.id] : nil)
+                                    }
                                 }
                             }
                             .padding(.vertical, 8)
@@ -311,41 +289,71 @@ struct InspectDiffView: View {
         }
     }
 
-    private func fileChip(_ file: InspectFile) -> some View {
-        let on = file.path == selected?.path
-        return Button { state.selectedFile = file.path } label: {
-            HStack(spacing: 6) {
-                Text((file.path as NSString).lastPathComponent)
-                    .font(DuoType.sans(small: true, medium: on))
-                    .foregroundStyle(on ? Theme.text : Theme.textMuted)
-                if let adds = file.additions { Text("+\(adds)").foregroundStyle(Theme.statusCompleted) }
-                if let dels = file.deletions { Text("-\(dels)").foregroundStyle(Theme.danger) }
+    /// The file's path and counts, and a pager through the session's edited files.
+    private func fileHeader(_ file: InspectFile) -> some View {
+        let index = files.firstIndex { $0.path == file.path } ?? 0
+        return HStack(spacing: 10) {
+            Text(file.path)
+                .font(DuoType.mono)
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 8)
+            if let adds = file.additions { Text("+\(adds)").font(DuoType.mono).foregroundStyle(Theme.statusCompleted) }
+            if let dels = file.deletions { Text("-\(dels)").font(DuoType.mono).foregroundStyle(Theme.danger) }
+            if files.count > 1 {
+                pageButton("chevron.left", enabled: index > 0) { state.selectedFile = files[index - 1].path }
+                Text("\(index + 1) / \(files.count)").font(DuoType.mono).foregroundStyle(Theme.textMuted)
+                    .monospacedDigit()
+                pageButton("chevron.right", enabled: index < files.count - 1) { state.selectedFile = files[index + 1].path }
             }
-            .font(DuoType.mono)
-            .padding(.horizontal, 10)
-            .frame(height: 30)
-            .background(on ? Theme.text.opacity(0.08) : .clear, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.border, lineWidth: on ? 0 : 1))
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("inspect-file-\((file.path as NSString).lastPathComponent)")
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
+        .frame(height: 44)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("inspect-file-header")
     }
 
-    private func diffLine(_ line: DiffLine) -> some View {
-        let sign: String, tint: Color
-        switch line.kind {
-        case .added: sign = "+"; tint = Theme.statusCompleted
-        case .removed: sign = "-"; tint = Theme.danger
-        case .context: sign = " "; tint = .clear
+    private func pageButton(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: 28, height: 44)
+                .contentShape(Rectangle())
         }
-        return Text(sign + " " + line.text)
-            .font(mono)
-            .foregroundStyle(line.kind == .context ? Theme.textMuted : Theme.text)
-            .fixedSize()
-            .padding(.horizontal, 12)
-            .frame(minWidth: 600, alignment: .leading)
-            .padding(.vertical, 1)
-            .background(tint.opacity(0.12))
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.3)
+        .accessibilityLabel(symbol == "chevron.left" ? "Previous file" : "Next file")
+    }
+
+    private func diffLine(_ line: DiffLine, number: Int?) -> some View {
+        let tint: Color
+        switch line.kind {
+        case .added: tint = Theme.statusCompleted
+        case .removed: tint = Theme.danger
+        case .context: tint = .clear
+        }
+        return HStack(spacing: 10) {
+            Text(number.map(String.init) ?? "")
+                .font(mono)
+                .foregroundStyle(Theme.textFaint)
+                .frame(width: 30, alignment: .trailing)
+            Text(line.text)
+                .font(mono)
+                .foregroundStyle(line.kind == .context ? Theme.text : tint)
+                .fixedSize()
+        }
+        .padding(.horizontal, 8)
+        .frame(minWidth: 600, alignment: .leading)
+        .padding(.vertical, 1)
+        .background(tint.opacity(0.12))
+        .overlay(alignment: .leading) {
+            if line.kind != .context { Rectangle().fill(tint).frame(width: 2) }
+        }
+        .accessibilityLabel((line.kind == .added ? "Added: " : line.kind == .removed ? "Removed: " : "") + line.text)
     }
 }
 
@@ -443,40 +451,6 @@ struct InspectFilesView: View {
         .frame(height: 30)
         .background(on ? Theme.text.opacity(0.06) : .clear)
         .contentShape(Rectangle())
-    }
-}
-
-/// With the keyboard up, Inspect folds to one line above the chat. A tap puts the keyboard away.
-struct InspectPeek: View {
-    let model: InspectModel
-    let state: InspectState
-    let open: () -> Void
-
-    private var summary: String {
-        switch state.segment {
-        case .diff: return model.diffSummary
-        case .terminal: return model.commands.last.map { "$ " + $0.command } ?? "No commands yet"
-        case .files: return model.tree.filter { !$0.isDirectory }.count == 1 ? "1 file" : "\(model.tree.filter { !$0.isDirectory }.count) files"
-        }
-    }
-
-    var body: some View {
-        Button(action: open) {
-            HStack(spacing: 8) {
-                Text(state.segment.rawValue).font(DuoType.sans(small: true, medium: true)).foregroundStyle(Theme.text)
-                Text(summary).font(DuoType.mono).foregroundStyle(Theme.textMuted).lineLimit(1)
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.down").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.textFaint)
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 36)
-            .background(Theme.surface)
-            .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("inspect-peek")
-        .accessibilityHint("Puts the keyboard away and shows Inspect")
     }
 }
 

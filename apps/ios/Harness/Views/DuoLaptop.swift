@@ -1,8 +1,5 @@
-// iPhone Duo half open like a laptop, with a session open. The upper half watches the work (the live
-// terminal, or the diff) in 14pt mono and takes no input; the lower half is where you act: the composer and
-// the quick actions. While typing, the keyboard covers the lower half, so the actions and the composer move
-// up to sit right above it and the watch pane gives them the room. The session list comes in on demand from
-// the header (FoldPaneHeader).
+// iPhone Duo half open (upright, the fold across), with a session open: the layout's measurements and the
+// approval helpers. The views are in DuoV3 (the chat above the hinge, Inspect below).
 
 import Combine
 import SwiftUI
@@ -82,99 +79,6 @@ enum QuickActions {
             if !text.isEmpty { return text }
         }
         return nil
-    }
-}
-
-/// Approve, Retry, Stop, Run tests. Solid, not glass: they sit on the work, and only the pill and the
-/// switcher float.
-struct QuickActionsRow: View {
-    let enabled: (QuickAction) -> Bool
-    let perform: (QuickAction) -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(QuickAction.allCases) { action in
-                let on = enabled(action)
-                Button { perform(action) } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: action.symbol).font(.system(size: 12, weight: .semibold))
-                        Text(action.title).font(DuoType.sans(small: true, medium: true))
-                    }
-                    .foregroundStyle(action == .stop && on ? Theme.danger : Theme.text)
-                    .padding(.horizontal, 14)
-                    .frame(height: 36)
-                    .background(Theme.surfaceRaised, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(!on)
-                .opacity(on ? 1 : 0.4)
-                .accessibilityIdentifier("quick-\(action.rawValue)")
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("quick-actions")
-    }
-}
-
-// MARK: - Watch pane
-
-/// The upper half: the live terminal, or the diff, read-only, in 14pt mono.
-struct LaptopWatchPane: View {
-    let model: InspectModel
-    @Bindable var state: InspectState
-    let running: Bool
-
-    /// Files is Inspect's third segment; the watch pane shows the diff in its place.
-    private var showsTerminal: Bool { state.segment == .terminal }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                tab("Terminal", on: showsTerminal) { state.segment = .terminal }
-                tab("Diff", on: !showsTerminal) { state.segment = .diff }
-                Spacer(minLength: 8)
-                if running {
-                    Circle().fill(Theme.statusCompleted).frame(width: 6, height: 6)
-                    Text("Live").font(DuoType.sans(small: true)).foregroundStyle(Theme.textMuted)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
-            Rectangle().fill(Theme.border).frame(height: 1)
-            Group {
-                if showsTerminal {
-                    InspectTerminalView(commands: model.commands, state: state)
-                } else {
-                    InspectDiffView(files: model.files, state: state)
-                        .padding(.top, 8)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .environment(\.inspectMono, Theme.mono(14))
-        }
-        .background(Theme.surface)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("laptop-watch")
-    }
-
-    private func tab(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(DuoType.sans(small: true, medium: true))
-                .foregroundStyle(on ? Theme.text : Theme.textMuted)
-                .padding(.horizontal, 12)
-                .frame(height: 30)
-                .background(on ? Theme.text.opacity(0.08) : .clear, in: Capsule())
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(on ? .isSelected : [])
-        .accessibilityIdentifier("laptop-watch-\(title.lowercased())")
     }
 }
 

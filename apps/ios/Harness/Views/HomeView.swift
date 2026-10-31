@@ -105,6 +105,12 @@ struct HomeView: View {
 
     private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
 
+    /// Wide Duo with a session open and Inspect closed: the session list stands beside it.
+    private var flatSidebar: Bool {
+        guard flatDuo, case .chat(let id) = path.last else { return false }
+        return !InspectState.of(id).open
+    }
+
     /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
     @AppStorage(DuoChat.foldableKey) private var foldableDevice = false
 
@@ -386,13 +392,25 @@ struct HomeView: View {
                     primaryStack
                 }
             } else {
-                NavigationStack(path: $path) {
-                    sidebar
-                        .navigationDestination(for: Route.self) {
-                            // iPhone Duo lying flat: the session splits at the fold, chat and Inspect.
-                            destination($0).environment(\.duoFlat, flatDuo)
-                        }
+                // One stack in every pose, so folding keeps the session (draft, scroll) in place. Wide (an iPhone
+                // Duo lying flat), the list stands beside an open session until Inspect takes its place.
+                HStack(spacing: 0) {
+                    if flatSidebar {
+                        NavigationStack { sidebar }
+                            .frame(width: DuoV3.sidebarWidth)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                            .accessibilityIdentifier("wide-sidebar")
+                        Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
+                    }
+                    NavigationStack(path: $path) {
+                        sidebar
+                            .navigationDestination(for: Route.self) {
+                                // iPhone Duo lying flat: the session beside the list, or chat and Inspect.
+                                destination($0).environment(\.duoFlat, flatDuo)
+                            }
+                    }
                 }
+                .animation(Motion.collapse, value: flatSidebar)
             }
         }
         // Laptop pose: the keyboard lands on the lower half, below the fold. The whole layout ignores it (the
@@ -483,7 +501,7 @@ struct HomeView: View {
             var next = panes
             next.openFromList(id)
             apply(next)
-        } else if splitLayout {
+        } else if splitLayout || flatSidebar {
             path = [route]
         } else {
             path.append(route)
@@ -503,7 +521,7 @@ struct HomeView: View {
 
     /// The session the detail column shows, for the sidebar's selection wash.
     private var selectedChatId: String? {
-        guard splitLayout, case .chat(let id) = path.first else { return nil }
+        guard splitLayout || flatSidebar, case .chat(let id) = path.last else { return nil }
         return id
     }
 
