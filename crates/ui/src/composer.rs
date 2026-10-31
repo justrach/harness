@@ -18594,10 +18594,6 @@ mod appshot_rebase_tests {
 
 #[cfg(feature = "appshots-fixture")]
 impl Composer {
-    pub fn fixture_set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| input.set_text(text, cx));
-    }
-
     pub fn fixture_model_bounds(&self) -> Option<Bounds<Pixels>> {
         self.model_bounds.get()
     }

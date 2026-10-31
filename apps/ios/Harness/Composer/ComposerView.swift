@@ -144,9 +144,12 @@ struct ComposerShell<Chips: View>: View {
         }
         .padding(.horizontal, expanded ? 12 : 5)
         .padding(.vertical, expanded ? 12 : 5)
-        .background(ink(0.04), in: surfaceShape)
+        // A bright writing plane on the glass, with an accent edge while
+        // typing (the desktop composer's design).
+        .background(Theme.composerPlane, in: surfaceShape)
         .glassEffect(.regular.interactive(), in: surfaceShape)
-        .overlay(surfaceShape.strokeBorder(hairline(0.05), lineWidth: 1))
+        .overlay(surfaceShape.strokeBorder(
+            focused ? Theme.accent.opacity(0.55) : hairline(0.05), lineWidth: 1))
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
         // misses the text box falls through to the transcript underneath —
@@ -227,19 +230,20 @@ struct ComposerShell<Chips: View>: View {
                 if busy {
                     ProgressView()
                         .controlSize(.small)
-                        .tint(Theme.bg)
+                        .tint(Theme.onAccent)
                 } else if showStop, !hasContent {
                     RoundedRectangle(cornerRadius: 3.5)
-                        .fill(Theme.bg)
+                        .fill(Theme.onAccent)
                         .frame(width: 12, height: 12)
                 } else {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(buttonActive ? Theme.bg : Theme.textFaint)
+                        .foregroundStyle(buttonActive ? Theme.onAccent : Theme.textFaint)
                 }
             }
             .frame(width: 44, height: 44)
-            .background(buttonActive ? AnyShapeStyle(Theme.text) : AnyShapeStyle(ink(0.10)),
+            // One accent action anchors the row; its glyph is contrast-checked.
+            .background(buttonActive ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(ink(0.10)),
                         in: Circle())
             .contentShape(Circle())
         }
