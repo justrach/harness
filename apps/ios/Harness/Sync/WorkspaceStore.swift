@@ -689,6 +689,22 @@ final class WorkspaceStore {
                                             params: ["pct": pct.map { $0 as Any } ?? NSNull()])
     }
 
+    /// GetAutonomy on the target device: how much its agents may do without asking.
+    func autonomy(deviceId: String) async throws -> AutonomySetting {
+        try await relay(for: deviceId).call(method: "GetAutonomy", params: [:])
+    }
+
+    /// SetAutonomy; answers with the level the device kept.
+    func setAutonomy(deviceId: String, _ autonomy: Autonomy) async throws -> AutonomySetting {
+        try await relay(for: deviceId).call(method: "SetAutonomy", params: ["autonomy": autonomy.rawValue])
+    }
+
+    /// SetHarnessEnabled: switch an agent on or off on that computer (Settings → Agents there).
+    func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws {
+        let _: JSONValue = try await relay(for: deviceId).call(method: "SetHarnessEnabled",
+                                                               params: ["harness": harness, "enabled": enabled])
+    }
+
     /// CodegraffSandboxes on the target device: the cloud sandboxes and sizes of
     /// the Codegraff account its engine is signed in with (nil while signed out).
     func codegraffSandboxes(deviceId: String) async throws -> CodegraffSandboxes? {

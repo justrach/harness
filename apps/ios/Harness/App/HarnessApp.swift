@@ -85,6 +85,16 @@ struct RootView: View {
                             }
                         }
                     }
+                    // First-run setup after a fresh sign-in (Settings replays it).
+                    .fullScreenCover(isPresented: Binding(
+                        get: { model.setupPresented },
+                        set: { model.setupPresented = $0 }
+                    )) {
+                        OnboardingView { model.setupPresented = false }
+                            .environment(model)
+                            .harnessAppearance()
+                            .tint(Theme.text)
+                    }
             }
         }
         .task { model.restore() }
