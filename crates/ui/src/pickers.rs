@@ -3921,6 +3921,7 @@ impl Pickers {
                     on_click: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .h(px(20.0))
                 .flex_none()
                 .flex()
@@ -3945,6 +3946,9 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(2.0))
+            // The buttons cannot shrink, so neither may their container:
+            // otherwise they paint over the PR badge at its shrunken edge.
+            .flex_shrink(0.0)
             .min_w_0();
         if busy {
             cluster = cluster.child(
@@ -4027,6 +4031,7 @@ impl Pickers {
             let chat = chat.clone();
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .h(px(20.0))
                 .flex_none()
                 .flex()
@@ -4059,6 +4064,9 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(2.0))
+            // Reserve the fixed-width actions as a unit. The session row
+            // clips at its edge; siblings must not start inside this card.
+            .flex_shrink(0.0)
             .min_w_0()
             .ml(px(4.0))
             .pl(px(6.0))
@@ -8020,6 +8028,145 @@ mod tests {
                 selected.is_some(),
                 "a fresh chat must not display the previous chat's cached PR"
             );
+        }
+    }
+
+    #[gpui::test]
+    fn worktree_footer_actions_do_not_overlap_pull_request(cx: &mut gpui::TestAppContext) {
+        struct Fixture {
+            width: f32,
+            pickers: Entity<Pickers>,
+        }
+        impl gpui::Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let state = self.pickers.read(cx).state.clone();
+                let usage = state.read(cx).context_usage;
+                div()
+                    .w(px(self.width))
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(
+                        div().flex_1().min_w_0().overflow_hidden().children(
+                            self.pickers
+                                .update(cx, |pickers, cx| pickers.render_footer(cx)),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink(1.0)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .pr(px(10.0))
+                            .child(crate::chatgpt_plan::using_plan_chip(&theme)),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "workspace-footer-usage".into())
+                            .flex_none()
+                            .pr(px(10.0))
+                            .child(crate::context_usage::render(usage, state, &theme)),
+                    )
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.spaces.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "project", "deviceId": "local", "path": "/project",
+                    "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
+                }))
+                .unwrap(),
+            );
+            state.selected_space = Some("project".into());
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "session", "deviceId": "local", "spaceId": "project",
+                    "archived": false, "createdAt": "2026-09-01T00:00:00Z",
+                    "cwd": "/project/.graff/worktrees/footer-test",
+                    "branch": "feature/a-very-long-branch-name",
+                    "sourceContext": {
+                        "checkoutId": "checkout", "repoRoot": "/project",
+                        "cwd": "/project/.graff/worktrees/footer-test",
+                        "branch": "feature/a-very-long-branch-name",
+                        "observedAt": "2026-09-01T00:00:00Z"
+                    }
+                }))
+                .unwrap(),
+            );
+            state.selected_chat = Some("session".into());
+            state.context_usage = Some(harness_proto::ContextUsage {
+                tokens: Some(100_000),
+                window: Some(200_000),
+                ..Default::default()
+            });
+            state.fixture_sidebar_change_request(harness_proto::CheckoutChangeRequestStatus {
+                checkout_id: "checkout".into(),
+                device_id: "local".into(),
+                cwd: "/project".into(),
+                branch: "feature/a-very-long-branch-name".into(),
+                change_request: Some(harness_proto::ChangeRequestSummary {
+                    provider: "github".into(),
+                    number: 123456,
+                    title: "Footer layout".into(),
+                    url: "https://example.invalid/pull/123456".into(),
+                    state: harness_proto::ChangeRequestState::Open,
+                    base_ref: "main".into(),
+                    head_ref: "feature/a-very-long-branch-name".into(),
+                }),
+                updated_at: chrono::Utc::now(),
+            });
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture {
+            width: 680.0,
+            pickers,
+        });
+        for armed in [false, true] {
+            for width in [1200.0, 680.0, 480.0, 320.0, 240.0, 160.0, 680.0, 1200.0] {
+                fixture.update(cx, |fixture, cx| {
+                    fixture.width = width;
+                    fixture.pickers.update(cx, |pickers, _| {
+                        pickers.change_request_merge_armed =
+                            armed.then(|| ("session".into(), 123456));
+                    });
+                    cx.notify();
+                });
+                cx.update(|window, cx| window.draw(cx).clear());
+                let mut previous = cx
+                    .debug_bounds("workspace-footer-label-icons/git-branch.svg")
+                    .unwrap();
+                let mut controls = vec![
+                    "graff-worktree-merge",
+                    "graff-worktree-archive",
+                    "graff-worktree-remove",
+                ];
+                if armed {
+                    controls.extend([
+                        "change-request-merge-confirm",
+                        "change-request-merge-cancel",
+                    ]);
+                } else {
+                    controls.push("change-request-merge");
+                }
+                controls.push("workspace-footer-pr");
+                for control in controls {
+                    let bounds = cx.debug_bounds(control).unwrap();
+                    assert!(
+                        previous.right() <= bounds.left(),
+                        "{control} overlaps its predecessor at width={width}, armed={armed}: {previous:?}, {bounds:?}"
+                    );
+                    previous = bounds;
+                }
+                let footer = cx.debug_bounds("session-workspace-footer").unwrap();
+                let usage = cx.debug_bounds("workspace-footer-usage").unwrap();
+                assert!(footer.right() <= usage.left(), "width={width}");
+                assert!((f32::from(usage.right()) - width).abs() < 0.1);
+            }
         }
     }
 
