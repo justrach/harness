@@ -2290,7 +2290,12 @@ pub fn rows_for_entry(
         );
     }
 
-    rows.extend(viewed_image_rows(entry));
+    // A reply that places images itself (`![caption](shot.png)`) has chosen
+    // what to show and where; the images it opened to check them are not
+    // stacked under its last line as well.
+    if !reply_places_images(&rows) {
+        rows.extend(viewed_image_rows(entry));
+    }
 
     if let Some(part_id) = final_answer_part(entry) {
         let answer_id = format!("{}#{part_id}.0", entry.id);
@@ -2334,8 +2339,20 @@ pub fn rows_for_entry(
     rows
 }
 
+/// Whether any of a reply's Markdown rows shows an image of its own.
+fn reply_places_images(rows: &[Row]) -> bool {
+    rows.iter().any(|row| match &row.kind {
+        RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix, .. } => tree
+            .blocks
+            .get(*block_ix)
+            .is_some_and(|top| !crate::files::markdown_media::block_image_sources(&top.block).is_empty()),
+        _ => false,
+    })
+}
+
 /// Images the agent opened with a read tool, shown under its reply so the
-/// person sees what it looked at (a screenshot it is checking, say). Only a
+/// person sees what it looked at (a screenshot it is checking, say), unless
+/// the reply places images itself ([`reply_places_images`]). Only a
 /// successful read of an absolute path to a raster type the engine's
 /// read-back serves; the read-back's jail decides whether it can load.
 fn viewed_image_rows(entry: &SessionMessageEntry) -> Vec<Row> {
@@ -15641,6 +15658,40 @@ mod tests {
         assert!(paths.contains(&absolute.to_owned()), "{paths:?}");
         // A remote image is never fetched, so it has nothing to shield.
         assert_eq!(paths.len(), 2, "{paths:?}");
+    }
+
+    #[test]
+    fn a_reply_that_places_its_own_images_does_not_also_stack_the_ones_it_read() {
+        // Before, every image the agent read was appended after the reply,
+        // so a reply that showed its screenshots between paragraphs ended
+        // with full-size copies of them piled under its last line.
+        let root = if cfg!(windows) { "C:/work" } else { "/work" };
+        let at = |path: &str| format!("{root}/{path}");
+        let viewed = |rows: &[Row]| {
+            rows.iter()
+                .filter(|row| matches!(row.kind, RowKind::GeneratedImage { viewed: true, .. }))
+                .count()
+        };
+        let reply = |text: &str| {
+            assistant(
+                "m1",
+                MessageStatus::Complete,
+                vec![
+                    read_part("r1", &at("shots/full.png"), false, true),
+                    text_part("t1", text),
+                ],
+            )
+        };
+        let placed = reply(&format!(
+            "The footer:\n\n![footer]({})\n\nIt keeps the ring.",
+            at("shots/small.png")
+        ));
+        let plain = reply("It keeps the ring.");
+        for compact in [false, true] {
+            assert_eq!(viewed(&rows_for_entry(&placed, false, compact, &mut parse)), 0);
+            // Without images of its own, the reply still shows what it read.
+            assert_eq!(viewed(&rows_for_entry(&plain, false, compact, &mut parse)), 1);
+        }
     }
 
     #[test]
