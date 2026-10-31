@@ -325,7 +325,10 @@ struct HomeView: View {
                         }
                     Color.clear.frame(height: gap)
                     NavigationStack { sidebar }
+                        .frame(minHeight: 0)
                 }
+                // Anchored to the top: the keyboard must not push the upper half down off the fold.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .ignoresSafeArea(.keyboard, edges: .bottom)
             } else if listBesideSession {
                 // iPad, iPhone Duo folded like a book and other wide windows: the list beside the session.
