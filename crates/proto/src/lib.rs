@@ -20,6 +20,7 @@ pub mod sidebar_pins;
 pub mod view;
 pub mod visual;
 pub mod workspace;
+pub mod worktree_name;
 
 pub use agent::*;
 pub use compaction::*;
