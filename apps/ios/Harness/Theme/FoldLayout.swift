@@ -43,6 +43,20 @@ enum FoldSplit: Equatable {
     }
 }
 
+/// Whether Home puts the session list beside the open session.
+enum HomeColumns {
+    /// Regular width shows the list beside the session (iPad, a Max in landscape), except on iPhone Duo's inner
+    /// display lying flat: an iPhone window regular both ways is that display, and flat it is the ordinary
+    /// one-column iPhone app. Folded like a book, the list and the session take either side of the fold.
+    /// `phone` is the device idiom; it is the only signal the TestFlight build has, since its SDK predates
+    /// the hinge API and its fold is always `.none`.
+    static func listBesideSession(regularWidth: Bool, regularHeight: Bool, phone: Bool, fold: FoldSplit) -> Bool {
+        guard regularWidth else { return false }
+        if case .sideBySide = fold { return true }
+        return !(phone && regularHeight)
+    }
+}
+
 /// Padding that keeps content clear of active occlusion regions inside the view.
 enum OcclusionInsets {
     /// Each region that overlaps the bounds pushes content in from the edge it is nearest, by as far as it

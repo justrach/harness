@@ -27,6 +27,29 @@ final class FoldLayoutTests: XCTestCase {
         XCTAssertEqual(FoldSplit.from(division: fold, in: inner), .none)
     }
 
+    func testIPhoneDuoLyingFlatIsTheOneColumnApp() {
+        // Main put every regular-width window in the split, including the Duo's inner display lying flat.
+        XCTAssertFalse(HomeColumns.listBesideSession(regularWidth: true, regularHeight: true, phone: true, fold: .none))
+        // Folded like a laptop the layout stacks around the fold elsewhere; it is not the list beside the session.
+        XCTAssertFalse(HomeColumns.listBesideSession(
+            regularWidth: true, regularHeight: true, phone: true, fold: .stacked(top: 455.5, gap: 40)))
+    }
+
+    func testIPhoneDuoFoldedLikeABookSplitsOnTheFold() {
+        XCTAssertTrue(HomeColumns.listBesideSession(
+            regularWidth: true, regularHeight: true, phone: true, fold: .sideBySide(leading: 314.5, gap: 40)))
+    }
+
+    func testIPadAndAMaxInLandscapeKeepTheListBesideTheSession() {
+        XCTAssertTrue(HomeColumns.listBesideSession(regularWidth: true, regularHeight: true, phone: false, fold: .none))
+        XCTAssertTrue(HomeColumns.listBesideSession(regularWidth: true, regularHeight: false, phone: true, fold: .none))
+    }
+
+    func testCompactWidthIsOneColumn() {
+        XCTAssertFalse(HomeColumns.listBesideSession(regularWidth: false, regularHeight: true, phone: true, fold: .none))
+        XCTAssertFalse(HomeColumns.listBesideSession(regularWidth: false, regularHeight: true, phone: false, fold: .none))
+    }
+
     func testOcclusionsOutsideTheBoundsAddNothing() {
         // The status bar strip sits in the safe area, outside the content's bounds.
         let bar = CGRect(x: inner.width, y: 0, width: 84, height: inner.height)
