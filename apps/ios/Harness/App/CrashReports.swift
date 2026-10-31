@@ -75,22 +75,23 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber, @unchecked Sendab
     /// failure leaves the rest for the next launch, sign-in or return to the foreground.
     func uploadPending(in folder: URL = CrashReports.folder) {
         guard sending else { return }
-        let config: AppConfig? = lock.withLock {
-            guard !uploading, let config, config.mode == .codegraff else { return nil }
-            uploading = true
-            return config
+        let signedIn: AppConfig? = lock.withLock {
+            guard !self.uploading, let current = self.config, current.mode == .codegraff else { return nil }
+            self.uploading = true
+            return current
         }
-        guard let config else { return }
+        guard let signedIn else { return }
         Task.detached(priority: .utility) {
             defer { self.lock.withLock { self.uploading = false } }
-            await self.upload(to: config, folder: folder)
+            await self.upload(to: signedIn, folder: folder)
         }
     }
 
     private func upload(to config: AppConfig, folder: URL) async {
         var sent = Self.sentNames(in: folder)
-        let waiting = reports(in: folder).reversed().filter { !sent.contains($0.id) }
-            .compactMap { report in (try? Data(contentsOf: report.file)).map { (report.id, $0) } }
+        let waiting: [(id: String, data: Data)] = reports(in: folder).reversed()
+            .filter { !sent.contains($0.id) }
+            .compactMap { report in (try? Data(contentsOf: report.file)).map { (id: report.id, data: $0) } }
         for batch in Self.batches(waiting) {
             guard var request = await config.crashReportsRequest() else { return }
             request.httpBody = Self.body(batch.map(\.data))
