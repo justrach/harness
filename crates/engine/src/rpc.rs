@@ -117,6 +117,19 @@ struct SetGraffDraftSubagentsParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetAutonomyParams {
+    autonomy: harness_proto::Autonomy,
+}
+
+/// `GetAutonomy` / `SetAutonomy` reply.
+fn autonomy_reply(registry: &HarnessRegistry) -> serde_json::Value {
+    serde_json::json!({
+        "autonomy": registry.autonomy(),
+        "chosen": registry.autonomy_chosen(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
 struct SetGraffCompactAtParams {
     /// Percent of the context window; `null` restores graff's default.
     pct: Option<u8>,
@@ -1423,6 +1436,8 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_AUTONOMY
+            | methods::SET_AUTONOMY
             | methods::GET_GRAFF_DRAFT_SUBAGENTS
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::GET_GRAFF_COMPACT_AT
@@ -1961,6 +1976,12 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_AUTONOMY => RpcReply::value(&autonomy_reply(&self.registry)),
+            methods::SET_AUTONOMY => {
+                let p: SetAutonomyParams = parse_params(params)?;
+                self.registry.set_autonomy(p.autonomy);
+                RpcReply::value(&autonomy_reply(&self.registry))
+            }
             methods::GET_GRAFF_DRAFT_SUBAGENTS => {
                 RpcReply::value(&self.registry.graff_draft_subagents())
             }
