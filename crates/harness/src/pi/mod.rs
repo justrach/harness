@@ -94,7 +94,7 @@ impl PiHarness {
         })
     }
     async fn probe(&self, cwd: &Path, models: bool) -> Result<Value, HarnessError> {
-        let mut process = self.spawn(cwd, &["--no-session".into()])?;
+        let mut process = self.spawn(cwd, &["--no-session".into()], None)?;
         let (mut tx, rx) = tokio::sync::oneshot::channel();
         let grace = self.kill_grace;
         tokio::spawn(async move {
@@ -111,7 +111,12 @@ impl PiHarness {
         rx.await
             .map_err(|_| HarnessError::Protocol("Pi discovery task failed".into()))?
     }
-    fn spawn(&self, cwd: &Path, args: &[String]) -> Result<Process, HarnessError> {
+    fn spawn(
+        &self,
+        cwd: &Path,
+        args: &[String],
+        origin: Option<&crate::RunOrigin>,
+    ) -> Result<Process, HarnessError> {
         let exe = self.resolve_executable()?;
         if self.executable.is_none() {
             if let Some(version) = crate::executable::binary_version(&exe) {
@@ -123,6 +128,7 @@ impl PiHarness {
             }
         }
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, origin);
         // Process group plus the same env scrubbing the ACP launch applied.
         crate::process::owned::configure(&mut cmd);
         crate::compose_child_path(&mut cmd, &exe);
@@ -335,7 +341,7 @@ impl Harness for PiHarness {
         if lost_context.is_some() {
             request.resume = None;
         }
-        let process = self.spawn(Path::new(&request.cwd), &args)?;
+        let process = self.spawn(Path::new(&request.cwd), &args, controls.origin.as_ref())?;
         let (tx, rx) = mpsc::channel(256);
         let kill_grace = self.kill_grace;
         let interrupt_grace = self.interrupt_grace;

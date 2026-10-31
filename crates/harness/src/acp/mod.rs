@@ -1143,7 +1143,8 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
+        let (_scratch, mut child, _stderr) =
+            self.spawn_agent(home.as_deref(), false, &[], None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1199,6 +1200,7 @@ impl AcpHarness {
             .transpose()?
             .flatten();
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
@@ -1506,9 +1508,11 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
+        origin: Option<&crate::RunOrigin>,
     ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, origin);
         cmd.args(args);
         cmd.args(extra_args);
         child::configure(&mut cmd);
@@ -1564,7 +1568,7 @@ impl AcpHarness {
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         let (_scratch, mut child, _stderr) = self
-            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[])
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
@@ -1634,7 +1638,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (_scratch, mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
+        let (_scratch, mut child, stderr_tail) = self.spawn_agent(None, false, &[], None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -2196,7 +2200,12 @@ impl Harness for AcpHarness {
             launch_args.extend(["-w".to_owned(), name.clone()]);
         }
         let (scratch, mut child, stderr_tail) = self
-            .spawn_agent(Some(&request.cwd), true, &launch_args)
+            .spawn_agent(
+                Some(&request.cwd),
+                true,
+                &launch_args,
+                controls.origin.as_ref(),
+            )
             .await?;
         if let Some(name) = &graff_worktree {
             // session/load only accepts the checkout Graff runs in: the tree.

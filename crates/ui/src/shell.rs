@@ -102,6 +102,7 @@ actions!(
     [
         SaveFile,
         ToggleSidebar,
+        OpenSessionSearch,
         ToggleChanges,
         ToggleFiles,
         AddSpacePalette,
@@ -183,6 +184,7 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
         ),
         row("Jump to the message box", Box::new(FocusComposer)),
         row("Command palette", Box::new(ToggleCommandPalette)),
+        row("Search sessions", Box::new(OpenSessionSearch)),
         row("Settings", Box::new(OpenSettings)),
     ]
 }
@@ -595,6 +597,7 @@ pub fn apply_keymap(
         // Fixed: ⌘K summons the command palette.
         // Pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
+        KeyBinding::new(&platform_combo("mod-f"), OpenSessionSearch, None),
         KeyBinding::new(
             &valid_or_default(&keymap.open_model_picker, "mod-/"),
             OpenModelPicker,
@@ -4171,6 +4174,11 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TranscriptEvent::StageAnnotated(annotated) => {
+                let annotated = annotated.clone();
+                self.composer
+                    .update(cx, |composer, cx| composer.stage_annotated(annotated, cx));
+            }
             TranscriptEvent::OpenSubagent {
                 chat_id,
                 doc_id,
@@ -5514,6 +5522,7 @@ impl Shell {
                     let keymap = self.settings.keymap.clone();
                     let escape_stops_active_agent = self.settings.escape_stops_active_agent;
                     let composer_send_behavior = self.settings.composer_send_behavior;
+                    let follow_up_behavior = self.settings.follow_up_behavior;
                     let appshots_enabled = self.settings.appshots_enabled;
                     let appshot_sound_enabled = self.settings.appshot_sound_enabled;
                     let appshot_destination = self.settings.appshot_destination;
@@ -5523,6 +5532,7 @@ impl Shell {
                             keymap,
                             escape_stops_active_agent,
                             composer_send_behavior,
+                            follow_up_behavior,
                             appshots_enabled,
                             appshot_sound_enabled,
                             appshot_destination,
@@ -5545,6 +5555,9 @@ impl Shell {
                                 ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
                                     this.settings.composer_send_behavior = *behavior;
                                 }
+                                ShortcutsEvent::FollowUpBehaviorChanged(behavior) => {
+                                    this.settings.follow_up_behavior = *behavior;
+                                }
                                 ShortcutsEvent::AppshotsChanged {
                                     enabled,
                                     sound_enabled,
@@ -5557,11 +5570,13 @@ impl Shell {
                                     crate::appshots::set_enabled(*enabled);
                                 }
                             }
-                            apply_keymap(
-                                cx,
-                                &this.settings.keymap,
-                                this.settings.composer_send_behavior,
-                            );
+                            if !matches!(event, ShortcutsEvent::FollowUpBehaviorChanged(_)) {
+                                apply_keymap(
+                                    cx,
+                                    &this.settings.keymap,
+                                    this.settings.composer_send_behavior,
+                                );
+                            }
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -7610,8 +7625,8 @@ impl Shell {
         // FAILED (explicit, with the transcript's retry affordance); a send
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
+        let now = Utc::now();
         let (queued, undelivered) = {
-            let now = Utc::now();
             let state = self.state.read(cx);
             (
                 state.send_queued(&id, now),
@@ -7625,10 +7640,17 @@ impl Shell {
         } else {
             spaces::status_dot_color(status, theme)
         };
+        let build_waiting = self
+            .state
+            .read(cx)
+            .build_wait_since_for_chat(&id, now)
+            .is_some();
         let status_label: Option<&'static str> = if undelivered {
             Some("Failed")
         } else if queued {
             Some("Queued")
+        } else if build_waiting {
+            Some("Waiting")
         } else {
             match status {
                 harness_proto::ChatIndicator::Working => Some("Working"),
@@ -7642,7 +7664,9 @@ impl Shell {
         let queued = queued && !undelivered;
         let working = status == harness_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
-            let glyph = if working {
+            let glyph = if build_waiting {
+                loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx).into_any_element()
+            } else if working {
                 loaders::mini_glyph_spinner(
                     format!("{row_id}-working"),
                     2.0,
@@ -7765,6 +7789,9 @@ impl Shell {
                             .size(px(11.0))
                             .flex_none()
                             .text_color(status_color)
+                            .into_any_element()
+                    } else if build_waiting {
+                        loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx)
                             .into_any_element()
                     } else if working {
                         loaders::mini_glyph_spinner(
@@ -13220,6 +13247,9 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &OpenSessionSearch, window, cx| {
+                this.open_sidebar_search(window, cx);
+            }))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) land on the section last viewed.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
@@ -13461,10 +13491,11 @@ impl Render for Shell {
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
+                let content_plane = Theme::of(cx).content_plane();
                 // No inset cards (user request): the conversation column sits
-                // flush and unbordered, the transcript directly on the frost
-                // glass; the changes pane is a flush left-bordered glass panel
-                // (built inside `render_right_pane`).
+                // flush and unbordered on the frost glass, lifted only by
+                // `Theme::content_plane`; the changes pane is a flush
+                // left-bordered glass panel (built inside `render_right_pane`).
                 let main = if main_transition.is_some() {
                     div()
                         .h_full()
@@ -13498,6 +13529,7 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
+                    .when_some(content_plane, |el, plane| el.bg(plane))
                     .child(main)
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (harness
@@ -16024,7 +16056,7 @@ mod exit_regressions {
             )
         });
         let windows = |cx: &mut TestAppContext| cx.update(|cx| cx.windows().len());
-        // A saved preference must not bypass the per-close question.
+        // Already chosen, so ⌘W closes instead of asking first.
         cx.update(|cx| settings::set_archive_sessions_on_close(false, cx));
         // A fresh, unprompted chat (the new-session canvas): nothing closes.
         cx.update(|cx| crate::app_menus::close_tab_in(window, cx));
@@ -16062,10 +16094,8 @@ mod exit_regressions {
         cx.update(|cx| crate::app_menus::close_tab_in(window, cx));
         assert_eq!(windows(cx), 1);
         window
-            .update(cx, |shell, window, cx| {
-                assert!(shell.archive_choice_prompt);
-                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("chat"));
-                assert!(shell.choose_close_archiving(false, window, cx));
+            .update(cx, |shell, _, cx| {
+                assert!(!shell.archive_choice_prompt);
                 assert_eq!(shell.state.read(cx).selected_chat, None, "the chat closed");
             })
             .unwrap();
@@ -18399,6 +18429,12 @@ impl Shell {
             page.update(cx, |page, cx| page.fixture_browse_link(status, cx));
         }
         cx.notify();
+    }
+
+    /// First-close QA without depending on native app activation.
+    pub fn fixture_first_chat_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        assert!(!self.close_chat_view_by_shortcut(window, cx));
+        assert!(self.archive_choice_prompt);
     }
 
     /// Close-and-archive QA (`examples/archive-choice-fixture.rs`).

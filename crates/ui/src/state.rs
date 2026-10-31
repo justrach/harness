@@ -505,6 +505,14 @@ impl EngineHandle {
     /// replies are made up (examples/ui-scenes.rs `replies`).
     #[cfg(any(test, feature = "ui-scenes"))]
     pub fn from_test_client(client: RpcClient) -> Self {
+        Self::from_test_client_with_capabilities(client, Vec::new())
+    }
+
+    #[cfg(any(test, feature = "ui-scenes"))]
+    pub(crate) fn from_test_client_with_capabilities(
+        client: RpcClient,
+        capabilities: Vec<String>,
+    ) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -515,7 +523,7 @@ impl EngineHandle {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: Vec::new(),
+                capabilities,
             },
             deferred_state: None,
         }
@@ -806,6 +814,9 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    /// Only chat panes watch live progress; child docs never inherit a parent's wait.
+    peer_progress_tasks: HashMap<String, Task<()>>,
+    peer_tool_progress: HashMap<String, Vec<harness_proto::ToolProgressItem>>,
     // A peer and a child may read the same document. Single-flight watches
     // share work, not lifetime; each kind of consumer releases independently.
     sub_doc_consumers: HashSet<String>,
@@ -892,6 +903,8 @@ impl AppState {
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            peer_progress_tasks: HashMap::new(),
+            peer_tool_progress: HashMap::new(),
             sub_doc_consumers: HashSet::new(),
             peer_doc_consumers: HashSet::new(),
             cloud_sandboxes: Default::default(),
@@ -1508,6 +1521,63 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// Explicit, live host signal only. A stale record cannot leak into a later
+    /// turn or survive a settled/cancelled session. An unavailable watch is empty.
+    pub(crate) fn build_wait_since_for_chat(
+        &self,
+        chat_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<i64> {
+        if self.indicator_for(chat_id, now) != Indicator::Working {
+            return None;
+        }
+        let items = if self.selected_chat.as_deref() == Some(chat_id) {
+            &self.tool_progress
+        } else {
+            self.peer_tool_progress.get(chat_id)?
+        };
+        let since = harness_proto::build_wait_since(items)?;
+        if self
+            .session_for(chat_id)
+            .and_then(|s| s.started_at)
+            .is_some_and(|start| since < start.timestamp())
+        {
+            return None;
+        }
+        Some(since)
+    }
+
+    pub(crate) fn receive_tool_progress(
+        &mut self,
+        chat_id: &str,
+        items: Vec<harness_proto::ToolProgressItem>,
+    ) -> bool {
+        let mut changed = false;
+        if self.selected_chat.as_deref() == Some(chat_id) && self.tool_progress != items {
+            self.tool_progress = items.clone();
+            changed = true;
+        }
+        if self.peer_doc_consumers.contains(chat_id)
+            && self.peer_tool_progress.get(chat_id) != Some(&items)
+        {
+            self.peer_tool_progress.insert(chat_id.to_owned(), items);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Synthetic production capture hook; never reads user data or opens a watch.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_tool_progress(
+        &mut self,
+        chat_id: &str,
+        items: Vec<harness_proto::ToolProgressItem>,
+        cx: &mut Context<Self>,
+    ) {
+        self.receive_tool_progress(chat_id, items);
+        cx.notify();
+    }
+
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
@@ -1556,7 +1626,16 @@ impl AppState {
     /// same doc watch subagent tabs use (`WatchDocMessages` takes any doc id).
     pub fn watch_peer_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.peer_doc_consumers.insert(chat_id.clone());
-        self.watch_doc(chat_id, cx);
+        self.watch_doc(chat_id.clone(), cx);
+        if !self.peer_progress_tasks.contains_key(&chat_id)
+            && let Some(handle) = self.engine.clone()
+            && handle
+                .engine_info()
+                .supports(harness_proto::capabilities::TOOL_PROGRESS_V1)
+        {
+            let task = spawn_tool_progress_watch(cx, handle, chat_id.clone());
+            self.peer_progress_tasks.insert(chat_id, task);
+        }
     }
 
     /// Drop an unfocused pane's feed. A chat that just became the selected
@@ -1564,6 +1643,8 @@ impl AppState {
     /// feed, so those stay; only the peer rows and watch go.
     pub fn unwatch_peer_chat(&mut self, chat_id: &str) {
         self.peer_doc_consumers.remove(chat_id);
+        self.peer_progress_tasks.remove(chat_id);
+        self.peer_tool_progress.remove(chat_id);
         self.release_doc_if_unused(chat_id);
     }
 
@@ -1622,6 +1703,51 @@ impl AppState {
                 self.transcript_revision = self.transcript_revision.wrapping_add(1);
             }
         }
+    }
+
+    /// Replace a provisional optimistic id with the queue's durable message id.
+    /// The transcript can confirm the durable id before the queue ack arrives.
+    pub(crate) fn rekey_echo(&mut self, chat_id: &str, provisional_id: &str, message_id: &str) {
+        let authoritative = self
+            .selected_chat
+            .as_deref()
+            .filter(|selected| *selected == chat_id)
+            .is_some_and(|_| self.transcript.iter().any(|entry| entry.id == message_id))
+            || self
+                .sub_transcripts
+                .get(chat_id)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.id == message_id));
+
+        let Some(echoes) = self.echoes.get_mut(chat_id) else {
+            return;
+        };
+        let had_provisional = echoes.iter().any(|entry| entry.id == provisional_id);
+        if !had_provisional {
+            return;
+        }
+
+        let final_echo_exists =
+            provisional_id != message_id && echoes.iter().any(|entry| entry.id == message_id);
+        if authoritative || final_echo_exists {
+            echoes.retain(|entry| entry.id != provisional_id);
+        } else if let Some(entry) = echoes.iter_mut().find(|entry| entry.id == provisional_id) {
+            entry.id = message_id.to_owned();
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    /// Whether an id is already visible as an optimistic or authoritative
+    /// message for this chat.
+    pub(crate) fn message_is_in_transcript(&self, chat_id: &str, message_id: &str) -> bool {
+        self.echoes
+            .get(chat_id)
+            .is_some_and(|echoes| echoes.iter().any(|entry| entry.id == message_id))
+            || (self.selected_chat.as_deref() == Some(chat_id)
+                && self.transcript.iter().any(|entry| entry.id == message_id))
+            || self
+                .sub_transcripts
+                .get(chat_id)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.id == message_id))
     }
 
     /// Composer send fired: overlay the chat as Working until the host writes
@@ -2230,6 +2356,13 @@ impl AppState {
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
+        self.tool_progress.clear();
+        self.tool_progress_task = None;
+        self.peer_progress_tasks.clear();
+        self.peer_tool_progress.clear();
+        for chat_id in self.peer_doc_consumers.clone() {
+            self.watch_peer_chat(chat_id, cx);
+        }
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
@@ -3278,10 +3411,7 @@ fn spawn_tool_progress_watch(
                     continue;
                 };
                 let alive = this.update(cx, |state, cx| {
-                    if state.selected_chat.as_deref() == Some(chat_id.as_str())
-                        && state.tool_progress != frame.items
-                    {
-                        state.tool_progress = frame.items;
+                    if state.receive_tool_progress(&chat_id, frame.items) {
                         cx.notify();
                     }
                 });
@@ -3290,7 +3420,11 @@ fn spawn_tool_progress_watch(
                 }
             }
             if this
-                .update(cx, |state, _| state.tool_progress.clear())
+                .update(cx, |state, cx| {
+                    if state.receive_tool_progress(&chat_id, Vec::new()) {
+                        cx.notify();
+                    }
+                })
                 .is_err()
             {
                 return;
@@ -5124,6 +5258,61 @@ mod tests {
             },
         );
         assert!(state.pending_echoes().is_empty());
+    }
+
+    #[test]
+    fn rekeyed_steer_echo_survives_ack_order_and_is_chat_scoped() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        let mut echo = user_entry("provisional");
+        echo.created_at = 42;
+        let expected = SessionMessageEntry {
+            id: "queued-id".into(),
+            ..echo.clone()
+        };
+        state.push_echo("c1", echo);
+
+        state.rekey_echo("c1", "provisional", "queued-id");
+        assert_eq!(state.pending_echoes(), &[expected.clone()]);
+        assert!(state.message_is_in_transcript("c1", "queued-id"));
+        assert!(!state.message_is_in_transcript("other", "queued-id"));
+
+        // Once the transcript confirms the durable id, it prunes the echo.
+        state.apply_transcript(vec![expected.clone()]);
+        assert!(state.pending_echoes().is_empty());
+        assert!(state.message_is_in_transcript("c1", "queued-id"));
+
+        // A transcript can land before the queue acknowledgement while the
+        // optimistic echo still has its provisional id. Rekey removes it.
+        let mut doc_first_echo = user_entry("doc-first-provisional");
+        doc_first_echo.created_at = 43;
+        let doc_first_expected = SessionMessageEntry {
+            id: "doc-first-queued".into(),
+            ..doc_first_echo.clone()
+        };
+        state.push_echo("c1", doc_first_echo.clone());
+        state.apply_transcript(vec![doc_first_expected.clone()]);
+        assert_eq!(state.pending_echoes(), &[doc_first_echo]);
+        state.rekey_echo("c1", "doc-first-provisional", "doc-first-queued");
+        assert!(state.pending_echoes().is_empty());
+        assert!(state.message_is_in_transcript("c1", "doc-first-queued"));
+
+        // If a final-id echo already exists, rekeying must not leave both.
+        state.push_echo("c1", user_entry("duplicate-provisional"));
+        let duplicate_final = user_entry("duplicate-final");
+        state.push_echo("c1", duplicate_final.clone());
+        state.rekey_echo("c1", "duplicate-provisional", "duplicate-final");
+        assert_eq!(state.pending_echoes(), &[duplicate_final]);
+
+        // Failed queued sends remove only their own pending echo.
+        state.push_echo("c1", user_entry("failed-id"));
+        state.remove_echo("c1", "failed-id");
+        assert!(!state.message_is_in_transcript("c1", "failed-id"));
+
+        // Same ids in another chat do not make this chat appear to contain it.
+        state.push_echo("other", user_entry("other-id"));
+        assert!(!state.message_is_in_transcript("c1", "other-id"));
+        assert!(state.message_is_in_transcript("other", "other-id"));
     }
 
     #[test]

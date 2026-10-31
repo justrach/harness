@@ -57,8 +57,15 @@ use harness_syntax::LanguageId as Lang;
 mod cadence;
 
 #[cfg(test)]
+#[path = "transcript/steer_echo_tests.rs"]
+mod steer_echo_tests;
+
+#[cfg(test)]
 #[path = "transcript/bottom_flicker_tests.rs"]
 mod bottom_flicker_tests;
+#[cfg(test)]
+#[path = "transcript/build_wait_tests.rs"]
+mod build_wait_tests;
 #[cfg(test)]
 #[path = "transcript/final_answer_tests.rs"]
 mod final_answer_tests;
@@ -1426,6 +1433,36 @@ fn reply_image_path(source: &str, workspace_root: Option<&str>) -> Option<String
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+/// The image files a transcript's rows show: user attachments and the images
+/// replies reference (`![caption](shot.png)`), resolved like
+/// [`reply_image_path`]. These are shielded from image-cache eviction: a
+/// reply's screenshots share the attachment budget, and with several large
+/// ones on screen, each load evicted another visible image, which reloaded
+/// and evicted the next, so the images flashed. Generated images use bounded
+/// LRU retention instead.
+fn transcript_image_paths(rows: &[Row], workspace_root: Option<&str>) -> Vec<String> {
+    let mut paths = Vec::new();
+    for row in rows {
+        match &row.kind {
+            RowKind::User { attachments, .. } => {
+                paths.extend(attachments.iter().map(|att| att.path.clone()));
+            }
+            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix, .. } => {
+                let Some(top) = tree.blocks.get(*block_ix) else {
+                    continue;
+                };
+                paths.extend(
+                    crate::files::markdown_media::block_image_sources(&top.block)
+                        .iter()
+                        .filter_map(|source| reply_image_path(source, workspace_root)),
+                );
+            }
+            _ => {}
+        }
+    }
+    paths
 }
 
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
@@ -4051,6 +4088,9 @@ enum BlobFetch {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    /// Done in a transcript image's annotate mode (crate::annotate): stage
+    /// the flattened copy, with its notes, in the composer.
+    StageAnnotated(crate::annotate::Annotated),
     /// An error card's "Log in": the run was refused because this chat's
     /// agent is signed out or out of usage ([`harness_proto::run_errors`]).
     /// The shell routes it by the chat's own agent and host, never by the
@@ -6339,15 +6379,11 @@ impl Transcript {
 
     fn protected_attachment_keys(&self, cx: &Context<Self>) -> HashSet<(String, String)> {
         let devices = self.attachment_device_ids(cx);
+        let workspace_root = self.workspace_root(cx);
         let mut keys = std::collections::HashSet::new();
-        for row in &self.rows {
-            // Generated images use bounded LRU retention, not history-wide protection.
-            if let RowKind::User { attachments, .. } = &row.kind {
-                for att in attachments.iter() {
-                    for dev in &devices {
-                        keys.insert((dev.clone(), att.path.clone()));
-                    }
-                }
+        for path in transcript_image_paths(&self.rows, workspace_root.as_deref()) {
+            for dev in &devices {
+                keys.insert((dev.clone(), path.clone()));
             }
         }
         keys
@@ -7872,6 +7908,16 @@ impl Transcript {
         }
     }
 
+    fn confirmed_build_wait_since(&self, cx: &gpui::App) -> Option<i64> {
+        let state = self.state.read(cx);
+        let chat_id = match &self.doc_override {
+            Some(doc_id) if self.doc_live && state.doc_has_chat_consumer(doc_id) => doc_id,
+            Some(_) => return None,
+            None => self.chat_id.as_ref()?,
+        };
+        state.build_wait_since_for_chat(chat_id, chrono::Utc::now())
+    }
+
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // A pending question owns the surface, even if the run still streams
         // or a steer follows it. Check this pane's doc, not the focused chat:
@@ -7986,6 +8032,29 @@ impl Transcript {
             };
             (sending, queued, elapsed, flavour_seed(&chat_id))
         };
+        if let Some(since) = self.confirmed_build_wait_since(cx) {
+            let theme = Theme::of(cx).clone();
+            // A separate, noninteractive row: historical tool disclosures stay
+            // where they are, and this status has no dropdown or actions.
+            return Some(
+                div()
+                    .id("build-wait-status")
+                    .debug_selector(|| "build-wait-status".into())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(Theme::SPACE_SM))
+                    .pt(px(Theme::SPACE_LG))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(crate::loaders::build_wait_dot(&theme, cx.entity_id(), cx))
+                    .child(SharedString::from(crate::build_wait::label(
+                        since,
+                        now.timestamp(),
+                    )))
+                    .into_any_element(),
+            );
+        }
         if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
@@ -8042,6 +8111,7 @@ impl Transcript {
             });
         let line = {
             div()
+                .debug_selector(|| "thinking-status".into())
                 .flex()
                 .flex_row()
                 .items_center()
@@ -9130,17 +9200,18 @@ impl Transcript {
                 .sum::<f32>();
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
-        let shimmer_phase = if active && !reduce_motion {
-            // The soft 3.4s sweep reads the same at 15Hz, and it runs for as
-            // long as a tool does.
-            motion::pulse_lease_slow(cx.entity_id(), cx);
-            self.tool_group_reveals
-                .get(row_id)
-                .and_then(|reveal| reveal.shimmer_started_at)
-                .map(|start| tool_title_shimmer_phase(start, now))
-        } else {
-            None
-        };
+        let shimmer_phase =
+            if active && !reduce_motion && self.confirmed_build_wait_since(cx).is_none() {
+                // The soft 3.4s sweep reads the same at 15Hz, and it runs for as
+                // long as a tool does.
+                motion::pulse_lease_slow(cx.entity_id(), cx);
+                self.tool_group_reveals
+                    .get(row_id)
+                    .and_then(|reveal| reveal.shimmer_started_at)
+                    .map(|start| tool_title_shimmer_phase(start, now))
+            } else {
+                None
+            };
         let disclosure_progress = if reduce_motion {
             if open { 1.0 } else { 0.0 }
         } else {
@@ -11232,6 +11303,20 @@ impl Render for Transcript {
             .child(crate::markdown::render::selection_owner_end());
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
+        if let Some(preview) = self.attachment_preview.as_mut()
+            && preview.annotate.is_none()
+        {
+            let weak = cx.weak_entity();
+            *preview = preview.clone().annotatable(move |annotated, _, cx| {
+                weak.update(cx, |this, cx| {
+                    this.attachment_preview = None;
+                    this.release_diagram_zoom(cx);
+                    cx.emit(TranscriptEvent::StageAnnotated(annotated));
+                    cx.notify();
+                })
+                .ok();
+            });
+        }
         if let Some(preview) = self.attachment_preview.clone() {
             let weak = cx.weak_entity();
             // A diagram keeps its natural size; the image is a raster of it.
@@ -15523,6 +15608,39 @@ mod tests {
             subagent_tail,
             view,
         }
+    }
+
+    #[test]
+    fn images_in_replies_are_shielded_from_cache_eviction() {
+        // Before, only user attachments were shielded, so a reply with
+        // several large screenshots evicted its own images in turn and they
+        // flashed between loaded and "Loading image…".
+        let root = if cfg!(windows) { "C:/work" } else { "/work" };
+        let absolute = if cfg!(windows) {
+            "C:/shots/after.png"
+        } else {
+            "/shots/after.png"
+        };
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![text_part(
+                "t1",
+                &format!(
+                    "Before:\n\n![before](shots/before.png)\n\nAfter:\n\n![after]({absolute})\n\n![remote](https://example.com/a.png)"
+                ),
+            )],
+        );
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let paths = transcript_image_paths(&rows, Some(root));
+        let in_root = std::path::Path::new(root)
+            .join("shots/before.png")
+            .to_string_lossy()
+            .into_owned();
+        assert!(paths.contains(&in_root), "{paths:?}");
+        assert!(paths.contains(&absolute.to_owned()), "{paths:?}");
+        // A remote image is never fetched, so it has nothing to shield.
+        assert_eq!(paths.len(), 2, "{paths:?}");
     }
 
     #[test]

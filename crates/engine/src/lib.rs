@@ -18,6 +18,7 @@ use harness_sync::DocsStore;
 pub mod agent_accounts;
 pub mod auth;
 pub mod browse_link;
+mod build_wait;
 pub mod change_requests;
 pub mod chat2_host;
 pub mod codegraff_auth;

@@ -434,6 +434,7 @@ impl Catalog {
             return Ok(models.clone());
         }
         let mut cmd = Command::new(exe);
+        crate::apply_run_environment(&mut cmd, None);
         cmd.args(["models", "list", "--format", "json"]);
         crate::compose_child_path(&mut cmd, exe);
         cmd.stdin(Stdio::null())

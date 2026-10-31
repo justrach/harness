@@ -950,6 +950,7 @@ pub(crate) mod tests {
                 name: "Safari Appshot.png".into(),
                 image: Some(Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new()))),
                 file: None,
+                annotations: None,
             },
             screenshot_dimensions: Some((1440, 900)),
             app_icon: None,

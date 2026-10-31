@@ -61,7 +61,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// The stable per-chat tree name Harness asks Graff for.
+/// Legacy name, retained for compatibility with existing checkouts.
 pub fn name_for_chat(chat_id: &str) -> String {
     let short: String = chat_id
         .chars()
@@ -74,6 +74,24 @@ pub fn name_for_chat(chat_id: &str) -> String {
     } else {
         format!("harness-{short}")
     }
+}
+
+/// A new tree is named for the task, with a stable digest of the full chat id
+/// to distinguish independent conversations doing the same work. Existing trees
+/// keep their name.
+pub fn name_for_task(chat_id: &str, task: &str) -> String {
+    // FNV-1a has an explicitly stable algorithm, unlike DefaultHasher. Hash all
+    // bytes: UUIDv7 ids share prefixes, and filtering punctuation/case loses ids.
+    let digest = chat_id
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    let slug = crate::worktree_name::task_slug(task);
+    // Reserve one separator and 16 hex digits within Graff's 64-byte limit.
+    let slug = slug[..slug.len().min(47)].trim_end_matches('-');
+    format!("{slug}-{digest:016x}")
 }
 
 #[cfg(test)]
@@ -107,6 +125,84 @@ mod tests {
             launch_root("/repo/.graff/worktrees/bad name"),
             "/repo/.graff/worktrees/bad name"
         );
+    }
+
+    #[test]
+    fn new_chat_names_describe_the_task_without_product_branding() {
+        let name = name_for_task("chat-graff-tree", "Fix login redirect after sign-in");
+        assert_eq!(name, "fix-login-redirect-after-sign-in-1a7188e911beeb31");
+        assert!(valid_name(&name));
+        assert!(valid_name(&name_for_task("---", "***")));
+        assert!(valid_name(&name_for_task("chat", &"x".repeat(100))));
+        assert_ne!(
+            name_for_task("chat-one", "Fix login"),
+            name_for_task("chat-two", "Fix login")
+        );
+    }
+
+    #[test]
+    fn task_name_digests_are_stable_across_processes() {
+        // Published FNV-1a 64-bit vectors pin the algorithm, not Rust's hasher.
+        assert_eq!(name_for_task("", "Fix login"), "fix-login-cbf29ce484222325");
+        assert_eq!(
+            name_for_task("a", "Fix login"),
+            "fix-login-af63dc4c8601ec8c"
+        );
+        assert_eq!(
+            name_for_task("foobar", "Fix login"),
+            "fix-login-85944171f73967e8"
+        );
+    }
+
+    #[test]
+    fn task_names_distinguish_chat_ids_with_shared_uuidv7_prefixes() {
+        let ids = [
+            "019b1234-5678-7000-8000-000000000001",
+            "019b1234-5678-7000-8000-000000000002",
+            "019b1234-5678-7fff-bfff-ffffffffffff",
+        ];
+        let names: std::collections::HashSet<_> = ids
+            .iter()
+            .map(|id| name_for_task(id, "Fix login"))
+            .collect();
+        assert_eq!(names.len(), ids.len());
+    }
+
+    #[test]
+    fn task_names_distinguish_punctuation_case_and_empty_chat_ids() {
+        let ids = [
+            "", "---", "...", "_", "chat-one", "chat_one", "chatone", "CHATONE", "é", "è",
+        ];
+        let names: std::collections::HashSet<_> = ids
+            .iter()
+            .map(|id| name_for_task(id, "Fix login"))
+            .collect();
+        assert_eq!(names.len(), ids.len());
+        for name in names {
+            assert!(valid_name(&name), "{name}");
+            assert!(name.starts_with("fix-login-"), "{name}");
+        }
+    }
+
+    #[test]
+    fn task_names_fit_graff_limits_at_slug_boundaries() {
+        for task in [
+            "x".repeat(47),
+            "x".repeat(48),
+            "x".repeat(100),
+            format!("{}-more", "x".repeat(46)),
+            "CON".into(),
+            "***".into(),
+        ] {
+            for id in ["", "---", "019b1234-5678-7000-8000-000000000001"] {
+                let name = name_for_task(id, &task);
+                assert!(valid_name(&name), "{name}");
+                assert!(name.len() <= 64);
+                assert!(!name.starts_with("harness-"));
+                assert!(!name.contains("--"), "{name}");
+                assert_eq!(name_for_task(id, &task), name);
+            }
+        }
     }
 
     #[test]

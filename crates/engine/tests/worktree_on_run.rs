@@ -109,7 +109,7 @@ fn run_payload(message_id: &str, repo_path: &str, space_id: Option<&str>) -> Ses
     SessionCommandPayload::Run {
         request: RunRequest {
             turn_origin: Default::default(),
-            prompt: "isolated please".into(),
+            prompt: "Fix login redirect after sign-in".into(),
             harness: None,
             model: None,
             reasoning: None,
@@ -309,9 +309,9 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool) {
         .expect("chat row exists");
     assert_eq!(chat.cwd.as_deref(), Some(first_cwd.as_str()));
     let branch = chat.branch.expect("branch stamped");
-    assert!(
-        branch.starts_with("harness/"),
-        "stamped branch is the worktree's own: {branch}"
+    assert_eq!(
+        branch, "task/fix-login-redirect-after-sign-in",
+        "a fresh chat in an unrelated repository needs a task-descriptive branch"
     );
     let context = chat.source_context.expect("host worktree source context");
     let identity = core.repos.checkout_identity(&first).await.unwrap();

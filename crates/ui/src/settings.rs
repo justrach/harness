@@ -451,15 +451,15 @@ pub fn transcript_compact_mode(cx: &App) -> bool {
         .unwrap_or_default()
 }
 
-/// Whether a session's tab or pane ✕ button archives it. ⌘W asks each time.
+/// Whether closing a session's tab or pane with ⌘W or its ✕ archives it.
 pub fn archive_sessions_on_close(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.archive_sessions_on_close)
         .unwrap_or_default()
 }
 
-/// Legacy saved-choice marker, retained for settings compatibility.
-/// ⌘W now asks each time, regardless of this value.
+/// Whether the user has picked what ⌘W does to a session; until then the
+/// first ⌘W close asks (`shell/archive_choice.rs`).
 pub fn archive_on_close_chosen(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .is_some_and(|store| store.current.archive_on_close_chosen)
@@ -480,7 +480,8 @@ pub fn close_shortcut_badges(cx: &App) -> (String, String) {
     (badge_combo(close), close_only)
 }
 
-/// Set the ✕-button preference. Per-close ⌘W answers do not change it.
+/// The Settings toggle and the first-close question both land here, so
+/// either one counts as the choice.
 pub fn set_archive_sessions_on_close(enabled: bool, cx: &mut App) {
     update(SavePolicy::Immediate, cx, |settings| {
         settings.archive_sessions_on_close = enabled;
@@ -553,6 +554,14 @@ pub enum ComposerSendBehavior {
     #[default]
     Enter,
     ModEnter,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FollowUpBehavior {
+    #[default]
+    Queue,
+    Steer,
 }
 
 /// Persist the latest revision. Safe to call at shutdown.
@@ -741,6 +750,8 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
+    /// How messages sent while the agent is working are handled.
+    pub follow_up_behavior: FollowUpBehavior,
     /// Legacy global opt-in; per-harness preferences take precedence.
     pub skills_in_slash_menu: bool,
     pub skill_completion_by_harness:
@@ -789,13 +800,14 @@ pub struct UiSettings {
     /// The split chat layout at quit; launch restores it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_layout: Option<SavedChatLayout>,
-    /// Closing a session's tab or pane with its ✕ button also archives the
-    /// session (off by default). ⌘W asks each time; ⌘⌥W never archives, and
-    /// neither does quitting or closing the window.
+    /// Closing a session's tab or pane with ⌘W or its ✕ button also archives
+    /// the session (off by default). The close-without-archiving shortcut
+    /// (⌘⌥W) never does, and neither does quitting or closing the window.
     #[serde(alias = "archiveSessionsOnTabClose")]
     pub archive_sessions_on_close: bool,
-    /// Legacy marker for [`Self::archive_sessions_on_close`], retained for
-    /// settings compatibility. It no longer suppresses the ⌘W question.
+    /// The user has chosen [`Self::archive_sessions_on_close`], in Settings or
+    /// by answering the question the first ⌘W close asks. A file that already
+    /// has the setting on counts as chosen.
     pub archive_on_close_chosen: bool,
     /// The Settings section last viewed — reopened by the generic entry points
     /// (⌘, the account menu, the palette). Kept as a string so an unknown or
@@ -979,6 +991,7 @@ impl Default for UiSettings {
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             composer_send_behavior: ComposerSendBehavior::default(),
+            follow_up_behavior: FollowUpBehavior::default(),
             skills_in_slash_menu: false,
             skill_completion_by_harness: Default::default(),
             appshots_enabled: false,
@@ -1998,6 +2011,32 @@ mod tests {
     }
 
     #[test]
+    fn follow_up_behavior_defaults_ignores_obsolete_key_and_round_trips() {
+        let missing: UiSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.follow_up_behavior, FollowUpBehavior::Queue);
+
+        let obsolete: UiSettings =
+            serde_json::from_str(r#"{"activeTurnSendBehavior":"steer"}"#).unwrap();
+        assert_eq!(obsolete.follow_up_behavior, FollowUpBehavior::Queue);
+
+        let dir = tempfile::tempdir().unwrap();
+        for behavior in [FollowUpBehavior::Queue, FollowUpBehavior::Steer] {
+            let mut settings = UiSettings::default();
+            settings.follow_up_behavior = behavior;
+            settings.save(dir.path()).unwrap();
+            let persisted = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+            assert!(persisted.contains(&format!(
+                r#""followUpBehavior": "{}""#,
+                match behavior {
+                    FollowUpBehavior::Queue => "queue",
+                    FollowUpBehavior::Steer => "steer",
+                }
+            )));
+            assert_eq!(UiSettings::load(dir.path()).follow_up_behavior, behavior);
+        }
+    }
+
+    #[test]
     fn window_geometry_round_trips_and_legacy_settings_default() {
         let dir = tempfile::tempdir().unwrap();
         let geometry = WindowGeometry {
@@ -2524,6 +2563,7 @@ mod tests {
             },
             escape_stops_active_agent: true,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
+            follow_up_behavior: FollowUpBehavior::Steer,
             skills_in_slash_menu: true,
             skill_completion_by_harness: Default::default(),
             appshots_enabled: false,

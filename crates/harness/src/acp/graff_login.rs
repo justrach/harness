@@ -29,6 +29,7 @@ pub async fn login_command(
     }
     let (program, _) = super::AcpHarness::graff().resolve_program(false).await?;
     let mut cmd = Command::new(&program);
+    crate::apply_run_environment(&mut cmd, None);
     match no_open_dir {
         Some(dir) => crate::compose_child_path_with_prefix(&mut cmd, &program, dir),
         None => crate::compose_child_path(&mut cmd, &program),
@@ -54,6 +55,7 @@ pub async fn logout_command(provider: &str) -> Result<Command, HarnessError> {
     }
     let (program, _) = super::AcpHarness::graff().resolve_program(false).await?;
     let mut cmd = Command::new(&program);
+    crate::apply_run_environment(&mut cmd, None);
     crate::compose_child_path(&mut cmd, &program);
     cmd.arg("logout").arg(provider).env("NO_COLOR", "1");
     Ok(cmd)

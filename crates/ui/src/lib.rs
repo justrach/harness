@@ -14,12 +14,14 @@
 
 mod agent_message;
 pub mod agent_work;
+pub mod annotate;
 pub mod app_menus;
 pub mod appearance;
 pub mod appshots;
 pub mod attachments;
 pub mod badges;
 pub mod browser;
+mod build_wait;
 pub mod change_requests;
 pub mod changes;
 pub(crate) mod chat_mode;

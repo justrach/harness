@@ -428,7 +428,8 @@ async fn unchanged_shared_primary_checkout_forks_from_recorded_head_without_copy
             "a linked worktree, not a copy"
         );
         assert_eq!(git(isolated, &["rev-parse", "HEAD"]), recorded_head);
-        assert_ne!(git(isolated, &["branch", "--show-current"]), before.branch);
+        let isolated_branch = git(isolated, &["branch", "--show-current"]);
+        assert_ne!(isolated_branch, before.branch);
         assert_eq!(git(isolated, &["status", "--porcelain"]), "");
         assert_eq!(
             std::fs::read(isolated.join("tracked.txt")).unwrap(),
@@ -515,6 +516,10 @@ async fn unchanged_shared_primary_checkout_forks_from_recorded_head_without_copy
             2
         );
         core.shutdown().await;
+        assert_eq!(
+            isolated_branch, "task/synthetic-task",
+            "recovery uses the existing task title"
+        );
     }
 }
 

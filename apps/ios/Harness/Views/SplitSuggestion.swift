@@ -23,7 +23,6 @@ struct SplitSuggestion: Equatable {
 
     struct Context {
         var mode: PhoneSplit
-        var isPhone: Bool
         var compactWidth: Bool
         var size: CGSize
         var largeText: Bool
@@ -48,7 +47,7 @@ struct SplitSuggestion: Equatable {
     }
 
     func shouldOffer(_ context: Context, now: TimeInterval) -> Bool {
-        guard context.isPhone, context.compactWidth, context.mode == .off, !context.largeText else { return false }
+        guard context.compactWidth, context.mode == .off, !context.largeText else { return false }
         // No room, nothing to offer: the split would not appear, so asking would only confuse.
         guard Self.offeredMode(for: context.size) != nil else { return false }
         guard shownCount < Self.maxShows else { return false }

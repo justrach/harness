@@ -898,6 +898,120 @@ async fn a_message_with_attachments_holds_even_for_a_steerable_agent() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_now_rejects_an_attachment_row_without_affecting_the_turn() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "with a file", vec!["att-1".into()])
+        .expect("queue attachment message");
+
+    let error = core
+        .doc_host
+        .steer_queued_now(CHAT, &id)
+        .await
+        .expect_err("attachment rows cannot be steered");
+    assert!(error.to_string().contains("attachments cannot be steered"));
+    let row = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("rejected row remains queued");
+    assert_eq!(row.text, "with a file");
+    assert_eq!(row.attachments, vec!["att-1"]);
+    assert!(core.sessions.turn_in_flight(CHAT));
+    assert_eq!(*prompts.lock().unwrap(), vec!["opening"]);
+    assert!(
+        !user_messages(&core)
+            .iter()
+            .any(|message| message == "with a file")
+    );
+
+    let _ = harness.finish.send(());
+    wait_for(
+        || {
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.starts_with("with a file\n\nAttached images"))
+        },
+        "the held attachment row to dispatch at turn end",
+    )
+    .await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_steer_of_a_non_head_row_preserves_the_other_rows_and_turn() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+    core.doc_host
+        .queue_message(CHAT, "first queued", Vec::new())
+        .expect("queue first row");
+    let selected_id = core
+        .doc_host
+        .queue_message(CHAT, "selected row", Vec::new())
+        .expect("queue selected row");
+    core.doc_host
+        .queue_message(CHAT, "last queued", Vec::new())
+        .expect("queue last row");
+
+    assert!(
+        core.doc_host
+            .steer_queued_now(CHAT, &selected_id)
+            .await
+            .expect("steer selected row")
+    );
+    wait_for(
+        || user_message_id(&core, "selected row").as_deref() == Some(selected_id.as_str()),
+        "selected row to appear in the transcript",
+    )
+    .await;
+    assert_eq!(queue_texts(&core), vec!["first queued", "last queued"]);
+    assert!(core.sessions.turn_in_flight(CHAT));
+    assert_eq!(*prompts.lock().unwrap(), vec!["opening"]);
+
+    let _ = harness.finish.send(());
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "first queued"),
+        "the original queue head to dispatch after the turn",
+    )
+    .await;
+    assert_eq!(queue_texts(&core), vec!["last queued"]);
+    let _ = harness.finish.send(());
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "last queued"),
+        "the remaining row to retain its order",
+    )
+    .await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// "Send now" interrupts the running turn and sends that one message, leaving
 /// the rest queued. The UI selects this action for providers that cannot steer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1401,6 +1515,81 @@ async fn only_one_editor_wins_and_an_expired_edit_requires_review() {
     .await;
     assert!(!prompts.lock().unwrap().iter().any(|p| p == "review me"));
 
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_delivery_rejects_a_gated_row_without_taking_it_or_interrupting() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "needs review", Vec::new())
+        .expect("queue gated row");
+    let gate = QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "lease-1".into(),
+        owner_device_id: "phone".into(),
+        since_ms: 1,
+        base_text_hash: "hash-1".into(),
+    };
+    assert!(
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .set_queued_delivery_gate(&id, Some(&gate))
+            .unwrap()
+    );
+
+    let steer_error = core
+        .doc_host
+        .steer_queued_now(CHAT, &id)
+        .await
+        .expect_err("a gated row cannot be steered");
+    assert!(
+        steer_error
+            .to_string()
+            .contains("blocked for editing or review")
+    );
+    let send_error = core
+        .doc_host
+        .send_queued_now(CHAT, &id)
+        .await
+        .expect_err("a gated row cannot be sent now");
+    assert!(
+        send_error
+            .to_string()
+            .contains("blocked for editing or review")
+    );
+
+    let row = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("rejected row remains queued");
+    assert_eq!(row.text, "needs review");
+    assert_eq!(row.delivery_gate, Some(gate));
+    assert!(core.sessions.turn_in_flight(CHAT));
+    assert_eq!(*prompts.lock().unwrap(), vec!["opening"]);
+    assert!(
+        !user_messages(&core)
+            .iter()
+            .any(|message| message == "needs review")
+    );
+
+    let _ = harness.finish.send(());
     core.shutdown().await;
 }
 

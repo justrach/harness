@@ -111,10 +111,10 @@ struct SessionView: View {
             if let toggleList = controls.toggleList {
                 Button(action: toggleList) {
                     Image(systemName: "sidebar.leading")
-                        .frame(width: 36, height: 36)
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
                         .contentShape(Rectangle())
                 }
-                .font(.system(size: 15, weight: .medium))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(Theme.textMuted)
                 .buttonStyle(.plain)
                 .accessibilityLabel("Show or hide the session list")
@@ -124,18 +124,18 @@ struct SessionView: View {
             Spacer(minLength: 8)
             splitButtons(controls)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 2)  // the 44pt buttons set the strip's height
         .background(Theme.bg)
     }
 
     @ViewBuilder
     private func splitButtons(_ controls: SplitScreenControls) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 6) {
             if let openBeside = controls.openBeside {
                 Button(action: openBeside) {
                     Image(systemName: "rectangle.split.2x1")
-                        .frame(width: 36, height: 36)
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("Open another session beside this one")
@@ -144,14 +144,14 @@ struct SessionView: View {
             if let close = controls.close {
                 Button(action: close) {
                     Image(systemName: "xmark")
-                        .frame(width: 36, height: 36)
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
                         .contentShape(Rectangle())
                 }
                 .accessibilityLabel("Close this pane")
                 .accessibilityIdentifier("split-close-pane")
             }
         }
-        .font(.system(size: 15, weight: .medium))
+        .font(.system(size: 15, weight: .semibold))
         .foregroundStyle(Theme.textMuted)
         .buttonStyle(.plain)
         .labelStyle(.iconOnly)
@@ -223,8 +223,9 @@ struct SessionView: View {
                     Button(action: stackedSplit) {
                         HStack(spacing: 6) {
                             Image(systemName: "rectangle.split.1x2")
+                                .fontWeight(.semibold)
                             Text("Split")
-                                .font(Theme.sans(15, weight: .medium))
+                                .font(Theme.sans(15, weight: .semibold))
                         }
                         .padding(.horizontal, 4)
                         .fixedSize()
@@ -238,6 +239,7 @@ struct SessionView: View {
                     Button(action: stackedClose) {
                         Label("Close this pane", systemImage: "xmark")
                     }
+                    .fontWeight(.semibold)
                     .accessibilityIdentifier("stacked-pane-close")
                 }
             }
