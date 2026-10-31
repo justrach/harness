@@ -3787,8 +3787,11 @@ impl Shell {
                     }
                 }
             }))
-            .tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
+            // No tooltip over the menu it opened.
+            .when(!view_open, |el| {
+                el.tooltip(|_, cx| cx.new(|_| SidebarViewOptionsTooltip).into())
+                    .tooltip_show_delay(std::time::Duration::from_millis(350))
+            })
             .child(
                 icon(icons::MORE_HORIZONTAL)
                     .size(px(16.0))

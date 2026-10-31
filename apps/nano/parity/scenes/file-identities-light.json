@@ -1,0 +1,75 @@
+{
+ "name": "file-identities-light",
+ "appearance": "light",
+ "width": 1200,
+ "height": 780,
+ "spaces": [
+  {
+   "id": "s",
+   "deviceId": "scene-device",
+   "path": "/work/fieldnotes",
+   "gitDetected": true,
+   "createdAt": "2026-09-24T14:41:22.685Z"
+  }
+ ],
+ "chats": [
+  {
+   "id": "a",
+   "deviceId": "scene-device",
+   "title": "Inspect the demo files",
+   "archived": false,
+   "spaceId": "s",
+   "cwd": "/work/fieldnotes",
+   "config": {
+    "harness": "claude-code",
+    "model": "sonnet",
+    "reasoning": null,
+    "modelOptions": {},
+    "sandbox": "workspace-write"
+   },
+   "lastMessagePreview": null,
+   "lastMessageAt": "2026-10-24T00:00:00Z",
+   "createdAt": "2026-10-24T00:00:00Z",
+   "branch": "docs/release-notes"
+  }
+ ],
+ "selectedChat": "a",
+ "transcript": [
+  {
+   "id": "files",
+   "role": "assistant",
+   "status": "streaming",
+   "createdAt": 1793000001000,
+   "deviceId": "scene-device",
+   "parts": [
+    {
+     "id": "read-0",
+     "kind": "tool",
+     "call": {
+      "kind": "readFile",
+      "path": "README.md"
+     },
+     "resolved": true
+    },
+    {
+     "id": "read-1",
+     "kind": "tool",
+     "call": {
+      "kind": "readFile",
+      "path": "Cargo.toml"
+     },
+     "resolved": true
+    },
+    {
+     "id": "read-2",
+     "kind": "tool",
+     "call": {
+      "kind": "readFile",
+      "path": "src/main.rs"
+     },
+     "resolved": true
+    }
+   ]
+  }
+ ]
+}

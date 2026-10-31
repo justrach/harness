@@ -11195,7 +11195,24 @@ impl Render for Composer {
 /// found once in the background so the mic only appears where it works.
 static DICTATION_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+/// A scene declares device capabilities rather than racing a probe of the
+/// developer's installed CLIs. Zero leaves normal application behavior intact.
+#[cfg(feature = "ui-scenes")]
+static SCENE_DICTATION_AVAILABLE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(feature = "ui-scenes")]
+pub fn set_scene_dictation_available(available: bool) {
+    SCENE_DICTATION_AVAILABLE.store(
+        if available { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 fn probe_dictation() {
+    #[cfg(feature = "ui-scenes")]
+    if SCENE_DICTATION_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+        return;
+    }
     static STARTED: std::sync::Once = std::sync::Once::new();
     if cfg!(test) {
         return;
@@ -11211,6 +11228,12 @@ fn probe_dictation() {
 impl Composer {
     /// The mic shows where dictation can run, and while a session is live.
     fn show_dictation(&self) -> bool {
+        #[cfg(feature = "ui-scenes")]
+        match SCENE_DICTATION_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => return self.dictation.is_some(),
+            2 => return true,
+            _ => {}
+        }
         self.dictation.is_some() || DICTATION_AVAILABLE.get().copied().unwrap_or(false)
     }
 

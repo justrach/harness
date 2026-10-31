@@ -790,6 +790,12 @@ impl HoverFades {
         );
     }
 
+    /// Whether something is hovered (fading in or held): a cached view
+    /// reading it must re-read it every frame, or it's pruned as unmounted.
+    pub fn any_held(&self) -> bool {
+        self.entries.values().any(|entry| entry.target == 1.0)
+    }
+
     /// Hover progress (0..1) for `key` at `now`; stamps liveness.
     pub fn value_at(&mut self, key: &str, now: Instant) -> f32 {
         let frame = self.frame;
@@ -902,6 +908,12 @@ pub fn hover_fades_active() -> bool {
     let now = Instant::now();
     let reveals = HOVER_REVEALS.with(|reveals| reveals.borrow_mut().tick_at(now));
     HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(now)) | reveals
+}
+
+/// Something is hovered (see [`HoverFades::any_held`]); call after
+/// [`hover_fades_active`] in the same frame.
+pub fn hover_fades_held() -> bool {
+    HOVER_FADES.with(|fades| fades.borrow().any_held())
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component
@@ -1434,6 +1446,20 @@ mod tests {
         fades.value_at("a", ms(300));
         assert!(!fades.tick_at(ms(500)), "settled at rest");
         assert!(fades.entries.is_empty(), "rest entries are pruned");
+    }
+
+    #[test]
+    fn a_hover_is_held_until_it_leaves() {
+        let mut fades = HoverFades::with_spec(HOVER_FADE);
+        let start = Instant::now();
+        assert!(!fades.any_held());
+        fades.set_at("row", true, false, start);
+        assert!(fades.any_held(), "fading in");
+        fades.tick_at(start + Duration::from_millis(400));
+        fades.value_at("row", start + Duration::from_millis(400));
+        assert!(fades.any_held(), "settled hovered");
+        fades.set_at("row", false, false, start + Duration::from_millis(500));
+        assert!(!fades.any_held(), "left");
     }
 
     #[test]

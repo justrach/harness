@@ -773,9 +773,8 @@ struct ErrorChipView: View {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.system(size: 10))
-                    .foregroundStyle(Theme.dangerSoft.opacity(0.8))
                     .frame(width: 20, height: 20)
-                    .background(Theme.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                    .tintedChip(Theme.danger, in: RoundedRectangle(cornerRadius: 6))
                 Text(problem?.label ?? "Error")
                     .font(Theme.sans(12, weight: .medium))
                     .foregroundStyle(Theme.text)

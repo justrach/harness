@@ -11,8 +11,8 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, Hsla, SharedString, Subscription, Task, Window,
-    div, prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, Focusable, Hsla, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use std::time::Duration;
 
@@ -332,6 +332,21 @@ impl LoginFlow {
     }
 }
 
+/// The engine's replies to the page's calls, for headless scenes
+/// (examples/ui-scenes.rs `accounts`): `snapshot` (ListAgentAccounts),
+/// `codegraffUsage`, `codegraffJobs`, `graffLogins`, `codegraffSandboxes`,
+/// and `loginStart` (StartAgentLogin, for the add-account dialog).
+#[cfg(feature = "ui-scenes")]
+pub static SCENE_ACCOUNTS: std::sync::Mutex<Option<serde_json::Value>> =
+    std::sync::Mutex::new(None);
+
+/// A scene's `loginStart`: what StartAgentLogin answers in it.
+#[cfg(feature = "ui-scenes")]
+fn scene_login_start() -> Option<AgentLoginStart> {
+    let fixture = SCENE_ACCOUNTS.lock().ok()?.clone()?;
+    serde_json::from_value(fixture.get("loginStart")?.clone()).ok()
+}
+
 pub struct AccountsPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
@@ -378,6 +393,8 @@ pub struct AccountsPage {
     copy_task: Option<Task<()>>,
     error: Option<SharedString>,
     code_input: Entity<ComposerInput>,
+    /// The code field takes the keys on the paste step's first frame.
+    focus_code: bool,
     load_task: Option<Task<()>>,
     codegraff_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
@@ -429,6 +446,7 @@ impl AccountsPage {
             copy_task: None,
             error: None,
             code_input,
+            focus_code: false,
             load_task: None,
             codegraff_task: None,
             action_task: None,
@@ -659,6 +677,12 @@ impl AccountsPage {
     }
 
     fn load(&mut self, force_usage: bool, cx: &mut Context<Self>) {
+        #[cfg(feature = "ui-scenes")]
+        if let Some(fixture) = SCENE_ACCOUNTS.lock().ok().and_then(|f| f.clone()) {
+            self.load_scene(&fixture, cx);
+            cx.notify();
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.snapshot = Loadable::Error("Engine not connected".into());
             return;
@@ -687,6 +711,32 @@ impl AccountsPage {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// A headless scene's replies in place of the engine's
+    /// (`SCENE_ACCOUNTS`): each read as its call's would be.
+    #[cfg(feature = "ui-scenes")]
+    fn load_scene(&mut self, fixture: &serde_json::Value, cx: &mut Context<Self>) {
+        fn read<T: serde::de::DeserializeOwned>(
+            fixture: &serde_json::Value,
+            key: &str,
+        ) -> Loadable<T> {
+            match serde_json::from_value(
+                fixture.get(key).cloned().unwrap_or(serde_json::Value::Null),
+            ) {
+                Ok(value) => Loadable::Ready(value),
+                Err(err) => Loadable::Error(err.to_string()),
+            }
+        }
+        self.snapshot = read(fixture, "snapshot");
+        self.codegraff_usage = read(fixture, "codegraffUsage");
+        self.codegraff_jobs = read(fixture, "codegraffJobs");
+        self.graff_logins = read(fixture, "graffLogins");
+        if let Some(sandboxes) = fixture.get("codegraffSandboxes") {
+            self.state.update(cx, |state, cx| {
+                state.apply_cloud_sandboxes_value(sandboxes, cx)
+            });
+        }
     }
 
     fn load_graff_logins(&mut self, cx: &mut Context<Self>) {
@@ -1431,6 +1481,32 @@ impl AccountsPage {
         reauthenticate: bool,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "ui-scenes")]
+        if let Some(start) = scene_login_start() {
+            // A scene's `loginStart`: the dialog as the engine's reply would open it.
+            self.error = None;
+            self.code_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            self.login = Some(match start.mode {
+                AgentLoginMode::PasteCode | AgentLoginMode::RelayBrowser => LoginFlow::PasteCode {
+                    harness,
+                    provider,
+                    start,
+                    submitting: false,
+                    error: None,
+                },
+                _ => LoginFlow::Browser {
+                    harness,
+                    provider,
+                    reauthenticate,
+                    start,
+                    message: None,
+                    error: None,
+                },
+            });
+            cx.notify();
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.error = Some("Engine not connected".into());
             cx.notify();
@@ -1493,6 +1569,7 @@ impl AccountsPage {
                                 let relayed = start.mode == AgentLoginMode::RelayBrowser;
                                 page.code_input
                                     .update(cx, |input, cx| input.set_text("", cx));
+                                page.focus_code = true;
                                 page.login = Some(LoginFlow::PasteCode {
                                     harness,
                                     provider,
@@ -2978,6 +3055,11 @@ impl Render for AccountsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
+        if std::mem::take(&mut self.focus_code)
+            && matches!(self.login, Some(LoginFlow::PasteCode { .. }))
+        {
+            window.focus(&self.code_input.focus_handle(cx), cx);
+        }
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
         let refreshing = matches!(self.snapshot, Loadable::Loading);
         let account_count = self

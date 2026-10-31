@@ -1,0 +1,130 @@
+{
+    "name": "settings-theme-library",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "files": {
+        "/tmp/nano-parity-themes/harbor/package.json": "{\n  \"name\": \"harbor-themes\",\n  \"displayName\": \"Harbor Themes\",\n  \"contributes\": {\n    \"themes\": [\n      {\n        \"label\": \"Harbor Night\",\n        \"uiTheme\": \"vs-dark\",\n        \"path\": \"./themes/night.json\"\n      },\n      {\n        \"label\": \"Harbor Day\",\n        \"uiTheme\": \"vs\",\n        \"path\": \"./themes/day.json\"\n      },\n      {\n        \"label\": \"Harbor Night\",\n        \"uiTheme\": \"vs-dark\",\n        \"path\": \"./themes/night.json\"\n      },\n      {\n        \"label\": \"Missing\",\n        \"uiTheme\": \"vs\",\n        \"path\": \"./themes/missing.json\"\n      },\n      {\n        \"label\": \"No Path\",\n        \"uiTheme\": \"vs\"\n      }\n    ]\n  }\n}",
+        "/tmp/nano-parity-themes/harbor/themes/day.json": "{\n  \"colors\": {\n    \"editor.background\": \"#f7f3e9\",\n    \"foreground\": \"#2b2d42\",\n    \"panel.background\": \"#efe9db\",\n    \"activityBarBadge.background\": \"#d62828\",\n    \"testing.iconPassed\": \"#2a9d8f\"\n  }\n}",
+        "/tmp/nano-parity-themes/harbor/themes/night.json": "{\n  \"colors\": {\n    \"editor.background\": \"#0d1b2a\",\n    \"foreground\": \"#e0e1dd\",\n    \"activityBar.background\": \"#0b1622\",\n    \"progressBar.background\": \"#e09f3e\",\n    \"gitDecoration.addedResourceForeground\": \"#2a9d8f\"\n  }\n}"
+    },
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 18,
+            "y": 762
+        },
+        {
+            "do": "click",
+            "x": 100,
+            "y": 750
+        },
+        {
+            "do": "click",
+            "x": 60,
+            "y": 161
+        },
+        {
+            "do": "hover",
+            "x": 1150,
+            "y": 20
+        },
+        {
+            "do": "click",
+            "x": 1020,
+            "y": 674
+        },
+        {
+            "do": "wait",
+            "ms": 300
+        },
+        {
+            "do": "type",
+            "text": "/tmp/nano-parity-themes/harbor"
+        },
+        {
+            "do": "click",
+            "x": 819,
+            "y": 536
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        },
+        {
+            "do": "click",
+            "x": 815,
+            "y": 689
+        },
+        {
+            "do": "wait",
+            "ms": 300
+        },
+        {
+            "do": "scroll",
+            "x": 700,
+            "y": 400,
+            "dy": -300
+        },
+        {
+            "do": "wait",
+            "ms": 2000
+        },
+        {
+            "do": "click",
+            "x": 837,
+            "y": 477
+        },
+        {
+            "do": "wait",
+            "ms": 300
+        }
+    ]
+}

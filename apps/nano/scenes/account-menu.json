@@ -1,0 +1,15 @@
+{
+ "width": 1200, "height": 780, "dark": true, "scale": 2,
+ "workspaceScope": "local",
+ "devices": [{"id": "d", "name": "Studio"}],
+ "spaces": [{"id": "s", "deviceId": "d", "path": "/work/fieldnotes", "gitDetected": true}],
+ "chats": [
+  {"id": "a", "deviceId": "d", "title": "Tidy the release notes", "archived": false, "spaceId": "s", "lastMessageAt": "2026-10-24T00:00:00Z"},
+  {"id": "b", "deviceId": "d", "title": "Sketch the onboarding flow", "archived": false, "spaceId": "s", "lastMessageAt": "2026-10-23T00:00:00Z"}
+ ],
+ "steps": [
+  {"clickAt": [18, 762]},
+  {"expect": "Stored on this device"}, {"expect": "Sign in with Codegraff"}, {"expect": "Enable sync"}, {"expect": "Settings"},
+  {"snap": "local"}
+ ]
+}

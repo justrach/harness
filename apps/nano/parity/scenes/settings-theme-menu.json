@@ -1,0 +1,93 @@
+{
+    "name": "settings-theme-menu",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 18,
+            "y": 762
+        },
+        {
+            "do": "click",
+            "x": 100,
+            "y": 750
+        },
+        {
+            "do": "click",
+            "x": 60,
+            "y": 161
+        },
+        {
+            "do": "hover",
+            "x": 1150,
+            "y": 20
+        },
+        {
+            "do": "click",
+            "x": 956,
+            "y": 532
+        },
+        {
+            "do": "wait",
+            "ms": 300
+        },
+        {
+            "do": "click",
+            "x": 927,
+            "y": 259
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        }
+    ]
+}

@@ -22,7 +22,7 @@ members = [
 exclude = ["vendor/zui", "vendor/gpui-component", "tui"]
 
 [workspace.package]
-version = "0.2.146"
+version = "0.2.147"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
@@ -150,10 +150,21 @@ ignore = "0.4"
 nucleo-matcher = "0.3"
 
 [profile.release]
-# Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
-# LTO's size/speed win at a fraction of the link time; strip debug symbols.
+# Optimized builds, CI's `--release` tests among them: thin LTO buys most of
+# fat LTO's size/speed win at a fraction of the link time; strip debug
+# symbols.
 lto = "thin"
 strip = "symbols"
+
+[profile.dist]
+# What ships (scripts/package-macos.sh, package-linux.sh, package-arch.sh,
+# package-windows.ps1): fat LTO in one codegen unit merges the generic code
+# thin LTO leaves duplicated. The macOS app binary measured 101.9 MB with
+# `release`, 84.5 MB with this, for a link of about 8 minutes on an M-series
+# Mac. Kept out of `release` so CI's release-mode tests stay fast.
+inherits = "release"
+lto = "fat"
+codegen-units = 1
 
 [profile.mobile]
 # The Android app's native library (apps/android builds it per ABI). Release

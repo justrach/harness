@@ -1,0 +1,134 @@
+{
+    "name": "settings-mcp-data",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 18,
+            "y": 762
+        },
+        {
+            "do": "click",
+            "x": 100,
+            "y": 750
+        },
+        {
+            "do": "click",
+            "x": 60,
+            "y": 407
+        },
+        {
+            "do": "click",
+            "x": 700,
+            "y": 201
+        },
+        {
+            "do": "hover",
+            "x": 1150,
+            "y": 20
+        }
+    ],
+    "replies": {
+        "ListMcpServers": [
+            {
+                "name": "notes",
+                "source": "global",
+                "transport": "stdio",
+                "origin": "notes-mcp",
+                "enabled": true,
+                "state": "ready",
+                "auth": "none",
+                "toolCount": 3,
+                "tools": [
+                    {
+                        "name": "search",
+                        "description": "Search notes"
+                    }
+                ]
+            },
+            {
+                "name": "tracker",
+                "source": "project",
+                "transport": "http",
+                "origin": "https://tracker.example.test",
+                "enabled": true,
+                "state": "needs_login",
+                "auth": "oauth",
+                "toolCount": 0,
+                "tools": []
+            },
+            {
+                "name": "weather",
+                "source": "imported",
+                "transport": "stdio",
+                "origin": "weather",
+                "enabled": true,
+                "state": "failed",
+                "error": "exited with status 1",
+                "auth": "none",
+                "toolCount": 0,
+                "tools": []
+            },
+            {
+                "name": "drafts",
+                "source": "global",
+                "transport": "stdio",
+                "origin": "drafts",
+                "enabled": false,
+                "state": "off",
+                "auth": "none",
+                "toolCount": 0,
+                "tools": []
+            }
+        ]
+    }
+}

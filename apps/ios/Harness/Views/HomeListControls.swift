@@ -51,27 +51,27 @@ struct HomeControlPill: View {
     let active: Bool
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Image(systemName: symbol)
-                .font(.footnote.weight(.medium))
+                .font(.system(size: 13, weight: .semibold))
                 .accessibilityHidden(true)
             Text(title)
-                .font(Theme.sans(14, weight: active ? .semibold : .medium, relativeTo: .subheadline))
+                .font(Theme.sans(Theme.previewSize, weight: active ? .semibold : .regular, relativeTo: .subheadline))
                 .lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.caption2.weight(.bold))
-                .imageScale(.small)
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Theme.textFaint)
                 .accessibilityHidden(true)
         }
         .foregroundStyle(active ? Theme.text : Theme.textMuted)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
-        .frame(minHeight: 30)
-        .background(Capsule().fill(active ? Theme.elementActive : Color.clear))
-        .overlay(Capsule().strokeBorder(active ? Color.clear : Theme.border, lineWidth: 1))
-        // A 44pt target around the smaller capsule.
-        .frame(minHeight: 44)
+        .padding(.horizontal, 14)
+        .frame(minHeight: Theme.chipHeight)
+        // Quiet either way: a faint ink fill under glass, a little deeper when
+        // the chip has been changed from its default. No border, no solid fill.
+        .background(Capsule().fill(ink(active ? 0.09 : 0.04)))
+        .glassEffect(.regular.interactive(), in: Capsule())
+        // A 44pt target around the 36pt capsule.
+        .frame(minHeight: Theme.hitTarget)
         .contentShape(Rectangle())
     }
 }

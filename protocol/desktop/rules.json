@@ -1,0 +1,710 @@
+{
+  "comment": "Rules the Harness desktop shell and harness-nano (apps/nano) both apply, as data. The Rust runner (crates/proto/tests/desktop_vectors.rs) checks them against harness-proto's view functions; the Zig runner (apps/nano/src/parity.zig) against the port. Times are milliseconds since the epoch.",
+  "nowMs": 1792846800000,
+  "timeAgo": [
+    {
+      "agoMs": 0,
+      "expect": "now"
+    },
+    {
+      "agoMs": 59000,
+      "expect": "now"
+    },
+    {
+      "agoMs": 60000,
+      "expect": "1m"
+    },
+    {
+      "agoMs": 3599000,
+      "expect": "59m"
+    },
+    {
+      "agoMs": 3600000,
+      "expect": "1h"
+    },
+    {
+      "agoMs": 82800000,
+      "expect": "23h"
+    },
+    {
+      "agoMs": 86400000,
+      "expect": "1d"
+    },
+    {
+      "agoMs": 518400000,
+      "expect": "6d"
+    },
+    {
+      "agoMs": 604800000,
+      "expect": "1w"
+    },
+    {
+      "agoMs": 2937600000,
+      "expect": "4w"
+    },
+    {
+      "agoMs": 3024000000,
+      "expect": "1mo"
+    },
+    {
+      "agoMs": 31017600000,
+      "expect": "11mo"
+    },
+    {
+      "agoMs": 31104000000,
+      "expect": "0y"
+    },
+    {
+      "agoMs": 34560000000,
+      "expect": "1y"
+    },
+    {
+      "agoMs": -300000,
+      "expect": "now"
+    }
+  ],
+  "toolChip": [
+    {
+      "call": {
+        "kind": "exec",
+        "command": "cargo test\n  --workspace"
+      },
+      "expect": {
+        "label": "Run",
+        "detail": "cargo test --workspace"
+      }
+    },
+    {
+      "call": {
+        "kind": "readFile",
+        "path": "src/app.ts"
+      },
+      "expect": {
+        "label": "Read",
+        "detail": "src/app.ts"
+      }
+    },
+    {
+      "call": {
+        "kind": "writeFile",
+        "path": "README.md",
+        "content": "x"
+      },
+      "expect": {
+        "label": "Write",
+        "detail": "README.md"
+      }
+    },
+    {
+      "call": {
+        "kind": "editFile",
+        "path": "src/a.rs",
+        "old_string": "a",
+        "new_string": "b"
+      },
+      "expect": {
+        "label": "Edit",
+        "detail": "src/a.rs"
+      }
+    },
+    {
+      "call": {
+        "kind": "applyPatch"
+      },
+      "expect": {
+        "label": "Patch",
+        "detail": "workspace"
+      }
+    },
+    {
+      "call": {
+        "kind": "applyPatch",
+        "path": "src/b.rs"
+      },
+      "expect": {
+        "label": "Patch",
+        "detail": "src/b.rs"
+      }
+    },
+    {
+      "call": {
+        "kind": "search",
+        "pattern": "TODO",
+        "path": "src"
+      },
+      "expect": {
+        "label": "Search",
+        "detail": "TODO in src"
+      }
+    },
+    {
+      "call": {
+        "kind": "search",
+        "pattern": "fn main"
+      },
+      "expect": {
+        "label": "Search",
+        "detail": "fn main"
+      }
+    },
+    {
+      "call": {
+        "kind": "glob",
+        "pattern": "**/*.zig"
+      },
+      "expect": {
+        "label": "Glob",
+        "detail": "**/*.zig"
+      }
+    },
+    {
+      "call": {
+        "kind": "webFetch",
+        "url": "https://example.com/a"
+      },
+      "expect": {
+        "label": "Fetch",
+        "detail": "https://example.com/a"
+      }
+    },
+    {
+      "call": {
+        "kind": "webSearch",
+        "query": "zig 0.17 std.Io"
+      },
+      "expect": {
+        "label": "Web",
+        "detail": "zig 0.17 std.Io"
+      }
+    },
+    {
+      "call": {
+        "kind": "todo",
+        "items": [
+          {
+            "text": "a",
+            "done": true
+          },
+          {
+            "text": "b",
+            "done": false
+          },
+          {
+            "text": "c",
+            "done": true
+          }
+        ]
+      },
+      "expect": {
+        "label": "Todo",
+        "detail": "2/3 done"
+      }
+    },
+    {
+      "call": {
+        "kind": "mcp",
+        "server": "codedb",
+        "tool": "search"
+      },
+      "expect": {
+        "label": "MCP",
+        "detail": "codedb · search"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Agent: scan the repo"
+      },
+      "expect": {
+        "label": "Agent",
+        "detail": "scan the repo"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Agent"
+      },
+      "expect": {
+        "label": "Agent",
+        "detail": ""
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Jev: rank results"
+      },
+      "expect": {
+        "label": "Jev",
+        "detail": "rank results"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Compact context"
+      },
+      "expect": {
+        "label": "Compact",
+        "detail": "context"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Wait for reviewer"
+      },
+      "expect": {
+        "label": "Waiting on",
+        "detail": "subagent"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Message agent 2"
+      },
+      "expect": {
+        "label": "Message",
+        "detail": "subagent"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Message agents"
+      },
+      "expect": {
+        "label": "Tool",
+        "detail": "Message agents"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "agent_output"
+      },
+      "expect": {
+        "label": "Waiting on",
+        "detail": "subagent"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "Load tools"
+      },
+      "expect": {
+        "label": "Load",
+        "detail": "tools"
+      }
+    },
+    {
+      "call": {
+        "kind": "unknown",
+        "name": "lsp_hover"
+      },
+      "expect": {
+        "label": "Tool",
+        "detail": "lsp_hover"
+      }
+    }
+  ],
+  "toolGroupSummary": [
+    {
+      "tools": [
+        {
+          "call": {
+            "kind": "exec",
+            "command": "a"
+          }
+        },
+        {
+          "call": {
+            "kind": "exec",
+            "command": "b"
+          }
+        }
+      ],
+      "expect": "Ran 2 commands"
+    },
+    {
+      "tools": [
+        {
+          "call": {
+            "kind": "exec",
+            "command": "a"
+          },
+          "isError": true
+        },
+        {
+          "call": {
+            "kind": "readFile",
+            "path": "x"
+          }
+        }
+      ],
+      "expect": "Ran 1 command · read 1 file · 1 failed"
+    },
+    {
+      "tools": [
+        {
+          "call": {
+            "kind": "editFile",
+            "path": "a"
+          }
+        },
+        {
+          "call": {
+            "kind": "writeFile",
+            "path": "a"
+          }
+        },
+        {
+          "call": {
+            "kind": "applyPatch",
+            "path": "b"
+          }
+        },
+        {
+          "call": {
+            "kind": "applyPatch"
+          }
+        }
+      ],
+      "expect": "Edited 3 files"
+    },
+    {
+      "tools": [
+        {
+          "call": {
+            "kind": "search",
+            "pattern": "p"
+          }
+        },
+        {
+          "call": {
+            "kind": "glob",
+            "pattern": "g"
+          }
+        },
+        {
+          "call": {
+            "kind": "webSearch",
+            "query": "q"
+          }
+        },
+        {
+          "call": {
+            "kind": "webFetch",
+            "url": "u"
+          }
+        }
+      ],
+      "expect": "Searched 3 times · fetched 1 page"
+    },
+    {
+      "tools": [
+        {
+          "call": {
+            "kind": "todo",
+            "items": []
+          }
+        },
+        {
+          "call": {
+            "kind": "todo",
+            "items": []
+          }
+        }
+      ],
+      "expect": "Updated todos"
+    },
+    {
+      "tools": [
+        {
+          "call": {
+            "kind": "mcp",
+            "server": "s",
+            "tool": "t"
+          }
+        },
+        {
+          "call": {
+            "kind": "unknown",
+            "name": "x"
+          }
+        }
+      ],
+      "expect": "Called 2 tools"
+    },
+    {
+      "tools": [
+        {
+          "call": {
+            "kind": "readFile",
+            "path": "a"
+          }
+        },
+        {
+          "call": {
+            "kind": "readFile",
+            "path": "a"
+          }
+        },
+        {
+          "call": {
+            "kind": "exec",
+            "command": "c"
+          }
+        }
+      ],
+      "expect": "Ran 1 command · read 2 files"
+    }
+  ],
+  "displayStatus": [
+    {
+      "name": "no session, never answered",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z"
+      },
+      "session": null,
+      "expect": "idle"
+    },
+    {
+      "name": "no session, a reply not yet seen",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z",
+        "lastMessageAt": "2026-10-24T12:00:00.000Z"
+      },
+      "session": null,
+      "expect": "completed"
+    },
+    {
+      "name": "no session, the reply was seen",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z",
+        "lastMessageAt": "2026-10-24T12:00:00.000Z",
+        "lastSeenAt": "2026-10-24T12:00:01.000Z"
+      },
+      "session": null,
+      "expect": "idle"
+    },
+    {
+      "name": "working and fresh",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "working",
+        "startedAt": "2026-10-24T12:59:45.000Z",
+        "updatedAt": "2026-10-24T12:59:50.000Z"
+      },
+      "expect": "working"
+    },
+    {
+      "name": "working but stale past 45 s, unseen reply",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z",
+        "lastMessageAt": "2026-10-24T12:59:00.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "working",
+        "startedAt": "2026-10-24T12:59:09.000Z",
+        "updatedAt": "2026-10-24T12:59:14.000Z"
+      },
+      "expect": "completed"
+    },
+    {
+      "name": "working but stale, nothing unseen",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "working",
+        "startedAt": "2026-10-24T12:59:09.000Z",
+        "updatedAt": "2026-10-24T12:59:14.000Z"
+      },
+      "expect": "idle"
+    },
+    {
+      "name": "waiting on a question",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "awaitingInput",
+        "startedAt": "2026-10-24T12:59:25.000Z",
+        "updatedAt": "2026-10-24T12:59:30.000Z"
+      },
+      "expect": "awaitingInput"
+    },
+    {
+      "name": "waiting on a question, stale",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "awaitingInput",
+        "startedAt": "2026-10-24T12:59:05.000Z",
+        "updatedAt": "2026-10-24T12:59:10.000Z"
+      },
+      "expect": "idle"
+    },
+    {
+      "name": "errored and unseen",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z",
+        "lastMessageAt": "2026-10-24T12:59:00.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "errored",
+        "startedAt": "2026-10-24T11:59:55.000Z",
+        "updatedAt": "2026-10-24T12:00:00.000Z"
+      },
+      "expect": "errored"
+    },
+    {
+      "name": "errored but seen",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z",
+        "lastMessageAt": "2026-10-24T12:59:00.000Z",
+        "lastSeenAt": "2026-10-24T12:59:30.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "errored",
+        "startedAt": "2026-10-24T11:59:55.000Z",
+        "updatedAt": "2026-10-24T12:00:00.000Z"
+      },
+      "expect": "idle"
+    },
+    {
+      "name": "idle session, unseen reply",
+      "chat": {
+        "id": "c1",
+        "deviceId": "dev-a",
+        "title": null,
+        "archived": false,
+        "createdAt": "2026-10-23T13:00:00.000Z",
+        "lastMessageAt": "2026-10-24T12:59:00.000Z"
+      },
+      "session": {
+        "chatId": "c1",
+        "deviceId": "dev-a",
+        "status": "idle",
+        "startedAt": "2026-10-24T12:59:45.000Z",
+        "updatedAt": "2026-10-24T12:59:50.000Z"
+      },
+      "expect": "completed"
+    }
+  ],
+  "sortActive": [
+    {
+      "name": "last called first; replies don't move a row; id breaks ties",
+      "chats": [
+        {
+          "id": "a",
+          "deviceId": "dev-a",
+          "title": null,
+          "archived": false,
+          "createdAt": "2026-10-14T13:00:00.000Z",
+          "lastMessageAt": "2026-10-24T12:59:00.000Z"
+        },
+        {
+          "id": "b",
+          "deviceId": "dev-a",
+          "title": null,
+          "archived": false,
+          "createdAt": "2026-10-15T13:00:00.000Z",
+          "lastPromptAt": "2026-10-24T12:00:00.000Z",
+          "lastMessageAt": "2026-10-24T12:58:00.000Z"
+        },
+        {
+          "id": "c",
+          "deviceId": "dev-a",
+          "title": null,
+          "archived": false,
+          "createdAt": "2026-10-16T13:00:00.000Z"
+        },
+        {
+          "id": "d",
+          "deviceId": "dev-a",
+          "title": null,
+          "archived": false,
+          "createdAt": "2026-10-17T13:00:00.000Z",
+          "lastPromptAt": "2026-10-24T11:00:00.000Z"
+        },
+        {
+          "id": "e",
+          "deviceId": "dev-a",
+          "title": null,
+          "archived": false,
+          "createdAt": "2026-10-16T13:00:00.000Z"
+        }
+      ],
+      "expect": [
+        "a",
+        "b",
+        "d",
+        "c",
+        "e"
+      ]
+    }
+  ]
+}

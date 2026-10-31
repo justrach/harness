@@ -1,0 +1,78 @@
+{
+ "schemaVersion": 1,
+ "date": "2026-10-27",
+ "kind": "UI-only offscreen replay, the GPUI app against harness-nano, same replay and sampler",
+ "conditions": {
+  "chip": "Apple M4 Pro",
+  "ramGiB": 48,
+  "os": "macOS 27.0.1",
+  "windowPoints": [
+   1320,
+   880
+  ],
+  "scale": 2,
+  "replay": "apps/nano/bench/make_replay.py (885 frames: a 40-section reply in 24-character appends every 20 ms)",
+  "order": [
+   "gpui",
+   "nano",
+   "nano",
+   "gpui"
+  ],
+  "method": "apps/nano/bench/resource.py: scripts/macos-resource-stat.c every 500 ms; CPU and wakeup rates exclude the first 2 s of each phase, but phase memory peaks include every sample; each binary saves complete.png at the settle, as the GPUI example does. Both GPUI references use this checkout's target/app-dev/examples; nano mirrors GPUI's connected and per-frame session state, including the working animation during streaming. Zero-footprint exit samples are ignored rather than counted as resting memory. The nano ReleaseFast binaries are rebuilt after the parity checker (which installs debug binaries by default)."
+ },
+ "binaries": {
+  "gpui": "crates/ui/examples/macos-resource-profile.rs (app-dev, mimalloc)",
+  "nano": "apps/nano/src/profile.zig (ReleaseFast, growing image atlas, transactional transcript recovery, build-time compiled Harness file-icon manifest and weighted text fields)"
+ },
+ "means": {
+  "gpui": {
+   "replay": {
+    "durationSeconds": 15.9,
+    "cpuPercent": 18.15,
+    "peakFootprintMiB": 177.75,
+    "endFootprintMiB": 177.75,
+    "peakRssMiB": 85.45,
+    "endRssMiB": 85.45,
+    "idleWakeupsPerSecond": 0.0
+   },
+   "settled": {
+    "durationSeconds": 12.3,
+    "cpuPercent": 0.22,
+    "peakFootprintMiB": 227.9,
+    "endFootprintMiB": 101.45,
+    "peakRssMiB": 123.95,
+    "endRssMiB": 123.95,
+    "idleWakeupsPerSecond": 0.0
+   },
+   "lifetimePeakFootprintMiB": 228.5
+  },
+  "nano": {
+   "replay": {
+    "durationSeconds": 15.62,
+    "cpuPercent": 8.05,
+    "peakFootprintMiB": 159.2,
+    "endFootprintMiB": 159.2,
+    "peakRssMiB": 34.5,
+    "endRssMiB": 34.5,
+    "idleWakeupsPerSecond": 0.0
+   },
+   "settled": {
+    "durationSeconds": 12.3,
+    "cpuPercent": 0.14,
+    "peakFootprintMiB": 187.7,
+    "endFootprintMiB": 59.1,
+    "peakRssMiB": 63.25,
+    "endRssMiB": 53.85,
+    "idleWakeupsPerSecond": 0.0
+   },
+   "lifetimePeakFootprintMiB": 214.8
+  }
+ },
+ "visualParity": {
+  "frames": 312,
+  "meanChanged": 0.00013568632889546345,
+  "maxChanged": 0.0004975961538461538,
+  "maxAllowed": 0.0005,
+  "failed": []
+ }
+}
