@@ -214,6 +214,16 @@ pub struct ModelOptionRecord {
     pub default_choice: String,
 }
 
+/// The device's default autonomy (`GetAutonomy` / `SetAutonomy`):
+/// `autonomy` is "read-only", "workspace" or "full-access"; `chosen` is
+/// false until someone picked one (onboarding offers the choice then).
+#[derive(Debug, Clone, PartialEq, Deserialize, uniffi::Record)]
+pub struct AutonomyRecord {
+    pub autonomy: String,
+    #[serde(default)]
+    pub chosen: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfoRecord {
@@ -314,6 +324,32 @@ impl Relay {
             .collect())
     }
 
+    /// Switch one agent on or off on the device (Settings > Agents there); answers with the fresh list.
+    pub async fn set_harness_enabled(
+        &self,
+        device_id: &str,
+        harness: &str,
+        enabled: bool,
+    ) -> Result<Vec<AgentDescriptorRecord>, RelayError> {
+        let wire: Vec<WireHarness> = self
+            .call_as(
+                device_id,
+                "SetHarnessEnabled",
+                json!({ "harness": harness, "enabled": enabled }),
+                CALL_TIMEOUT,
+            )
+            .await?;
+        Ok(wire
+            .into_iter()
+            .map(|h| AgentDescriptorRecord {
+                id: h.id,
+                installed: h.installed.unwrap_or(true),
+                can_install: h.can_install.unwrap_or(false),
+                enabled: h.enabled,
+            })
+            .collect())
+    }
+
     pub async fn list_models(
         &self,
         device_id: &str,
@@ -345,6 +381,27 @@ impl Relay {
             device_id,
             "SetGraffCompactAt",
             json!({ "pct": pct }),
+            CALL_TIMEOUT,
+        )
+        .await
+    }
+
+    /// `GetAutonomy`: what the device's runs may do without asking.
+    pub async fn autonomy(&self, device_id: &str) -> Result<AutonomyRecord, RelayError> {
+        self.call_as(device_id, "GetAutonomy", json!({}), CALL_TIMEOUT)
+            .await
+    }
+
+    /// `SetAutonomy`: answers with the value the device kept.
+    pub async fn set_autonomy(
+        &self,
+        device_id: &str,
+        autonomy: &str,
+    ) -> Result<AutonomyRecord, RelayError> {
+        self.call_as(
+            device_id,
+            "SetAutonomy",
+            json!({ "autonomy": autonomy }),
             CALL_TIMEOUT,
         )
         .await

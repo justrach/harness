@@ -554,6 +554,18 @@ impl MobileCore {
             .await
     }
 
+    /// Switch one agent on or off on the device, for onboarding's optional extras.
+    pub async fn set_harness_enabled(
+        &self,
+        device_id: String,
+        harness: String,
+        enabled: bool,
+    ) -> Result<Vec<relay::AgentDescriptorRecord>, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.set_harness_enabled(&device_id, &harness, enabled).await })
+            .await
+    }
+
     pub async fn list_models(
         &self,
         device_id: String,
@@ -581,6 +593,26 @@ impl MobileCore {
     ) -> Result<Option<u8>, relay::RelayError> {
         let relay = self.relay.clone();
         self.on_runtime(async move { relay.set_graff_compact_at(&device_id, pct).await })
+            .await
+    }
+
+    /// The device's default autonomy: read only, workspace, or full access.
+    pub async fn autonomy(
+        &self,
+        device_id: String,
+    ) -> Result<relay::AutonomyRecord, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.autonomy(&device_id).await })
+            .await
+    }
+
+    pub async fn set_autonomy(
+        &self,
+        device_id: String,
+        autonomy: String,
+    ) -> Result<relay::AutonomyRecord, relay::RelayError> {
+        let relay = self.relay.clone();
+        self.on_runtime(async move { relay.set_autonomy(&device_id, &autonomy).await })
             .await
     }
 

@@ -1,5 +1,6 @@
 package harness.codegraff.android
 
+import harness.codegraff.android.model.Onboarding
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.net.Uri
@@ -54,6 +55,9 @@ class MainActivity : ComponentActivity() {
         account = CodegraffAccount(KeystoreSecretStore(applicationContext))
         account.onRejected = { runOnUiThread { sessionExpired() } }
         AppModel.scenario = intent?.getStringExtra("scenario")
+        // Screenshot rigs: open the first-run setup on one step, or Settings > Autonomy.
+        setupStep = intent?.getIntExtra("setupStep", -1)?.takeIf { it >= 0 }
+        openAutonomy = intent?.getBooleanExtra("openAutonomy", false) == true
         if (savedInstanceState != null) {
             generation = savedInstanceState.getInt(GENERATION)
             gate = savedInstanceState.getBoolean(GATE)
@@ -77,7 +81,7 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     val model = remember(generation) { model() }
-                    HarnessApp(model = model, onSignOut = ::signOut)
+                    HarnessApp(model = model, onSignOut = ::signOut, setupStep = setupStep, openAutonomy = openAutonomy)
                 }
             }
         }
@@ -107,6 +111,9 @@ class MainActivity : ComponentActivity() {
         PerfSharing.flush(this)
         super.onPause()
     }
+
+    private var setupStep: Int? = null
+    private var openAutonomy = false
 
     private fun model(): AppModel = ViewModelProvider(this)["app-$generation", AppModel::class.java]
 
@@ -194,6 +201,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun goLive() {
+        // A fresh sign-in shows the first-run setup once (Onboarding.isPending).
+        Onboarding.signedInFresh(this)
         retireModel()
         armFactories()
         generation += 1

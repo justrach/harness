@@ -106,7 +106,9 @@ fun NewSessionScreen(
     val chatModelPref = rememberPref("newChatModel", "")
     val isChat = destination is NewSessionDestination.PlainChat
 
-    var draft by rememberSaveable { mutableStateOf("") }
+    // A starter picked on the setup's ready screen arrives once as the draft.
+    val starterPref = rememberPref("onboarding.starterDraft", "")
+    var draft by rememberSaveable { mutableStateOf(starterPref.value.also { if (it.isNotEmpty()) starterPref.set("") }) }
     var selectedHostId by rememberSaveable { mutableStateOf<String?>(null) }
     var showHostPicker by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
