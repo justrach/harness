@@ -20,6 +20,7 @@ const workspace = @import("workspace.zig");
 const agents = @import("agents.zig");
 const rows = @import("view_settings_agents_rows.zig");
 const cards = @import("view_settings_agents_cards.zig");
+const setup = @import("view_setup.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
@@ -67,6 +68,13 @@ pub const Page = struct {
     compact_pct: ?u8 = null,
     compact_saving: bool = false,
     compact_call: ?u64 = null,
+    /// The device's autonomy (`GetAutonomy`): what its agents may do
+    /// without asking, and whether someone chose it.
+    autonomy: Phase = .idle,
+    autonomy_level: setup.Autonomy = .full_access,
+    autonomy_chosen: bool = false,
+    autonomy_saving: bool = false,
+    autonomy_call: ?u64 = null,
     /// The session-title agent and model (`TitleSettings`).
     titles: Phase = .idle,
     title_harness: ?agents.Id = null,
@@ -142,6 +150,7 @@ pub fn load(a: *App) void {
     loadTitles(a, null);
     loadDraft(a, null);
     loadCompact(a, .read);
+    loadAutonomy(a, null);
     p.phase = .loading;
     send(a, &p.list_call, "ListHarnesses", .{ .targetDeviceId = p.target }, .of(App, a, onList));
 }
@@ -433,6 +442,41 @@ pub fn setCompact(a: *App, pct: ?u8) void {
     p.err.clearRetainingCapacity();
 }
 
+/// `save` writes a level; null reads the device's.
+pub fn loadAutonomy(a: *App, save: ?setup.Autonomy) void {
+    const p = &a.view.agents;
+    if (save == null and !live(a)) return;
+    p.autonomy_saving = save != null;
+    if (save) |x| {
+        send(a, &p.autonomy_call, "SetAutonomy", .{ .autonomy = x.wire(), .targetDeviceId = p.target }, .of(App, a, onAutonomy));
+    } else {
+        p.autonomy = .loading;
+        send(a, &p.autonomy_call, "GetAutonomy", .{ .targetDeviceId = p.target }, .of(App, a, onAutonomy));
+    }
+}
+
+fn onAutonomy(a: *App, id: u64, r: rpc.Reply) void {
+    const p = &a.view.agents;
+    if (!current(&p.autonomy_call, id)) return;
+    const saving = p.autonomy_saving;
+    p.autonomy_saving = false;
+    switch (r) {
+        .ok => |v| if (setup.readAutonomy(v)) |x| setAutonomy(a, x) else problem(a, saving, &p.autonomy, "Unexpected reply"),
+        .err => |e| problem(a, saving, &p.autonomy, friendly(e)),
+        else => {},
+    }
+    a.redraw();
+}
+
+/// Show the device's autonomy as if the engine said it (setup's answer,
+/// tests and fixtures).
+pub fn setAutonomy(a: *App, x: setup.Read) void {
+    const p = &a.view.agents;
+    p.autonomy = .ready;
+    p.autonomy_level = x.autonomy;
+    p.autonomy_chosen = x.chosen;
+}
+
 pub const TitleChoice = struct { harness: ?agents.Id, model: ?[]const u8 };
 
 pub fn loadTitles(a: *App, save: ?TitleChoice) void {
@@ -509,7 +553,9 @@ pub fn setTarget(a: *App, target: ?[]const u8) void {
     if (same) return a.redraw();
     cancelSignIn(a);
     clearFailure(a);
-    inline for (.{ "list_call", "draft_call", "compact_call", "titles_call", "models_call", "install_call" }) |f| @field(p, f) = null;
+    inline for (.{ "list_call", "draft_call", "compact_call", "autonomy_call", "titles_call", "models_call", "install_call" }) |f| @field(p, f) = null;
+    p.autonomy = .idle;
+    p.autonomy_saving = false;
     p.draft = .idle;
     p.draft_saving = false;
     p.compact = .idle;
@@ -549,6 +595,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (p.install_notice.items.len > 0) set.subtitle(c, k, p.install_notice.items, false);
     // Above the list: a missing grant breaks every agent's screenshots.
     cards.screenAccess(c, a, k);
+    cards.autonomyCard(c, a, k);
     switch (p.phase) {
         .idle, .loading => {
             const cd = set.card(c, k);

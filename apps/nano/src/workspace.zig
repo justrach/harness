@@ -134,6 +134,8 @@ pub const Harness = struct {
     /// Offered for new chats: enabled, or (from an engine that doesn't say)
     /// installed and one of graff, Codex, Claude Code.
     offered: bool,
+    /// On this device (first-run setup's extras).
+    installed: bool = false,
     /// Its reasoning ladder, for a model that lists none (`trait_ladder`).
     levels: []const []const u8 = &.{},
 };
@@ -256,7 +258,7 @@ fn parseHarness(a: Allocator, o: json.ObjectMap) ?Harness {
     const installed = if (o.get("installed")) |v| v == .bool and v.bool else false;
     const offered = if (o.get("enabled")) |v| v == .bool and v.bool else installed and
         (std.mem.eql(u8, id, "graff") or std.mem.eql(u8, id, "codex") or std.mem.eql(u8, id, "claude-code"));
-    return .{ .id = id, .name = str(a, o, "name") orelse id, .offered = offered, .levels = stringList(a, o, "reasoningLevels") };
+    return .{ .id = id, .name = str(a, o, "name") orelse id, .offered = offered, .installed = installed, .levels = stringList(a, o, "reasoningLevels") };
 }
 
 fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {

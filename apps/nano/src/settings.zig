@@ -210,6 +210,8 @@ pub const Store = struct {
     /// `sidebarPinnedSessionIdsByProfile` (pins.zig).
     pins: std.ArrayList([]const u8) = .empty,
     doc_arena: ?std.heap.ArenaAllocator = null,
+    /// The file wasn't there to read: a first run (view_setup.zig).
+    fresh: bool = false,
 
     pub fn deinit(s: *Store) void {
         if (s.path) |p| s.gpa.free(p);
@@ -392,7 +394,10 @@ pub const Store = struct {
     /// Reads what the file says; what it doesn't say keeps its default.
     pub fn load(s: *Store) void {
         const path = s.path orelse return;
-        const body = std.Io.Dir.cwd().readFileAlloc(s.io, path, s.gpa, .limited(8 << 20)) catch return;
+        const body = std.Io.Dir.cwd().readFileAlloc(s.io, path, s.gpa, .limited(8 << 20)) catch {
+            s.fresh = true;
+            return;
+        };
         defer s.gpa.free(body);
         s.apply(body);
     }

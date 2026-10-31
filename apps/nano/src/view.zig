@@ -152,6 +152,8 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_chat_menu.zig").overlays(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
     @import("view_palette.zig").overlay(c, a, popup);
+    // First-run setup, over the whole window.
+    @import("view_setup.zig").overlay(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
 }
 
@@ -274,6 +276,8 @@ fn keys(c: *ui.Context, a: *App) void {
     // A shortcut being rebound takes the keys first.
     const rebinding = @import("view_settings_shortcuts.zig");
     if (rebinding.recording(a)) return rebinding.capture(c, a);
+    // First-run setup covers the window and has every key.
+    if (@import("view_setup.zig").keys(c, a)) return;
     // ⌘K, the command palette (fixed, as the GPUI app binds it); open, it
     // takes ↑↓, Return and Escape before anything else.
     const palette = @import("view_palette.zig");

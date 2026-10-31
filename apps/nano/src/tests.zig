@@ -41,6 +41,7 @@ test {
     _ = @import("view_settings_archived.zig");
     _ = @import("agents.zig");
     _ = @import("view_settings_agents.zig");
+    _ = @import("view_setup.zig");
     _ = @import("accounts.zig");
     _ = @import("view_settings_accounts.zig");
     _ = @import("sandboxes.zig");
@@ -77,6 +78,7 @@ test {
     _ = @import("tests_ui_change_requests.zig");
     _ = @import("palette.zig");
     _ = @import("tests_ui_palette.zig");
+    _ = @import("tests_ui_setup.zig");
     _ = @import("tests_ui_archived.zig");
     _ = @import("tests_ui_devices.zig");
     _ = @import("tests_ui_hover.zig");

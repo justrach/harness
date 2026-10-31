@@ -96,6 +96,10 @@ pub const View = struct {
     groups: std.StringHashMapUnmanaged(bool) = .empty,
     /// Settings › GitHub CI, kept between visits.
     github_ci: @import("view_settings_github_ci.zig").Page = .{},
+    /// First-run setup, while it shows (view_setup.zig), and whether
+    /// launch has asked if it should.
+    setup: ?@import("view_setup.zig").Setup = null,
+    setup_checked: bool = false,
     /// Settings › Agents, kept between visits.
     agents: @import("view_settings_agents.zig").Page = .{},
     /// Settings › Accounts, kept between visits.
