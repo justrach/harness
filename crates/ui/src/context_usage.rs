@@ -71,7 +71,9 @@ pub fn render(
         .child(SharedString::from(percent));
     hit_area("context-usage", HOVER_GROUP, HitSlop::RING, pill)
         .debug_selector(|| "context-usage".into())
-        .tooltip(move |_, cx| card(state.clone(), cx))
+        // hoverable: the pointer can move into the card to hover the savings
+        // meter's parts without the card closing
+        .hoverable_tooltip(move |_, cx| card(state.clone(), cx))
 }
 
 const HOVER_GROUP: &str = "context-usage";

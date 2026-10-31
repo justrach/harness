@@ -1247,7 +1247,8 @@ pub fn footer_chip(
         .child(body);
     Some(
         hit_area("agent-work", "agent-work", HitSlop::AGENT_WORK, pill)
-            .tooltip(move |_, cx| hover_card(state.clone(), cx))
+            // hoverable: the card stays open while the pointer is on it
+            .hoverable_tooltip(move |_, cx| hover_card(state.clone(), cx))
             .into_any_element(),
     )
 }
