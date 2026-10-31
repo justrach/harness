@@ -255,6 +255,7 @@ async fn run(
     abort: CancellationToken,
 ) -> Result<(), String> {
     let mut cmd = Command::new(&runtime.codex);
+    crate::apply_run_environment(&mut cmd, None);
     cmd.arg("app-server");
     crate::compose_child_path(&mut cmd, &runtime.codex);
     cmd.stdin(Stdio::piped())

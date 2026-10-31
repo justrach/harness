@@ -154,13 +154,13 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert_eq!(branches[0], "main", "default branch first: {branches:?}");
     assert!(branches.contains(&"feature/x".to_string()));
 
-    // Worktree add: harness/<name> branch, isolated dir under the test root.
+    // Worktree add: task/<name> branch, isolated dir under the test root.
     let worktree = repos
         .create_worktree(&repo_dir, "main")
         .await
         .expect("worktree");
     assert!(
-        worktree.branch.starts_with("harness/"),
+        worktree.branch.starts_with("task/"),
         "branch: {}",
         worktree.branch
     );
@@ -178,7 +178,7 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert!(branches.contains(&worktree.branch));
 
     // Refs carry checkout state: `main` is current (main folder), the
-    // worktree's harness/<name> branch maps to its linked-checkout path, and
+    // worktree's task/<name> branch maps to its linked-checkout path, and
     // a plain branch has neither.
     let refs = repos.refs(&repo_dir).await.expect("refs");
     let by_name = |name: &str| refs.iter().find(|r| r.name == name).expect("ref row");
@@ -2138,7 +2138,7 @@ async fn rpc_dispatch_for_m5_methods() {
         worktree["branch"]
             .as_str()
             .expect("branch")
-            .starts_with("harness/")
+            .starts_with("task/")
     );
     assert!(worktree["checkoutId"].is_string());
     assert!(worktree.get("setupAction").is_none());

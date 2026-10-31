@@ -42,6 +42,10 @@ struct HeldHarness {
     /// Park the first turn on a question instead of just hanging, so the chat
     /// sits in `AwaitingInput` rather than `Working`.
     asks: bool,
+    /// Confirm each steer it takes with `AgentEvent::Steered`, as a real
+    /// step-boundary adapter does. Without it the engine's delivery ledger
+    /// still holds the steer at turn end and sends it again as a turn.
+    confirms_steers: bool,
 }
 
 impl HeldHarness {
@@ -51,6 +55,13 @@ impl HeldHarness {
 
     fn asking(steering: SteeringMode) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
         Self::build(steering, true)
+    }
+
+    fn confirming(steering: SteeringMode) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
+        let (harness, prompts) = Self::build(steering, false);
+        let mut harness = Arc::into_inner(harness).expect("not shared yet");
+        harness.confirms_steers = true;
+        (Arc::new(harness), prompts)
     }
 
     fn build(steering: SteeringMode, asks: bool) -> (Arc<Self>, Arc<Mutex<Vec<String>>>) {
@@ -65,6 +76,7 @@ impl HeldHarness {
                 prompts: prompts.clone(),
                 requests: Mutex::new(Vec::new()),
                 asks,
+                confirms_steers: false,
             }),
             prompts,
         )
@@ -124,43 +136,48 @@ impl Harness for HeldHarness {
             session_id: "sess-queue".into(),
             assistant_message_id: format!("a-{}", request.prompt),
         })]);
-        let done = futures::stream::once(async move {
-            loop {
-                tokio::select! {
-                    _ = finish.recv() => {
-                        return Ok(AgentEvent::Done {
-                            status: DoneStatus::Completed,
-                            result: None,
-                            error: None,
-                            session_id: Some("sess-queue".into()),
-                        });
-                    }
-                    Ok(failure) = fail.recv() => {
-                        return match failure {
-                            TurnFailure::Done => Ok(AgentEvent::Done {
-                                status: DoneStatus::Errored,
-                                result: None,
-                                error: Some("network error (gave up after 6 attempts)".into()),
-                                session_id: Some("sess-queue".into()),
-                            }),
-                            TurnFailure::Stream => Err(HarnessError::Protocol(
-                                "network error (gave up after 6 attempts)".into(),
-                            )),
-                        };
-                    }
-                    steer = steering.recv() => {
-                        if steer.is_none() {
-                            return Ok(AgentEvent::Done {
-                                status: DoneStatus::Completed,
-                                result: None,
-                                error: None,
-                                session_id: Some("sess-queue".into()),
-                            });
+        let confirms_steers = self.confirms_steers;
+        let done =
+            futures::stream::unfold(Some((finish, fail, steering)), move |state| async move {
+                let (mut finish, mut fail, mut steering) = state?;
+                let done = |status, error: Option<&str>| AgentEvent::Done {
+                    status,
+                    result: None,
+                    error: error.map(str::to_owned),
+                    session_id: Some("sess-queue".into()),
+                };
+                loop {
+                    tokio::select! {
+                        _ = finish.recv() => {
+                            return Some((Ok(done(DoneStatus::Completed, None)), None));
+                        }
+                        Ok(failure) = fail.recv() => {
+                            let event = match failure {
+                                TurnFailure::Done => Ok(done(
+                                    DoneStatus::Errored,
+                                    Some("network error (gave up after 6 attempts)"),
+                                )),
+                                TurnFailure::Stream => Err(HarnessError::Protocol(
+                                    "network error (gave up after 6 attempts)".into(),
+                                )),
+                            };
+                            return Some((event, None));
+                        }
+                        steer = steering.recv() => {
+                            if steer.is_none() {
+                                return Some((Ok(done(DoneStatus::Completed, None)), None));
+                            }
+                            if confirms_steers {
+                                let steered = AgentEvent::Steered {
+                                    assistant_message_id: None,
+                                    next_assistant_message_id: None,
+                                };
+                                return Some((Ok(steered), Some((finish, fail, steering))));
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
         // A live question owns its receiver until the run finishes. Dropping it
         // now explicitly cancels the engine-owned input lifecycle.
         Ok(started
@@ -898,6 +915,123 @@ async fn a_message_with_attachments_holds_even_for_a_steerable_agent() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_now_rejects_an_attachment_row_without_affecting_the_turn() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "with a file", vec!["att-1".into()])
+        .expect("queue attachment message");
+
+    let error = core
+        .doc_host
+        .steer_queued_now(CHAT, &id)
+        .await
+        .expect_err("attachment rows cannot be steered");
+    assert!(error.to_string().contains("attachments cannot be steered"));
+    let row = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("rejected row remains queued");
+    assert_eq!(row.text, "with a file");
+    assert_eq!(row.attachments, vec!["att-1"]);
+    assert!(core.sessions.turn_in_flight(CHAT));
+    assert_eq!(*prompts.lock().unwrap(), vec!["opening"]);
+    assert!(
+        !user_messages(&core)
+            .iter()
+            .any(|message| message == "with a file")
+    );
+
+    let _ = harness.finish.send(());
+    wait_for(
+        || {
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.starts_with("with a file\n\nAttached images"))
+        },
+        "the held attachment row to dispatch at turn end",
+    )
+    .await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_steer_of_a_non_head_row_preserves_the_other_rows_and_turn() {
+    // The agent confirms the steer at its step boundary; an unconfirmed one
+    // is sent again as a turn of its own (the at-least-once ledger).
+    let (core, harness, prompts) =
+        setup_with(HeldHarness::confirming(SteeringMode::StepBoundary)).await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+    core.doc_host
+        .queue_message(CHAT, "first queued", Vec::new())
+        .expect("queue first row");
+    let selected_id = core
+        .doc_host
+        .queue_message(CHAT, "selected row", Vec::new())
+        .expect("queue selected row");
+    core.doc_host
+        .queue_message(CHAT, "last queued", Vec::new())
+        .expect("queue last row");
+
+    assert!(
+        core.doc_host
+            .steer_queued_now(CHAT, &selected_id)
+            .await
+            .expect("steer selected row")
+    );
+    wait_for(
+        || user_message_id(&core, "selected row").as_deref() == Some(selected_id.as_str()),
+        "selected row to appear in the transcript",
+    )
+    .await;
+    assert_eq!(queue_texts(&core), vec!["first queued", "last queued"]);
+    assert!(core.sessions.turn_in_flight(CHAT));
+    assert_eq!(*prompts.lock().unwrap(), vec!["opening"]);
+
+    let _ = harness.finish.send(());
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "first queued"),
+        "the original queue head to dispatch after the turn",
+    )
+    .await;
+    assert_eq!(queue_texts(&core), vec!["last queued"]);
+    let _ = harness.finish.send(());
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "last queued"),
+        "the remaining row to retain its order",
+    )
+    .await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// "Send now" interrupts the running turn and sends that one message, leaving
 /// the rest queued. The UI selects this action for providers that cannot steer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1401,6 +1535,81 @@ async fn only_one_editor_wins_and_an_expired_edit_requires_review() {
     .await;
     assert!(!prompts.lock().unwrap().iter().any(|p| p == "review me"));
 
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_delivery_rejects_a_gated_row_without_taking_it_or_interrupting() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "needs review", Vec::new())
+        .expect("queue gated row");
+    let gate = QueueDeliveryGate::ReviewRequired {
+        previous_lease_id: "lease-1".into(),
+        owner_device_id: "phone".into(),
+        since_ms: 1,
+        base_text_hash: "hash-1".into(),
+    };
+    assert!(
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .set_queued_delivery_gate(&id, Some(&gate))
+            .unwrap()
+    );
+
+    let steer_error = core
+        .doc_host
+        .steer_queued_now(CHAT, &id)
+        .await
+        .expect_err("a gated row cannot be steered");
+    assert!(
+        steer_error
+            .to_string()
+            .contains("blocked for editing or review")
+    );
+    let send_error = core
+        .doc_host
+        .send_queued_now(CHAT, &id)
+        .await
+        .expect_err("a gated row cannot be sent now");
+    assert!(
+        send_error
+            .to_string()
+            .contains("blocked for editing or review")
+    );
+
+    let row = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_queue()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == id)
+        .expect("rejected row remains queued");
+    assert_eq!(row.text, "needs review");
+    assert_eq!(row.delivery_gate, Some(gate));
+    assert!(core.sessions.turn_in_flight(CHAT));
+    assert_eq!(*prompts.lock().unwrap(), vec!["opening"]);
+    assert!(
+        !user_messages(&core)
+            .iter()
+            .any(|message| message == "needs review")
+    );
+
+    let _ = harness.finish.send(());
     core.shutdown().await;
 }
 

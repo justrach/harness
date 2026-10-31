@@ -778,6 +778,7 @@ impl FilesSurface {
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Submitted => this.commit_editor_comment(cx),
             ComposerInputEvent::Edited => cx.notify(),
+            ComposerInputEvent::FollowUpSubmitted => {}
             _ => {}
         });
         let focus = input.read(cx).focus_handle(cx);

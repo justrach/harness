@@ -5,6 +5,7 @@
 // numbers and never depend on which color is painted.
 
 import SwiftUI
+import UIKit
 
 enum Theme {
     private static var palette: ThemePalette { ThemeStore.shared.palette }
@@ -62,6 +63,28 @@ enum Theme {
     static let spaceSM: CGFloat = 8
     static let spaceMD: CGFloat = 12
     static let spaceLG: CGFloat = 16
+
+    // ---- Home and session list (iOS) ----
+    /// Side gutter of the session list and its title, chips and pinned row.
+    static let gutter: CGFloat = 24
+    /// Height of the filter chips above the list. Fully round (a capsule).
+    static let chipHeight: CGFloat = 36
+    /// The agent avatar at the head of each session row.
+    static let rowAvatar: CGFloat = 44
+    /// A pinned session's avatar in the pinned row.
+    static let pinnedAvatar: CGFloat = 56
+    /// Minimum tap target, per DESIGN.md.
+    static let hitTarget: CGFloat = 44
+
+    // ---- type scale for Home and the session rows: four sizes, two weights ----
+    /// The large Home title.
+    static let titleSize: CGFloat = 27
+    /// A session's name.
+    static let nameSize: CGFloat = 16
+    /// The line under the name: project and device.
+    static let previewSize: CGFloat = 14
+    /// Times, status words and the branch.
+    static let metaSize: CGFloat = 12
 }
 
 // MARK: - Fonts
@@ -224,5 +247,74 @@ extension View {
     /// A grouped list section's rows on the theme's raised card surface.
     func harnessListRow() -> some View {
         listRowBackground(Theme.surfaceRaised)
+    }
+}
+
+// MARK: Status and tag chips
+
+/// A status or tag chip: a soft tint of its hue behind darker, saturated text in that same hue, never a solid
+/// saturated fill with white text (DESIGN.md "Status and tag chips"). Light: the hue at 12% over the surface,
+/// text mixed 35% toward black. Dark: the hue at 16%, text mixed 20% toward white. On both Codegraff
+/// appearances every status hue (danger, warning, success, accent) clears 4.5:1 that way.
+struct TintedChipStyle: ViewModifier {
+    let hue: Color
+    let shape: AnyShape
+    @Environment(\.colorScheme) private var colorScheme
+
+    func body(content: Content) -> some View {
+        content
+            .foregroundStyle(TintedChipStyle.text(hue, dark: colorScheme == .dark))
+            .background(TintedChipStyle.fill(hue, dark: colorScheme == .dark), in: shape)
+    }
+
+    static func text(_ hue: Color, dark: Bool) -> Color {
+        dark ? hue.mix(with: .white, by: 0.2, in: .device) : hue.mix(with: .black, by: 0.35, in: .device)
+    }
+
+    static func fill(_ hue: Color, dark: Bool) -> Color {
+        hue.opacity(dark ? 0.16 : 0.12)
+    }
+}
+
+extension View {
+    /// Style this as a status or tag chip in `hue` (see `TintedChipStyle`). Capsule unless a shape is given.
+    func tintedChip(_ hue: Color, in shape: some Shape = Capsule()) -> some View {
+        modifier(TintedChipStyle(hue: hue, shape: AnyShape(shape)))
+    }
+}
+
+// MARK: - Accent controls and the writing plane (after the desktop composer)
+
+extension Theme {
+    /// Foreground for a control filled with the accent: black or white,
+    /// whichever reads better on it (the desktop's `on_primary_accent`).
+    static var onAccent: Color { Color(readableForeground(on: UIColor(accent))) }
+
+    /// Black or white, whichever has the higher contrast ratio against `fill`.
+    static func readableForeground(on fill: UIColor) -> UIColor {
+        contrastRatio(.black, fill) >= contrastRatio(.white, fill) ? .black : .white
+    }
+
+    /// WCAG contrast ratio between two opaque colors, 1 to 21.
+    static func contrastRatio(_ a: UIColor, _ b: UIColor) -> Double {
+        let (la, lb) = (relativeLuminance(a), relativeLuminance(b))
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    private static func relativeLuminance(_ color: UIColor) -> Double {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, alpha: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &alpha)
+        func linear(_ c: CGFloat) -> Double {
+            let c = Double(c)
+            return c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
+    /// The composer's writing plane over its glass: light themes lift it
+    /// toward white so the draft sits on a bright surface; dark themes keep
+    /// the faint raised ink.
+    static var composerPlane: Color {
+        ThemeStore.shared.palette.isDark ? ink(0.04) : Color.white.opacity(0.62)
     }
 }

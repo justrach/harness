@@ -27,7 +27,7 @@ struct ArchivedSection: View {
     private static let initialCount = 10
     private static let pageSize = 25
 
-    private static let rowInsets = EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
+    private static let rowInsets = EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14)  // + 10 = the 24pt gutter
 
     var body: some View {
         let archived = model.archivedMatches(in: spaceId, query: query).filter { $0.id != excluding }

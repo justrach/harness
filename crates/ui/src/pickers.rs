@@ -13,6 +13,8 @@
 
 #[path = "pickers/harness_tabs.rs"]
 mod harness_tabs;
+#[cfg(feature = "model-picker-preview")]
+mod model_preview;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -828,6 +830,8 @@ fn cloud_row(
 }
 
 pub struct Pickers {
+    #[cfg(feature = "model-picker-preview")]
+    preview: model_preview::Preview,
     state: Entity<AppState>,
     config: DraftConfig,
     /// Sticky last-used picks (harness `harness.composer.defaults:v1`): seeds the
@@ -961,6 +965,8 @@ impl Pickers {
                         this.active = 0;
                     }
                     if this.open_kind() == Some(PickerKind::HarnessModel) {
+                        #[cfg(feature = "model-picker-preview")]
+                        this.preview.hide_detail();
                         this.setting_menu = None;
                         this.setting_bounds = None;
                         this.active = 0;
@@ -977,6 +983,7 @@ impl Pickers {
             | ComposerInputEvent::HistoryNavigate(_)
             | ComposerInputEvent::PastedPaths(_)
             | ComposerInputEvent::PastedText { .. }
+            | ComposerInputEvent::FollowUpSubmitted
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
             | ComposerInputEvent::MentionNavigate(_)
@@ -989,6 +996,8 @@ impl Pickers {
         let state_observe = cx.observe(&state, |this: &mut Self, state, cx| {
             let selected = state.read(cx).selected_chat.clone();
             if selected != this.draft_owner {
+                #[cfg(feature = "model-picker-preview")]
+                this.preview.reset();
                 this.draft_owner = selected;
                 this.config.harness = None;
                 this.config.model = None;
@@ -1050,6 +1059,8 @@ impl Pickers {
             .is_some_and(|space| space.git_detected);
         let checkout = CheckoutKind::for_space(state.read(cx).selected_space_row());
         Self {
+            #[cfg(feature = "model-picker-preview")]
+            preview: model_preview::Preview::default(),
             state,
             space_owner,
             device_owner,
@@ -1126,6 +1137,8 @@ impl Pickers {
             .selected_space_row()
             .is_some_and(|space| space.git_detected);
         if space != self.space_owner || device != self.device_owner || git != self.git_owner {
+            #[cfg(feature = "model-picker-preview")]
+            self.preview.reset();
             self.space_owner = space;
             self.device_owner = device;
             self.git_owner = git;
@@ -1336,6 +1349,26 @@ impl Pickers {
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
+    /// Whether the selected chat's own host catalog advertises safe
+    /// step-boundary steering for its configured harness. Draft picker
+    /// overrides are deliberately ignored, and a catalog fetched for another
+    /// host (or one that has not loaded) cannot enable the action.
+    pub(crate) fn selected_chat_supports_steering(&self, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        let Some(chat) = state.selected_chat_row() else {
+            return false;
+        };
+        let Some(harness) = chat.config.as_ref().map(|config| config.harness) else {
+            return false;
+        };
+        catalog_supports_chat_steering(
+            &chat.device_id,
+            self.device_owner.as_deref(),
+            harness,
+            self.harnesses.ready().map(Vec::as_slice),
+        )
+    }
+
     /// Effective harness: picked, or the chat's config, or the first listed.
     fn effective_harness(&self, cx: &App) -> Option<HarnessId> {
         if self.chat_mode(cx) {
@@ -1504,6 +1537,35 @@ impl Pickers {
                     None => None,
                 }
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_step_boundary_steering_for_test(&mut self, cx: &App) {
+        let Some((device_id, harness)) = ({
+            let state = self.state.read(cx);
+            state.selected_chat_row().map(|chat| {
+                (
+                    chat.device_id.clone(),
+                    chat.config
+                        .as_ref()
+                        .map(|config| config.harness)
+                        .unwrap_or(HarnessId::Codex),
+                )
+            })
+        }) else {
+            return;
+        };
+        self.device_owner = Some(device_id);
+        self.harnesses = Loadable::Ready(vec![HarnessDescriptor {
+            id: harness,
+            name: "Test harness".into(),
+            supports_steering: true,
+            steering_mode: harness_proto::SteeringMode::StepBoundary,
+            reasoning_levels: Vec::new(),
+            installed: true,
+            can_install: false,
+            enabled: Some(true),
+        }]);
     }
 
     /// The explicit (non-default) option picks: the chat's persisted
@@ -1686,9 +1748,17 @@ impl Pickers {
             cx.notify();
             return;
         }
+        #[cfg(feature = "model-picker-preview")]
+        if kind == PickerKind::HarnessModel && self.preview.enabled {
+            self.preview.reset();
+        }
         if kind == PickerKind::HarnessModel {
             self.open_model_width = self.model_trigger_bounds.map(|bounds| bounds.size.width);
             self.open_model_height = model_menu_height(self.setting_groups(cx).len());
+            #[cfg(feature = "model-picker-preview")]
+            if self.preview.enabled {
+                self.open_model_height = 480.0;
+            }
         }
         self.open.open(kind);
         self.focus_on_mount = true;
@@ -2204,6 +2274,16 @@ impl Pickers {
     }
 
     fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled {
+            if !self.harness_locked(cx) {
+                self.preview.viewed = Some(harness);
+                self.preview.pending = None;
+                self.ensure_models(harness, false, cx);
+                self.preview_reset_rows(cx);
+            }
+            return;
+        }
         if self.harness_locked(cx) {
             return;
         }
@@ -2362,6 +2442,10 @@ impl Pickers {
             {
                 config.model_options =
                     offered_options(model, std::mem::take(&mut config.model_options));
+                #[cfg(feature = "model-picker-preview")]
+                if self.preview.enabled {
+                    config.reasoning = clamp_reasoning(config.reasoning, &model.reasoning_levels);
+                }
             }
         }
         self.state.update(cx, |state, cx| {
@@ -2388,6 +2472,13 @@ impl Pickers {
     /// The traits popover's reasoning ladder (model levels, falling back to
     /// the harness's advertised ladder) — shared by render and keyboard nav.
     fn trait_ladder(&self, cx: &App) -> Vec<ReasoningLevel> {
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled {
+            return self
+                .selected_model(cx)
+                .map(|m| m.reasoning_levels.clone())
+                .unwrap_or_default();
+        }
         let Some(model) = self.selected_model(cx) else {
             return Vec::new();
         };
@@ -2437,6 +2528,10 @@ impl Pickers {
     /// Cached [`Self::visible_model_rows`]: selection/highlight changes and
     /// re-renders share one flattened list until an input actually changes.
     fn model_rows(&self, cx: &App) -> std::sync::Arc<Vec<ModelRowData>> {
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled {
+            return self.preview_rows(cx);
+        }
         let key = ModelRowsKey {
             query: self.search.read(cx).text().trim().to_string(),
             rail: self.model_rail,
@@ -2579,6 +2674,11 @@ impl Pickers {
 
     /// Enter on the harness/model popover: pick the highlighted model.
     fn activate_model_row(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled && self.preview.pending.is_some() {
+            self.preview_commit(cx);
+            return;
+        }
         if self.setting_menu.is_some() {
             self.activate_setting_choice(cx);
         } else if let Some(index) = self.active.checked_sub(self.model_rows_len(cx)) {
@@ -2594,6 +2694,11 @@ impl Pickers {
     /// search) switches the harness first, exactly like clicking its rail
     /// icon and then the model.
     fn activate_model_index(&mut self, ix: usize, cx: &mut Context<Self>) {
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled {
+            self.preview_stage(ix, cx);
+            return;
+        }
         let Some(row) = self.model_rows(cx).get(ix).cloned() else {
             return;
         };
@@ -3444,11 +3549,15 @@ impl Pickers {
         }
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_setting_hover();
         // The frame stays mounted (and possibly focused) through the exit
         // animation — keys must not drive a dying popover.
         if !self.open.is_open() {
+            return;
+        }
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled && self.preview_key(event, _window, cx) {
             return;
         }
         if self.setting_menu.is_some() {
@@ -3688,7 +3797,11 @@ impl Pickers {
             .relative()
             .child(self.measure_trigger(kind, cx))
             .id(id)
-            .h(px(32.0))
+            .h(px(if kind == PickerKind::HarnessModel {
+                24.0
+            } else {
+                32.0
+            }))
             .max_w(px(248.0))
             .when(
                 kind == PickerKind::HarnessModel && self.mounted_kind() == Some(kind),
@@ -3701,9 +3814,8 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            // The model trigger sits immediately beside the attachment.
-            // Its own padding participates in that visible gap; footer and
-            // destination triggers keep their wider independent hit areas.
+            // Keep the model trigger compact in the footer; destination
+            // triggers retain their wider independent hit areas.
             .px(px(if kind == PickerKind::HarnessModel {
                 6.0
             } else {
@@ -3921,6 +4033,7 @@ impl Pickers {
                     on_click: Box<dyn Fn(&mut Self, &mut Context<Self>)>| {
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .h(px(20.0))
                 .flex_none()
                 .flex()
@@ -3945,6 +4058,9 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(2.0))
+            // The buttons cannot shrink, so neither may their container:
+            // otherwise they paint over the PR badge at its shrunken edge.
+            .flex_shrink(0.0)
             .min_w_0();
         if busy {
             cluster = cluster.child(
@@ -4027,6 +4143,7 @@ impl Pickers {
             let chat = chat.clone();
             div()
                 .id(id)
+                .debug_selector(move || id.into())
                 .h(px(20.0))
                 .flex_none()
                 .flex()
@@ -4059,6 +4176,9 @@ impl Pickers {
             .flex_row()
             .items_center()
             .gap(px(2.0))
+            // Reserve the fixed-width actions as a unit. The session row
+            // clips at its edge; siblings must not start inside this card.
+            .flex_shrink(0.0)
             .min_w_0()
             .ml(px(4.0))
             .pl(px(6.0))
@@ -4658,6 +4778,15 @@ impl Pickers {
                     {
                         return;
                     }
+                    #[cfg(feature = "model-picker-preview")]
+                    if this.preview.enabled
+                        && this
+                            .preview
+                            .detail_bounds
+                            .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        return;
+                    }
                     this.dismiss(cx);
                     if this.focus.contains_focused(window, cx) {
                         window.blur();
@@ -4680,9 +4809,16 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
+        let height = self.menu_geometry().height.min(self.open_model_height);
+        #[cfg(feature = "model-picker-preview")]
+        let height = if self.preview.enabled {
+            height.min(self.preview.preferred_height())
+        } else {
+            height
+        };
         popover::popover_card_flush(&theme)
             .w(px(width))
-            .h(px(self.menu_geometry().height.min(self.open_model_height)))
+            .h(px(height))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
@@ -4700,6 +4836,15 @@ impl Pickers {
                     if this.setting_menu.is_some()
                         && this
                             .setting_bounds
+                            .is_some_and(|bounds| bounds.contains(&event.position))
+                    {
+                        return;
+                    }
+                    #[cfg(feature = "model-picker-preview")]
+                    if this.preview.enabled
+                        && this
+                            .preview
+                            .detail_bounds
                             .is_some_and(|bounds| bounds.contains(&event.position))
                     {
                         return;
@@ -5002,6 +5147,10 @@ impl Pickers {
     /// Model picker with favorites and harness tabs above a scoped search.
     /// Existing chats show only their own harness tab and models.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled {
+            return self.render_model_preview(cx);
+        }
         let height = self.menu_geometry().height.min(self.open_model_height);
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
 
@@ -5526,6 +5675,10 @@ impl Pickers {
     }
 
     fn setting_groups(&self, cx: &App) -> Vec<SettingGroup> {
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled {
+            return Vec::new();
+        }
         let mut groups = Vec::new();
         let levels = self.trait_ladder(cx);
         if !levels.is_empty() {
@@ -5916,6 +6069,24 @@ impl Pickers {
             .children(rows)
             .into_any_element()
     }
+}
+
+fn catalog_supports_chat_steering(
+    chat_host: &str,
+    catalog_host: Option<&str>,
+    harness: HarnessId,
+    descriptors: Option<&[HarnessDescriptor]>,
+) -> bool {
+    if catalog_host != Some(chat_host) {
+        return false;
+    }
+    descriptors
+        .and_then(|descriptors| {
+            descriptors
+                .iter()
+                .find(|descriptor| descriptor.id == harness)
+        })
+        .is_some_and(HarnessDescriptor::steers_mid_turn)
 }
 
 /// The floating-scrollbar treatment for every picker list
@@ -6549,6 +6720,10 @@ fn attach_overlay_end(
 impl Render for Pickers {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        #[cfg(feature = "model-picker-preview")]
+        if self.preview.enabled && self.preview.animating(cx.reduce_motion()) {
+            window.request_animation_frame();
+        }
         // A HARNESS_OPEN_PICKER popover never went through `toggle`, so claim
         // its keyboard focus here (re-claim until it sticks — the shell's
         // first-paint fallback focuses the composer after our first render).
@@ -6643,6 +6818,16 @@ impl Render for Pickers {
         let chip_label_loading =
             !no_agents && model_label.is_empty() && (catalog_loading || models_loading);
         let harness_icon = self.model_chip_icon(&theme, cx);
+        #[cfg(feature = "model-picker-preview")]
+        let harness_icon = if self.preview.enabled {
+            self.selected_model(cx)
+                .and_then(model_maker)
+                .and_then(maker_icon)
+                .map(|icon| (icon, None))
+                .unwrap_or(harness_icon)
+        } else {
+            harness_icon
+        };
         let explicit_options = self.explicit_options(cx);
         let traits_set = traits_summary(
             self.selected_model(cx),
@@ -6671,13 +6856,29 @@ impl Render for Pickers {
                     PickerKind::HarnessModel,
                     // Compact single-harness pane (t3 ModelPickerContent
                     // shrunk to its tabbed layout).
-                    self.popover_frame_flush(304.0, content, cx),
+                    self.popover_frame_flush(
+                        {
+                            #[cfg(feature = "model-picker-preview")]
+                            if self.preview.enabled {
+                                model_preview::PICKER_WIDTH
+                                    .min(f32::from(window.viewport_size().width) - 24.0)
+                            } else {
+                                304.0
+                            }
+                            #[cfg(not(feature = "model-picker-preview"))]
+                            {
+                                304.0
+                            }
+                        },
+                        content,
+                        cx,
+                    ),
                 ))
             }
             None => None,
         };
 
-        // The composer places this model chip beside the attachment button.
+        // The composer places this model chip at the footer's leading edge.
         // ONE chip for the whole run identity (user request): brand icon +
         // model name, then the joined traits summary ("Medium", "High · 1M ·
         // Fast", "Agent · Balance") as the chip's muted second tone — the
@@ -6724,7 +6925,7 @@ impl Render for Pickers {
                     ),
                 ))
             });
-        let model_chip = attach_overlay_end(
+        let model_chip = attach_overlay(
             model_chip,
             &mut overlay,
             PickerKind::HarnessModel,
@@ -8025,6 +8226,145 @@ mod tests {
     }
 
     #[gpui::test]
+    fn worktree_footer_actions_do_not_overlap_pull_request(cx: &mut gpui::TestAppContext) {
+        struct Fixture {
+            width: f32,
+            pickers: Entity<Pickers>,
+        }
+        impl gpui::Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let state = self.pickers.read(cx).state.clone();
+                let usage = state.read(cx).context_usage;
+                div()
+                    .w(px(self.width))
+                    .h(px(24.0))
+                    .flex()
+                    .items_center()
+                    .overflow_hidden()
+                    .child(
+                        div().flex_1().min_w_0().overflow_hidden().children(
+                            self.pickers
+                                .update(cx, |pickers, cx| pickers.render_footer(cx)),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink(1.0)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .pr(px(10.0))
+                            .child(crate::chatgpt_plan::using_plan_chip(&theme)),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "workspace-footer-usage".into())
+                            .flex_none()
+                            .pr(px(10.0))
+                            .child(crate::context_usage::render(usage, state, &theme)),
+                    )
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.spaces.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "project", "deviceId": "local", "path": "/project",
+                    "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
+                }))
+                .unwrap(),
+            );
+            state.selected_space = Some("project".into());
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "session", "deviceId": "local", "spaceId": "project",
+                    "archived": false, "createdAt": "2026-09-01T00:00:00Z",
+                    "cwd": "/project/.graff/worktrees/footer-test",
+                    "branch": "feature/a-very-long-branch-name",
+                    "sourceContext": {
+                        "checkoutId": "checkout", "repoRoot": "/project",
+                        "cwd": "/project/.graff/worktrees/footer-test",
+                        "branch": "feature/a-very-long-branch-name",
+                        "observedAt": "2026-09-01T00:00:00Z"
+                    }
+                }))
+                .unwrap(),
+            );
+            state.selected_chat = Some("session".into());
+            state.context_usage = Some(harness_proto::ContextUsage {
+                tokens: Some(100_000),
+                window: Some(200_000),
+                ..Default::default()
+            });
+            state.fixture_sidebar_change_request(harness_proto::CheckoutChangeRequestStatus {
+                checkout_id: "checkout".into(),
+                device_id: "local".into(),
+                cwd: "/project".into(),
+                branch: "feature/a-very-long-branch-name".into(),
+                change_request: Some(harness_proto::ChangeRequestSummary {
+                    provider: "github".into(),
+                    number: 123456,
+                    title: "Footer layout".into(),
+                    url: "https://example.invalid/pull/123456".into(),
+                    state: harness_proto::ChangeRequestState::Open,
+                    base_ref: "main".into(),
+                    head_ref: "feature/a-very-long-branch-name".into(),
+                }),
+                updated_at: chrono::Utc::now(),
+            });
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        let (fixture, cx) = cx.add_window_view(|_, _| Fixture {
+            width: 680.0,
+            pickers,
+        });
+        for armed in [false, true] {
+            for width in [1200.0, 680.0, 480.0, 320.0, 240.0, 160.0, 680.0, 1200.0] {
+                fixture.update(cx, |fixture, cx| {
+                    fixture.width = width;
+                    fixture.pickers.update(cx, |pickers, _| {
+                        pickers.change_request_merge_armed =
+                            armed.then(|| ("session".into(), 123456));
+                    });
+                    cx.notify();
+                });
+                cx.update(|window, cx| window.draw(cx).clear());
+                let mut previous = cx
+                    .debug_bounds("workspace-footer-label-icons/git-branch.svg")
+                    .unwrap();
+                let mut controls = vec![
+                    "graff-worktree-merge",
+                    "graff-worktree-archive",
+                    "graff-worktree-remove",
+                ];
+                if armed {
+                    controls.extend([
+                        "change-request-merge-confirm",
+                        "change-request-merge-cancel",
+                    ]);
+                } else {
+                    controls.push("change-request-merge");
+                }
+                controls.push("workspace-footer-pr");
+                for control in controls {
+                    let bounds = cx.debug_bounds(control).unwrap();
+                    assert!(
+                        previous.right() <= bounds.left(),
+                        "{control} overlaps its predecessor at width={width}, armed={armed}: {previous:?}, {bounds:?}"
+                    );
+                    previous = bounds;
+                }
+                let footer = cx.debug_bounds("session-workspace-footer").unwrap();
+                let usage = cx.debug_bounds("workspace-footer-usage").unwrap();
+                assert!(footer.right() <= usage.left(), "width={width}");
+                assert!((f32::from(usage.right()) - width).abs() < 0.1);
+            }
+        }
+    }
+
+    #[gpui::test]
     fn picker_completion_and_dismissal_have_distinct_focus_behavior(cx: &mut gpui::TestAppContext) {
         use std::cell::Cell;
         use std::rc::Rc;
@@ -8804,6 +9144,48 @@ mod tests {
             steering_mode: harness_proto::SteeringMode::StepBoundary,
             supports_steering: false,
         }
+    }
+
+    #[test]
+    fn steering_requires_provider_support_and_step_boundary_mode() {
+        let mut descriptor = descriptor(HarnessId::Codex, "Codex");
+        descriptor.supports_steering = true;
+        let catalog = [descriptor.clone()];
+        assert!(catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            Some(&catalog),
+        ));
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-b"),
+            HarnessId::Codex,
+            Some(&catalog),
+        ));
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            None,
+        ));
+
+        descriptor.supports_steering = false;
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            Some(&[descriptor.clone()]),
+        ));
+
+        descriptor.supports_steering = true;
+        descriptor.steering_mode = harness_proto::SteeringMode::TurnBoundary;
+        assert!(!catalog_supports_chat_steering(
+            "host-a",
+            Some("host-a"),
+            HarnessId::Codex,
+            Some(&[descriptor]),
+        ));
     }
 
     #[test]

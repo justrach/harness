@@ -262,6 +262,7 @@ impl ClaudeHarness {
     async fn probe_initialize(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
         }
@@ -538,6 +539,7 @@ impl ClaudeHarness {
             );
         }
         let mut cmd = self.build_command(&exe, &request);
+        crate::apply_run_environment(&mut cmd, controls.origin.as_ref().filter(|_| !title_only));
         if title_only {
             cmd.args([
                 "--system-prompt",

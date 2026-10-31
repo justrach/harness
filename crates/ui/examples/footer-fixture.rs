@@ -12,7 +12,16 @@ fn main() -> anyhow::Result<()> {
     let data = temp.path().to_path_buf();
     let output = std::env::current_dir()?.join(".graff");
     std::fs::create_dir_all(&output)?;
-    let image = output.join("footer-preview.png");
+    let image = output.join(
+        std::env::var("HARNESS_FOOTER_IMAGE").unwrap_or_else(|_| "footer-preview.png".into()),
+    );
+    let worktree = std::env::var_os("HARNESS_FOOTER_WORKTREE").is_some();
+    let capture_only = std::env::var_os("HARNESS_FOOTER_CAPTURE_ONLY").is_some();
+    let single_pane = std::env::var_os("HARNESS_FOOTER_SINGLE_PANE").is_some();
+    let width = std::env::var("HARNESS_FOOTER_WIDTH")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(1000.0);
     gpui_platform::application()
         .with_assets(icons::Assets)
         .run(move |cx| {
@@ -50,14 +59,23 @@ fn main() -> anyhow::Result<()> {
                 })).unwrap()];
                 for index in 1..=2 {
                     let branch = format!("feature/long-branch-name-for-footer-test-{index}");
+                    let cwd = if worktree {
+                        format!("/preview/project/.graff/worktrees/footer-{index}")
+                    } else {
+                        "/preview/project".into()
+                    };
                     state.chats.push(serde_json::from_value(serde_json::json!({
                         "id": format!("footer-{index}"), "deviceId": "preview", "spaceId": "project",
                         "title": format!("Footer test {index}"), "archived": false,
-                        "createdAt": "2026-09-01T00:00:00Z", "cwd": "/preview/project", "branch": branch,
-                        "config": {"harness": "mock", "model": "mock", "sandbox": "workspace-write"},
+                        "createdAt": "2026-09-01T00:00:00Z", "cwd": cwd, "branch": branch,
+                        "config": {
+                            "harness": if worktree { "graff" } else { "mock" },
+                            "model": if worktree { "chatgpt-new/preview" } else { "mock" },
+                            "sandbox": "workspace-write"
+                        },
                         "sourceContext": {
                             "checkoutId": format!("checkout-{index}"), "repoRoot": "/preview/project",
-                            "cwd": "/preview/project", "branch": branch, "observedAt": "2026-09-01T00:00:00Z"
+                            "cwd": cwd, "branch": branch, "observedAt": "2026-09-01T00:00:00Z"
                         }
                     })).unwrap());
                     state.fixture_sidebar_change_request(harness_proto::CheckoutChangeRequestStatus {
@@ -85,7 +103,7 @@ fn main() -> anyhow::Result<()> {
             };
             let window = cx.open_window(WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    gpui::point(px(60.0), px(70.0)), size(px(1000.0), px(720.0)),
+                    gpui::point(px(60.0), px(70.0)), size(px(width), px(720.0)),
                 ))),
                 titlebar: Some(gpui::TitlebarOptions {
                     title: Some("Harness Dev — Footer overlap preview".into()),
@@ -98,9 +116,11 @@ fn main() -> anyhow::Result<()> {
             cx.activate(true);
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(Duration::from_millis(1200)).await;
-                window.update(cx, |shell, window, cx| {
-                    shell.fixture_onboarding_split(true, window, cx);
-                }).unwrap();
+                if !single_pane {
+                    window.update(cx, |shell, window, cx| {
+                        shell.fixture_onboarding_split(true, window, cx);
+                    }).unwrap();
+                }
             state.update(cx, |state, cx| {
                 state.select_chat(Some("footer-2".into()), cx);
                 state.receive_transcript_frame(harness_doc::TranscriptFrame::Reset {
@@ -113,7 +133,7 @@ fn main() -> anyhow::Result<()> {
                     }])).unwrap(),
                 }, cx).unwrap();
                 state.context_usage = Some(harness_proto::ContextUsage {
-                    tokens: Some(12_000), window: Some(200_000),
+                    tokens: Some(100_000), window: Some(200_000), ..Default::default()
                 });
                 cx.notify();
             });
@@ -127,6 +147,9 @@ fn main() -> anyhow::Result<()> {
                 });
                 if let Err(error) = result.and_then(|result| result) {
                     eprintln!("Unable to save footer preview: {error}");
+                }
+                if capture_only {
+                    cx.update(|cx| cx.quit());
                 }
             }).detach();
         });

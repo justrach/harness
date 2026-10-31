@@ -602,9 +602,8 @@ impl Shell {
     }
 
     /// The two close shortcuts share view/history handling. ⌘W supplies the
-    /// user's per-close archive choice; ⌘⌥W never archives. Neither consults
-    /// or changes the ✕-button preference. Include the final session-to-canvas
-    /// close in both.
+    /// saved archive-on-close preference; ⌘⌥W never archives. Include the
+    /// final session-to-canvas close in both.
     pub(crate) fn close_chat_view_with_archive(
         &mut self,
         may_archive: bool,

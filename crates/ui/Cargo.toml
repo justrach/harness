@@ -6,6 +6,10 @@ license-file.workspace = true
 publish.workspace = true
 
 [features]
+# Phil Hedayatnia's two-step model picker is the default picker;
+# HARNESS_MODEL_PICKER_PREVIEW=0 switches back to the previous one.
+default = ["model-picker-preview"]
+model-picker-preview = []
 project-palette-fixture = []
 
 browser-fixture = []
@@ -15,6 +19,10 @@ appshots-fixture = ["gpui_platform/test-support"]
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 # Headless renders of scenes of the main window (examples/ui-scenes.rs).
 ui-scenes = ["gpui/bench", "gpui_platform/test-support"]
+
+[[example]]
+name = "model-picker-fixture"
+required-features = ["model-picker-preview", "appshots-fixture"]
 
 [[example]]
 name = "macos-resource-profile"
@@ -81,6 +89,10 @@ name = "final-answer-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "build-wait-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "restart-resume-fixture"
 required-features = ["appshots-fixture"]
 
@@ -101,11 +113,23 @@ name = "readme-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "composer-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "queue-steer-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "markdown-math-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
 name = "composer-completion-fade-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "annotate-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -163,6 +187,8 @@ alacritty_terminal.workspace = true
 base64 = "0.22"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 usvg = "0.46"
+# Flattens image annotations onto the picture (annotate.rs); usvg already parses.
+resvg = { version = "0.46", default-features = false }
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 unicode-segmentation.workspace = true
 unicode-width.workspace = true

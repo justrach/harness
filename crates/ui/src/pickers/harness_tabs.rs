@@ -114,6 +114,12 @@ impl Pickers {
             return;
         }
         let current = self.effective_harness(cx);
+        #[cfg(feature = "model-picker-preview")]
+        let current = if self.preview.enabled {
+            self.preview_viewed(cx)
+        } else {
+            current
+        };
         let index = descriptors.iter().position(|d| Some(d.id) == current);
         let next = match (index, backwards) {
             (Some(0), true) | (None, true) => descriptors.len() - 1,

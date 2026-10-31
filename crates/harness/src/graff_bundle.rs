@@ -49,6 +49,7 @@ pub fn managed_path() -> Option<PathBuf> {
 pub fn version_of(path: &Path) -> Option<Vec<u64>> {
     let output = std::process::Command::new(path)
         .arg("--version")
+        .env_remove("HARNESS_BUILD_WAIT_DIR")
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;
@@ -104,6 +105,7 @@ pub fn release_highlights(from: Option<&str>, to: &str) -> Vec<String> {
     };
     let Ok(output) = std::process::Command::new(path)
         .arg("--version")
+        .env_remove("HARNESS_BUILD_WAIT_DIR")
         .stdin(std::process::Stdio::null())
         .output()
     else {
@@ -126,6 +128,7 @@ pub fn installed_beta_tag(managed: &Path) -> Option<String> {
     }
     let output = std::process::Command::new(managed)
         .arg("--version")
+        .env_remove("HARNESS_BUILD_WAIT_DIR")
         .stdin(std::process::Stdio::null())
         .output()
         .ok()?;

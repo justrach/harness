@@ -185,6 +185,11 @@ icon_assets![
     (TERMINAL, "terminal"),
     (PLUS, "plus"),
     (CLOSE, "close"),
+    // Hand-drawn annotate tools and undo in the Solar Linear style (24px,
+    // 1.5 stroke) for the image annotation toolbar (annotate.rs).
+    (ANNOTATE_TEXT, "annotate-text"),
+    (ANNOTATE_RECT, "annotate-rect"),
+    (UNDO, "undo"),
     // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
     // restore stacked squares) in the same style as `close` — drawn for the
     // client-side-decoration window controls; no system glyph font exists on
@@ -240,6 +245,16 @@ icon_assets![
     (MAKER_MINIMAX, "maker-minimax"),
     (MAKER_MISTRAL, "maker-mistral"),
     (MAKER_META, "maker-meta"),
+    (PROVIDER_KILO, "provider-kilo"),
+    (PROVIDER_GROQ, "provider-groq"),
+    (PROVIDER_CEREBRAS, "provider-cerebras"),
+    (PROVIDER_VERCEL, "provider-vercel"),
+    (PROVIDER_OPENROUTER, "provider-openrouter"),
+    (PROVIDER_FUGU, "provider-fugu"),
+    (PROVIDER_FIREWORKS, "provider-fireworks"),
+    (PROVIDER_LMSTUDIO, "provider-lmstudio"),
+    (PROVIDER_MLX, "provider-mlx"),
+    (PROVIDER_OMLX, "provider-omlx"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity
