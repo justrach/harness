@@ -212,6 +212,18 @@ fn response_failure(error: &Value) -> HarnessError {
     {
         return HarnessError::ReauthRequired { provider };
     }
+    // graff's typed key rejection wins over whatever its prose says: the
+    // sign-in is fine, the API key it used (or fell back to) is not.
+    if let Some(rejected) = error
+        .get("data")
+        .and_then(harness_proto::KeyRejected::from_acp)
+    {
+        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+        return HarnessError::KeyRejected {
+            message: harness_proto::run_errors::key_rejected_message(&rejected.provider, message),
+            provider: rejected.provider,
+        };
+    }
     // Compatibility with installed Graff releases predating the typed contract.
     // Match only the observed, route-specific terminal provider error; never
     // infer reauthentication from arbitrary prose or a generic -32603.
@@ -345,6 +357,40 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn a_typed_key_rejection_reads_as_the_key_whatever_the_prose() {
+        use harness_proto::run_errors::{ProviderProblem, provider_problem};
+        let data = json!({"kind":"api_key_rejected","provider":"anthropic"});
+        for message in [
+            "Anthropic API key was rejected (ANTHROPIC_API_KEY): replace or remove the key. Your sign-in is not affected.",
+            "provider authentication failed: sign in again or check the API key",
+            "unauthorized",
+        ] {
+            let failure =
+                response_failure(&json!({"code":-32603,"message":message,"data":data}));
+            let HarnessError::KeyRejected { provider, .. } = &failure else {
+                panic!("{message}: {failure:?}");
+            };
+            assert_eq!(provider, "anthropic");
+            assert_eq!(
+                provider_problem(&failure.to_string()),
+                Some(ProviderProblem::KeyRejected),
+                "{failure}"
+            );
+        }
+        // Graff's own wording is shown as written.
+        let own = "Anthropic API key was rejected (keychain): replace or remove the key. Your sign-in is not affected.";
+        assert_eq!(
+            response_failure(&json!({"code":-32603,"message":own,"data":data})).to_string(),
+            own
+        );
+        // The untyped generic text stays a protocol error (read as signed out).
+        assert!(matches!(
+            response_failure(&json!({"code":-32603,"message":"provider authentication failed: sign in again or check the API key"})),
+            HarnessError::Protocol(_)
+        ));
     }
 
     #[test]

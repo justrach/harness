@@ -469,6 +469,36 @@ impl ReauthProvider {
     }
 }
 
+/// graff's typed "the provider rejected an API key" failure: JSON-RPC error
+/// data `{"kind":"api_key_rejected","provider":"<id>"}`, beside
+/// [`ReauthProvider`]'s `reauth_required`. The sign-in (if any) is fine; the
+/// key graff used, or fell back to after a plan ran out, is not. Carries no
+/// command: the fix ("Update key") is routed by the chat, never the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRejected {
+    /// graff's provider id (`anthropic`, `openai`, ...), as sent.
+    pub provider: String,
+}
+
+impl KeyRejected {
+    /// Recognize graff's `api_key_rejected` error data.
+    pub fn from_acp(data: &serde_json::Value) -> Option<Self> {
+        if data.get("kind")?.as_str()? != "api_key_rejected" {
+            return None;
+        }
+        let provider = data.get("provider")?.as_str()?.trim();
+        // A provider id, not prose: short, with no spaces or control characters.
+        (!provider.is_empty()
+            && provider.len() <= 64
+            && provider
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        .then(|| Self {
+            provider: provider.to_owned(),
+        })
+    }
+}
+
 /// The normalized streaming event every harness emits.
 ///
 /// Mirrors harness's `AgentEvent` tagged enum.
@@ -903,6 +933,32 @@ pub struct ToolProgressItem {
     pub output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+}
+
+#[cfg(test)]
+mod key_rejected_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reads_only_graffs_api_key_rejected_data() {
+        assert_eq!(
+            KeyRejected::from_acp(&json!({"kind":"api_key_rejected","provider":"anthropic"})),
+            Some(KeyRejected {
+                provider: "anthropic".into()
+            })
+        );
+        for data in [
+            json!({"kind":"reauth_required","provider":"anthropic"}),
+            json!({"kind":"api_key_rejected"}),
+            json!({"kind":"api_key_rejected","provider":""}),
+            json!({"kind":"api_key_rejected","provider":"run this; rm -rf"}),
+            json!({"kind":"api_key_rejected","provider":7}),
+            json!("api_key_rejected"),
+        ] {
+            assert_eq!(KeyRejected::from_acp(&data), None, "{data}");
+        }
+    }
 }
 
 #[cfg(test)]

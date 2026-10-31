@@ -93,6 +93,9 @@ pub const Page = struct {
     jobs_poll_at: ?f64 = null,
     /// An action's error over the page; a click dismisses it.
     notice: std.ArrayList(u8) = .empty,
+    /// A failed run's "Update key" (`key_notice`): where graff's rejected API
+    /// key is replaced, until a click dismisses it.
+    key_notice: bool = false,
     busy_account: ?[]u8 = null,
     busy_graff: ?[]u8 = null,
     cancelling_job: ?[]u8 = null,
@@ -270,6 +273,8 @@ fn setTarget(a: *App, to: ?[]const u8) void {
     if (p.graff.arena) |*ar| ar.deinit();
     p.graff = .{ .why = p.graff.why };
     p.notice.clearRetainingCapacity();
+    // The notice was about the last device's key.
+    p.key_notice = false;
     load(a, .mount);
 }
 
@@ -280,12 +285,25 @@ fn setTarget(a: *App, to: ?[]const u8) void {
 /// of its providers.
 pub fn signIn(a: *App, target_device: ?[]const u8, harness: ?accounts.Harness) void {
     setTarget(a, target_device);
+    a.view.accounts.key_notice = false;
     if (harness) |h| for (accounts.providers) |pv| if (pv.harness == h) {
         login.begin(a, h, null);
         break;
     };
     a.redraw();
 }
+
+/// A failed run's "Update key" (`update_key`): `target_device`'s logins,
+/// with where to replace or remove the rejected API key. Never starts a
+/// sign-in: signing in again doesn't fix a bad key.
+pub fn updateKey(a: *App, target_device: ?[]const u8) void {
+    setTarget(a, target_device);
+    a.view.accounts.key_notice = true;
+    a.redraw();
+}
+
+/// `KEY_REJECTED_NOTICE`.
+pub const key_rejected_notice = "graff's API key for this provider was rejected. Your sign-in is not affected. Replace the key on this computer with `graff key set <provider> <key>`, or remove it (or its <PROVIDER>_API_KEY variable) so graff uses the sign-in. The error says which key it used.";
 
 /// Switch (`ActivateAgentAccount`) or Forget (`ForgetAgentAccount`).
 fn accountAction(a: *App, method: []const u8, acc: accounts.Account) void {
@@ -392,6 +410,9 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     header(c, a, k);
     set.subtitle(c, k, "CodeGraff usage, graff's provider sign-ins, and the Claude Code, Codex, and Cursor logins on this device. Harness keeps local agent logins backed up and can swap between them.", false);
     if (p.notice.items.len > 0) if (rows.errorStrip(c, k, p.notice.items, false)) p.notice.clearRetainingCapacity();
+    if (p.key_notice) if (rows.warningStrip(c, k, key_rejected_notice)) {
+        p.key_notice = false;
+    };
     codegraff(c, a, k, now);
     graff.chatgpt(c, a, k);
     graff.providers(c, a, k);
@@ -624,7 +645,9 @@ fn providerSections(c: *ui.Context, a: *App, k: theme.Colors, now: i64) void {
             const s = p.snapshot.value;
             ui.key(c, c.print("accounts-provider-{s}", .{pv.harness.wire()}));
             if (rows.providerHead(c, k, pv, true)) login.begin(a, pv.harness, null);
-            for (s.warnings) |w| if (std.mem.eql(u8, w.harness, pv.harness.wire())) rows.warningStrip(c, k, w.message);
+            for (s.warnings) |w| if (std.mem.eql(u8, w.harness, pv.harness.wire())) {
+                _ = rows.warningStrip(c, k, w.message);
+            };
             const cd = rows.card(c, k, 8);
             defer cd.end();
             if (accounts.countOf(s, pv.harness) == 0) {

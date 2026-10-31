@@ -213,6 +213,14 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
         .unwrap_or("graff")
 }
 
+/// What "Update key" shows: graff keeps API keys on the computer it runs on
+/// (its keychain or a `<PROVIDER>_API_KEY` variable), and the error names
+/// which one it used.
+pub const KEY_REJECTED_NOTICE: &str = "graff's API key for this provider was rejected. Your \
+     sign-in is not affected. Replace the key on this computer with `graff key set <provider> \
+     <key>`, or remove it (or its <PROVIDER>_API_KEY variable) so graff uses the sign-in. The \
+     error says which key it used.";
+
 /// Where OpenAI API keys are made: the other way to use graff's ChatGPT
 /// models when plan usage is off.
 const OPENAI_API_KEYS_URL: &str = "https://platform.openai.com/api-keys";
@@ -392,6 +400,9 @@ pub struct AccountsPage {
     login_url_copied: bool,
     copy_task: Option<Task<()>>,
     error: Option<SharedString>,
+    /// A failed run's "Update key": the provider rejected graff's API key, so
+    /// the page says where keys live (Harness doesn't edit them) until dismissed.
+    key_notice: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     /// The code field takes the keys on the paste step's first frame.
     focus_code: bool,
@@ -445,6 +456,7 @@ impl AccountsPage {
             login_url_copied: false,
             copy_task: None,
             error: None,
+            key_notice: None,
             code_input,
             focus_code: false,
             load_task: None,
@@ -495,6 +507,8 @@ impl AccountsPage {
         // Another device's sign-ins: never show the last device's rows.
         self.graff_logins = Loadable::Idle;
         self.error = None;
+        // The notice was about the last device's key.
+        self.key_notice = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
 
@@ -1422,6 +1436,7 @@ impl AccountsPage {
         cx: &mut Context<Self>,
     ) {
         self.set_target_device(target, cx);
+        self.key_notice = None;
         if let Some(harness) = harness.filter(|harness| {
             PROVIDERS
                 .iter()
@@ -1430,6 +1445,22 @@ impl AccountsPage {
             self.start_login(harness, cx);
         }
         cx.notify();
+    }
+
+    /// A failed run's "Update key" (the provider rejected the API key graff
+    /// used; the sign-in is fine): `target`'s Accounts, with where to replace
+    /// or remove the key. Never starts a sign-in: signing in again doesn't fix
+    /// a bad key, and graff would keep preferring it.
+    pub(crate) fn update_key(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        self.set_target_device(target, cx);
+        self.key_notice = Some(KEY_REJECTED_NOTICE.into());
+        cx.notify();
+    }
+
+    /// The "Update key" notice, for the shell's tests.
+    #[cfg(test)]
+    pub(crate) fn key_notice(&self) -> Option<&str> {
+        self.key_notice.as_deref()
     }
 
     /// The device whose logins are shown (`None`: this one), and the flow's
@@ -3342,6 +3373,17 @@ impl Render for AccountsPage {
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.error = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .when_some(self.key_notice.clone(), |el, message| {
+                                el.child(
+                                    widgets::warning_strip(&theme, message)
+                                        .id("accounts-key-notice")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.key_notice = None;
                                             cx.notify();
                                         })),
                                 )

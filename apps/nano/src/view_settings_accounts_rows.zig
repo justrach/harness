@@ -167,8 +167,8 @@ pub fn errorStrip(c: *ui.Context, k: theme.Colors, message: []const u8, retry: b
     return s.clicked();
 }
 
-/// `warning_strip`: amber, 8 points under what's above.
-pub fn warningStrip(c: *ui.Context, k: theme.Colors, message: []const u8) void {
+/// `warning_strip`: amber, 8 points under what's above. True when clicked.
+pub fn warningStrip(c: *ui.Context, k: theme.Colors, message: []const u8) bool {
     set.space(c, 8);
     const s = ui.div(c).row().wFull().px(17).py(11).gap(8).itemsStart().rounded(12).border(k.warning.alpha(0.2)).borderW(1).bg(k.warning.alpha(0.06));
     defer s.end();
@@ -178,9 +178,12 @@ pub fn warningStrip(c: *ui.Context, k: theme.Colors, message: []const u8) void {
         defer ic.end();
         icons.icon(c, .@"danger-triangle", 14, amber, 0);
     }
-    const w = ui.div(c).column().w(@max(set.inner_w - 2 * 17 - 14 - 8, 80));
-    defer w.end();
-    ui.text(c, message, st(c, 12, .{ .wrap = true, .color = amber }));
+    {
+        const w = ui.div(c).column().w(@max(set.inner_w - 2 * 17 - 14 - 8, 80));
+        defer w.end();
+        ui.text(c, message, st(c, 12, .{ .wrap = true, .color = amber }));
+    }
+    return s.clicked();
 }
 
 /// The pulse a skeleton breathes with (`HARNESS_PULSE`, 2.4 s), 0 to 1.

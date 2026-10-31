@@ -4113,6 +4113,10 @@ pub enum TranscriptEvent {
     /// The shell routes it by the chat's own agent and host, never by the
     /// error text.
     SignIn { chat_id: String },
+    /// An error card's "Update key": the provider rejected the API key this
+    /// chat's agent used (its sign-in is fine). Routed like [`Self::SignIn`]
+    /// by the chat's host, to Accounts, without starting a sign-in.
+    UpdateKey { chat_id: String },
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -8497,18 +8501,18 @@ impl Transcript {
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, *viewed, cx),
             RowKind::ErrorChip { message } => {
                 let problem = harness_proto::run_errors::provider_problem(message);
-                let sign_in = self
-                    .chat_id
-                    .clone()
-                    .filter(|_| problem.is_some())
-                    .map(|chat_id| {
-                        cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            cx.emit(TranscriptEvent::SignIn {
-                                chat_id: chat_id.clone(),
-                            });
-                        })
-                    });
+                let sign_in = self.chat_id.clone().zip(problem).map(|(chat_id, problem)| {
+                    cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        let chat_id = chat_id.clone();
+                        cx.emit(match problem {
+                            harness_proto::run_errors::ProviderProblem::KeyRejected => {
+                                TranscriptEvent::UpdateKey { chat_id }
+                            }
+                            _ => TranscriptEvent::SignIn { chat_id },
+                        });
+                    })
+                });
                 error_chip(&row.id, message.clone(), problem, sign_in, &theme)
             }
             RowKind::ReauthRequired { message, provider } => {
@@ -9830,9 +9834,9 @@ fn plan_usage_limit_card(
 /// the human message below). Unlike the web port, the message WRAPS instead
 /// of truncating: startup-crash errors carry the agent's exit status and
 /// stderr, and a one-line ellipsis was exactly what made the upstream adapter
-/// failure undiagnosable from the screenshot. A refusal that signing in fixes (signed out, a usage limit)
-/// says so in the label, and with a chat to route it carries a "Log in"
-/// button under the message that starts that agent's sign-in.
+/// failure undiagnosable from the screenshot. A refusal the provider account fixes (signed out, a usage
+/// limit, a rejected API key) says so in the label, and with a chat to route it carries its button
+/// under the message: "Log in" starts that agent's sign-in, "Update key" opens Accounts.
 fn error_chip(
     row_id: &SharedString,
     message: SharedString,
