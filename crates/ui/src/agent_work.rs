@@ -511,7 +511,7 @@ pub struct Palette {
     pub muted: Hsla,
     pub faint: Hsla,
     pub line: Hsla,
-    pub pink: Hsla,
+    pub accent: Hsla,
     pub blue: Hsla,
     pub blue_text: Hsla,
     pub amber_text: Hsla,
@@ -521,7 +521,7 @@ pub struct Palette {
     pub blue_bg: Hsla,
     pub chip_bg: Hsla,
     pub chip_border: Hsla,
-    pub on_pink: Hsla,
+    pub on_accent: Hsla,
 }
 
 fn hex(value: u32) -> Hsla {
@@ -529,47 +529,35 @@ fn hex(value: u32) -> Hsla {
 }
 
 impl Palette {
+    /// Neutral roles come from the theme and the highlight is its accent, so
+    /// the card matches the rest of the app; blue, amber and red keep their
+    /// status meaning in both appearances.
     pub fn new(theme: &Theme) -> Self {
-        if theme.appearance.is_dark() {
-            Self {
-                card: hex(0x18181B),
-                card_border: hex(0x27272A),
-                text: hex(0xF4F4F5),
-                muted: hex(0xA1A1AA),
-                faint: hex(0x71717A),
-                line: hex(0x3F3F46),
-                pink: hex(0xEC4899),
-                blue: hex(0x3B82F6),
-                blue_text: hex(0x60A5FA),
-                amber_text: hex(0xF5B547),
-                amber_bg: hex(0x3B2C12),
-                red_text: hex(0xF87171),
-                red_bg: hex(0x4A1D20),
-                blue_bg: hex(0x1E3A5F),
-                chip_bg: hex(0x27272A),
-                chip_border: hex(0x3F3F46),
-                on_pink: hex(0xFFFFFF),
-            }
-        } else {
-            Self {
-                card: theme.surface_dialog,
-                card_border: theme.border,
-                text: theme.text,
-                muted: theme.text_muted,
-                faint: theme.text_faint,
-                line: theme.text_faint.opacity(0.45),
-                pink: hex(0xEC4899),
-                blue: hex(0x3B82F6),
-                blue_text: hex(0x2563EB),
-                amber_text: hex(0xB45309),
-                amber_bg: hex(0xFEF3C7),
-                red_text: hex(0xB91C1C),
-                red_bg: hex(0xFEE2E2),
-                blue_bg: hex(0xDBEAFE),
-                chip_bg: theme.surface_raised,
-                chip_border: theme.border,
-                on_pink: hex(0xFFFFFF),
-            }
+        let neutral = |dark: u32, light: u32| {
+            hex(if theme.appearance.is_dark() {
+                dark
+            } else {
+                light
+            })
+        };
+        Self {
+            card: theme.surface_dialog,
+            card_border: theme.border,
+            text: theme.text,
+            muted: theme.text_muted,
+            faint: theme.text_faint,
+            line: theme.text_faint.opacity(0.45),
+            accent: theme.accent,
+            blue: hex(0x3B82F6),
+            blue_text: neutral(0x60A5FA, 0x2563EB),
+            amber_text: neutral(0xF5B547, 0xB45309),
+            amber_bg: neutral(0x3B2C12, 0xFEF3C7),
+            red_text: neutral(0xF87171, 0xB91C1C),
+            red_bg: neutral(0x4A1D20, 0xFEE2E2),
+            blue_bg: neutral(0x1E3A5F, 0xDBEAFE),
+            chip_bg: theme.surface_raised,
+            chip_border: theme.border,
+            on_accent: theme.on_primary_accent(),
         }
     }
 }
@@ -659,14 +647,14 @@ fn check_dot(diameter: f32, p: &Palette) -> AnyElement {
         .flex_none()
         .size(px(diameter))
         .rounded_full()
-        .bg(p.pink)
+        .bg(p.accent)
         .flex()
         .items_center()
         .justify_center()
         .child(
             crate::icons::icon(crate::icons::CHECK)
                 .size(px(diameter * 0.62))
-                .text_color(p.on_pink),
+                .text_color(p.on_accent),
         )
         .into_any_element()
 }
@@ -699,7 +687,7 @@ fn lock_dot(diameter: f32, p: &Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// The active step: a pink spinner around a pink dot.
+/// The active step: an accent spinner around an accent dot.
 fn active_dot(diameter: f32, p: &Palette, phase: f32) -> AnyElement {
     div()
         .flex_none()
@@ -712,9 +700,9 @@ fn active_dot(diameter: f32, p: &Palette, phase: f32) -> AnyElement {
             div()
                 .absolute()
                 .inset_0()
-                .child(spinner(diameter, 2.0, p.pink, p.line, phase)),
+                .child(spinner(diameter, 2.0, p.accent, p.line, phase)),
         )
-        .child(div().size(px(diameter * 0.34)).rounded_full().bg(p.pink))
+        .child(div().size(px(diameter * 0.34)).rounded_full().bg(p.accent))
         .into_any_element()
 }
 
@@ -814,13 +802,13 @@ fn connectors(steps: &[Step], p: Palette) -> AnyElement {
                 let ((a, ay), (b, by)) = (pair[0], pair[1]);
                 match (a, b) {
                     (Row::Step(i), Row::Step(_)) => {
-                        let pink = states[i] == StepState::Done;
+                        let accent = states[i] == StepState::Done;
                         stroke(
                             at(ICON / 2.0, ay + r),
                             at(ICON / 2.0, by - r),
                             None,
-                            if pink { p.pink } else { p.line },
-                            !pink,
+                            if accent { p.accent } else { p.line },
+                            !accent,
                         );
                     }
                     (Row::Step(_), Row::Sub) => {
@@ -937,7 +925,7 @@ pub fn timeline(steps: &[Step], p: &Palette, phase: f32) -> AnyElement {
                     .rounded_full()
                     .bg(p.faint)
                     .into_any_element(),
-                SubState::Active => spinner(10.0, 1.5, p.pink, p.line, phase),
+                SubState::Active => spinner(10.0, 1.5, p.accent, p.line, phase),
             };
             let row = div()
                 .h(px(SUB_ROW))
@@ -980,7 +968,7 @@ pub fn timeline(steps: &[Step], p: &Palette, phase: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// A row of step dots joined by connectors: pink between done steps, dashed
+/// A row of step dots joined by connectors: accent between done steps, dashed
 /// gray from the active one on.
 pub fn step_dots(
     states: &[StepState],
@@ -992,14 +980,14 @@ pub fn step_dots(
     let mut row = div().flex().items_center();
     for (i, state) in states.iter().enumerate() {
         if i > 0 {
-            let pink = states[i - 1] == StepState::Done;
-            let color = if pink { p.pink } else { p.line };
+            let accent = states[i - 1] == StepState::Done;
+            let color = if accent { p.accent } else { p.line };
             let line = canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
                     let y = bounds.center().y;
                     let mut path = PathBuilder::stroke(px(1.5));
-                    if !pink {
+                    if !accent {
                         path = path.dash_array(&[px(3.0), px(3.0)]);
                     }
                     path.move_to(point(bounds.origin.x, y));
@@ -1089,12 +1077,12 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
         .child(div().text_color(p.muted).child(word));
     let rows = work.agents.iter().map(|agent| {
         let glyph = match agent.state {
-            AgentState::Running => spinner(18.0, 2.0, p.pink, p.line, phase),
+            AgentState::Running => spinner(18.0, 2.0, p.accent, p.line, phase),
             AgentState::Done => check_dot(18.0, p),
             AgentState::Failed | AgentState::Stopped => hollow(18.0, p.faint),
         };
         let detail_color = match agent.state {
-            AgentState::Done => p.pink,
+            AgentState::Done => p.accent,
             AgentState::Failed => p.red_text,
             _ => p.muted,
         };
@@ -1209,7 +1197,7 @@ pub fn footer_chip(
                 .items_center()
                 .gap(px(5.0))
                 .child(if work.live {
-                    spinner(12.0, 1.5, p.pink, p.line, phase)
+                    spinner(12.0, 1.5, p.accent, p.line, phase)
                 } else {
                     check_dot(12.0, &p)
                 })
@@ -1227,7 +1215,7 @@ pub fn footer_chip(
                 .items_center()
                 .gap(px(5.0))
                 .child(if work.running_agents() > 0 {
-                    spinner(12.0, 1.5, p.pink, p.line, phase)
+                    spinner(12.0, 1.5, p.accent, p.line, phase)
                 } else {
                     check_dot(12.0, &p)
                 })
