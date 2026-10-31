@@ -144,7 +144,7 @@ struct UsageCard {
     _subscription: gpui::Subscription,
 }
 
-fn with_separators(count: u64) -> String {
+pub(crate) fn with_separators(count: u64) -> String {
     let digits = count.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
@@ -264,7 +264,7 @@ impl Render for UsageCard {
                     .child(SharedString::from(details(usage))),
             )
             // With a window, the segment card shows graff's savings itself
-            // (crate::context_window::savings_section).
+            // (crate::context_window::savings_meter).
             .children(saved_label(usage).filter(|_| !has_window(usage)).map(|label| {
                 div()
                     .text_size(px(TEXT_BODY))
