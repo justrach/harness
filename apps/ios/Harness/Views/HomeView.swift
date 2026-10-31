@@ -99,6 +99,18 @@ struct HomeView: View {
 
     private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
 
+    /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
+    @AppStorage(DuoChat.foldableKey) private var foldableDevice = false
+
+    private func noteFoldable() {
+        guard !foldableDevice else { return }
+        if DuoChat.isFoldableWindow(phone: UIDevice.current.userInterfaceIdiom == .phone,
+                                    regularWidth: horizontalSizeClass == .regular,
+                                    regularHeight: verticalSizeClass == .regular, fold: fold) {
+            foldableDevice = true
+        }
+    }
+
     // MARK: Laptop pose (iPhone Duo folded with the fold across)
 
     /// The session's composer has the keyboard, which covers the list on the lower half.
@@ -371,6 +383,7 @@ struct HomeView: View {
             // Both columns stay up in book pose: each half of the fold holds one.
             if case .sideBySide = next { columnVisibility = .all }
             withAnimation(Motion.resort) { fold = next }
+            noteFoldable()
         }
         .avoidingOcclusions()
         // The keyboard must not reshape the split under the person typing (see PhoneSplit.layoutSize).
@@ -379,7 +392,11 @@ struct HomeView: View {
         }
         .onChange(of: containerSize) { refreshSplitOffer() }
         .onChange(of: phoneSplitRaw) { refreshSplitOffer() }
-        .onAppear { refreshSplitOffer() }
+        .onAppear {
+            refreshSplitOffer()
+            noteFoldable()
+        }
+        .onChange(of: horizontalSizeClass) { noteFoldable() }
         .environment(\.switchToSession, switchTo)
         .onChange(of: path) { _, _ in
             // A row picked from the list over the upper half opens there; the list gets out of the way.

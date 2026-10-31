@@ -18,6 +18,9 @@ struct SessionView: View {
     /// Above the fold in laptop pose: draw the header strip here, with a back button (FoldPaneHeader).
     @Environment(\.foldPaneHeader) private var foldPaneHeader
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let chatId: String
 
     /// Reserve the back button and native bar margins. Anchor the rest to the
@@ -69,6 +72,12 @@ struct SessionView: View {
         return headerControls(chat, chats: chats, maxVisible: limit)
     }
 
+    /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
+    private func pillShows(_ chat: Chat) -> Bool {
+        duoChat && liveStatus(chat: chat) == .working && model.sendState(for: chat) == nil
+            && model.connectivity.state == .connected
+    }
+
     private func headerControls(_ chat: Chat, chats: [Chat], maxVisible: Int) -> some View {
         HStack(spacing: 4) {
             HStack(spacing: 3) {
@@ -81,10 +90,12 @@ struct SessionView: View {
                         Text(chat.displayTitle)
                             .font(Theme.sans(15, weight: .medium))
                             .foregroundStyle(Theme.text)
-                            .lineLimit(1)
+                            // A Duo wraps a long title to a second line instead of cutting it.
+                            .lineLimit(duoChat ? 2 : 1)
                             .truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: duoChat)
                         projectLocation(chat: chat, model: model)
-                            .font(Theme.sans(12))
+                            .font(Theme.sans(duoChat ? DuoType.small : 12))
                             .foregroundStyle(Theme.textMuted.opacity(0.6))
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -102,7 +113,9 @@ struct SessionView: View {
             .pagerSwipe()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("session-navigation-controls")
-            SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            if !pillShows(chat) {
+                SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { headerWidth = $0 }
         .accessibilityElement(children: .contain)
@@ -341,7 +354,8 @@ struct SessionView: View {
         return VStack(spacing: 0) {
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
                            onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
-                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId))
+                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
+                           duoChat: duoChat)
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
@@ -353,9 +367,26 @@ struct SessionView: View {
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
+                .overlay(alignment: .bottomLeading) {
+                    if pillShows(chat) {
+                        RunStatusPill(chatId: chat.id, startedAtMs: sessionStartedAt(chat: chat),
+                                      onStop: { store.sendInterrupt() })
+                            .padding(.leading, 16)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                    }
+                }
+                .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
+                .overlay(alignment: .leading) {
+                    // Swipe in from the edge to go back; the pager owns the rest of the width.
+                    if duoChat, horizontalSizeClass == .compact { EdgeSwipeBack { dismiss() } }
+                }
             VStack(spacing: 0) {
-                if verticalSizeClass != .compact || status == .working || status == .errored
-                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected {
+                // A Duo's running turn is the pill; the strip shows only sends and connection trouble there.
+                if duoChat ? (status == .errored || model.sendState(for: chat) != nil
+                              || model.connectivity.state != .connected)
+                    : (verticalSizeClass != .compact || status == .working || status == .errored
+                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected) {
                     statusStrip(chat: chat, status: status, store: store)
                         .allowsHitTesting(model.sendState(for: chat).map { $0 == .failed || $0 == .waiting } ?? false)
                 }
