@@ -446,6 +446,8 @@ pub struct ContextWindowCard {
     built_from: Option<(u64, Option<ContextUsage>)>,
     current: Option<Breakdown>,
     transition: Option<Transition>,
+    /// The savings meter part under the pointer, named on the line below it.
+    saved_hover: Option<SavedPart>,
     _subscription: Subscription,
 }
 
@@ -457,6 +459,7 @@ impl ContextWindowCard {
             built_from: None,
             current: None,
             transition: None,
+            saved_hover: None,
         }
     }
 
@@ -703,89 +706,205 @@ fn trajectory_strip(trajectory: &crate::context_trajectory::Trajectory, theme: &
         )
 }
 
-/// One measured source of graff's savings: label left, count right.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavingsRow {
-    pub label: &'static str,
-    pub tokens: u64,
-    /// Shown for context, not added to the total.
-    pub counted: bool,
+/// The three parts of the savings meter: what the context holds now, then
+/// what graff kept out of it. Cache reads stay out: they were in the context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedPart {
+    InContext,
+    Files,
+    Compaction,
 }
 
-/// graff's measured savings as rows, skipping sources that saved nothing.
-/// The total is what stayed out of the context; cache reads were in the
-/// context, only cheaper, so they are listed but not counted.
-pub fn savings_rows(savings: harness_proto::ContextSavings) -> Vec<SavingsRow> {
-    [
-        ("Tool output kept in files", savings.handle_tokens(), true),
-        ("Freed by compaction", savings.compacted_tokens, true),
-        (
-            "Read from the provider's cache",
-            savings.cache_read_tokens,
-            false,
-        ),
-    ]
-    .into_iter()
-    .filter(|(_, tokens, _)| *tokens > 0)
-    .map(|(label, tokens, counted)| SavingsRow {
-        label,
-        tokens,
-        counted,
-    })
-    .collect()
+impl SavedPart {
+    fn label(self) -> &'static str {
+        match self {
+            SavedPart::InContext => "In context",
+            SavedPart::Files => "Tool output",
+            SavedPart::Compaction => "Compaction",
+        }
+    }
+
+    /// The hover line for this part.
+    fn detail(self, tokens: u64) -> String {
+        let n = crate::context_usage::with_separators(tokens);
+        match self {
+            SavedPart::InContext => format!("{n} tokens in context now"),
+            SavedPart::Files => format!("~{n} tokens of tool output kept in files"),
+            SavedPart::Compaction => format!("{n} tokens freed by compaction"),
+        }
+    }
+
+    /// Calm tones: neutral for what is in context, the legend's own colors
+    /// for files and compaction, so the meter reads with the bar above it.
+    fn color(self, history: History, theme: &Theme) -> Hsla {
+        match self {
+            SavedPart::InContext => theme.text_muted.opacity(0.75),
+            SavedPart::Files => Slot::Files.color(history, theme),
+            // The summary blue even when the context is sealed: the sealed
+            // slate sits too close to the neutral in-context tone.
+            SavedPart::Compaction => Slot::History.color(History::Summary, theme),
+        }
+    }
 }
 
-/// "Saved by graff": the tokens graff kept out of this context, then one
-/// row per source. Nothing when graff reported no savings.
-fn savings_section(savings: harness_proto::ContextSavings, theme: &Theme) -> Option<Div> {
-    let rows = savings_rows(savings);
-    if rows.is_empty() {
+/// How many of the meter's [`SEGMENTS`] each part gets, in order, scaled to
+/// in-context plus saved tokens. A part that holds anything keeps at least
+/// one segment; the largest part absorbs the rounding.
+pub fn saved_segments(parts: [(SavedPart, u64); 3]) -> Vec<(SavedPart, usize, u64)> {
+    let parts: Vec<_> = parts.into_iter().filter(|(_, n)| *n > 0).collect();
+    let total: u64 = parts.iter().map(|(_, n)| n).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut out: Vec<_> = parts
+        .iter()
+        .map(|&(part, n)| {
+            let share = (n as f64 / total as f64 * SEGMENTS as f64).round() as usize;
+            (part, share.max(1), n)
+        })
+        .collect();
+    let used: usize = out.iter().map(|(_, c, _)| c).sum();
+    if let Some(largest) = out.iter_mut().max_by_key(|(_, c, _)| *c) {
+        largest.1 = (largest.1 + SEGMENTS).saturating_sub(used).max(1);
+    }
+    out
+}
+
+/// graff's savings as one number and a meter: what the context holds now,
+/// then what graff kept out of it. Hovering a part names its count on the
+/// line below; nothing at all when graff reported no savings.
+fn savings_meter(
+    savings: harness_proto::ContextSavings,
+    in_context: u64,
+    history: History,
+    hovered: Option<SavedPart>,
+    fill: f32,
+    theme: &Theme,
+    cx: &mut Context<ContextWindowCard>,
+) -> Option<gpui::AnyElement> {
+    const HEIGHT: f32 = 8.0;
+    let kept = savings.kept_out_tokens();
+    if kept == 0 {
         return None;
     }
-    let line = |label: SharedString, value: SharedString, strong: bool| {
+    let parts = saved_segments([
+        (SavedPart::InContext, in_context),
+        (SavedPart::Files, savings.handle_tokens()),
+        (SavedPart::Compaction, savings.compacted_tokens),
+    ]);
+    // The meter fills left to right on first paint, then holds.
+    let mut lit = (fill.clamp(0.0, 1.0) * SEGMENTS as f32).round() as usize;
+    let groups = parts.iter().map(|&(part, count, _)| {
+        let on = count.min(lit);
+        lit -= on;
+        let color = part.color(history, theme);
+        let dim = hovered.is_some_and(|h| h != part);
+        let pad = (Theme::HIT_TARGET - HEIGHT) / 2.0;
         div()
+            .id(SharedString::from(format!("context-saved-{part:?}")))
+            .flex_none()
+            .flex()
+            .gap(px(SEGMENT_GAP))
+            // A thin meter, a full-height target: the padding grows the
+            // hover area to HIT_TARGET without moving the line.
+            .py(px(pad))
+            .my(px(-pad))
+            .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                let next = if *over {
+                    Some(part)
+                } else if this.saved_hover == Some(part) {
+                    None
+                } else {
+                    this.saved_hover
+                };
+                if next != this.saved_hover {
+                    this.saved_hover = next;
+                    cx.notify();
+                }
+            }))
+            .children((0..count).map(move |i| {
+                div()
+                    .flex_none()
+                    .w(px(SEGMENT_W))
+                    .h(px(HEIGHT))
+                    .rounded(px(1.5))
+                    .bg(if i < on {
+                        color.opacity(if dim { 0.35 } else { 1.0 })
+                    } else {
+                        theme.text_faint.opacity(0.22)
+                    })
+            }))
+    });
+    let line: gpui::AnyElement = match hovered.and_then(|h| parts.iter().find(|p| p.0 == h)) {
+        Some(&(part, _, tokens)) => div()
+            .text_color(theme.text_muted)
+            .child(SharedString::from(part.detail(tokens)))
+            .into_any_element(),
+        None => div()
             .flex()
             .items_center()
-            .justify_between()
-            .gap(px(8.0))
-            .whitespace_nowrap()
-            .child(
+            .gap(px(10.0))
+            .children(parts.iter().map(|&(part, _, _)| {
                 div()
-                    .text_color(if strong { theme.text } else { theme.text_muted })
-                    .when(strong, |d| d.font_weight(WEIGHT_STRONG))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .text_color(if strong { theme.text } else { theme.text_faint })
-                    .when(strong, |d| d.font_weight(WEIGHT_STRONG))
-                    .child(value),
-            )
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(
+                        div()
+                            .relative()
+                            .top(px(CAP_CENTER_NUDGE))
+                            .size(px(6.0))
+                            .rounded(px(1.5))
+                            .bg(part.color(history, theme)),
+                    )
+                    .child(part.label())
+            }))
+            .into_any_element(),
     };
-    let kept = savings.kept_out_tokens();
     Some(
         div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .pt(px(8.0))
-            .border_t_1()
-            .border_color(theme.text_faint.opacity(0.18))
-            .text_size(px(TEXT_BODY))
+            .gap(px(6.0))
+            .pt(px(2.0))
             .tabular_nums()
-            .child(line(
-                "Saved by graff".into(),
-                format!("{} tokens", compact_count(kept)).into(),
-                true,
-            ))
-            .children(rows.into_iter().map(|row| {
-                let label = if row.counted {
-                    SharedString::from(row.label)
-                } else {
-                    SharedString::from(format!("{} (not counted)", row.label))
-                };
-                line(label, compact_count(row.tokens).into(), false)
-            })),
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(4.0))
+                    .whitespace_nowrap()
+                    .child(
+                        div()
+                            .text_size(px(TEXT_TITLE))
+                            .font_weight(WEIGHT_STRONG)
+                            .text_color(theme.text)
+                            .child(SharedString::from(compact_count(kept))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.text_muted)
+                            .child("saved by graff"),
+                    ),
+            )
+            .child(
+                div()
+                    .id("context-saved-meter")
+                    .flex()
+                    .h(px(HEIGHT))
+                    .gap(px(SEGMENT_GAP))
+                    .children(groups),
+            )
+            .child(
+                div()
+                    .h(px(16.0))
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(theme.text_faint)
+                    .whitespace_nowrap()
+                    .child(line),
+            )
+            .into_any_element(),
     )
 }
 
@@ -1041,12 +1160,20 @@ impl Render for ContextWindowCard {
                 .map(|t| trajectory_strip(t, &theme))
         };
 
-        let savings = self
-            .state
-            .read(cx)
-            .context_usage
-            .and_then(|usage| usage.savings)
-            .and_then(|savings| savings_section(savings, &theme));
+        let usage = self.state.read(cx).context_usage;
+        let history = to.history;
+        let hovered = self.saved_hover;
+        let savings = usage.and_then(|usage| {
+            savings_meter(
+                usage.savings?,
+                usage.tokens.unwrap_or(0),
+                history,
+                hovered,
+                if transition.cascade { t } else { 1.0 },
+                &theme,
+                cx,
+            )
+        });
 
         card.child(header)
             .child(bar)
@@ -1320,18 +1447,51 @@ mod tests {
     }
 
     #[test]
-    fn savings_rows_list_measured_sources_and_skip_the_cache_in_the_total() {
+    fn saved_segments_split_the_meter_and_leave_the_cache_out() {
         let savings = harness_proto::ContextSavings {
             handle_bytes: 100_000,
             compacted_tokens: 77_000,
             cache_read_tokens: 40_000,
         };
-        let rows = savings_rows(savings);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].tokens, 25_000);
-        assert!(!rows[2].counted);
+        // Cache reads were in the context, only cheaper: not saved.
         assert_eq!(savings.kept_out_tokens(), 102_000);
-        assert!(savings_rows(harness_proto::ContextSavings::default()).is_empty());
+        let parts = saved_segments([
+            (SavedPart::InContext, 51_000),
+            (SavedPart::Files, savings.handle_tokens()),
+            (SavedPart::Compaction, savings.compacted_tokens),
+        ]);
+        let counts: Vec<_> = parts.iter().map(|(p, c, _)| (*p, *c)).collect();
+        assert_eq!(
+            counts,
+            vec![
+                (SavedPart::InContext, 21),
+                (SavedPart::Files, 10),
+                (SavedPart::Compaction, 31),
+            ]
+        );
+        assert_eq!(parts.iter().map(|p| p.1).sum::<usize>(), SEGMENTS);
+        // A tiny part still shows, and empty parts drop out.
+        let tiny = saved_segments([
+            (SavedPart::InContext, 1_000_000),
+            (SavedPart::Files, 10),
+            (SavedPart::Compaction, 0),
+        ]);
+        assert_eq!(tiny.len(), 2);
+        assert_eq!(tiny[1].1, 1);
+        assert_eq!(tiny.iter().map(|p| p.1).sum::<usize>(), SEGMENTS);
+        assert!(saved_segments([(SavedPart::InContext, 0); 3]).is_empty());
+    }
+
+    #[test]
+    fn saved_details_name_their_counts() {
+        assert_eq!(
+            SavedPart::Files.detail(25_000),
+            "~25,000 tokens of tool output kept in files"
+        );
+        assert_eq!(
+            SavedPart::Compaction.detail(77_000),
+            "77,000 tokens freed by compaction"
+        );
     }
 
     // Short motion: the whole cascade under 800 ms, the status fade 250 ms.
