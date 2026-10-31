@@ -1,8 +1,8 @@
 //! DialKit-style panels rendered from made-up values: the dev Tune panel
-//! (motion and shape tokens) and the Run settings card. No engine, no agent
-//! calls.
+//! (motion and shape tokens) and the Run settings card, with or without the
+//! walkthrough. No engine, no agent calls.
 //!
-//! `HARNESS_DIAL_SCENE=motion|shape|run` picks the panel.
+//! `HARNESS_DIAL_SCENE=motion|shape|run|walkthrough` picks the panel.
 //! `HARNESS_FIXTURE_APPEARANCE=dark|light` picks the appearance.
 //! cargo run -p harness-ui --example dial-panel-fixture
 use gpui::{
@@ -69,7 +69,7 @@ fn shape(theme: &Theme) -> gpui::Div {
         .child(code_row(theme, "nested_radius(12, 1, 4) = 7"))
 }
 
-fn run(theme: &Theme) -> gpui::Div {
+fn run(theme: &Theme, walkthrough: bool) -> gpui::Div {
     let card = panel(theme, false)
         .child(header(
             theme,
@@ -80,11 +80,23 @@ fn run(theme: &Theme) -> gpui::Div {
         .child(segmented(theme, &["Presets", "Saved"], 0))
         .child(run_presets(theme, &RUN_PRESETS, 2))
         .child(divider(theme));
-    card.child(choice_row(theme, "Reasoning", &["Low", "Med", "High"], 2))
-        .child(choice_row(theme, "Sandbox", &["Read", "Write", "Full"], 1))
-        .child(toggle_row(theme, "Auto-approve", false))
-        .child(toggle_row(theme, "Worktree", true))
-        .child(dial_row(theme, "Compact", "80%", 0.8, false))
+    let reasoning = choice_row(theme, "Reasoning", &["Low", "Med", "High"], 2);
+    let sandbox = choice_row(theme, "Sandbox", &["Read", "Write", "Full"], 1);
+    let approve = toggle_row(theme, "Auto-approve", false);
+    let worktree = toggle_row(theme, "Worktree", true);
+    let compact = dial_row(theme, "Compact", "80%", 0.8, false);
+    // Holding H explains the control under the pointer; here, Sandbox.
+    let hint = |control, text, on| explained(theme, control, text, walkthrough && on);
+    card.child(hint(reasoning, "How hard the model thinks.", false))
+        .child(hint(sandbox, "Write: edits this repo only.", true))
+        .child(hint(approve, "Off: you approve each command.", false))
+        .child(hint(worktree, "Own branch; main stays clean.", false))
+        .child(hint(compact, "Summarise at this context use.", false))
+        .child(mode_bar(
+            theme,
+            &[("H", if walkthrough { "Sandbox" } else { "Explain" })],
+            if walkthrough { 0 } else { 9 },
+        ))
 }
 
 impl Render for Fixture {
@@ -92,7 +104,8 @@ impl Render for Fixture {
         let theme = Theme::of(cx).clone();
         let body = match self.scene.as_str() {
             "shape" => shape(&theme),
-            "run" => run(&theme),
+            "run" => run(&theme, false),
+            "walkthrough" => run(&theme, true),
             _ => motion(&theme),
         };
         div()
@@ -112,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     let scene = std::env::var("HARNESS_DIAL_SCENE").unwrap_or_else(|_| "motion".into());
     let light = std::env::var("HARNESS_FIXTURE_APPEARANCE").as_deref() == Ok("light");
     let height = match scene.as_str() {
+        "walkthrough" => 600.0,
         "run" => 580.0,
         "shape" => 580.0,
         _ => 640.0,
