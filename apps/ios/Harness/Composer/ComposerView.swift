@@ -57,6 +57,8 @@ struct ComposerShell<Chips: View>: View {
     @State private var editor = ComposerEditorController()
     /// Inside a stacked phone split: where this composer reports its keyboard focus (PhoneSplitContainer).
     @Environment(\.stackedComposerFocus) private var stackedComposerFocus
+    /// Above the fold in laptop pose: where this composer reports its keyboard focus (HomeView).
+    @Environment(\.foldComposerFocus) private var foldComposerFocus
 
     private var expanded: Bool {
         alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
@@ -92,9 +94,17 @@ struct ComposerShell<Chips: View>: View {
                     focused = true
                 }
             }
-            .onChange(of: focused) { _, focused in stackedComposerFocus?(focused) }
+            .onChange(of: focused) { _, focused in
+                stackedComposerFocus?(focused)
+                foldComposerFocus?(focused)
+            }
             // Leaving the session while typing (switching sessions, closing it) lets the split have its rest back.
-            .onDisappear { if focused { stackedComposerFocus?(false) } }
+            .onDisappear {
+                if focused {
+                    stackedComposerFocus?(false)
+                    foldComposerFocus?(false)
+                }
+            }
     }
 
     /// The glass surface: collapsed = editor + send in one capsule row;
@@ -268,6 +278,8 @@ struct ComposerView: View {
     let store: SessionStore
     let chat: Chat
     let runLive: Bool
+    /// iPhone Duo: Stop lives in the status pill (DuoChat), so Send never turns into Stop.
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let questionClosedAtMs: Int64?
 
     // What was typed and not sent comes back with the chat (DraftStore).
@@ -450,7 +462,8 @@ struct ComposerView: View {
                 sendLabel: editingQueuedId != nil ? "Save queued message"
                     : (runLive ? "Queue message" : "Send message"),
                 allowEmptySend: editingQueuedId != nil,
-                showStop: runLive,
+                // A Duo stops from the status pill above the composer, never next to Send.
+                showStop: runLive && !duoChat,
                 busy: uploading || queueEditBusy || attachmentDraft.loading,
                 keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil,
                 onSend: send,
@@ -967,6 +980,7 @@ struct ComposerView: View {
 // MARK: - Question panel (composer.rs Wizard)
 
 struct QuestionPanel: View {
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let requestId: String
     let questions: [UserInputQuestion]
     let respond: (String, [UserInputAnswer]) -> Void
@@ -1046,7 +1060,8 @@ struct QuestionPanel: View {
             }
         }
         .padding(16)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26))
+        // On a Duo the answer bar is solid: glass is kept for the status pill and the switchers.
+        .modifier(SolidOrGlass(solid: duoChat, shape: RoundedRectangle(cornerRadius: 26)))
         .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(hairline(0.05), lineWidth: 1))
         .padding(.horizontal, 12)
         .transition(.opacity)
@@ -1170,4 +1185,18 @@ struct QueuedAttachmentEdit: Identifiable {
     var id: String { draft.rowId }
     let lease: QueueEditLease?
     let draft: QueuedAttachmentDraft
+}
+
+/// A solid raised surface, or the regular glass.
+struct SolidOrGlass<S: Shape>: ViewModifier {
+    let solid: Bool
+    let shape: S
+
+    func body(content: Content) -> some View {
+        if solid {
+            content.background(Theme.surfaceRaised, in: shape)
+        } else {
+            content.glassEffect(.regular, in: shape)
+        }
+    }
 }

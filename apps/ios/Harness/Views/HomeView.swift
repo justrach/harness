@@ -97,7 +97,66 @@ struct HomeView: View {
             fold: fold)
     }
 
+    private var flatDuo: Bool {
+        DuoChat.isFlat(phone: UIDevice.current.userInterfaceIdiom == .phone,
+                       regularWidth: horizontalSizeClass == .regular,
+                       regularHeight: verticalSizeClass == .regular, fold: fold)
+    }
+
     private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
+
+    /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
+    @AppStorage(DuoChat.foldableKey) private var foldableDevice = false
+
+    private func noteFoldable() {
+        guard !foldableDevice else { return }
+        if DuoChat.isFoldableWindow(phone: UIDevice.current.userInterfaceIdiom == .phone,
+                                    regularWidth: horizontalSizeClass == .regular,
+                                    regularHeight: verticalSizeClass == .regular, fold: fold) {
+            foldableDevice = true
+        }
+    }
+
+    // MARK: Laptop pose (iPhone Duo folded with the fold across)
+
+    /// The session's composer has the keyboard, which covers the list on the lower half.
+    @State private var laptopTyping = false
+    /// The list brought over the upper half while the keyboard covers it.
+    @State private var laptopListShown = false
+
+    private var laptopPose: Bool {
+        guard horizontalSizeClass == .regular, case .stacked = fold else { return false }
+        return true
+    }
+
+    /// The header the session above the fold draws (FoldPaneHeader); nil outside laptop pose.
+    private var foldPaneHeader: FoldPaneHeader? {
+        guard laptopPose else { return nil }
+        return FoldPaneHeader(showList: laptopTyping || laptopListShown ? {
+            withAnimation(Motion.collapse) { laptopListShown.toggle() }
+        } : nil)
+    }
+
+    /// The list over the upper half, above the keyboard. Picking a row closes it.
+    private var laptopListOverlay: some View {
+        NavigationStack { sidebar }
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+            .padding(8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .accessibilityIdentifier("fold-list-overlay")
+    }
+
+    private var searchInBar: Bool {
+        SessionSearchPlacement.inBar(phoneSplit: phoneArrangement != nil, fold: fold)
+    }
+
+    /// Book pose: the list column's glass toolbar sits over the top of the list, so its title starts below it.
+    private var listTopMargin: CGFloat {
+        if case .sideBySide = fold { return 52 }
+        return 2
+    }
 
     // MARK: Split screen (a Max-class iPhone only; see SplitScreen)
 
@@ -246,6 +305,7 @@ struct HomeView: View {
                 .navigationDestination(for: Route.self) { route in
                     destination(route)
                         .environment(\.splitScreen, controls(for: .primary))
+                        .environment(\.foldPaneHeader, foldPaneHeader)
                         .environment(\.stackedSplit, stackedSplitAction)
                         .environment(\.stackedClose, stackedSecond == nil ? nil : { closeStackedPrimary() })
                 }
@@ -274,11 +334,26 @@ struct HomeView: View {
             } else if horizontalSizeClass == .regular, case .stacked(let top, let gap) = fold {
                 // iPhone Duo folded like a laptop: nothing may cross the fold, so the open session takes the
                 // upper half (its composer, and the keyboard, land on the lower half) and the list the lower.
+                // The keyboard covers the lower half while the session types; the list keeps its layout under
+                // it (no squeeze to nothing) and can be brought over the upper half from the session header.
                 VStack(spacing: 0) {
-                    primaryStack.frame(height: top)
+                    primaryStack
+                        // The keyboard sits below the fold; it must not squeeze the session above it.
+                        .ignoresSafeArea(.keyboard)
+                        .frame(height: top)
+                        .overlay(alignment: .top) {
+                            if laptopListShown { laptopListOverlay }
+                        }
+                        .environment(\.foldComposerFocus) { focused in
+                            laptopTyping = focused
+                        }
                     Color.clear.frame(height: gap)
                     NavigationStack { sidebar }
+                        .frame(minHeight: 0)
                 }
+                // Anchored to the top: the keyboard must not push the upper half down off the fold.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
             } else if listBesideSession {
                 // iPad, iPhone Duo folded like a book and other wide windows: the list beside the session.
                 // On the fold, the list's column ends on the fold line and each side keeps its 20pt margin.
@@ -302,14 +377,22 @@ struct HomeView: View {
             } else {
                 NavigationStack(path: $path) {
                     sidebar
-                        .navigationDestination(for: Route.self) { destination($0) }
+                        .navigationDestination(for: Route.self) {
+                            // iPhone Duo lying flat: the session splits at the fold, chat and Inspect.
+                            destination($0).environment(\.duoFlat, flatDuo)
+                        }
                 }
             }
         }
+        // Laptop pose: the keyboard lands on the lower half, below the fold. The whole layout ignores it (the
+        // fold is measured on the full window and the session above the fold keeps its height); otherwise the
+        // window's keyboard avoidance squeezes the session into a strip under its header.
+        .ignoresSafeArea(.keyboard, edges: laptopPose ? .all : [])
         .onFoldChange { next in
             // Both columns stay up in book pose: each half of the fold holds one.
             if case .sideBySide = next { columnVisibility = .all }
             withAnimation(Motion.resort) { fold = next }
+            noteFoldable()
         }
         .avoidingOcclusions()
         // The keyboard must not reshape the split under the person typing (see PhoneSplit.layoutSize).
@@ -318,8 +401,19 @@ struct HomeView: View {
         }
         .onChange(of: containerSize) { refreshSplitOffer() }
         .onChange(of: phoneSplitRaw) { refreshSplitOffer() }
-        .onAppear { refreshSplitOffer() }
+        .onAppear {
+            refreshSplitOffer()
+            noteFoldable()
+        }
+        .onChange(of: horizontalSizeClass) { noteFoldable() }
         .environment(\.switchToSession, switchTo)
+        .onChange(of: path) { _, _ in
+            // A row picked from the list over the upper half opens there; the list gets out of the way.
+            if laptopListShown { withAnimation(Motion.collapse) { laptopListShown = false } }
+        }
+        .onChange(of: laptopPose) { _, isLaptop in
+            if !isLaptop { laptopListShown = false; laptopTyping = false }
+        }
         .onChange(of: path) { _, next in
             // Backing out of the upper stacked pane promotes the lower one into its place.
             if next.isEmpty, stackedSecond != nil { closeStackedPrimary() }
@@ -418,15 +512,17 @@ struct HomeView: View {
                 withAnimation(Motion.collapse) { proxy.scrollTo(id) }
             }
         }
-        // In the phone split the field sits in the pane's own bar: the floating one overlaps the rows of a
-        // short pane.
+        // In the phone split and in laptop pose the field sits in the pane's own bar: the floating one overlaps
+        // the rows of a short pane.
         .searchable(text: $searchText,
-                    placement: phoneArrangement == nil ? .automatic : .navigationBarDrawer(displayMode: .always),
+                    placement: searchInBar ? .navigationBarDrawer(displayMode: .always) : .automatic,
                     prompt: "Search sessions")
         .sessionDeleteConfirmation(pending: $pendingDelete, onDelete: delete)
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 10)
-        .contentMargins(.top, 2, for: .scrollContent)
+        .contentMargins(.top, listTopMargin, for: .scrollContent)
+        // The floating search field: the last row scrolls clear of it instead of ending underneath.
+        .contentMargins(.bottom, searchInBar ? 0 : 64, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(Theme.surface.ignoresSafeArea())

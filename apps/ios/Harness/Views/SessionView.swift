@@ -15,6 +15,20 @@ struct SessionView: View {
     @Environment(\.stackedSplit) private var stackedSplit
     /// Close this pane of the stacked split, while two are shown.
     @Environment(\.stackedClose) private var stackedClose
+    /// Above the fold in laptop pose: draw the header strip here, with a back button (FoldPaneHeader).
+    @Environment(\.foldPaneHeader) private var foldPaneHeader
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// iPhone Duo lying flat: chat left of the fold, Inspect right (DuoInspect).
+    @Environment(\.duoFlat) private var duoFlat
+    @Environment(\.foldComposerFocus) private var foldComposerFocus
+    /// Flat Duo: the composer has the keyboard, so Inspect folds to its one-line peek.
+    @State private var keyboardUp = false
+    /// Flat Duo: where the chat column starts and where the window's middle (the fold) is, in global space.
+    @State private var columnMinX: CGFloat = 0
+    @State private var windowMidX: CGFloat = 0
+    /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let chatId: String
 
     /// Reserve the back button and native bar margins. Anchor the rest to the
@@ -50,7 +64,9 @@ struct SessionView: View {
     /// bar is hidden. The bar's fixed-width header kept being evicted into the "…" menu in the narrow columns a
     /// Max uses (a session beside the list, or two panes of about 478pt), and on a landscape Max the bar is also
     /// a lot of lost height. Everywhere else the bar and its header are exactly as before.
-    private var paneChrome: Bool { splitScreen != nil }
+    /// iPhone Duo in laptop pose draws the strip too: the bar shares its row with the status bar there and
+    /// clipped the title under the back arrow.
+    private var paneChrome: Bool { splitScreen != nil || foldPaneHeader != nil }
 
     /// Rename and paging are sibling controls: tapping an arrow must never rename.
     private func headerTitle(_ chat: Chat) -> some View {
@@ -58,10 +74,20 @@ struct SessionView: View {
         let entries = SessionPaging.entries(model: model, including: chat.id)
         let represented = pageSession == nil ? entries : SessionPaging.pageSet(of: chat.id, in: entries)
         let chats = represented.compactMap { model.chat(id: $0.id) }
-        let available = headerWidth > 0 ? headerWidth : viewWidth - Self.headerChromeInset
+        let available = headerWidth > 0 ? headerWidth : viewWidth - headerInset
         let limit = SessionStatusWindow.visibleLimit(availableWidth: available, total: chats.count,
                                                    hasPager: pageSession != nil && chats.count > 1)
         return headerControls(chat, chats: chats, maxVisible: limit)
+    }
+
+    private var headerInset: CGFloat {
+        duoChat && horizontalSizeClass == .compact ? 32 : Self.headerChromeInset
+    }
+
+    /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
+    private func pillShows(_ chat: Chat) -> Bool {
+        duoChat && liveStatus(chat: chat) == .working && model.sendState(for: chat) == nil
+            && model.connectivity.state == .connected
     }
 
     private func headerControls(_ chat: Chat, chats: [Chat], maxVisible: Int) -> some View {
@@ -76,10 +102,12 @@ struct SessionView: View {
                         Text(chat.displayTitle)
                             .font(Theme.sans(15, weight: .medium))
                             .foregroundStyle(Theme.text)
-                            .lineLimit(1)
+                            // A Duo wraps a long title to a second line instead of cutting it.
+                            .lineLimit(duoChat ? 2 : 1)
                             .truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: duoChat)
                         projectLocation(chat: chat, model: model)
-                            .font(Theme.sans(12))
+                            .font(Theme.sans(duoChat ? DuoType.small : 12))
                             .foregroundStyle(Theme.textMuted.opacity(0.6))
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -97,7 +125,9 @@ struct SessionView: View {
             .pagerSwipe()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("session-navigation-controls")
-            SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            if !pillShows(chat) {
+                SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { headerWidth = $0 }
         .accessibilityElement(children: .contain)
@@ -108,6 +138,30 @@ struct SessionView: View {
     /// Swipe it to page to a neighbouring session.
     private func paneHeader(_ chat: Chat, controls: SplitScreenControls) -> some View {
         HStack(spacing: 8) {
+            if foldPaneHeader != nil {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("fold-back")
+            }
+            if let showList = foldPaneHeader?.showList {
+                Button(action: showList) {
+                    Image(systemName: "list.bullet")
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show the session list")
+                .accessibilityIdentifier("fold-show-list")
+            }
             if let toggleList = controls.toggleList {
                 Button(action: toggleList) {
                     Image(systemName: "sidebar.leading")
@@ -171,8 +225,8 @@ struct SessionView: View {
                 // under it), so it is neither dimmed nor overlapped, and the content is clipped to its own
                 // rectangle.
                 VStack(spacing: 0) {
-                    if paneChrome, let splitScreen {
-                        paneHeader(chat, controls: splitScreen)
+                    if paneChrome {
+                        paneHeader(chat, controls: splitScreen ?? SplitScreenControls())
                         content(chat: chat, store: store).clipped()
                     } else {
                         // Not clipped: the content's background and header cover reach under the status bar.
@@ -210,7 +264,8 @@ struct SessionView: View {
                         // trailing buttons: the title expands before the
                         // fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).
-                        .frame(width: max(140, viewWidth - Self.headerChromeInset - stackedButtonsWidth),
+                        // A folded Duo's back button is in the side bar, so the title can start at the edge.
+                        .frame(width: max(140, viewWidth - headerInset - stackedButtonsWidth),
                                alignment: .leading)
                 }
                 // Bare text on the bar, not a glass capsule.
@@ -309,10 +364,33 @@ struct SessionView: View {
         let status = liveStatus(chat: chat)
         // The composer owns real layout space. The transcript's viewport ends
         // above it, so keyboard and glass morphs cannot cover the last row.
-        return VStack(spacing: 0) {
+        let flat = duoFlat && splitScreen == nil
+        let inspect = InspectState.of(chat.id)
+        let inspectModel = flat
+            ? InspectModel.build(store.entries,
+                                 source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
+            : InspectModel()
+        // Flat Duo: two equal halves meet at the fold. The chat column keeps its place in the tree whether or
+        // not Inspect shows, so the transcript (and its scroll) survives the keyboard and the fold.
+        return HStack(spacing: 0) {
+        VStack(spacing: 0) {
+            if flat, keyboardUp {
+                InspectPeek(model: inspectModel, state: inspect) {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
+                // Above the transcript, whose rows draw past its top edge.
+                .zIndex(1)
+            }
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
                            onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
-                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId))
+                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
+                           duoChat: duoChat,
+                           inspectDiff: flat ? { summary in
+                               inspect.segment = .diff
+                               inspect.selectedFile = summary.files.first
+                           } : nil,
+                           inspectTool: flat ? { inspect.show($0) } : nil)
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
@@ -324,9 +402,26 @@ struct SessionView: View {
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
+                .overlay(alignment: .bottomLeading) {
+                    if pillShows(chat) {
+                        RunStatusPill(chatId: chat.id, startedAtMs: sessionStartedAt(chat: chat),
+                                      onStop: { store.sendInterrupt() })
+                            .padding(.leading, 16)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                    }
+                }
+                .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
+                .overlay(alignment: .leading) {
+                    // Swipe in from the edge to go back; the pager owns the rest of the width.
+                    if duoChat, horizontalSizeClass == .compact { EdgeSwipeBack { dismiss() } }
+                }
             VStack(spacing: 0) {
-                if verticalSizeClass != .compact || status == .working || status == .errored
-                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected {
+                // A Duo's running turn is the pill; the strip shows only sends and connection trouble there.
+                if duoChat ? (status == .errored || model.sendState(for: chat) != nil
+                              || model.connectivity.state != .connected)
+                    : (verticalSizeClass != .compact || status == .working || status == .errored
+                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected) {
                     statusStrip(chat: chat, status: status, store: store)
                         .allowsHitTesting(model.sendState(for: chat).map { $0 == .failed || $0 == .waiting } ?? false)
                 }
@@ -342,6 +437,9 @@ struct SessionView: View {
                             .id(chat.id)
                     }
                 }
+                .environment(\.foldComposerFocus, flat ? { up in
+                    withAnimation(Motion.collapse) { keyboardUp = up }
+                } : foldComposerFocus)
                 .padding(.bottom, 8)
             }
             .background {
@@ -359,7 +457,25 @@ struct SessionView: View {
                 .allowsHitTesting(false)
             }
         }
+        // Flat: the chat column ends on the fold (the window's middle), not the middle of what the side bar leaves.
+        .frame(width: flat && !keyboardUp && windowMidX - columnMinX > 240 ? windowMidX - columnMinX : nil)
+        .frame(maxWidth: flat && !keyboardUp ? nil : .infinity)
+            if flat, !keyboardUp {
+                Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea(.container, edges: .bottom)
+                InspectPane(model: inspectModel, state: inspect)
+                    .frame(maxWidth: .infinity)
+                    .ignoresSafeArea(.container, edges: .bottom)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
         .background(Theme.bg.ignoresSafeArea())
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            columnMinX = frame.minX
+            // The fold is the window's middle; the side bar's column is outside this view's frame.
+            let window = UIApplication.shared.connectedScenes
+                .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+            windowMidX = window.map { $0.bounds.midX } ?? frame.midX
+        }
         .overlay(alignment: .top) {
             #if DEBUG
             if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-image-drop-fixture") {
