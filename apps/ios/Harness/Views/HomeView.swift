@@ -82,13 +82,22 @@ struct HomeView: View {
         return PhoneSplit.arrangement(mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off, in: containerSize)
     }
 
-    /// iPad, a foldable phone opened (its inner display is regular width) and
-    /// other wide windows: the session list becomes a sidebar next to the open
-    /// session, like the desktop. The split view sizes its own columns so they
-    /// follow the fold when the device is partly open. Compact width (a phone,
-    /// a foldable's cover display) keeps the single stack, unless the person
-    /// turned on the phone split and the window has room for it.
-    private var splitLayout: Bool { horizontalSizeClass == .regular || phoneArrangement != nil }
+    /// iPad and other wide windows: the session list becomes a sidebar next to
+    /// the open session, like the desktop. iPhone Duo's inner display does
+    /// this only while folded like a book, with the columns on either side of
+    /// the fold; lying flat it is the ordinary one-column app (see
+    /// HomeColumns). Compact width (a phone, a foldable's cover display) keeps
+    /// the single stack, unless the person turned on the phone split and the
+    /// window has room for it.
+    private var listBesideSession: Bool {
+        HomeColumns.listBesideSession(
+            regularWidth: horizontalSizeClass == .regular,
+            regularHeight: verticalSizeClass == .regular,
+            phone: UIDevice.current.userInterfaceIdiom == .phone,
+            fold: fold)
+    }
+
+    private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
 
     // MARK: Split screen (a Max-class iPhone only; see SplitScreen)
 
@@ -270,9 +279,9 @@ struct HomeView: View {
                     Color.clear.frame(height: gap)
                     NavigationStack { sidebar }
                 }
-            } else if horizontalSizeClass == .regular {
-                // iPad, iPhone Duo's inner display and other wide windows: the list beside the session. Folded
-                // like a book, the list's column ends on the fold line and each side keeps its 20pt margin.
+            } else if listBesideSession {
+                // iPad, iPhone Duo folded like a book and other wide windows: the list beside the session.
+                // On the fold, the list's column ends on the fold line and each side keeps its 20pt margin.
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
                         .modifier(FoldColumn(fold: fold, side: .leading))
