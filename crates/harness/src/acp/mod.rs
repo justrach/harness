@@ -2555,6 +2555,8 @@ fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
 /// Matched against advertised values and skipped when already current. Pure
 /// so it's testable; the returned value is the request's flattened `value`
 /// payload (select: `{"value": id}`, boolean: `{"type":"boolean","value": b}`).
+/// Full-access mode preferences; runs use [`config_option_sets_with_modes`].
+#[cfg(test)]
 fn config_option_sets(
     session_response: &Value,
     model: Option<&str>,
