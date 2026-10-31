@@ -102,6 +102,7 @@ actions!(
     [
         SaveFile,
         ToggleSidebar,
+        OpenSessionSearch,
         ToggleChanges,
         ToggleFiles,
         AddSpacePalette,
@@ -183,6 +184,7 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
         ),
         row("Jump to the message box", Box::new(FocusComposer)),
         row("Command palette", Box::new(ToggleCommandPalette)),
+        row("Search sessions", Box::new(OpenSessionSearch)),
         row("Settings", Box::new(OpenSettings)),
     ]
 }
@@ -595,6 +597,7 @@ pub fn apply_keymap(
         // Fixed: ⌘K summons the command palette.
         // Pressing it again dismisses.
         KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
+        KeyBinding::new(&platform_combo("mod-f"), OpenSessionSearch, None),
         KeyBinding::new(
             &valid_or_default(&keymap.open_model_picker, "mod-/"),
             OpenModelPicker,
@@ -13225,6 +13228,9 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &OpenSessionSearch, window, cx| {
+                this.open_sidebar_search(window, cx);
+            }))
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) land on the section last viewed.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {

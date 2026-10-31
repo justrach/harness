@@ -279,3 +279,4 @@ fn sidebar_search_native_controls_and_archived_open(cx: &mut gpui::TestAppContex
 mod edge_cases;
 mod keyboard_edges;
 mod reported_regressions;
+mod shortcut;

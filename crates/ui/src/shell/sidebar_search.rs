@@ -186,6 +186,36 @@ impl Shell {
         cx.notify();
     }
 
+    /// The Find shortcut reveals and focuses search; unlike the magnifier,
+    /// repeating it must not close search or discard its query and filters.
+    pub(super) fn open_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Do not move typing behind a dialog or composer picker. The command
+        // palette is intentionally replaceable, just like clicking the trigger.
+        if !matches!(self.route, Route::Chat)
+            || self.add_space.is_some()
+            || self.composer.read(cx).pickers().read(cx).is_open()
+            || self.rename_dialog.is_some()
+            || self.rename_space_dialog.is_some()
+            || self.delete_confirm.is_some()
+            || self.delete_space_confirm.is_some()
+            || self.archive_choice_prompt
+        {
+            return;
+        }
+        if self.settings.sidebar_collapsed {
+            self.toggle_sidebar(cx);
+        }
+        if self.sidebar_search.is_none() {
+            self.toggle_sidebar_search(window, cx);
+        }
+        if let Some(search) = self.sidebar_search.as_mut() {
+            // Focus now for immediate typing, then again as the sidebar mounts.
+            search.focus_pending = true;
+            window.focus(&search.input.focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn focus_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.route, Route::Chat) && !self.settings.sidebar_collapsed {
             if let Some(search) = self.sidebar_search.as_mut() {
