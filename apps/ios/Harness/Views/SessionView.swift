@@ -15,6 +15,29 @@ struct SessionView: View {
     @Environment(\.stackedSplit) private var stackedSplit
     /// Close this pane of the stacked split, while two are shown.
     @Environment(\.stackedClose) private var stackedClose
+    /// Above the fold in laptop pose: draw the header strip here, with a back button (FoldPaneHeader).
+    @Environment(\.foldPaneHeader) private var foldPaneHeader
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// iPhone Duo lying flat: chat left of the fold, Inspect right (DuoInspect).
+    @Environment(\.duoFlat) private var duoFlat
+    /// Beside the list: the session's page is lifted (ContentPlane).
+    @Environment(\.liftedPlane) private var liftedPlane
+    /// Flat Duo: the chat column's width, for the rounded seam at the fold.
+    @State private var chatColumnWidth: CGFloat = 0
+    @Environment(\.foldComposerFocus) private var foldComposerFocus
+    /// iPhone Duo half open like a laptop: watch above the fold, act below it (DuoLaptop).
+    @Environment(\.duoLaptop) private var duoLaptop
+    /// Laptop pose: how far the keyboard reaches into this view, and the header strip's height.
+    @State private var keyboardOverlap: CGFloat = 0
+    @State private var paneHeaderHeight: CGFloat = 0
+    /// Upright Duo: this view's top in the window (the fold is measured from the window's top).
+    @State private var viewMinY: CGFloat = 0
+    /// Flat Duo: where the chat column starts and where the window's middle (the fold) is, in global space.
+    @State private var columnMinX: CGFloat = 0
+    @State private var windowMidX: CGFloat = 0
+    /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let chatId: String
 
     /// Reserve the back button and native bar margins. Anchor the rest to the
@@ -50,7 +73,9 @@ struct SessionView: View {
     /// bar is hidden. The bar's fixed-width header kept being evicted into the "…" menu in the narrow columns a
     /// Max uses (a session beside the list, or two panes of about 478pt), and on a landscape Max the bar is also
     /// a lot of lost height. Everywhere else the bar and its header are exactly as before.
-    private var paneChrome: Bool { splitScreen != nil }
+    /// iPhone Duo in laptop pose draws the strip too: the bar shares its row with the status bar there and
+    /// clipped the title under the back arrow.
+    private var paneChrome: Bool { splitScreen != nil || foldPaneHeader != nil }
 
     /// Rename and paging are sibling controls: tapping an arrow must never rename.
     private func headerTitle(_ chat: Chat) -> some View {
@@ -58,10 +83,21 @@ struct SessionView: View {
         let entries = SessionPaging.entries(model: model, including: chat.id)
         let represented = pageSession == nil ? entries : SessionPaging.pageSet(of: chat.id, in: entries)
         let chats = represented.compactMap { model.chat(id: $0.id) }
-        let available = headerWidth > 0 ? headerWidth : viewWidth - Self.headerChromeInset
+        let available = headerWidth > 0 ? headerWidth : viewWidth - headerInset
         let limit = SessionStatusWindow.visibleLimit(availableWidth: available, total: chats.count,
                                                    hasPager: pageSession != nil && chats.count > 1)
         return headerControls(chat, chats: chats, maxVisible: limit)
+    }
+
+    private var headerInset: CGFloat {
+        // A Duo's back button is in the side bar (folded, or lying flat), so the title can start at the edge.
+        duoChat && (horizontalSizeClass == .compact || duoFlat) ? 32 : Self.headerChromeInset
+    }
+
+    /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
+    private func pillShows(_ chat: Chat) -> Bool {
+        duoChat && liveStatus(chat: chat) == .working && model.sendState(for: chat) == nil
+            && model.connectivity.state == .connected
     }
 
     private func headerControls(_ chat: Chat, chats: [Chat], maxVisible: Int) -> some View {
@@ -76,10 +112,12 @@ struct SessionView: View {
                         Text(chat.displayTitle)
                             .font(Theme.sans(15, weight: .medium))
                             .foregroundStyle(Theme.text)
-                            .lineLimit(1)
+                            // A Duo wraps a long title to a second line instead of cutting it.
+                            .lineLimit(duoChat ? 2 : 1)
                             .truncationMode(.tail)
+                            .fixedSize(horizontal: false, vertical: duoChat)
                         projectLocation(chat: chat, model: model)
-                            .font(Theme.sans(12))
+                            .font(Theme.sans(duoChat ? DuoType.small : 12))
                             .foregroundStyle(Theme.textMuted.opacity(0.6))
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -97,7 +135,9 @@ struct SessionView: View {
             .pagerSwipe()
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("session-navigation-controls")
-            SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            if !pillShows(chat) {
+                SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { headerWidth = $0 }
         .accessibilityElement(children: .contain)
@@ -108,6 +148,30 @@ struct SessionView: View {
     /// Swipe it to page to a neighbouring session.
     private func paneHeader(_ chat: Chat, controls: SplitScreenControls) -> some View {
         HStack(spacing: 8) {
+            if foldPaneHeader != nil {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Theme.text)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("fold-back")
+            }
+            if duoLaptop == nil, let showList = foldPaneHeader?.showList {
+                Button(action: showList) {
+                    Image(systemName: "list.bullet")
+                        .frame(width: Theme.hitTarget, height: Theme.hitTarget)
+                        .contentShape(Rectangle())
+                }
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show the session list")
+                .accessibilityIdentifier("fold-show-list")
+            }
             if let toggleList = controls.toggleList {
                 Button(action: toggleList) {
                     Image(systemName: "sidebar.leading")
@@ -126,7 +190,7 @@ struct SessionView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 2)  // the 44pt buttons set the strip's height
-        .background(Theme.bg)
+        .background(page)
     }
 
     @ViewBuilder
@@ -159,6 +223,12 @@ struct SessionView: View {
 
     private var chat: Chat? { model.chat(id: chatId) }
 
+    /// iPhone Duo lying flat, this session alone on the screen: chat and Inspect split at the fold.
+    private var flatSplit: Bool { (duoFlat || DuoChat.demoFlat) && splitScreen == nil }
+
+    /// The session's page: lifted beside the list, and on a flat Duo, where Inspect is the column beside it.
+    private var page: Color { Theme.sessionPage(lifted: liftedPlane || flatSplit) }
+
     private var chatSpace: Space? {
         guard let spaceId = chat?.spaceId else { return nil }
         return model.spaces.first { $0.id == spaceId }
@@ -171,9 +241,17 @@ struct SessionView: View {
                 // under it), so it is neither dimmed nor overlapped, and the content is clipped to its own
                 // rectangle.
                 VStack(spacing: 0) {
-                    if paneChrome, let splitScreen {
-                        paneHeader(chat, controls: splitScreen)
-                        content(chat: chat, store: store).clipped()
+                    if paneChrome {
+                        paneHeader(chat, controls: splitScreen ?? SplitScreenControls())
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { paneHeaderHeight = $0 }
+                        Group {
+                            if let duoLaptop, splitScreen == nil {
+                                laptopContent(chat: chat, store: store, layout: duoLaptop)
+                            } else {
+                                content(chat: chat, store: store)
+                            }
+                        }
+                        .clipped()
                     } else {
                         // Not clipped: the content's background and header cover reach under the status bar.
                         content(chat: chat, store: store)
@@ -182,8 +260,9 @@ struct SessionView: View {
                 // The clip above also cuts off the content's own background, which reaches under the side and
                 // bottom safe areas; without this the system's backing showed there (white, or black in dark
                 // mode). Painted outside the clip, to the screen edges.
-                .background { if paneChrome { Theme.bg.ignoresSafeArea() } }
+                .background { if paneChrome { page.ignoresSafeArea() } }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { viewMinY = $0 }
             } else {
                 VStack(spacing: 12) {
                     HarnessPulse()
@@ -192,7 +271,7 @@ struct SessionView: View {
                         .foregroundStyle(Theme.textFaint)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.bg)
+                .background(page)
             }
         }
         .navigationTitle(chat?.displayTitle ?? "Session")  // feeds the back menu
@@ -210,7 +289,8 @@ struct SessionView: View {
                         // trailing buttons: the title expands before the
                         // fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).
-                        .frame(width: max(140, viewWidth - Self.headerChromeInset - stackedButtonsWidth),
+                        // A folded Duo's back button is in the side bar, so the title can start at the edge.
+                        .frame(width: max(140, viewWidth - headerInset - stackedButtonsWidth),
                                alignment: .leading)
                 }
                 // Bare text on the bar, not a glass capsule.
@@ -260,6 +340,12 @@ struct SessionView: View {
         .onAppear {
             model.attachSessionView(chatId: chatId)
             model.markSeen(chatId: chatId)
+            #if DEBUG
+            // Screenshot rig: open on Inspect (the wide Duo swaps the list for it).
+            if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-duo-inspect") {
+                InspectState.of(chatId).open = true
+            }
+            #endif
         }
         .onDisappear {
             model.markSeen(chatId: chatId)
@@ -305,14 +391,127 @@ struct SessionView: View {
         .accessibilityIdentifier(previous ? "session-page-previous" : "session-page-next")
     }
 
+    /// Approve answers the open question with its first option; nil while nothing waits for approval.
+    private func approveAction(_ store: SessionStore) -> (() -> Void)? {
+        guard let request = store.openInputRequest, let answers = QuickActions.approval(request.questions) else {
+            return nil
+        }
+        return { store.respondInput(requestId: request.requestId, answers: answers) }
+    }
+
+    private func inspectModel(_ store: SessionStore) -> InspectModel {
+        InspectModel.build(store.entries,
+                           source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
+    }
+
+    /// Upright (half open, the fold across): the chat above the hinge with the composer parked on it, Inspect
+    /// below. Typing, the keyboard takes the lower half: a one-line status strip and the composer sit right
+    /// above it and Inspect steps aside.
+    private func laptopContent(chat: Chat, store: SessionStore, layout: DuoLaptopLayout) -> some View {
+        let status = liveStatus(chat: chat)
+        let running = status == .working
+        let typing = keyboardOverlap > 0
+        let inspect = InspectState.of(chat.id)
+        let inspectModel = inspectModel(store)
+        // The fold, measured from this view's top (the header shares the status bar's row).
+        let upper = max(200, layout.top - viewMinY - paneHeaderHeight)
+        return VStack(spacing: 0) {
+            VStack(spacing: 0) {
+                TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
+                               onHostLink: { hostLink = $0 }, chat: chat, runLive: running,
+                               hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
+                               duoChat: duoChat,
+                               inspectDiff: { summary in
+                                   inspect.segment = .diff
+                                   inspect.selectedFile = summary.files.first
+                                   UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                               },
+                               inspectTool: { tool in
+                                   inspect.show(tool)
+                                   UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                               })
+                    .frame(maxHeight: .infinity)
+                    .clipped()
+                    .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
+                if typing {
+                    DuoStatusStrip(model: inspectModel, activity: DuoStatusStrip.activity(inspectModel, running: running)) {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    }
+                    .transition(.opacity)
+                }
+                Group {
+                    if let request = store.openInputRequest {
+                        QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
+                            store.respondInput(requestId: requestId, answers: answers)
+                        }
+                    } else {
+                        ComposerView(store: store, chat: chat, runLive: running,
+                                     attachmentDraft: attachmentDraft,
+                                     questionClosedAtMs: questionClosedAtMs)
+                            .id(chat.id)
+                    }
+                }
+                .padding(.bottom, 8)
+            }
+            // Parked on the hinge; typing, it follows the keyboard.
+            .frame(height: typing ? nil : upper)
+            .frame(maxHeight: typing ? .infinity : nil)
+            if !typing {
+                Color.clear.frame(height: layout.gap)
+                InspectCard(model: inspectModel, state: inspect, title: true,
+                            approve: approveAction(store),
+                            askForChanges: { DuoComposerFocus.shared.request(chat.id) })
+                    .frame(maxHeight: .infinity)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .padding(.bottom, keyboardOverlap)
+        .modifier(KeyboardOverlap(overlap: $keyboardOverlap))
+        .background(page.ignoresSafeArea())
+        .accessibilityIdentifier("laptop-session")
+    }
+
+    @ViewBuilder
+    private func runPill(chat: Chat, store: SessionStore) -> some View {
+        if pillShows(chat) {
+            HStack(spacing: 8) {
+                RunStatusPill(chatId: chat.id, startedAtMs: sessionStartedAt(chat: chat),
+                              onStop: { store.sendInterrupt() })
+                // The turn's steps and agents beside it, a separate tap from the pill's Stop.
+                AgentWorkChip(store: store, glass: true)
+                ContextRing(store: store, glass: true)
+            }
+                .padding(.leading, 16)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+        }
+    }
+
     private func content(chat: Chat, store: SessionStore) -> some View {
         let status = liveStatus(chat: chat)
         // The composer owns real layout space. The transcript's viewport ends
         // above it, so keyboard and glass morphs cannot cover the last row.
-        return VStack(spacing: 0) {
+        let flat = flatSplit
+        let inspect = InspectState.of(chat.id)
+        let inspectModel = flat ? inspectModel(store) : InspectModel()
+        // Wide: Inspect takes the list's place once opened; until then the chat keeps a reading width.
+        let inspectOpen = flat && inspect.open
+        // Flat Duo: two equal halves meet at the fold. The chat column keeps its place in the tree whether or
+        // not Inspect shows, so the transcript (and its scroll) survives the keyboard and the fold.
+        return HStack(spacing: 0) {
+        VStack(spacing: 0) {
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
                            onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
-                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId))
+                           hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
+                           duoChat: duoChat,
+                           inspectDiff: flat ? { summary in
+                               withAnimation(Motion.collapse) {
+                                   inspect.segment = .diff
+                                   inspect.selectedFile = summary.files.first
+                                   inspect.open = true
+                               }
+                           } : nil,
+                           inspectTool: flat ? { tool in withAnimation(Motion.collapse) { inspect.show(tool) } } : nil)
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
@@ -320,15 +519,33 @@ struct SessionView: View {
                 .overlay {
                     if store.entries.isEmpty, store.pendingSends.isEmpty,
                        chat.lastMessageAt != nil {
-                        TranscriptSkeleton().background(Theme.bg)
+                        TranscriptSkeleton().background(page)
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
+                .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
+                .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
+                .overlay(alignment: .leading) {
+                    // Swipe in from the edge to go back; the pager owns the rest of the width.
+                    if duoChat, horizontalSizeClass == .compact { EdgeSwipeBack { dismiss() } }
+                }
             VStack(spacing: 0) {
-                if verticalSizeClass != .compact || status == .working || status == .errored
-                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected {
+                // A Duo's running turn is the pill; the strip shows only sends and connection trouble there.
+                if duoChat ? (status == .errored || model.sendState(for: chat) != nil
+                              || model.connectivity.state != .connected)
+                    : (verticalSizeClass != .compact || status == .working || status == .errored
+                    || model.sendState(for: chat) != nil || model.connectivity.state != .connected) {
                     statusStrip(chat: chat, status: status, store: store)
                         .allowsHitTesting(model.sendState(for: chat).map { $0 == .failed || $0 == .waiting } ?? false)
+                        // The turn's steps and agents, then the context ring, at the strip's far end (the
+                        // desktop footer's order); they take taps, the strip doesn't.
+                        .overlay(alignment: .trailing) {
+                            HStack(spacing: 4) {
+                                AgentWorkChip(store: store)
+                                ContextRing(store: store)
+                            }
+                            .padding(.trailing, 20)
+                        }
                 }
                 Group {
                     if let request = store.openInputRequest {
@@ -347,10 +564,10 @@ struct SessionView: View {
             .background {
                 LinearGradient(
                     stops: [
-                        .init(color: Theme.bg.opacity(0), location: 0),
-                        .init(color: Theme.bg.opacity(0.45), location: 0.25),
-                        .init(color: Theme.bg.opacity(0.72), location: 0.6),
-                        .init(color: Theme.bg, location: 1),
+                        .init(color: page.opacity(0), location: 0),
+                        .init(color: page.opacity(0.45), location: 0.25),
+                        .init(color: page.opacity(0.72), location: 0.6),
+                        .init(color: page, location: 1),
                     ],
                     startPoint: .top, endPoint: .bottom
                 )
@@ -359,7 +576,33 @@ struct SessionView: View {
                 .allowsHitTesting(false)
             }
         }
-        .background(Theme.bg.ignoresSafeArea())
+        // Wide, beside the list: a reading width. With Inspect: the chat column ends on the fold (the window's
+        // middle), not the middle of what the side bar leaves.
+        .frame(maxWidth: flat && !inspectOpen ? DuoV3.readingWidth + 48 : nil)
+        .frame(maxWidth: flat && !inspectOpen ? .infinity : nil)
+        .frame(width: inspectOpen && windowMidX - columnMinX > 240 ? windowMidX - columnMinX : nil)
+        .frame(maxWidth: inspectOpen ? nil : .infinity)
+        // Flat: the chat is the lifted page; Inspect beside it is the chrome it rounds against at the fold.
+        .environment(\.liftedPlane, liftedPlane || flat)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { chatColumnWidth = $0 }
+            if inspectOpen {
+                // No divider: the chat page's rounded seam (below) draws the edge.
+                InspectCard(model: inspectModel, state: inspect,
+                            close: { withAnimation(Motion.collapse) { inspect.open = false } },
+                            approve: approveAction(store),
+                            askForChanges: { DuoComposerFocus.shared.request(chat.id) })
+                    .frame(maxWidth: .infinity)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .background(page.ignoresSafeArea())
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            columnMinX = frame.minX
+            // The fold is the window's middle; the side bar's column is outside this view's frame.
+            let window = UIApplication.shared.connectedScenes
+                .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+            windowMidX = window.map { $0.bounds.midX } ?? frame.midX
+        }
         .overlay(alignment: .top) {
             #if DEBUG
             if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-image-drop-fixture") {
@@ -384,31 +627,39 @@ struct SessionView: View {
                             .font(Theme.sans(14, weight: .medium))
                             .foregroundStyle(Theme.text)
                             .padding(12)
-                            .background(Theme.bg, in: Capsule())
+                            .background(page, in: Capsule())
                             .padding(.bottom, 90)
                     }
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
         }
-        .overlay {
+        .overlay(alignment: .leading) {
             GeometryReader { geometry in
                 // The bar stays opaque so the header never collides with rows
                 // scrolling under it; the fade lives just below the bar.
                 VStack(spacing: 0) {
-                    Theme.bg.frame(height: geometry.safeAreaInsets.top)
+                    page.frame(height: geometry.safeAreaInsets.top)
                     LinearGradient(stops: [
-                        .init(color: Theme.bg, location: 0),
-                        .init(color: Theme.bg.opacity(0.85), location: 0.35),
-                        .init(color: Theme.bg.opacity(0.45), location: 0.7),
-                        .init(color: Theme.bg.opacity(0), location: 1),
+                        .init(color: page, location: 0),
+                        .init(color: page.opacity(0.85), location: 0.35),
+                        .init(color: page.opacity(0.45), location: 0.7),
+                        .init(color: page.opacity(0), location: 1),
                     ], startPoint: .top, endPoint: .bottom)
                         .frame(height: Self.topFadeHeight)
                 }
                 .offset(y: -geometry.safeAreaInsets.top)
             }
+            // Flat with Inspect open beside it: the chat's own bar, so Inspect keeps its tone up to the screen's top.
+            .frame(width: inspectOpen && chatColumnWidth > 0 ? chatColumnWidth : nil)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
+        }
+        .overlay(alignment: .leading) {
+            // The chat's page rounds at the fold, over its bar too (ContentPlane).
+            if inspectOpen, chatColumnWidth > 0 {
+                Color.clear.frame(width: chatColumnWidth).seam(.trailing, chrome: Theme.surface)
+            }
         }
         .onChange(of: chatId) { _, _ in
             attachmentDraft = AttachmentDraft()
@@ -428,7 +679,7 @@ struct SessionView: View {
     }
 
     /// Reserved 24pt status strip (shell.rs render_status_strip) — Working
-    /// shows the sunrise spinner + rotating flavour word + elapsed; Errored
+    /// shows the accent spinner + rotating flavour word + elapsed; Errored
     /// shows "Run failed"; the strip always reserves its height so the
     /// composer never shifts. An unadopted send's truth takes precedence:
     /// "Sending…" (healthy, within the 2-minute grace), "Queued — will send

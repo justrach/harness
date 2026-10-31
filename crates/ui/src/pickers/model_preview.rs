@@ -152,6 +152,33 @@ fn route(model: &Model) -> &str {
         .map(|(route, _)| route)
         .unwrap_or_else(|| model_maker(model).unwrap_or("other"))
 }
+/// One headed section per route (`claude-agent/…` → "Claude Agent"), in
+/// first-appearance order except that Claude Agent's leads Anthropic's.
+fn route_sections(flat: &[ModelRowData]) -> Vec<ModelRowData> {
+    let mut routes = Vec::<&str>::new();
+    for row in flat {
+        let id = route(&row.model);
+        if !routes.contains(&id) {
+            routes.push(id);
+        }
+    }
+    super::claude_agent_before_anthropic(&mut routes, |route, id| *route == id);
+    let mut rows = Vec::with_capacity(flat.len() + routes.len());
+    for id in routes {
+        let mut section = flat
+            .iter()
+            .filter(|r| route(&r.model) == id)
+            .cloned()
+            .peekable();
+        if let Some(first) = section.peek() {
+            let mut header = first.clone();
+            header.header = Some(provider(id).0.to_owned().into());
+            rows.push(header);
+        }
+        rows.extend(section);
+    }
+    rows
+}
 fn provider(id: &str) -> (&str, &'static str) {
     PROVIDERS
         .iter()
@@ -164,8 +191,11 @@ fn model_icon(model: &Model) -> &'static str {
         .and_then(maker_icon)
         .unwrap_or_else(|| provider(route(model)).1)
 }
-fn brand_accent(model: &Model, theme: &Theme) -> gpui::Hsla {
-    // Only sourced product/brand accents. Unverified brands stay neutral.
+/// The reasoning slider's color: the model maker's (or its route's) sourced
+/// accent. A model whose maker has no sourced accent takes its agent's color,
+/// so no slider falls back to plain grey and no brand color is made up.
+fn brand_accent(model: &Model, harness: HarnessId, theme: &Theme) -> gpui::Hsla {
+    let dark = theme.appearance.is_dark();
     match model_maker(model).unwrap_or(route(model)) {
         "openai" | "codex" | "chatgpt-new" => rgb(0x66b5ff).into(),
         "anthropic" => rgb(0xd97757).into(),
@@ -198,8 +228,17 @@ fn brand_accent(model: &Model, theme: &Theme) -> gpui::Hsla {
             0x4338ca
         })
         .into(),
-        "zai" | "xai" | "vercel" | "mlx" | "omlx" => theme.text,
-        _ => theme.text_muted,
+        // Monochrome brands: Grok in pure black or white, Z.ai a softer
+        // shade of the same so the two stay apart.
+        "xai" => rgb(if dark { 0xffffff } else { 0x000000 }).into(),
+        "zai" => rgb(if dark { 0xb4b4b4 } else { 0x4d4d4d }).into(),
+        "vercel" | "mlx" | "omlx" => theme.text,
+        _ => match harness {
+            HarnessId::Graff => rgb(0x0285ff).into(),
+            HarnessId::ClaudeCode => rgb(0xd97757).into(),
+            HarnessId::Codex => rgb(0x66b5ff).into(),
+            _ => theme.text_muted,
+        },
     }
 }
 
@@ -247,6 +286,21 @@ fn validate_pending(pending: &Pending, live: Option<&Model>) -> bool {
 }
 
 impl Pickers {
+    /// `model` as the picker offers it: a model whose catalog entry lists no
+    /// reasoning levels takes its agent's ladder, as the traits summary on the
+    /// model button and the previous picker do. Agents that report per-model
+    /// levels (graff) keep them; agents with no ladder offer no slider.
+    fn with_agent_ladder(&self, harness: HarnessId, mut model: Model) -> Model {
+        if model.reasoning_levels.is_empty()
+            && let Some(descriptor) = self
+                .harnesses
+                .ready()
+                .and_then(|list| list.iter().find(|d| d.id == harness))
+        {
+            model.reasoning_levels = descriptor.reasoning_levels.clone();
+        }
+        model
+    }
     pub(super) fn preview_viewed(&self, cx: &App) -> Option<HarnessId> {
         if self.harness_locked(cx) {
             self.effective_harness(cx)
@@ -307,7 +361,7 @@ impl Pickers {
                     flat.push(ModelRowData {
                         harness: d.id,
                         harness_name: d.name.clone().into(),
-                        model: model.clone(),
+                        model: self.with_agent_ladder(d.id, model.clone()),
                         selected_only: false,
                         header: None,
                     });
@@ -315,32 +369,7 @@ impl Pickers {
             }
         }
         let grouped = self.model_rail == ModelRail::Harness && key.query.is_empty();
-        let rows = if grouped {
-            let mut routes = Vec::<String>::new();
-            for row in &flat {
-                let id = route(&row.model);
-                if !routes.iter().any(|r| r == id) {
-                    routes.push(id.into());
-                }
-            }
-            let mut rows = Vec::new();
-            for id in routes {
-                let mut section = flat
-                    .iter()
-                    .filter(|r| route(&r.model) == id)
-                    .cloned()
-                    .peekable();
-                if let Some(first) = section.peek() {
-                    let mut header = first.clone();
-                    header.header = Some(provider(&id).0.to_owned().into());
-                    rows.push(header);
-                }
-                rows.extend(section);
-            }
-            rows
-        } else {
-            flat
-        };
+        let rows = if grouped { route_sections(&flat) } else { flat };
         let rows = std::sync::Arc::new(rows);
         *self.model_rows_cache.borrow_mut() = Some((key, rows.clone()));
         rows
@@ -453,8 +482,9 @@ impl Pickers {
             .models
             .get(&p.harness)
             .and_then(|l| l.ready())
-            .and_then(|models| models.iter().find(|m| m.id == p.model.id));
-        if !validate_pending(&p, live)
+            .and_then(|models| models.iter().find(|m| m.id == p.model.id))
+            .map(|m| self.with_agent_ladder(p.harness, m.clone()));
+        if !validate_pending(&p, live.as_ref())
             || (self.harness_locked(cx) && self.effective_harness(cx) != Some(p.harness))
         {
             self.preview.error =
@@ -475,8 +505,7 @@ impl Pickers {
             self.defaults.harness = Some(p.harness);
             self.defaults.reasoning = p.reasoning;
             *self.defaults.model_options_mut(p.harness, &p.model.id) = p.options;
-            self.defaults
-                .remember_model(p.harness, p.model.id, p.model.label);
+            self.remember_pick(p.harness, p.model.id, p.model.label);
             self.save_defaults();
         }
         self.animate_close(cx);
@@ -912,7 +941,7 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let accent = brand_accent(&p.model, theme);
+        let accent = brand_accent(&p.model, p.harness, theme);
         let binary = binary_reasoning_switch(Some(&p.model));
         let label = p
             .reasoning
@@ -1148,6 +1177,7 @@ impl Pickers {
                 div().flex_none().px(px(16.0)).pb(px(12.0)).child(
                     popover::btn_primary(theme, "Use model")
                         .id("preview-use-model")
+                        .debug_selector(|| "preview-use-model".into())
                         .role(gpui::Role::Button)
                         .aria_label("Use model")
                         .w_full()
@@ -1171,6 +1201,20 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut this = Self::new(state, cx);
+        this.fixture_catalog(legacy, large, true, cx);
+        this
+    }
+    /// Loads the fixture's synthetic catalog into an existing picker (for
+    /// example, the one a composer owns), opening it when asked.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_catalog(
+        &mut self,
+        legacy: bool,
+        large: bool,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let this = self;
         this.preview.enabled = !legacy && cfg!(debug_assertions);
         this.config.harness = Some(HarnessId::Graff);
         this.config.model = Some("anthropic/claude-sonnet-4.6".into());
@@ -1285,15 +1329,16 @@ impl Pickers {
             .insert(HarnessId::Codex, Loadable::Ready(models[3..5].to_vec()));
         this.models
             .insert(HarnessId::Graff, Loadable::Ready(models));
-        this.open.open(PickerKind::HarnessModel);
+        if open {
+            this.open.open(PickerKind::HarnessModel);
+            this.boot_focus_pending = true;
+        }
         this.open_model_height = if legacy {
             model_menu_height(this.setting_groups(cx).len())
         } else {
             480.0
         };
-        this.boot_focus_pending = true;
         this.active = this.selected_model_index(cx);
-        this
     }
     #[cfg(feature = "appshots-fixture")]
     pub fn fixture_preview_model(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1318,6 +1363,35 @@ impl Pickers {
             .position(|row| row.header.is_none() && row.model.id == id);
         cx.notify();
     }
+    /// Strips `id`'s own reasoning levels and gives its agent (graff in the
+    /// fixture) a ladder, as agents that report levels per agent do.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_agent_ladder_only(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(Loadable::Ready(models)) = self.models.get_mut(&HarnessId::Graff)
+            && let Some(model) = models.iter_mut().find(|m| m.id == id)
+        {
+            model.reasoning_levels.clear();
+        }
+        if let Loadable::Ready(descriptors) = &mut self.harnesses
+            && let Some(graff) = descriptors.iter_mut().find(|d| d.id == HarnessId::Graff)
+        {
+            graff.reasoning_levels = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+            ];
+        }
+        self.catalog_rev += 1;
+        cx.notify();
+    }
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_pending(&self) -> Option<(String, Option<ReasoningLevel>)> {
+        self.preview
+            .pending
+            .as_ref()
+            .map(|p| (p.model.id.clone(), p.reasoning))
+    }
     #[cfg(feature = "appshots-fixture")]
     pub fn fixture_model_position(&self, id: &str, cx: &App) -> Option<gpui::Point<gpui::Pixels>> {
         let index = self
@@ -1338,6 +1412,81 @@ impl Pickers {
             bounds.left() + bounds.size.width * percent.unwrap_or(slider.percentage().end),
             bounds.center().y,
         ))
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    fn row(id: &str) -> ModelRowData {
+        let label = id.split_once('/').map_or(id, |(_, name)| name);
+        ModelRowData {
+            harness: HarnessId::Graff,
+            harness_name: "graff".into(),
+            model: Model {
+                id: id.into(),
+                label: label.into(),
+                description: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                maker: Some("anthropic".into()),
+                billing: Some("plan".into()),
+            },
+            selected_only: false,
+            header: None,
+        }
+    }
+
+    #[test]
+    fn claude_agent_models_get_their_own_section_ahead_of_anthropic() {
+        // graff's order: the current Anthropic model first, then Claude
+        // Agent's rows, then the rest of Anthropic's (same names, and more).
+        let flat: Vec<ModelRowData> = [
+            "anthropic/claude-opus-5",
+            "claude-agent/claude-opus-5-5",
+            "claude-agent/claude-opus-5",
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-opus-4-8",
+            "codex/gpt-6-sol",
+        ]
+        .into_iter()
+        .map(row)
+        .collect();
+        let rows = route_sections(&flat);
+        let shown: Vec<String> = rows
+            .iter()
+            .map(|r| match &r.header {
+                Some(title) => format!("# {title}"),
+                None => r.model.id.clone(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "# Claude Agent",
+                "claude-agent/claude-opus-5-5",
+                "claude-agent/claude-opus-5",
+                "# Anthropic",
+                "anthropic/claude-opus-5",
+                "anthropic/claude-opus-5-5",
+                "anthropic/claude-opus-4-8",
+                "# Codex / ChatGPT",
+                "codex/gpt-6-sol",
+            ]
+        );
+        // Both headers wear the Claude mark.
+        for title in ["Claude Agent", "Anthropic"] {
+            let header = rows
+                .iter()
+                .find(|r| r.header.as_deref() == Some(title))
+                .unwrap();
+            assert_eq!(provider(route(&header.model)).1, icons::CLAUDE_MARK);
+        }
+        // Claude Agent already ahead: the order stands.
+        let rows = route_sections(&flat[1..3]);
+        assert_eq!(rows[0].header.as_deref(), Some("Claude Agent"));
+        assert_eq!(rows.len(), 3);
     }
 }
 
@@ -1577,14 +1726,60 @@ mod tests {
                 &p.preview.pending.as_ref().unwrap().model
             )));
             p.preview_back(cx);
+            // No levels on the model and none on its agent: no slider, no level.
             p.fixture_preview_model("anthropic/claude-haiku-4.5", cx);
             assert!(p.preview.pending.as_ref().unwrap().reasoning.is_none());
-            // An agent-wide ladder must not invent options for this model.
-            if let Loadable::Ready(descriptors) = &mut p.harnesses {
-                descriptors[0].reasoning_levels = vec![ReasoningLevel::High];
-            }
+            assert!(
+                p.preview
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .model
+                    .reasoning_levels
+                    .is_empty()
+            );
             p.preview_commit(cx);
+            assert_eq!(p.preview.error, None);
             assert_eq!(p.resolved(cx).reasoning, None);
+        });
+    }
+
+    /// Claude Code, Codex and other agents can report their reasoning ladder
+    /// for the agent rather than per model. The second step must still offer
+    /// it (the model button already shows a level from it), or those agents
+    /// get a screen with no slider. Failed before the agent ladder fallback.
+    #[gpui::test]
+    fn a_model_without_its_own_levels_takes_its_agents_ladder(cx: &mut gpui::TestAppContext) {
+        let (_, picker) = fixture(cx, false);
+        picker.update(cx, |p, cx| {
+            let ladder = vec![
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+            ];
+            if let Loadable::Ready(descriptors) = &mut p.harnesses {
+                let codex = descriptors
+                    .iter_mut()
+                    .find(|d| d.id == HarnessId::Codex)
+                    .unwrap();
+                codex.reasoning_levels = ladder.clone();
+            }
+            if let Some(Loadable::Ready(models)) = p.models.get_mut(&HarnessId::Codex) {
+                for model in models.iter_mut() {
+                    model.reasoning_levels.clear();
+                }
+            }
+            p.catalog_rev += 1;
+            p.pick_harness(HarnessId::Codex, cx);
+            p.fixture_preview_model("openai/gpt-5.4", cx);
+            let pending = p.preview.pending.as_ref().expect("reasoning step");
+            assert_eq!(pending.model.reasoning_levels, ladder);
+            assert!(p.preview.slider.is_some(), "the step offers a slider");
+            p.preview.pending.as_mut().unwrap().reasoning = Some(ReasoningLevel::Low);
+            p.preview_commit(cx);
+            assert_eq!(p.preview.error, None);
+            assert_eq!(p.resolved(cx).harness, Some(HarnessId::Codex));
+            assert_eq!(p.resolved(cx).reasoning, Some(ReasoningLevel::Low));
         });
     }
     #[gpui::test]
@@ -1708,6 +1903,261 @@ mod tests {
                 Some("anthropic/claude-sonnet-4.6")
             );
         });
+    }
+
+    #[gpui::test]
+    fn clicking_a_model_then_the_track_picks_a_level(cx: &mut gpui::TestAppContext) {
+        struct ClickFixture(Entity<Pickers>);
+        impl Render for ClickFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .p(px(20.0))
+                    .child(self.0.update(cx, |p, cx| {
+                        let content = p.render_model_preview(cx);
+                        p.popover_frame_flush(PICKER_WIDTH, content, cx)
+                    }))
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::light()));
+        let handle = cx.add_window(|window, cx| {
+            let state = cx.new(|_| AppState::new());
+            let picker = cx.new(|cx| Pickers::model_picker_fixture(state, false, false, cx));
+            picker.update(cx, |p, cx| {
+                p.menu_geometry.insert(
+                    PickerKind::HarnessModel,
+                    popover::MenuGeometry {
+                        height: 480.0,
+                        below: false,
+                    },
+                );
+                window.focus(&p.focus, cx);
+            });
+            ClickFixture(picker)
+        });
+        let picker = handle.read_with(cx, |f, _| f.0.clone()).unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+        };
+        let click = |cx: &mut gpui::TestAppContext, position| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                for input in [
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                ] {
+                    window.dispatch_event(input, cx);
+                }
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        draw(cx);
+        // Hover long enough for the details card, as a pointer does, then click.
+        let row = picker.read_with(cx, |p, cx| {
+            p.fixture_model_position("openai/gpt-5.4", cx).unwrap()
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: row,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.executor().advance_clock(Duration::from_millis(250));
+        cx.run_until_parked();
+        draw(cx);
+        assert!(picker.read_with(cx, |p, _| p.preview.detail.is_some()));
+        click(cx, row);
+        draw(cx);
+        let bounds = picker.read_with(cx, |p, cx| {
+            assert_eq!(
+                p.preview.pending.as_ref().map(|p| p.model.id.as_str()),
+                Some("openai/gpt-5.4"),
+                "clicking a model opens its reasoning step"
+            );
+            p.preview.slider.as_ref().unwrap().read(cx).bounds()
+        });
+        // A click on the track's start, without dragging the thumb, picks the lowest level.
+        click(cx, gpui::point(bounds.left() + px(1.0), bounds.center().y));
+        draw(cx);
+        let lowest = picker.read_with(cx, |p, _| {
+            let pending = p.preview.pending.as_ref().unwrap();
+            assert_eq!(
+                pending.reasoning,
+                pending.model.reasoning_levels.first().copied()
+            );
+            pending.reasoning
+        });
+        let use_model = gpui::VisualTestContext::from_window(handle.into(), cx)
+            .debug_bounds("preview-use-model")
+            .expect("Use model button")
+            .center();
+        click(cx, use_model);
+        picker.read_with(cx, |p, cx| {
+            assert_eq!(p.preview.error, None);
+            assert_eq!(p.effective_model_id(cx), Some("openai/gpt-5.4"));
+            assert_eq!(p.resolved(cx).reasoning, lowest);
+        });
+    }
+
+    #[gpui::test]
+    fn the_footer_picker_opens_a_model_and_drags_its_level(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::light()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::model_picker_fixture(state, false, false, cx)
+        });
+        let draw = |cx: &mut gpui::TestAppContext| {
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let press = |cx: &mut gpui::TestAppContext, from, to| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position: from,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: from,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                if from != to {
+                    for _ in 0..2 {
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position: to,
+                                pressed_button: Some(gpui::MouseButton::Left),
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.draw(cx).clear();
+                    }
+                }
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Left,
+                        position: to,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        // The fixture opens with the picker up, anchored to its model button.
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(400));
+        draw(cx);
+        assert!(handle.read_with(cx, |p, _| p.open.is_open()).unwrap());
+        let row = handle
+            .read_with(cx, |p, cx| p.fixture_model_position("openai/gpt-5.4", cx))
+            .unwrap()
+            .expect("model row in the open picker");
+        press(cx, row, row);
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(400));
+        draw(cx);
+        let (from, to) = handle
+            .read_with(cx, |p, cx| {
+                assert_eq!(
+                    p.preview.pending.as_ref().map(|p| p.model.id.as_str()),
+                    Some("openai/gpt-5.4"),
+                    "clicking a model opens its reasoning step"
+                );
+                (
+                    p.fixture_slider_position(None, cx).unwrap(),
+                    p.fixture_slider_position(Some(0.0), cx).unwrap(),
+                )
+            })
+            .unwrap();
+        press(cx, from, to);
+        draw(cx);
+        let lowest = handle
+            .read_with(cx, |p, _| {
+                let pending = p.preview.pending.as_ref().unwrap();
+                assert_eq!(
+                    pending.reasoning,
+                    pending.model.reasoning_levels.first().copied(),
+                    "dragging the thumb to the start picks the lowest level"
+                );
+                pending.reasoning
+            })
+            .unwrap();
+        let use_model = gpui::VisualTestContext::from_window(handle.into(), cx)
+            .debug_bounds("preview-use-model")
+            .expect("Use model button")
+            .center();
+        press(cx, use_model, use_model);
+        handle
+            .read_with(cx, |p, cx| {
+                assert_eq!(p.preview.error, None);
+                assert_eq!(p.effective_model_id(cx), Some("openai/gpt-5.4"));
+                assert_eq!(p.resolved(cx).reasoning, lowest);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn every_slider_has_a_color_and_grok_and_zai_differ() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+            maker: None,
+            billing: None,
+        };
+        for theme in [Theme::light(), Theme::dark()] {
+            let grok = brand_accent(&model("xai/grok-5"), HarnessId::Graff, &theme);
+            let zai = brand_accent(&model("zai/glm-5"), HarnessId::Graff, &theme);
+            assert_eq!(grok.s, 0.0, "Grok is black and white");
+            assert_eq!(zai.s, 0.0, "Z.ai is monochrome too");
+            assert_ne!(grok, zai, "in different shades");
+            assert_eq!(grok.l, if theme.appearance.is_dark() { 1.0 } else { 0.0 });
+            // A model no maker claims takes its agent's color, not grey.
+            let custom = model("custom-router/house-model");
+            let graff: gpui::Hsla = rgb(0x0285ff).into();
+            assert_eq!(brand_accent(&custom, HarnessId::Graff, &theme), graff);
+            let claude: gpui::Hsla = rgb(0xd97757).into();
+            assert_eq!(brand_accent(&custom, HarnessId::ClaudeCode, &theme), claude);
+            // A known maker keeps its own color whichever agent serves it.
+            let anthropic = brand_accent(&model("anthropic/claude-x"), HarnessId::Graff, &theme);
+            assert_eq!(anthropic, claude);
+        }
     }
 
     #[test]

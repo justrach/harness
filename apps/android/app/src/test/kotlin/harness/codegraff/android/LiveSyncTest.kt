@@ -1,6 +1,7 @@
 package harness.codegraff.android
 
 import harness.codegraff.android.core.AgentDescriptorRecord
+import harness.codegraff.android.core.AutonomyRecord
 import harness.codegraff.android.core.ChangeRequestRecord
 import harness.codegraff.android.core.ChatConfigRecord
 import harness.codegraff.android.core.ChatRecord
@@ -120,6 +121,17 @@ private class FakeCore : MobileCoreInterface {
         calls += "compact-at $deviceId $pct"
         compactAt = pct
         return compactAt
+    }
+    var autonomy = AutonomyRecord("full-access", false)
+    override suspend fun autonomy(deviceId: String): AutonomyRecord {
+        if (!reachable) throw RelayException.Timeout()
+        return autonomy
+    }
+    override suspend fun setAutonomy(deviceId: String, autonomy: String): AutonomyRecord {
+        if (!reachable) throw RelayException.Timeout()
+        calls += "autonomy $deviceId $autonomy"
+        this.autonomy = AutonomyRecord(autonomy, true)
+        return this.autonomy
     }
     override fun setNetwork(online: Boolean, key: String) {}
     override suspend fun switchRef(deviceId: String, repoPath: String, refName: String) {}

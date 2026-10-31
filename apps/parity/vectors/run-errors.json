@@ -1,10 +1,15 @@
 {
-  "comment": "What a failed run's plain error text means: signedOut (not signed in, signed out, an expired or rejected login) or limitReached (a usage or rate limit), the two that signing in to the agent's provider can fix, or null for anything else. Matching is case-insensitive on substrings, and a curly apostrophe reads as a straight one. Hosted credit, GitHub's own API and Harness's own account are never the provider's problem. A signedOut match wins over limitReached. Provider-typed reauthentication keeps its own card and is not classified here. The desktop (crates/proto/src/run_errors.rs) and the phone (RunErrors.swift) check these same cases.",
+  "comment": "What a failed run's plain error text means: signedOut (not signed in, signed out, an expired or rejected login), limitReached (a usage or rate limit), keyRejected (the provider rejected graff's API key, or the key it fell back to after a plan ran out; the sign-in is fine), or null for anything else. Matching is case-insensitive on substrings, and a curly apostrophe reads as a straight one. keyRejected is checked first (\"api key was rejected\", \"fallback api key\", \"sign-in is not affected\"), before everything else, so a provider named like GitHub Copilot still reads as its key. Otherwise hosted credit, GitHub's own API and Harness's own account are never the provider's problem, and a signedOut match wins over limitReached. graff's older generic \"provider authentication failed: sign in again or check the API key\" can't say which credential failed and stays signedOut, as does Claude Code's \"Invalid API key · Please run /login\". Provider-typed reauthentication keeps its own card and is not classified here. The desktop (crates/proto/src/run_errors.rs) and the phone (RunErrors.swift) check these same cases.",
   "labels": {
     "signedOut": "Signed out",
-    "limitReached": "Limit reached"
+    "limitReached": "Limit reached",
+    "keyRejected": "API key rejected"
   },
-  "actionLabel": "Log in",
+  "actionLabels": {
+    "signedOut": "Log in",
+    "limitReached": "Log in",
+    "keyRejected": "Update key"
+  },
   "cases": [
     { "message": "Claude Code isn't signed in. Use Settings → Agents → Sign in.", "expect": "signedOut" },
     { "message": "Codex isn’t signed in on this computer.", "expect": "signedOut" },
@@ -13,6 +18,12 @@
     { "message": "Not logged in · Please run /login", "expect": "signedOut" },
     { "message": "OAuth token has expired. Please obtain a new token or refresh your existing token.", "expect": "signedOut" },
     { "message": "Request failed (401) Unauthorized", "expect": "signedOut" },
+    { "message": "provider authentication failed: sign in again or check the API key", "expect": "signedOut" },
+    { "message": "Anthropic sign-in was rejected: sign in again (graff login anthropic)", "expect": "signedOut" },
+    { "message": "Anthropic API key was rejected (ANTHROPIC_API_KEY): replace or remove the key. Your sign-in is not affected.", "expect": "keyRejected" },
+    { "message": "Anthropic plan is out of usage, and the fallback API key (keychain) was rejected: replace or remove the key, or wait for the plan to reset.", "expect": "keyRejected" },
+    { "message": "GitHub Copilot API key was rejected (env): replace or remove the key. Your sign-in is not affected.", "expect": "keyRejected" },
+    { "message": "OpenAI API key was rejected (keychain): unauthorized (401). Your sign-in is not affected.", "expect": "keyRejected" },
     { "message": "Claude usage limit reached — try again after the limit resets.", "expect": "limitReached" },
     { "message": "Claude 5-hour limit reached — the turn was blocked. Try again after it resets.", "expect": "limitReached" },
     { "message": "You've hit your usage limit. Upgrade to Pro or try again later.", "expect": "limitReached" },

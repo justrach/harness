@@ -9,6 +9,11 @@ struct SettingsView: View {
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
     /// Opens straight onto Crash reports (the `-sheet crashreports` rig).
     @State private var showCrashReports: Bool
+    /// The first-run setup, opened again from Agents.
+    @State private var replaySetup = false
+    /// Screenshot rig: `-demo -open-autonomy` opens on Agents > Autonomy.
+    @State private var showAutonomy = ProcessInfo.processInfo.arguments.contains("-demo")
+        && ProcessInfo.processInfo.arguments.contains("-open-autonomy")
 
     init(openCrashReports: Bool = false) {
         _showCrashReports = State(initialValue: openCrashReports)
@@ -60,11 +65,20 @@ struct SettingsView: View {
 
                 Section("Agents") {
                     NavigationLink {
+                        AutonomyView()
+                    } label: {
+                        Text("Autonomy")
+                    }
+                    .accessibilityIdentifier("settings-autonomy")
+                    NavigationLink {
                         CompactionView()
                     } label: {
                         Text("Graff compaction")
                     }
                     .accessibilityIdentifier("settings-compaction")
+                    Button("Replay setup") { replaySetup = true }
+                        .foregroundStyle(Theme.text)
+                        .accessibilityIdentifier("settings-replay-setup")
                 }
                 .harnessListRow()
 
@@ -149,6 +163,13 @@ struct SettingsView: View {
             .harnessGroupedList()
             .navigationTitle("Settings")
             .navigationDestination(isPresented: $showCrashReports) { CrashReportsView() }
+            .navigationDestination(isPresented: $showAutonomy) { AutonomyView() }
+            .fullScreenCover(isPresented: $replaySetup) {
+                OnboardingView { replaySetup = false }
+                    .environment(model)
+                    .harnessAppearance()
+                    .tint(Theme.text)
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

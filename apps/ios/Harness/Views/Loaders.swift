@@ -1,19 +1,28 @@
 // Loaders + status indicators — ports of crates/ui/src/loaders.rs.
 //
-// gradient-spin-pulse: a 3×3 cell grid with per-row "sunrise" tints; each cell
-// pulses once per 750ms with phase = distance from bottom-center, so the wave
-// travels upward. The mini variant (2×3) snakes clockwise around the perimeter
-// and marks Working rows in lists.
+// gradient-spin-pulse: a 3×3 cell grid with per-row tints in the theme's
+// accent family; each cell pulses once per 750ms with phase = distance from
+// bottom-center, so the wave travels upward. The mini variant (2×3) snakes
+// clockwise around the perimeter and marks Working rows in lists.
 
 import SwiftUI
 
 enum GradientSpin {
-    // GSPIN_ROW_TINTS: row0 cool blue, row1 amber, row2 pink.
-    static let rowTints: [Color] = [
-        Color(red: 0xB6 / 255, green: 0xD3 / 255, blue: 0xEF / 255),
-        Color(red: 0xED / 255, green: 0xB1 / 255, blue: 0x85 / 255),
-        Color(red: 0xF8 / 255, green: 0x88 / 255, blue: 0xA0 / 255),
-    ]
+    /// The rows' tints, top first: the accent family's light, mid and deep tones (the desktop's
+    /// `GlyphPalette`, authored per theme in themes.json), so the spinner follows the theme instead of the
+    /// fixed blue, amber and pink it had. A theme without them gets the same three steps mixed from its
+    /// accent toward white and black.
+    static func rowTints(glyph: [HexColor]?, primary: HexColor, dark: Bool) -> [HexColor] {
+        if let glyph, glyph.count == 3 { return glyph }
+        func mix(_ c: HexColor, toward target: Double, by t: Double) -> HexColor {
+            HexColor(red: c.red + (target - c.red) * t, green: c.green + (target - c.green) * t,
+                     blue: c.blue + (target - c.blue) * t, alpha: c.alpha)
+        }
+        return [mix(primary, toward: 1, by: dark ? 0.28 : 0.18), primary,
+                mix(primary, toward: 0, by: dark ? 0.18 : 0.26)]
+    }
+
+    static var rowTints: [HexColor] { ThemeStore.shared.palette.spinnerTints }
     static let dim = 0.1
 
     /// Opacity keyframe (motion.rs gspin_opacity): full at 0, ease down to dim
@@ -36,7 +45,8 @@ struct WorkingSpinner: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        GradientSpinCells(cellSize: cellSize, animated: !reduceMotion, offsets: (0..<3).map { row in
+        GradientSpinCells(cellSize: cellSize, animated: !reduceMotion, tints: GradientSpin.rowTints,
+                          offsets: (0..<3).map { row in
             (0..<3).map { col in
                 let dx = Double(col - 1)
                 let dy = Double(2 - row)  // distance from bottom-center
@@ -58,7 +68,8 @@ struct MiniSpinner: View {
     ]
 
     var body: some View {
-        GradientSpinCells(cellSize: cellSize, animated: !reduceMotion, offsets: (0..<3).map { row in
+        GradientSpinCells(cellSize: cellSize, animated: !reduceMotion, tints: GradientSpin.rowTints,
+                          offsets: (0..<3).map { row in
             (0..<2).map { col in
                 let ix = Self.ring.firstIndex { $0 == (row, col) } ?? 0
                 return Double(ix) / Double(Self.ring.count)
@@ -74,6 +85,8 @@ struct MiniSpinner: View {
 private struct GradientSpinCells: UIViewRepresentable {
     let cellSize: CGFloat
     let animated: Bool
+    /// The rows' tints, top first (the theme's, so a theme change repaints the cells).
+    let tints: [HexColor]
     /// Each cell's phase offset in periods, by row (top first) and column; a row takes its tint by index.
     let offsets: [[Double]]
 
@@ -83,7 +96,7 @@ private struct GradientSpinCells: UIViewRepresentable {
     func makeUIView(context: Context) -> SpinCellsView { SpinCellsView() }
 
     func updateUIView(_ view: SpinCellsView, context: Context) {
-        view.configure(cellSize: cellSize, gap: gap, offsets: offsets, animated: animated)
+        view.configure(cellSize: cellSize, gap: gap, tints: tints, offsets: offsets, animated: animated)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: SpinCellsView, context: Context) -> CGSize? {
@@ -95,17 +108,17 @@ private struct GradientSpinCells: UIViewRepresentable {
 
 private final class SpinCellsView: UIView {
     private var cells: [[CALayer]] = []
-    private var config: (cellSize: CGFloat, gap: CGFloat, offsets: [[Double]], animated: Bool)?
+    private var config: (cellSize: CGFloat, gap: CGFloat, tints: [HexColor], offsets: [[Double]], animated: Bool)?
 
-    func configure(cellSize: CGFloat, gap: CGFloat, offsets: [[Double]], animated: Bool) {
-        if let config, config.cellSize == cellSize, config.gap == gap, config.offsets == offsets,
-           config.animated == animated { return }
-        config = (cellSize, gap, offsets, animated)
+    func configure(cellSize: CGFloat, gap: CGFloat, tints: [HexColor], offsets: [[Double]], animated: Bool) {
+        if let config, config.cellSize == cellSize, config.gap == gap, config.tints == tints,
+           config.offsets == offsets, config.animated == animated { return }
+        config = (cellSize, gap, tints, offsets, animated)
         cells.joined().forEach { $0.removeFromSuperlayer() }
         cells = offsets.enumerated().map { row, line in
             line.map { _ in
                 let cell = CALayer()
-                cell.backgroundColor = UIColor(GradientSpin.rowTints[row % GradientSpin.rowTints.count]).cgColor
+                cell.backgroundColor = tints.isEmpty ? nil : UIColor(tints[row % tints.count].color).cgColor
                 layer.addSublayer(cell)
                 return cell
             }
@@ -264,10 +277,10 @@ extension ChatIndicator {
     /// is routine); only Done keeps its pop.
     var dotColor: Color {
         switch self {
-        case .working: return Theme.statusWorking.opacity(0.55)     // pink-400
-        case .awaitingInput: return Theme.accent.opacity(0.6)       // indigo
+        case .working: return Theme.statusWorking.opacity(0.55)     // the theme's activity accent
+        case .awaitingInput: return Theme.accent.opacity(0.6)       // the theme accent
         case .errored: return Theme.danger.opacity(0.65)
-        case .completed: return Theme.statusCompleted.opacity(0.9)  // emerald-400
+        case .completed: return Theme.statusCompleted.opacity(0.9)  // the theme's success green
         case .idle: return ink(0.14)
         }
     }

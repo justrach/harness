@@ -49,6 +49,12 @@ pub mod methods {
     pub const GET_GRAFF_COMPACT_AT: &str = "GetGraffCompactAt";
     pub const SET_GRAFF_COMPACT_AT: &str = "SetGraffCompactAt";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
+    /// The device's default autonomy (`read-only` / `workspace` /
+    /// `full-access`), stamped onto every run's sandbox and auto-approve.
+    /// Replies `{ autonomy, chosen }`; `chosen: false` is the untouched
+    /// full-access fallback existing installs keep.
+    pub const GET_AUTONOMY: &str = "GetAutonomy";
+    pub const SET_AUTONOMY: &str = "SetAutonomy";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";

@@ -224,6 +224,10 @@ final class AppModel {
                     launchRoute = .space(String(spec.dropFirst("space:".count)))
                 }
             }
+            // Rig: a draft already typed in the opened session (fold-transition recordings).
+            if let ix = args.firstIndex(of: "-demo-draft"), ix + 1 < args.count, case .chat(let id)? = launchRoute {
+                DraftStore.save(args[ix + 1], for: DraftStore.chatKey(id))
+            }
             if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {
                 launchSheet = args[ix + 1]
             }
@@ -418,6 +422,7 @@ final class AppModel {
             foregrounded()
             return
         }
+        Onboarding.signedInFresh()
         connect(url: url, mode: .codegraff, userId: storedUserId, orgId: org.organizationId,
                 tokens: scoped, devBearer: nil)
     }
@@ -446,6 +451,7 @@ final class AppModel {
         demoPinnedSessionIds = []
         DraftStore.persistsToDisk = false
         phase = .ready
+        setupPresented = args.contains("-setup-flow")
         WatchBridge.shared.modelReady()
     }
 
@@ -528,6 +534,7 @@ final class AppModel {
         store.start()
         startConnectivity()
         phase = .ready
+        setupPresented = Onboarding.isPending
         PushNotifications.shared.signedIn(model: self)
         WatchBridge.shared.modelReady()
     }
@@ -909,9 +916,6 @@ final class AppModel {
                                    roomGen: 2))
             return id
         }
-        // The first session started from the phone is when "tell me when it's
-        // done" makes sense: ask for notification permission then.
-        PushNotifications.shared.askAfterFirstSession()
         if let space {
             return workspace?.createChat(space: space, config: chatConfig, branch: branch, cwd: cwd)
         }
@@ -1018,6 +1022,35 @@ final class AppModel {
         guard let workspace else { throw RelayError.notConnected }
         return try await workspace.setGraffCompactAt(deviceId: deviceId, pct: pct)
     }
+
+    /// Demo mode's autonomy, so the setup and Settings round-trip without a computer.
+    @ObservationIgnored private var demoAutonomy = AutonomySetting(autonomy: .fullAccess, chosen: false)
+
+    /// How much agents on one computer may do without asking (Settings → Autonomy, setup step 3).
+    func autonomy(deviceId: String) async throws -> AutonomySetting {
+        if demo != nil { return demoAutonomy }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.autonomy(deviceId: deviceId)
+    }
+
+    func setAutonomy(deviceId: String, _ autonomy: Autonomy) async throws -> AutonomySetting {
+        if demo != nil {
+            demoAutonomy = AutonomySetting(autonomy: autonomy, chosen: true)
+            return demoAutonomy
+        }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.setAutonomy(deviceId: deviceId, autonomy)
+    }
+
+    /// Switch an agent on for one computer (the setup's optional extras).
+    func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws {
+        if demo != nil { return }
+        guard let workspace else { throw RelayError.notConnected }
+        try await workspace.setHarnessEnabled(deviceId: deviceId, harness: harness, enabled: enabled)
+    }
+
+    /// The first-run setup is on screen (after a fresh sign-in, or `-setup-flow` in demo mode).
+    var setupPresented = false
 
     /// Folder listings the New space browser has loaded, per computer and
     /// path, kept across presentations of the sheet (#420).

@@ -201,6 +201,18 @@ pub fn openai_login(snapshot: &AgentAccountsSnapshot) -> (bool, Option<String>) 
     }
 }
 
+/// Whether a reload of graff's sign-ins changed which providers are signed
+/// in (the model list follows them).
+fn graff_sign_ins_changed(before: &[GraffLoginProvider], after: &[GraffLoginProvider]) -> bool {
+    let signed_in = |rows: &[GraffLoginProvider]| -> std::collections::BTreeSet<String> {
+        rows.iter()
+            .filter(|row| row.signed_in)
+            .map(|row| row.id.clone())
+            .collect()
+    };
+    signed_in(before) != signed_in(after)
+}
+
 /// A graff provider's display name for the sign-in dialog title.
 fn graff_provider_name(id: Option<&str>) -> &'static str {
     if id == Some("chatgpt-new") {
@@ -212,6 +224,15 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
         .map(|(_, name)| *name)
         .unwrap_or("graff")
 }
+
+/// What "Update key" shows: graff keeps API keys on the computer it runs on
+/// (its keychain, a `<PROVIDER>_API_KEY` variable, or the key the metered
+/// Console sign-in minted), and the error names which one it used.
+pub const KEY_REJECTED_NOTICE: &str = "graff's API key for this provider was rejected. Your \
+     sign-in is not affected. Replace the key on this computer with `graff key set <provider> \
+     <key>`, or remove it (or its <PROVIDER>_API_KEY variable) so graff uses the sign-in; or, if \
+     it came from the Console sign-in, run `graff login console` again. The error says which key \
+     it used.";
 
 /// Where OpenAI API keys are made: the other way to use graff's ChatGPT
 /// models when plan usage is off.
@@ -392,6 +413,9 @@ pub struct AccountsPage {
     login_url_copied: bool,
     copy_task: Option<Task<()>>,
     error: Option<SharedString>,
+    /// A failed run's "Update key": the provider rejected graff's API key, so
+    /// the page says where keys live (Harness doesn't edit them) until dismissed.
+    key_notice: Option<SharedString>,
     code_input: Entity<ComposerInput>,
     /// The code field takes the keys on the paste step's first frame.
     focus_code: bool,
@@ -445,6 +469,7 @@ impl AccountsPage {
             login_url_copied: false,
             copy_task: None,
             error: None,
+            key_notice: None,
             code_input,
             focus_code: false,
             load_task: None,
@@ -495,6 +520,8 @@ impl AccountsPage {
         // Another device's sign-ins: never show the last device's rows.
         self.graff_logins = Loadable::Idle;
         self.error = None;
+        // The notice was about the last device's key.
+        self.key_notice = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
 
@@ -756,17 +783,34 @@ impl AccountsPage {
                 .call(methods::LIST_GRAFF_LOGINS, params)
                 .await;
             this.update(cx, |page, cx| {
-                page.graff_logins = match result {
+                let next = match result {
                     Ok(value) => match serde_json::from_value::<Vec<GraffLoginProvider>>(value) {
                         Ok(rows) => Loadable::Ready(rows),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                page.set_graff_logins(next, cx);
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Show a reloaded sign-in list. A provider signed in or out (Claude
+    /// Agent opted in, say) changes graff's model list, so the composers
+    /// reload theirs: a new chat must see `claude-agent/` rows to prefer them.
+    fn set_graff_logins(
+        &mut self,
+        next: Loadable<Vec<GraffLoginProvider>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let (Loadable::Ready(before), Loadable::Ready(after)) = (&self.graff_logins, &next)
+            && graff_sign_ins_changed(before, after)
+        {
+            crate::pickers::bump_graff_models(cx);
+        }
+        self.graff_logins = next;
     }
 
     fn load_codegraff_usage(&mut self, cx: &mut Context<Self>) {
@@ -1422,6 +1466,7 @@ impl AccountsPage {
         cx: &mut Context<Self>,
     ) {
         self.set_target_device(target, cx);
+        self.key_notice = None;
         if let Some(harness) = harness.filter(|harness| {
             PROVIDERS
                 .iter()
@@ -1430,6 +1475,22 @@ impl AccountsPage {
             self.start_login(harness, cx);
         }
         cx.notify();
+    }
+
+    /// A failed run's "Update key" (the provider rejected the API key graff
+    /// used; the sign-in is fine): `target`'s Accounts, with where to replace
+    /// or remove the key. Never starts a sign-in: signing in again doesn't fix
+    /// a bad key, and graff would keep preferring it.
+    pub(crate) fn update_key(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        self.set_target_device(target, cx);
+        self.key_notice = Some(KEY_REJECTED_NOTICE.into());
+        cx.notify();
+    }
+
+    /// The "Update key" notice, for the shell's tests.
+    #[cfg(test)]
+    pub(crate) fn key_notice(&self) -> Option<&str> {
+        self.key_notice.as_deref()
     }
 
     /// The device whose logins are shown (`None`: this one), and the flow's
@@ -1464,7 +1525,7 @@ impl AccountsPage {
                     serde_json::from_value::<Vec<GraffLoginProvider>>(value)
                         .map_err(|e| harness_rpc::RpcError::Failed(e.to_string()))
                 }) {
-                    Ok(rows) => page.graff_logins = Loadable::Ready(rows),
+                    Ok(rows) => page.set_graff_logins(Loadable::Ready(rows), cx),
                     Err(err) => page.error = Some(format!("Sign out failed: {err}").into()),
                 }
                 cx.notify();
@@ -3342,6 +3403,17 @@ impl Render for AccountsPage {
                                         .cursor_pointer()
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.error = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .when_some(self.key_notice.clone(), |el, message| {
+                                el.child(
+                                    widgets::warning_strip(&theme, message)
+                                        .id("accounts-key-notice")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.key_notice = None;
                                             cx.notify();
                                         })),
                                 )

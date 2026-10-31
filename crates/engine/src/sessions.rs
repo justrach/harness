@@ -498,10 +498,15 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return false;
         }
+        // Compare what dispatch would actually run: the live runtime was
+        // baked from a request carrying the device's autonomy, not the
+        // sandbox the sender stamped.
+        let mut request = request.clone();
+        self.inner.registry.autonomy().apply(&mut request);
         lock(&self.inner.runs).get(chat_id).is_some_and(|h| {
             !(h.steerable
                 && h.runtime_config
-                    .can_route(harness_id, request, h.steers_attachments))
+                    .can_route(harness_id, &request, h.steers_attachments))
         })
     }
 
@@ -581,6 +586,12 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        // The device's default autonomy decides what every run may do,
+        // whatever sandbox the sender stamped (clients have always sent
+        // workspace-write while agents ran unattended). Stamped before the
+        // runtime-config comparison below, so changing the setting replaces
+        // a live runtime on its next send instead of steering into it.
+        self.inner.registry.autonomy().apply(&mut request);
         // Imported Claude Code / Codex chats always run in graff — callers
         // that bypass the doc host (MCP send_message, crash recovery) reach
         // dispatch with the source harness still named.

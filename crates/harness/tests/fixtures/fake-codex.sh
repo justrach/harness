@@ -321,8 +321,8 @@ case "$turnline" in
   ;;
 
 *scenario:approve*)
-  # Wire policy is always "never" (unattended parity with the Claude
-  # adapter); the requests below are the STRAY-approval path, which must
+  # Full access keeps the wire policy at "never" (unattended parity with the
+  # Claude adapter); the requests below are the STRAY-approval path, which must
   # still round-trip as input questions.
   has "$thread_line" '"approvalPolicy":"never"' ||
     { fail_turn "$tid" "thread approvalPolicy should be never"; exit 0; }

@@ -6,6 +6,7 @@
 
 import ActivityKit
 import Foundation
+import UserNotifications
 
 /// One session as the Live Activity sees it.
 struct LiveActivitySnapshot: Hashable {
@@ -119,6 +120,23 @@ final class LiveActivities {
     /// A Live Activity is up, so its state may still need to follow the session.
     var isShowing: Bool { !activities.isEmpty }
 
+    /// iOS answers the first Live Activity with the system's notification
+    /// prompt while notifications are undecided, which reads as a cold ask at
+    /// launch. Nothing starts until setup or Settings has asked; until then
+    /// this is checked again on each sync.
+    private var notificationsDecided = false
+    private var checkingNotifications = false
+
+    private func checkNotificationsDecided() {
+        guard !notificationsDecided, !checkingNotifications else { return }
+        checkingNotifications = true
+        Task { @MainActor in
+            let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+            notificationsDecided = status != .notDetermined
+            checkingNotifications = false
+        }
+    }
+
     init() {
         // Adopt activities from an earlier launch instead of doubling them.
         for activity in Activity<SessionActivityAttributes>.activities
@@ -135,6 +153,8 @@ final class LiveActivities {
         for step in LiveActivityPlan.steps(showing: showing, sessions: sessions) {
             switch step {
             case .start(let chatId):
+                checkNotificationsDecided()
+                guard notificationsDecided else { continue }
                 guard let session = byId[chatId], let state = session.state else { continue }
                 if let activity = try? Activity.request(attributes: session.attributes,
                                                         content: Self.content(state), pushType: nil) {
