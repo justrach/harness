@@ -454,7 +454,7 @@ struct NewSessionView: View {
                     showPicker = true
                 }
                 if let reasoning {
-                    ComposerChip(label: HarnessCatalog.reasoningLabel(reasoning)) {
+                    ComposerChip(label: ReasoningSlider.label(reasoning, levels: selectedModel.reasoningLevels)) {
                         focused = false
                         showTraitPicker = true
                     }
@@ -1006,32 +1006,57 @@ struct TraitPickerSheet: View {
     @Binding var reasoning: String?
     let levels: [String]
     @State private var initialReasoning: String?
+    /// The level under the thumb while it moves; `reasoning` takes it once the thumb settles.
+    @State private var shown: String?
 
     init(reasoning: Binding<String?>, levels: [String]) {
         self._reasoning = reasoning
         self.levels = levels
         self._initialReasoning = State(initialValue: reasoning.wrappedValue)
+        self._shown = State(initialValue: reasoning.wrappedValue)
     }
 
     private var selectionChanged: Bool { reasoning != initialReasoning }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
-                    SheetLabel("Effort")
-                    ForEach(levels, id: \.self) { level in
-                        PickRow(title: HarnessCatalog.reasoningLabel(level),
-                                subtitle: Self.effortHint(level),
-                                selected: reasoning == level) {
-                            UISelectionFeedbackGenerator().selectionChanged()
-                            reasoning = level
-                        }
-                    }
+            // The desktop's reasoning step: a slider from Faster to Deeper (ReasoningSlider), the level's
+            // name above it and its hint below.
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text(ReasoningSlider.title(levels))
+                    Spacer()
+                    Text(shown.map { ReasoningSlider.label($0, levels: levels) } ?? "Model default")
+                        .foregroundStyle(Theme.textMuted)
+                        .contentTransition(.numericText())
                 }
-                .padding(20)
-                .padding(.bottom, 12)
+                .font(Theme.sans(15))
+                .foregroundStyle(Theme.text)
+                if ReasoningSlider.hasSlider(levels) {
+                    VStack(spacing: 8) {
+                        ReasoningTrack(levels: levels, selection: $shown) { reasoning = $0 }
+                        HStack {
+                            Text(ReasoningSlider.ends(levels).low)
+                            Spacer()
+                            Text(ReasoningSlider.ends(levels).high)
+                        }
+                        .font(Theme.sans(12))
+                        .foregroundStyle(Theme.textMuted)
+                    }
+                } else {
+                    Text("This model has no adjustable reasoning level.")
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.textMuted)
+                }
+                if let hint = shown.flatMap(Self.effortHint), !ReasoningSlider.isBinary(levels) {
+                    Text(hint)
+                        .font(Theme.sans(13))
+                        .foregroundStyle(Theme.textFaint)
+                }
+                Spacer(minLength: 0)
             }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(SheetStyle.panel)
             .navigationTitle("Reasoning")
             .navigationBarTitleDisplayMode(.inline)
@@ -1040,7 +1065,7 @@ struct TraitPickerSheet: View {
                                  identifier: "reasoning-picker-confirm") { dismiss() }
             }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.height(300), .medium])
         .presentationDragIndicator(.visible)
         .presentationCornerRadius(32)
         .harnessAppearance()

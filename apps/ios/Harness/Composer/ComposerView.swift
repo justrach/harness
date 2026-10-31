@@ -488,7 +488,7 @@ struct ComposerView: View {
                     showModelPicker = true
                 }
                 if let currentReasoning {
-                    ComposerChip(label: HarnessCatalog.reasoningLabel(currentReasoning)) {
+                    ComposerChip(label: ReasoningSlider.label(currentReasoning, levels: currentModel.reasoningLevels)) {
                         showTraitPicker = true
                     }
                 }
@@ -598,6 +598,9 @@ struct ComposerView: View {
             if model.launchSheet == "config" {
                 model.launchSheet = nil
                 showModelPicker = true
+            } else if model.launchSheet == "reasoning" {
+                model.launchSheet = nil
+                showTraitPicker = true
             }
         }
         .onDisappear {
