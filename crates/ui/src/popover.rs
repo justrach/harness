@@ -330,8 +330,20 @@ pub const MENU_GAP: f32 = 2.0;
 /// The four-pixel inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
 pub const CARD_INSET: f32 = 4.0;
+/// Concentric corners: an element inset by `border + padding` inside a
+/// surface rounded at `outer` is rounded at `outer - border - padding`, so
+/// both curves share one center. Never below zero.
+pub const fn nested_radius(outer: f32, border: f32, padding: f32) -> f32 {
+    let inner = outer - border - padding;
+    if inner > 0.0 { inner } else { 0.0 }
+}
+/// The surface radius that keeps an inner element's `inner` corners
+/// concentric at `border + padding` in: the inverse of [`nested_radius`].
+pub const fn outer_radius(inner: f32, border: f32, padding: f32) -> f32 {
+    inner + border + padding
+}
 /// Concentric corners: rows sit inside both the card's 1px border and padding.
-pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - 1.0 - CARD_INSET;
+pub const MENU_ITEM_RADIUS: f32 = nested_radius(CARD_RADIUS, 1.0, CARD_INSET);
 pub const PALETTE_ITEM_RADIUS: f32 = 14.0 - CARD_INSET;
 
 pub fn surface_bg(theme: &Theme) -> gpui::Hsla {

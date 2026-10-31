@@ -35,6 +35,9 @@ pub use crate::context_usage::card as usage_card;
 use crate::motion::{AnimationExt, CubicBezier};
 use crate::state::AppState;
 use crate::theme::Theme;
+use crate::typography::{
+    CAP_CENTER_NUDGE, TEXT_BODY, TEXT_CAPTION, TEXT_TITLE, TabularNums, WEIGHT_STRONG,
+};
 
 /// Segments across the full window. Each is 4 px wide with a 2 px gap.
 pub const SEGMENTS: usize = 62;
@@ -48,11 +51,14 @@ const LEGEND_GAP: f32 = 12.0;
 /// Tool output is counted the way graff counts it.
 const BYTES_PER_TOKEN: u64 = 4;
 
-/// `cubic-bezier(0.2, 0.8, 0.2, 1)`: fast out, long settle.
-pub const EASE_SETTLE: CubicBezier = CubicBezier::new(0.2, 0.8, 0.2, 1.0);
-const TRANSITION_MS: u64 = 720;
+/// The app's shared ease-out, `cubic-bezier(0.22, 1, 0.36, 1)`: moves at
+/// once, lands gently.
+pub const EASE_SETTLE: CubicBezier = crate::motion::EASE_OUT_QUINT;
+const TRANSITION_MS: u64 = 460;
 /// Each later block starts this much after the one before it.
-const CASCADE_STAGGER_MS: u64 = 70;
+const CASCADE_STAGGER_MS: u64 = 45;
+/// The status line's fade up when its text changes.
+const STATUS_FADE_MS: u64 = 240;
 
 /// What the oldest block of the context holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -540,7 +546,10 @@ fn odometer(from: &str, to: &str, rising: bool, t: f32, color: Hsla) -> Div {
         .h(px(line))
         .overflow_hidden()
         .text_color(color)
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(WEIGHT_STRONG)
+        // Every digit the same width, so a rolling digit never nudges its
+        // neighbours.
+        .tabular_nums()
         .children(from_chars.into_iter().zip(to_chars).map(move |(a, b)| {
             let glyph = |c: Option<char>| {
                 div()
@@ -585,6 +594,9 @@ fn legend_marker(shape: History, color: Hsla, t: f32) -> Div {
         .flex()
         .items_center()
         .justify_center()
+        // Centered on the label's letters, not its line box.
+        .relative()
+        .top(px(CAP_CENTER_NUDGE))
         .opacity(t);
     match shape {
         History::Chat => slot.child(div().size(px(8.0)).rounded(px(4.0)).bg(color)),
@@ -675,8 +687,9 @@ fn trajectory_strip(trajectory: &crate::context_trajectory::Trajectory, theme: &
         .gap(px(4.0))
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(px(TEXT_CAPTION))
                 .text_color(theme.text_faint)
+                .tabular_nums()
                 .child(SharedString::from(caption)),
         )
         .child(
@@ -688,6 +701,92 @@ fn trajectory_strip(trajectory: &crate::context_trajectory::Trajectory, theme: &
                 .gap(px(SEGMENT_GAP))
                 .children(columns),
         )
+}
+
+/// One measured source of graff's savings: label left, count right.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavingsRow {
+    pub label: &'static str,
+    pub tokens: u64,
+    /// Shown for context, not added to the total.
+    pub counted: bool,
+}
+
+/// graff's measured savings as rows, skipping sources that saved nothing.
+/// The total is what stayed out of the context; cache reads were in the
+/// context, only cheaper, so they are listed but not counted.
+pub fn savings_rows(savings: harness_proto::ContextSavings) -> Vec<SavingsRow> {
+    [
+        ("Tool output kept in files", savings.handle_tokens(), true),
+        ("Freed by compaction", savings.compacted_tokens, true),
+        (
+            "Read from the provider's cache",
+            savings.cache_read_tokens,
+            false,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, tokens, _)| *tokens > 0)
+    .map(|(label, tokens, counted)| SavingsRow {
+        label,
+        tokens,
+        counted,
+    })
+    .collect()
+}
+
+/// "Saved by graff": the tokens graff kept out of this context, then one
+/// row per source. Nothing when graff reported no savings.
+fn savings_section(savings: harness_proto::ContextSavings, theme: &Theme) -> Option<Div> {
+    let rows = savings_rows(savings);
+    if rows.is_empty() {
+        return None;
+    }
+    let line = |label: SharedString, value: SharedString, strong: bool| {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .text_color(if strong { theme.text } else { theme.text_muted })
+                    .when(strong, |d| d.font_weight(WEIGHT_STRONG))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_color(if strong { theme.text } else { theme.text_faint })
+                    .when(strong, |d| d.font_weight(WEIGHT_STRONG))
+                    .child(value),
+            )
+    };
+    let kept = savings.kept_out_tokens();
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .pt(px(8.0))
+            .border_t_1()
+            .border_color(theme.text_faint.opacity(0.18))
+            .text_size(px(TEXT_BODY))
+            .tabular_nums()
+            .child(line(
+                "Saved by graff".into(),
+                format!("{} tokens", compact_count(kept)).into(),
+                true,
+            ))
+            .children(rows.into_iter().map(|row| {
+                let label = if row.counted {
+                    SharedString::from(row.label)
+                } else {
+                    SharedString::from(format!("{} (not counted)", row.label))
+                };
+                line(label, compact_count(row.tokens).into(), false)
+            })),
+    )
 }
 
 impl Render for ContextWindowCard {
@@ -750,14 +849,14 @@ impl Render for ContextWindowCard {
                 .flex()
                 .items_center()
                 .justify_between()
-                .text_size(px(13.0))
+                .text_size(px(TEXT_TITLE))
                 .child(
                     div()
                         .flex()
                         .gap(px(4.0))
                         .child(
                             div()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(WEIGHT_STRONG)
                                 .text_color(theme.text)
                                 .child("Context"),
                         )
@@ -773,6 +872,7 @@ impl Render for ContextWindowCard {
                         .flex()
                         .items_center()
                         .gap(px(3.0))
+                        .tabular_nums()
                         .child(counter)
                         .child(div().text_color(theme.text_faint).child(SharedString::from(
                             format!("of {}", compact_count(to.window)),
@@ -904,7 +1004,8 @@ impl Render for ContextWindowCard {
             .flex_wrap()
             .gap_x(px(LEGEND_GAP))
             .gap_y(px(8.0))
-            .text_size(px(12.0))
+            .text_size(px(TEXT_BODY))
+            .tabular_nums()
             .children(entries);
 
         // Status line: fades up whenever its text changes.
@@ -914,8 +1015,9 @@ impl Render for ContextWindowCard {
             .id(SharedString::from(format!(
                 "context-window-status-{status}"
             )))
-            .text_size(px(12.0))
+            .text_size(px(TEXT_BODY))
             .text_color(theme.text_faint)
+            .tabular_nums()
             .child(SharedString::from(status));
         let status_el = if reduced {
             status_el.into_any_element()
@@ -923,7 +1025,7 @@ impl Render for ContextWindowCard {
             status_el
                 .with_animation(
                     SharedString::from(status_key),
-                    crate::motion::MotionSpec::new(360, EASE_SETTLE).animation(),
+                    crate::motion::MotionSpec::new(STATUS_FADE_MS, EASE_SETTLE).animation(),
                     |el, t| el.relative().opacity(t).top(px(5.0 * (1.0 - t))),
                 )
                 .into_any_element()
@@ -939,14 +1041,22 @@ impl Render for ContextWindowCard {
                 .map(|t| trajectory_strip(t, &theme))
         };
 
+        let savings = self
+            .state
+            .read(cx)
+            .context_usage
+            .and_then(|usage| usage.savings)
+            .and_then(|savings| savings_section(savings, &theme));
+
         card.child(header)
             .child(bar)
             .child(legend)
             .child(status_el)
+            .children(savings)
             .children(trajectory)
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(px(TEXT_CAPTION))
                     .text_color(theme.text_faint)
                     .whitespace_nowrap()
                     .child(if to.history == History::Sealed {
@@ -1207,6 +1317,30 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(segment_counts(&small), vec![(Slot::Files, 1.0)]);
+    }
+
+    #[test]
+    fn savings_rows_list_measured_sources_and_skip_the_cache_in_the_total() {
+        let savings = harness_proto::ContextSavings {
+            handle_bytes: 100_000,
+            compacted_tokens: 77_000,
+            cache_read_tokens: 40_000,
+        };
+        let rows = savings_rows(savings);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].tokens, 25_000);
+        assert!(!rows[2].counted);
+        assert_eq!(savings.kept_out_tokens(), 102_000);
+        assert!(savings_rows(harness_proto::ContextSavings::default()).is_empty());
+    }
+
+    // Short motion: the whole cascade under 800 ms, the status fade 250 ms.
+    const _: () = assert!(TRANSITION_MS + CASCADE_STAGGER_MS * Slot::ALL.len() as u64 <= 800);
+    const _: () = assert!(STATUS_FADE_MS <= 250);
+
+    #[test]
+    fn motion_uses_the_shared_ease_out() {
+        assert_eq!(EASE_SETTLE, crate::motion::EASE_OUT_QUINT);
     }
 
     #[test]

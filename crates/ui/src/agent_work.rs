@@ -31,14 +31,17 @@ use gpui::{
 use harness_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
 use harness_proto::{COMPACTION_TOOL_NAME, ToolCall};
 
+use crate::context_usage::{HitSlop, hit_area};
 use crate::motion::{AnimationExt, CubicBezier, MotionSpec};
+use crate::popover::outer_radius;
 use crate::state::AppState;
 use crate::theme::Theme;
+use crate::typography::{CAP_CENTER_NUDGE, TEXT_BODY, TEXT_TITLE, TabularNums};
 
 /// One spinner turn: linear, clockwise, shared by every spinner.
 pub const SPIN: MotionSpec = MotionSpec::new(1000, CubicBezier::new(0.0, 0.0, 1.0, 1.0));
 /// Enter transition for a substep or a step changing state.
-pub const ENTER: MotionSpec = MotionSpec::new(200, crate::motion::EASE_OUT);
+pub const ENTER: MotionSpec = MotionSpec::new(180, crate::motion::EASE_OUT_QUINT);
 /// The spinner's gap, in turns (54 degrees).
 const SPINNER_GAP: f32 = 0.15;
 /// Substeps shown under the active step, newest last.
@@ -46,6 +49,9 @@ pub const MAX_SUBSTEPS: usize = 3;
 /// Step dots in the composer footer before it switches to "3/9".
 const MAX_FOOTER_DOTS: usize = 6;
 const TITLE_MAX: usize = 44;
+/// Top inset of an agent row's 18 px glyph, so it centers on the title's
+/// letters rather than the top of its line box.
+const AGENT_GLYPH_TOP: f32 = 2.0;
 
 // Geometry of the timeline (px).
 const STEP_ROW: f32 = 34.0;
@@ -54,6 +60,12 @@ const ICON: f32 = 18.0;
 const SUB_X: f32 = 25.0;
 const TEXT_X: f32 = 40.0;
 const CARD_W: f32 = 320.0;
+const CARD_PAD: f32 = 16.0;
+/// Tool chips: the shared small-control radius.
+const CHIP_RADIUS: f32 = Theme::CONTROL_RADIUS;
+/// The card's corners are concentric with the chips that sit in its corner:
+/// chip radius + 1 px border + padding.
+const CARD_RADIUS: f32 = outer_radius(CHIP_RADIUS, 1.0, CARD_PAD);
 
 /// Where a step stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -724,7 +736,7 @@ pub fn tag(label: impl Into<SharedString>, text: Hsla, bg: Hsla) -> AnyElement {
         .py(px(2.0))
         .rounded_full()
         .bg(bg)
-        .text_size(px(12.0))
+        .text_size(px(TEXT_BODY))
         .text_color(text)
         .child(label.into())
         .into_any_element()
@@ -866,12 +878,17 @@ pub fn timeline(steps: &[Step], p: &Palette, phase: f32) -> AnyElement {
             StepState::Done => step.duration_ms.map(|ms| {
                 div()
                     .text_color(p.faint)
+                    .tabular_nums()
+                    .relative()
+                    .top(px(-CAP_CENTER_NUDGE))
                     .child(SharedString::from(duration_label(ms)))
                     .into_any_element()
             }),
             StepState::Active => step.status.map(|word| {
                 div()
                     .text_color(p.blue_text)
+                    .relative()
+                    .top(px(-CAP_CENTER_NUDGE))
                     .child(SharedString::from(word))
                     .into_any_element()
             }),
@@ -894,11 +911,21 @@ pub fn timeline(steps: &[Step], p: &Palette, phase: f32) -> AnyElement {
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_size(px(14.0))
+                    .text_size(px(TEXT_TITLE))
                     .text_color(title_color)
+                    // The glyph and its connectors stay on the row's center;
+                    // the title rises to put its letters there.
+                    .relative()
+                    .top(px(-CAP_CENTER_NUDGE))
                     .child(SharedString::from(step.title.clone())),
             )
-            .children(trail.map(|t| div().flex_none().pl(px(10.0)).text_size(px(13.0)).child(t)));
+            .children(trail.map(|t| {
+                div()
+                    .flex_none()
+                    .pl(px(10.0))
+                    .text_size(px(TEXT_BODY))
+                    .child(t)
+            }));
         rows.push(enter(
             ElementId::Name(format!("agent-step-{i}-{:?}", step.state).into()),
             row,
@@ -932,8 +959,10 @@ pub fn timeline(steps: &[Step], p: &Palette, phase: f32) -> AnyElement {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .text_size(px(13.0))
+                        .text_size(px(TEXT_BODY))
                         .text_color(p.muted)
+                        .relative()
+                        .top(px(-CAP_CENTER_NUDGE))
                         .child(SharedString::from(sub.title.clone())),
                 );
             rows.push(enter(
@@ -993,12 +1022,12 @@ pub fn step_dots(
 /// The status legend: Running, Done, Waiting.
 pub fn legend(p: &Palette, phase: f32) -> AnyElement {
     let item = |glyph: AnyElement, label: &'static str, color: Hsla| {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(glyph)
-            .child(div().text_size(px(13.0)).text_color(color).child(label))
+        div().flex().items_center().gap(px(6.0)).child(glyph).child(
+            div()
+                .text_size(px(TEXT_BODY))
+                .text_color(color)
+                .child(label),
+        )
     };
     div()
         .flex()
@@ -1027,16 +1056,18 @@ pub fn tool_chips(tools: &[ToolChip], p: &Palette) -> AnyElement {
                 .gap(px(6.0))
                 .px(px(8.0))
                 .py(px(3.0))
-                .rounded(px(6.0))
+                .rounded(px(CHIP_RADIUS))
                 .bg(p.chip_bg)
                 .border(px(1.0))
                 .border_color(p.chip_border)
-                .text_size(px(13.0))
+                .text_size(px(TEXT_BODY))
                 .text_color(p.text)
                 .child(
                     crate::icons::icon(tool.icon)
                         .size(px(14.0))
-                        .text_color(p.muted),
+                        .text_color(p.muted)
+                        .relative()
+                        .top(px(CAP_CENTER_NUDGE)),
                 )
                 .child(SharedString::from(tool.label.clone()))
         }))
@@ -1052,7 +1083,8 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
         .flex()
         .items_center()
         .gap(px(5.0))
-        .text_size(px(15.0))
+        .text_size(px(TEXT_TITLE))
+        .tabular_nums()
         .child(div().text_color(p.text).child(SharedString::from(count)))
         .child(div().text_color(p.muted).child(word));
     let rows = work.agents.iter().map(|agent| {
@@ -1070,7 +1102,8 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
             .flex()
             .items_start()
             .gap(px(12.0))
-            .child(div().pt(px(2.0)).child(glyph))
+            // Centers the glyph on the title's letters (optical, measured).
+            .child(div().pt(px(AGENT_GLYPH_TOP)).child(glyph))
             .child(
                 div()
                     .flex_1()
@@ -1082,7 +1115,7 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
                         div()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .text_size(px(15.0))
+                            .text_size(px(TEXT_TITLE))
                             .text_color(p.text)
                             .child(SharedString::from(agent.title.clone())),
                     )
@@ -1090,7 +1123,7 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
                         div()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .text_size(px(13.0))
+                            .text_size(px(TEXT_BODY))
                             .text_color(detail_color)
                             .child(SharedString::from(agent.detail.clone())),
                     ),
@@ -1110,8 +1143,8 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
 pub fn card(p: &Palette) -> gpui::Div {
     div()
         .w(px(CARD_W))
-        .p(px(16.0))
-        .rounded(px(20.0))
+        .p(px(CARD_PAD))
+        .rounded(px(CARD_RADIUS))
         .bg(p.card)
         .border(px(1.0))
         .border_color(p.card_border)
@@ -1180,7 +1213,11 @@ pub fn footer_chip(
                 } else {
                     check_dot(12.0, &p)
                 })
-                .child(SharedString::from(format!("{done}/{}", work.steps.len())))
+                .child(
+                    div()
+                        .tabular_nums()
+                        .child(SharedString::from(format!("{done}/{}", work.steps.len()))),
+                )
                 .into_any_element()
         }
         None => {
@@ -1194,23 +1231,22 @@ pub fn footer_chip(
                 } else {
                     check_dot(12.0, &p)
                 })
-                .child(SharedString::from(count))
+                .child(div().tabular_nums().child(SharedString::from(count)))
                 .into_any_element()
         }
     };
+    let pill = div()
+        .flex()
+        .items_center()
+        .h(px(24.0))
+        .px(px(6.0))
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .text_size(px(TEXT_BODY))
+        .text_color(theme.text_muted)
+        .group_hover("agent-work", |s| s.bg(crate::theme::ink(0.05)))
+        .child(body);
     Some(
-        div()
-            .id("agent-work")
-            .flex_none()
-            .flex()
-            .items_center()
-            .h(px(24.0))
-            .px(px(6.0))
-            .rounded(px(6.0))
-            .text_size(px(12.0))
-            .text_color(theme.text_muted)
-            .hover(|s| s.bg(crate::theme::ink(0.05)))
-            .child(body)
+        hit_area("agent-work", "agent-work", HitSlop::AGENT_WORK, pill)
             .tooltip(move |_, cx| hover_card(state.clone(), cx))
             .into_any_element(),
     )
