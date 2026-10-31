@@ -152,6 +152,33 @@ fn route(model: &Model) -> &str {
         .map(|(route, _)| route)
         .unwrap_or_else(|| model_maker(model).unwrap_or("other"))
 }
+/// One headed section per route (`claude-agent/…` → "Claude Agent"), in
+/// first-appearance order except that Claude Agent's leads Anthropic's.
+fn route_sections(flat: &[ModelRowData]) -> Vec<ModelRowData> {
+    let mut routes = Vec::<&str>::new();
+    for row in flat {
+        let id = route(&row.model);
+        if !routes.contains(&id) {
+            routes.push(id);
+        }
+    }
+    super::claude_agent_before_anthropic(&mut routes, |route, id| *route == id);
+    let mut rows = Vec::with_capacity(flat.len() + routes.len());
+    for id in routes {
+        let mut section = flat
+            .iter()
+            .filter(|r| route(&r.model) == id)
+            .cloned()
+            .peekable();
+        if let Some(first) = section.peek() {
+            let mut header = first.clone();
+            header.header = Some(provider(id).0.to_owned().into());
+            rows.push(header);
+        }
+        rows.extend(section);
+    }
+    rows
+}
 fn provider(id: &str) -> (&str, &'static str) {
     PROVIDERS
         .iter()
@@ -342,32 +369,7 @@ impl Pickers {
             }
         }
         let grouped = self.model_rail == ModelRail::Harness && key.query.is_empty();
-        let rows = if grouped {
-            let mut routes = Vec::<String>::new();
-            for row in &flat {
-                let id = route(&row.model);
-                if !routes.iter().any(|r| r == id) {
-                    routes.push(id.into());
-                }
-            }
-            let mut rows = Vec::new();
-            for id in routes {
-                let mut section = flat
-                    .iter()
-                    .filter(|r| route(&r.model) == id)
-                    .cloned()
-                    .peekable();
-                if let Some(first) = section.peek() {
-                    let mut header = first.clone();
-                    header.header = Some(provider(&id).0.to_owned().into());
-                    rows.push(header);
-                }
-                rows.extend(section);
-            }
-            rows
-        } else {
-            flat
-        };
+        let rows = if grouped { route_sections(&flat) } else { flat };
         let rows = std::sync::Arc::new(rows);
         *self.model_rows_cache.borrow_mut() = Some((key, rows.clone()));
         rows
@@ -1410,6 +1412,81 @@ impl Pickers {
             bounds.left() + bounds.size.width * percent.unwrap_or(slider.percentage().end),
             bounds.center().y,
         ))
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    fn row(id: &str) -> ModelRowData {
+        let label = id.split_once('/').map_or(id, |(_, name)| name);
+        ModelRowData {
+            harness: HarnessId::Graff,
+            harness_name: "graff".into(),
+            model: Model {
+                id: id.into(),
+                label: label.into(),
+                description: None,
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                maker: Some("anthropic".into()),
+                billing: Some("plan".into()),
+            },
+            selected_only: false,
+            header: None,
+        }
+    }
+
+    #[test]
+    fn claude_agent_models_get_their_own_section_ahead_of_anthropic() {
+        // graff's order: the current Anthropic model first, then Claude
+        // Agent's rows, then the rest of Anthropic's (same names, and more).
+        let flat: Vec<ModelRowData> = [
+            "anthropic/claude-opus-5",
+            "claude-agent/claude-opus-5-5",
+            "claude-agent/claude-opus-5",
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-opus-4-8",
+            "codex/gpt-6-sol",
+        ]
+        .into_iter()
+        .map(row)
+        .collect();
+        let rows = route_sections(&flat);
+        let shown: Vec<String> = rows
+            .iter()
+            .map(|r| match &r.header {
+                Some(title) => format!("# {title}"),
+                None => r.model.id.clone(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "# Claude Agent",
+                "claude-agent/claude-opus-5-5",
+                "claude-agent/claude-opus-5",
+                "# Anthropic",
+                "anthropic/claude-opus-5",
+                "anthropic/claude-opus-5-5",
+                "anthropic/claude-opus-4-8",
+                "# Codex / ChatGPT",
+                "codex/gpt-6-sol",
+            ]
+        );
+        // Both headers wear the Claude mark.
+        for title in ["Claude Agent", "Anthropic"] {
+            let header = rows
+                .iter()
+                .find(|r| r.header.as_deref() == Some(title))
+                .unwrap();
+            assert_eq!(provider(route(&header.model)).1, icons::CLAUDE_MARK);
+        }
+        // Claude Agent already ahead: the order stands.
+        let rows = route_sections(&flat[1..3]);
+        assert_eq!(rows[0].header.as_deref(), Some("Claude Agent"));
+        assert_eq!(rows.len(), 3);
     }
 }
 

@@ -1588,8 +1588,14 @@ impl Pickers {
                 return Some(chat_mode::UNAVAILABLE_CHIP.to_owned());
             }
         }
+        let catalog = self
+            .effective_harness(cx)
+            .and_then(|harness| self.models.get(&harness))
+            .and_then(Loadable::ready)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         self.selected_model(cx)
-            .map(|model| model.label.clone())
+            .map(|model| chip_model_label(model, catalog))
             .or_else(|| {
                 let remembered = self
                     .effective_harness(cx)
@@ -6299,6 +6305,7 @@ fn scoped_model_rows<'a>(
                 .iter()
                 .partition(|m| is_favorite(descriptor.id, &m.id));
             let mut sections = provider_sections(&rest);
+            claude_agent_before_anthropic(&mut sections, |(provider, _), id| *provider == Some(id));
             // The user's own plan logins lead; stable, so sections of one
             // kind keep their first-appearance order.
             sections.sort_by_key(|(_, models)| {
@@ -6383,6 +6390,41 @@ fn provider_sections<'a>(models: &[&'a Model]) -> Vec<(Option<&'a str>, Vec<&'a 
         sections.push((None, unprefixed));
     }
     sections
+}
+
+/// graff lists Claude Agent's models under the same names as Anthropic's
+/// (`claude-agent/claude-opus-5`, `anthropic/claude-opus-5`). The section of
+/// the current model leads, so with an Anthropic model current, Claude
+/// Agent's section sat below a run of identically named Anthropic rows and
+/// read as missing. Claude Agent's section goes right before Anthropic's
+/// (a new graff chat prefers it too); everything else keeps its order.
+fn claude_agent_before_anthropic<T>(sections: &mut Vec<T>, is: impl Fn(&T, &str) -> bool) {
+    let agent = sections.iter().position(|s| is(s, "claude-agent"));
+    let anthropic = sections.iter().position(|s| is(s, "anthropic"));
+    if let (Some(agent), Some(anthropic)) = (agent, anthropic)
+        && agent > anthropic
+    {
+        let section = sections.remove(agent);
+        sections.insert(anthropic, section);
+    }
+}
+
+/// The chip's name for `model`. When the list offers the same name through
+/// another provider (Claude Agent and Anthropic both list `claude-opus-5`),
+/// the bare name can't say which one runs, so the provider follows it.
+fn chip_model_label(model: &Model, models: &[Model]) -> String {
+    let route = |id: &str| id.split_once('/').map(|(route, _)| route.to_owned());
+    let Some(own) = route(&model.id).filter(|r| !r.is_empty()) else {
+        return model.label.clone();
+    };
+    let shared = models.iter().any(|other| {
+        other.label == model.label && route(&other.id).is_some_and(|r| r != own)
+    });
+    if shared {
+        format!("{} · {}", model.label, provider_display_name(&own))
+    } else {
+        model.label.clone()
+    }
 }
 
 /// Drop a leading provider attribution the section header already shows.
@@ -9621,6 +9663,69 @@ mod tests {
                 "xAI · your key",
             ]
         );
+    }
+
+    #[test]
+    fn graff_lists_claude_agent_apart_from_anthropic() {
+        let descriptors = vec![descriptor(HarnessId::Graff, "Graff")];
+        let plan = |id: &str| Model {
+            billing: Some("plan".into()),
+            ..bare_model(id, id.split_once('/').unwrap().1)
+        };
+        // graff leads with the current Anthropic model, then Claude Agent's
+        // rows, then the rest of Anthropic's under the same names.
+        let models = vec![
+            plan("anthropic/claude-opus-5"),
+            plan("claude-agent/claude-opus-5-5"),
+            plan("claude-agent/claude-opus-5"),
+            plan("anthropic/claude-opus-5-5"),
+            plan("anthropic/claude-opus-4-8"),
+        ];
+        let rows = scoped_model_rows(
+            "",
+            ModelRail::Harness,
+            Some(HarnessId::Graff),
+            &descriptors,
+            |_| Some(models.as_slice()),
+            |_, _| false,
+        );
+        let shown: Vec<String> = rows
+            .iter()
+            .map(|r| match &r.header {
+                Some(title) => format!("# {title}"),
+                None => r.model.id.clone(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "# Claude Agent · your plan",
+                "claude-agent/claude-opus-5-5",
+                "claude-agent/claude-opus-5",
+                "# Anthropic · your plan",
+                "anthropic/claude-opus-5",
+                "anthropic/claude-opus-5-5",
+                "anthropic/claude-opus-4-8",
+            ]
+        );
+
+        // The chip names the provider only when the name alone is ambiguous.
+        assert_eq!(
+            chip_model_label(&models[2], &models),
+            "claude-opus-5 · Claude Agent"
+        );
+        assert_eq!(
+            chip_model_label(&models[0], &models),
+            "claude-opus-5 · Anthropic"
+        );
+        assert_eq!(chip_model_label(&models[4], &models), "claude-opus-4-8");
+        let anthropic_only = [plan("anthropic/claude-opus-5")];
+        assert_eq!(
+            chip_model_label(&anthropic_only[0], &anthropic_only),
+            "claude-opus-5"
+        );
+        let bare = bare_model("opus", "Opus");
+        assert_eq!(chip_model_label(&bare, &[bare.clone()]), "Opus");
     }
 
     #[test]
