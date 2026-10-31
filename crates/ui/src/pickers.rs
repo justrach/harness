@@ -6169,6 +6169,7 @@ fn provider_display_name(provider: &str) -> String {
     match provider {
         "anthropic" => "Anthropic",
         "cerebras" => "Cerebras",
+        "claude-agent" => "Claude Agent",
         "codegraff" => "Codegraff",
         "codex" => "Codex",
         "deepseek" => "DeepSeek",
