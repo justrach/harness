@@ -249,12 +249,18 @@ struct ThemePalette {
     let accent, accentStrong, danger, dangerSoft, warning: Color
     let statusWorking, statusCompleted, inlineCodeText, inlineCodeWash: Color
     let tokenKeyword, tokenString, tokenNumber: Color
+    /// The session's page beside another column (`Theme.liftedPage`).
+    let liftedBg: Color
+    /// The working spinners' row tints, top row first (`GradientSpin.rowTints`).
+    let spinnerTints: [HexColor]
 
     init(_ variant: ThemeVariant) {
         let colors = variant.colors
         let accent = variant.accent
         isDark = variant.appearance == .dark
         bg = colors.background.color
+        liftedBg = Theme.liftedPage(colors.background, dark: isDark).color
+        spinnerTints = GradientSpin.rowTints(glyph: accent.glyph, primary: accent.primary, dark: isDark)
         surface = colors.shell.color
         surfaceRaised = colors.raised.color
         surfaceDialog = colors.dialog.color

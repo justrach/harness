@@ -31,6 +31,8 @@ struct TranscriptView: View {
     @State var folds = ToolGroupFolds()
     @State private var userExpansionHeights: [String: CGFloat] = [:]
     @State private var reauthRequest: AgentReauthRequest?
+    /// Beside another column the page is lifted (ContentPlane).
+    @Environment(\.liftedPlane) private var liftedPlane
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
@@ -68,7 +70,7 @@ struct TranscriptView: View {
                     }))
             }
             .modifier(TranscriptViewportProbe(chatId: chatId))
-            .background(Theme.bg)
+            .background(Theme.sessionPage(lifted: liftedPlane))
             .overlay(alignment: .bottom) {
                 if scroll.showJump {
                     Button {

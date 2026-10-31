@@ -172,6 +172,8 @@ struct HomeView: View {
     /// in portrait) `.automatic` hid the list behind the open session; the point of the wide window is the two
     /// side by side. The sidebar button still hides it.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// Where the list's column ends, in global space: the session's rounded seam (ContentPlane).
+    @State private var listColumnEdge: CGFloat = 0
 
     /// The session header on a Max is drawn in the pane, so the system's sidebar button is gone; this brings
     /// the list in and out.
@@ -303,13 +305,18 @@ struct HomeView: View {
     /// What the other stacked pane keeps while one is typing: its bar and the last rows.
     private static let stackedPeek: CGFloat = 150
 
-    private var primaryStack: some View {
+    private var primaryStack: some View { primaryStack(lifted: false) }
+
+    /// `lifted`: the session sits beside the list, on the lifted page (ContentPlane).
+    private func primaryStack(lifted: Bool) -> some View {
         NavigationStack(path: $path) {
             SplitDetailPlaceholder()
+                .environment(\.liftedPlane, lifted)
                 // On each destination, not on the stack: a value set outside the stack did not reach the
                 // pushed session, so its header never saw the split controls.
                 .navigationDestination(for: Route.self) { route in
                     destination(route)
+                        .environment(\.liftedPlane, lifted)
                         .environment(\.splitScreen, controls(for: .primary))
                         .environment(\.foldPaneHeader, foldPaneHeader)
                         .environment(\.duoLaptop, laptopLayout)
@@ -368,14 +375,32 @@ struct HomeView: View {
             } else if listBesideSession {
                 // iPad, iPhone Duo folded like a book and other wide windows: the list beside the session.
                 // On the fold, the list's column ends on the fold line and each side keeps its 20pt margin.
+                // The session's page is lifted, its corners rounding where it meets the list (on the fold
+                // line in book pose; the margin stays inside the page); with the list hidden, the edge is
+                // the screen's and stays square.
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
                         .modifier(FoldColumn(fold: fold, side: .leading))
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxX } action: {
+                            listColumnEdge = $0
+                        }
                 } detail: {
-                    primaryStack
+                    primaryStack(lifted: true)
                         .modifier(FoldColumn(fold: fold, side: .trailing))
                 }
                 .navigationSplitViewStyle(.balanced)
+                // The split view drops an overlay on its detail column, so the seam is drawn over the whole
+                // split, across the part right of the list's edge.
+                .overlay {
+                    GeometryReader { proxy in
+                        let x = listColumnEdge - proxy.frame(in: .global).minX
+                        Color.clear
+                            .frame(width: max(0, proxy.size.width - x))
+                            .seam(.leading, chrome: Theme.surface,
+                                  when: columnVisibility != .detailOnly && x > 0 && x < proxy.size.width)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
             } else if stackedSplitAvailable, stackedSecond != nil, !path.isEmpty {
                 stackedPanes
             } else if let arrangement = phoneArrangement {
@@ -383,7 +408,9 @@ struct HomeView: View {
                                     detailRoute: path.first.map(AnyHashable.init), hasDetail: !path.isEmpty) {
                     NavigationStack { sidebar }
                 } detail: {
-                    primaryStack
+                    // Side by side the session is the lifted page beside the list (PhoneSplitContainer rounds
+                    // the seam); stacked, the handle between them marks it.
+                    primaryStack(lifted: arrangement.axis == .sideBySide)
                 }
             } else {
                 NavigationStack(path: $path) {
@@ -1246,6 +1273,8 @@ func projectLocation(chat: Chat, model: AppModel) -> Text {
 
 /// The split layout's detail column before a session is picked.
 private struct SplitDetailPlaceholder: View {
+    @Environment(\.liftedPlane) private var liftedPlane
+
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "bubble.left.and.text.bubble.right")
@@ -1256,7 +1285,7 @@ private struct SplitDetailPlaceholder: View {
                 .foregroundStyle(Theme.textMuted)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.bg.ignoresSafeArea())
+        .background(Theme.sessionPage(lifted: liftedPlane).ignoresSafeArea())
     }
 }
 

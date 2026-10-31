@@ -24,6 +24,15 @@ enum DuoChat {
     static func isFlat(phone: Bool, regularWidth: Bool, regularHeight: Bool, fold: FoldSplit) -> Bool {
         fold == .none && phone && regularWidth && regularHeight
     }
+
+    /// Rig (DEBUG): `-demo-duo-flat` lays a session out as on a Duo lying flat, chat and Inspect, on any wide
+    /// simulator. The Duo simulator has no command to unfold, so its inner display can't be captured from a
+    /// script.
+    #if DEBUG
+    static let demoFlat = ProcessInfo.processInfo.arguments.contains("-demo-duo-flat")
+    #else
+    static let demoFlat = false
+    #endif
 }
 
 extension EnvironmentValues {

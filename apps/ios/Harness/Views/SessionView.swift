@@ -21,6 +21,10 @@ struct SessionView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// iPhone Duo lying flat: chat left of the fold, Inspect right (DuoInspect).
     @Environment(\.duoFlat) private var duoFlat
+    /// Beside the list: the session's page is lifted (ContentPlane).
+    @Environment(\.liftedPlane) private var liftedPlane
+    /// Flat Duo: the chat column's width, for the rounded seam at the fold.
+    @State private var chatColumnWidth: CGFloat = 0
     @Environment(\.foldComposerFocus) private var foldComposerFocus
     /// iPhone Duo half open like a laptop: watch above the fold, act below it (DuoLaptop).
     @Environment(\.duoLaptop) private var duoLaptop
@@ -185,7 +189,7 @@ struct SessionView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 2)  // the 44pt buttons set the strip's height
-        .background(Theme.bg)
+        .background(page)
     }
 
     @ViewBuilder
@@ -218,6 +222,12 @@ struct SessionView: View {
 
     private var chat: Chat? { model.chat(id: chatId) }
 
+    /// iPhone Duo lying flat, this session alone on the screen: chat and Inspect split at the fold.
+    private var flatSplit: Bool { (duoFlat || DuoChat.demoFlat) && splitScreen == nil }
+
+    /// The session's page: lifted beside the list, and on a flat Duo, where Inspect is the column beside it.
+    private var page: Color { Theme.sessionPage(lifted: liftedPlane || flatSplit) }
+
     private var chatSpace: Space? {
         guard let spaceId = chat?.spaceId else { return nil }
         return model.spaces.first { $0.id == spaceId }
@@ -249,7 +259,7 @@ struct SessionView: View {
                 // The clip above also cuts off the content's own background, which reaches under the side and
                 // bottom safe areas; without this the system's backing showed there (white, or black in dark
                 // mode). Painted outside the clip, to the screen edges.
-                .background { if paneChrome { Theme.bg.ignoresSafeArea() } }
+                .background { if paneChrome { page.ignoresSafeArea() } }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { viewWidth = $0 }
             } else {
                 VStack(spacing: 12) {
@@ -259,7 +269,7 @@ struct SessionView: View {
                         .foregroundStyle(Theme.textFaint)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.bg)
+                .background(page)
             }
         }
         .navigationTitle(chat?.displayTitle ?? "Session")  // feeds the back menu
@@ -437,7 +447,7 @@ struct SessionView: View {
         }
         .padding(.bottom, keyboardOverlap)
         .modifier(KeyboardOverlap(overlap: $keyboardOverlap))
-        .background(Theme.bg.ignoresSafeArea())
+        .background(page.ignoresSafeArea())
         .accessibilityIdentifier("laptop-session")
     }
 
@@ -445,7 +455,7 @@ struct SessionView: View {
         let status = liveStatus(chat: chat)
         // The composer owns real layout space. The transcript's viewport ends
         // above it, so keyboard and glass morphs cannot cover the last row.
-        let flat = duoFlat && splitScreen == nil
+        let flat = flatSplit
         let inspect = InspectState.of(chat.id)
         let inspectModel = flat
             ? InspectModel.build(store.entries,
@@ -479,7 +489,7 @@ struct SessionView: View {
                 .overlay {
                     if store.entries.isEmpty, store.pendingSends.isEmpty,
                        chat.lastMessageAt != nil {
-                        TranscriptSkeleton().background(Theme.bg)
+                        TranscriptSkeleton().background(page)
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
@@ -526,10 +536,10 @@ struct SessionView: View {
             .background {
                 LinearGradient(
                     stops: [
-                        .init(color: Theme.bg.opacity(0), location: 0),
-                        .init(color: Theme.bg.opacity(0.45), location: 0.25),
-                        .init(color: Theme.bg.opacity(0.72), location: 0.6),
-                        .init(color: Theme.bg, location: 1),
+                        .init(color: page.opacity(0), location: 0),
+                        .init(color: page.opacity(0.45), location: 0.25),
+                        .init(color: page.opacity(0.72), location: 0.6),
+                        .init(color: page, location: 1),
                     ],
                     startPoint: .top, endPoint: .bottom
                 )
@@ -541,15 +551,18 @@ struct SessionView: View {
         // Flat: the chat column ends on the fold (the window's middle), not the middle of what the side bar leaves.
         .frame(width: flat && !keyboardUp && windowMidX - columnMinX > 240 ? windowMidX - columnMinX : nil)
         .frame(maxWidth: flat && !keyboardUp ? nil : .infinity)
+        // Flat: the chat is the lifted page; Inspect beside it is the chrome it rounds against at the fold.
+        .environment(\.liftedPlane, liftedPlane || flat)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { chatColumnWidth = $0 }
             if flat, !keyboardUp {
-                Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea(.container, edges: .bottom)
                 InspectPane(model: inspectModel, state: inspect)
                     .frame(maxWidth: .infinity)
                     .ignoresSafeArea(.container, edges: .bottom)
+                    .background(Theme.surface.ignoresSafeArea())
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .background(Theme.bg.ignoresSafeArea())
+        .background(page.ignoresSafeArea())
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
             columnMinX = frame.minX
             // The fold is the window's middle; the side bar's column is outside this view's frame.
@@ -581,31 +594,39 @@ struct SessionView: View {
                             .font(Theme.sans(14, weight: .medium))
                             .foregroundStyle(Theme.text)
                             .padding(12)
-                            .background(Theme.bg, in: Capsule())
+                            .background(page, in: Capsule())
                             .padding(.bottom, 90)
                     }
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
         }
-        .overlay {
+        .overlay(alignment: .leading) {
             GeometryReader { geometry in
                 // The bar stays opaque so the header never collides with rows
                 // scrolling under it; the fade lives just below the bar.
                 VStack(spacing: 0) {
-                    Theme.bg.frame(height: geometry.safeAreaInsets.top)
+                    page.frame(height: geometry.safeAreaInsets.top)
                     LinearGradient(stops: [
-                        .init(color: Theme.bg, location: 0),
-                        .init(color: Theme.bg.opacity(0.85), location: 0.35),
-                        .init(color: Theme.bg.opacity(0.45), location: 0.7),
-                        .init(color: Theme.bg.opacity(0), location: 1),
+                        .init(color: page, location: 0),
+                        .init(color: page.opacity(0.85), location: 0.35),
+                        .init(color: page.opacity(0.45), location: 0.7),
+                        .init(color: page.opacity(0), location: 1),
                     ], startPoint: .top, endPoint: .bottom)
                         .frame(height: Self.topFadeHeight)
                 }
                 .offset(y: -geometry.safeAreaInsets.top)
             }
+            // Flat with Inspect beside it: the chat's own bar, so Inspect keeps its tone up to the screen's top.
+            .frame(width: flat && !keyboardUp && chatColumnWidth > 0 ? chatColumnWidth : nil)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
+        }
+        .overlay(alignment: .leading) {
+            // The chat's page rounds at the fold, over its bar too (ContentPlane).
+            if flat, !keyboardUp, chatColumnWidth > 0 {
+                Color.clear.frame(width: chatColumnWidth).seam(.trailing, chrome: Theme.surface)
+            }
         }
         .onChange(of: chatId) { _, _ in
             attachmentDraft = AttachmentDraft()
@@ -625,7 +646,7 @@ struct SessionView: View {
     }
 
     /// Reserved 24pt status strip (shell.rs render_status_strip) — Working
-    /// shows the sunrise spinner + rotating flavour word + elapsed; Errored
+    /// shows the accent spinner + rotating flavour word + elapsed; Errored
     /// shows "Run failed"; the strip always reserves its height so the
     /// composer never shifts. An unadopted send's truth takes precedence:
     /// "Sending…" (healthy, within the 2-minute grace), "Queued — will send
