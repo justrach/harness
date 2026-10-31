@@ -1056,6 +1056,15 @@ impl Theme {
             .collect()
     }
 
+    /// The conversation column's lift over the shell chrome, extending the
+    /// composer's contrast to the main screen: light palettes wash the column
+    /// toward white, so the sidebar's tone reads as chrome around a bright
+    /// page. The wash is translucent, so glass still shows through. Dark
+    /// palettes keep the column flush on the shell.
+    pub fn content_plane(&self) -> Option<Hsla> {
+        (!self.appearance.is_dark()).then(|| gpui::white().opacity(0.55))
+    }
+
     /// Section-card fill (settings cards and similar in-panel cards). The
     /// opaque `surface` tone read as a harsh solid slab floating on the
     /// frosted blur (user report), so glass thins it to a translucent tint;
