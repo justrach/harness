@@ -385,21 +385,7 @@ struct SessionView: View {
             source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
         let approval = store.openInputRequest.flatMap { QuickActions.approval($0.questions) }
         let lastPrompt = QuickActions.lastPrompt(store.entries)
-        return VStack(spacing: 0) {
-            LaptopWatchPane(model: inspectModel, state: inspect, running: running)
-                // Ends on the fold; typing, it gives the composer the room the keyboard took.
-                .frame(height: typing ? nil : max(120, layout.top - paneHeaderHeight))
-                .frame(maxHeight: typing ? .infinity : nil)
-            Color.clear.frame(height: typing ? 0 : layout.gap)
-            if !typing {
-                TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
-                               onHostLink: { hostLink = $0 }, chat: chat, runLive: running,
-                               hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
-                               duoChat: duoChat)
-                    .frame(maxHeight: .infinity)
-                    .transition(.opacity)
-            }
-            QuickActionsRow(enabled: { action in
+        let quickActions = QuickActionsRow(enabled: { action in
                 QuickActions.enabled(action, running: running, approvable: approval != nil,
                                      hasPrompt: lastPrompt != nil)
             }, perform: { action in
@@ -413,6 +399,24 @@ struct SessionView: View {
                 case .runTests: store.sendRun(prompt: QuickActions.runTestsPrompt, chat: chat)
                 }
             })
+        return VStack(spacing: 0) {
+            LaptopWatchPane(model: inspectModel, state: inspect, running: running)
+                // Ends on the fold; typing, it gives the composer the room the keyboard took.
+                .frame(height: typing ? nil : max(120, layout.top - paneHeaderHeight))
+                .frame(maxHeight: typing ? .infinity : nil)
+                // Above the transcript, whose rows draw past its top edge.
+                .zIndex(1)
+            Color.clear.frame(height: typing ? 0 : layout.gap)
+            if !typing {
+                TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
+                               onHostLink: { hostLink = $0 }, chat: chat, runLive: running,
+                               hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
+                               duoChat: duoChat)
+                    .frame(maxHeight: .infinity)
+                    .clipped()
+                    .transition(.opacity)
+            }
+            if !typing { quickActions }
             Group {
                 if let request = store.openInputRequest {
                     QuestionPanel(requestId: request.requestId, questions: request.questions) { requestId, answers in
@@ -425,7 +429,11 @@ struct SessionView: View {
                         .id(chat.id)
                 }
             }
-            .padding(.bottom, 8)
+            // Typing, the composer's chips fold into its one line (the compact composer).
+            .environment(\.verticalSizeClass, typing ? .compact : verticalSizeClass)
+            .padding(.bottom, typing ? 4 : 8)
+            // Typing, the actions sit in the row right above the keyboard.
+            if typing { quickActions }
         }
         .padding(.bottom, keyboardOverlap)
         .modifier(KeyboardOverlap(overlap: $keyboardOverlap))
