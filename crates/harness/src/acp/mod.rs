@@ -2561,6 +2561,67 @@ fn config_option_sets(
     efforts: &[&'static str],
     model_options: &serde_json::Map<String, Value>,
 ) -> Vec<(String, Value)> {
+    config_option_sets_with_modes(
+        session_response,
+        model,
+        efforts,
+        model_options,
+        FULL_ACCESS_MODES,
+    )
+}
+
+/// The no-prompts session modes, most specific first: the unattended
+/// default (full access).
+const FULL_ACCESS_MODES: &[&str] = &[
+    "bypassPermissions",
+    "bypass_permissions",
+    "bypass",
+    "yolo",
+    "agent-full-access",
+    "danger-full-access",
+    "full-access",
+];
+
+/// Read-only session modes: the agent plans and reads, never writes.
+const READ_ONLY_MODES: &[&str] = &["plan", "read-only", "read_only", "readOnly", "ask"];
+
+/// Workspace session modes: edits in the workspace go through, anything
+/// else asks (claude-agent-acp `acceptEdits`, codex-acp `auto`).
+const WORKSPACE_MODES: &[&str] = &[
+    "acceptEdits",
+    "accept_edits",
+    "auto",
+    "agent",
+    "default",
+];
+
+/// The session modes to prefer for the run's autonomy (see
+/// [`harness_proto::Autonomy`]): full access unless the engine stamped a
+/// restricted level without auto-approve.
+fn autonomy_modes(request: &RunRequest) -> &'static [&'static str] {
+    use harness_proto::SandboxLevel;
+    match (request.auto_approve, request.sandbox) {
+        (false, SandboxLevel::ReadOnly) => READ_ONLY_MODES,
+        (false, SandboxLevel::WorkspaceWrite) => WORKSPACE_MODES,
+        _ => FULL_ACCESS_MODES,
+    }
+}
+
+/// Whether tool permission requests ask the user (a restricted autonomy)
+/// instead of auto-accepting.
+fn asks_permission(request: &RunRequest) -> bool {
+    !request.auto_approve && request.sandbox != harness_proto::SandboxLevel::DangerFullAccess
+}
+
+/// [`config_option_sets`] with the session-mode preference list for the
+/// run's autonomy.
+fn config_option_sets_with_modes(
+    session_response: &Value,
+    model: Option<&str>,
+    efforts: &[&'static str],
+    model_options: &serde_json::Map<String, Value>,
+    modes: &[&str],
+) -> Vec<(String, Value)> {
     let Some(options) = session_response
         .get("configOptions")
         .and_then(Value::as_array)
@@ -2605,18 +2666,10 @@ fn config_option_sets(
                 .filter(|c| available.contains(c))
                 .map(|c| Value::String(c.to_owned()))
                 .or_else(|| {
-                    [
-                        "bypassPermissions",
-                        "bypass_permissions",
-                        "bypass",
-                        "yolo",
-                        "agent-full-access",
-                        "danger-full-access",
-                        "full-access",
-                    ]
-                    .into_iter()
-                    .find(|v| available.contains(v))
-                    .map(|v| Value::String(v.to_owned()))
+                    modes
+                        .iter()
+                        .find(|v| available.contains(*v))
+                        .map(|v| Value::String((*v).to_owned()))
                 }),
             ("select", Some("thought_level")) => efforts
                 .iter()
@@ -3083,6 +3136,7 @@ fn handle_server_request_live(
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
     answered: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ask_permission: bool,
 ) -> Vec<AgentEvent> {
     if params
         .get("sessionId")
@@ -3109,6 +3163,9 @@ fn handle_server_request_live(
         .cloned()
         .unwrap_or_default();
     if !is_user_question(&options) {
+        if ask_permission {
+            return ask_permission_yes_no(client, id, params, options, request_input);
+        }
         return handle_server_request(client, id, method, params);
     }
     let names: Vec<String> = options
@@ -3161,6 +3218,75 @@ fn handle_server_request_live(
         }
     });
     Vec::new()
+}
+
+/// A tool permission under a restricted autonomy: ask the user yes/no (in a
+/// subtask so the message loop keeps flowing). Yes picks the agent's allow
+/// option for this one call, No its reject option; a dropped resolver
+/// cancels, never a silent allow.
+fn ask_permission_yes_no(
+    client: &RpcClient,
+    id: Value,
+    params: &Value,
+    options: Vec<Value>,
+    request_input: &std::sync::Arc<RequestInputFn>,
+) -> Vec<AgentEvent> {
+    let title = params
+        .get("toolCall")
+        .and_then(|t| t.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    let question = UserInputQuestion {
+        id: new_message_id(),
+        header: "Approve tool".into(),
+        question: match title {
+            Some(title) => format!("The agent wants to run: {title}. Allow it?"),
+            None => "The agent wants to use a tool. Allow it?".into(),
+        },
+        options: vec!["Yes".into(), "No".into()],
+        prefill: None,
+        multiline: false,
+        multi_select: false,
+    };
+    let client = client.clone();
+    let request_input = std::sync::Arc::clone(request_input);
+    tokio::spawn(async move {
+        let answers = (request_input)(vec![question.clone()])
+            .await
+            .unwrap_or_default();
+        let outcome = permission_outcome(&question, &answers, &options);
+        client.respond(&id, json!({ "outcome": outcome }));
+    });
+    Vec::new()
+}
+
+/// The `outcome` for a yes/no permission answer: the allow option (once
+/// before always) on Yes, the reject option on No, cancelled otherwise.
+fn permission_outcome(
+    question: &UserInputQuestion,
+    answers: &[UserInputAnswer],
+    options: &[Value],
+) -> Value {
+    let label = answers
+        .iter()
+        .find(|a| a.question_id == question.id)
+        .and_then(|a| a.labels.first());
+    let kinds: &[&str] = match label {
+        Some(l) if l.eq_ignore_ascii_case("yes") => &["allow_once", "allow_always"],
+        Some(l) if l.eq_ignore_ascii_case("no") => &["reject_once", "reject_always"],
+        _ => &[],
+    };
+    kinds
+        .iter()
+        .find_map(|kind| {
+            options
+                .iter()
+                .find(|o| o.get("kind").and_then(Value::as_str) == Some(*kind))
+        })
+        .and_then(|o| o.get("optionId").and_then(Value::as_str))
+        .map(|option_id| json!({ "outcome": "selected", "optionId": option_id }))
+        .unwrap_or_else(|| json!({ "outcome": "cancelled" }))
 }
 
 /// Show a form elicitation on the engine's input bridge (in a subtask so the
@@ -3525,6 +3651,7 @@ async fn run_session(session: Session) {
         handshake_timeout,
         stderr_tail,
     } = session;
+    let ask_permission = asks_permission(&request);
     let RunControls {
         request_input,
         mut steering,
@@ -3738,11 +3865,12 @@ async fn run_session(session: Session) {
         let options_snapshot = session_response;
         let mut initial_effort =
             thought_level_value(&options_snapshot["configOptions"]).map(str::to_owned);
-        for (config_id, payload) in config_option_sets(
+        for (config_id, payload) in config_option_sets_with_modes(
             &options_snapshot,
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
+            autonomy_modes(&request),
         ) {
             if devin_configured
                 && config_id == "speed"
@@ -4154,6 +4282,7 @@ async fn run_session(session: Session) {
                                 &request_input,
                                 &session_id,
                                 &clarification.answered,
+                                ask_permission,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -4430,6 +4559,7 @@ async fn run_session(session: Session) {
                         &request_input,
                         &session_id,
                         &clarification.answered,
+                        ask_permission,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -4548,6 +4678,7 @@ async fn run_session(session: Session) {
                                         &request_input,
                                 &session_id,
                                 &clarification.answered,
+                                ask_permission,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -6063,6 +6194,83 @@ mod tests {
             json!({ "optionId": "b", "name": "Другое", "kind": "other" }),
         ];
         assert!(is_user_question(&mixed));
+    }
+
+    fn autonomy_request(sandbox: &str, auto_approve: bool) -> RunRequest {
+        serde_json::from_value(json!({
+            "prompt": "p", "cwd": "", "sandbox": sandbox, "autoApprove": auto_approve
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn autonomy_picks_the_session_mode() {
+        let response = json!({"configOptions": [{
+            "id": "mode", "type": "select", "category": "mode",
+            "currentValue": "default",
+            "options": [
+                {"value": "default"}, {"value": "acceptEdits"},
+                {"value": "plan"}, {"value": "bypassPermissions"}
+            ]
+        }]});
+        let no_opts = serde_json::Map::new();
+        let mode = |sandbox: &str, auto: bool| {
+            let request = autonomy_request(sandbox, auto);
+            config_option_sets_with_modes(&response, None, &[], &no_opts, autonomy_modes(&request))
+        };
+        assert_eq!(
+            mode("danger-full-access", false),
+            vec![("mode".to_string(), json!({"value": "bypassPermissions"}))]
+        );
+        assert_eq!(
+            mode("workspace-write", false),
+            vec![("mode".to_string(), json!({"value": "acceptEdits"}))]
+        );
+        assert_eq!(
+            mode("read-only", false),
+            vec![("mode".to_string(), json!({"value": "plan"}))]
+        );
+        // Legacy senders stamp workspace-write with auto-approve: unattended.
+        assert_eq!(
+            mode("workspace-write", true),
+            vec![("mode".to_string(), json!({"value": "bypassPermissions"}))]
+        );
+        assert!(asks_permission(&autonomy_request("read-only", false)));
+        assert!(!asks_permission(&autonomy_request("danger-full-access", false)));
+    }
+
+    #[test]
+    fn restricted_permission_answers_map_to_options() {
+        let options = vec![
+            json!({"optionId": "always", "kind": "allow_always", "name": "Always"}),
+            json!({"optionId": "once", "kind": "allow_once", "name": "Allow"}),
+            json!({"optionId": "no", "kind": "reject_once", "name": "Reject"}),
+        ];
+        let question = UserInputQuestion {
+            id: "q".into(),
+            header: "Approve tool".into(),
+            question: "?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            prefill: None,
+            multiline: false,
+            multi_select: false,
+        };
+        let answer = |label: &str| UserInputAnswer {
+            question_id: "q".into(),
+            labels: vec![label.into()],
+        };
+        assert_eq!(
+            permission_outcome(&question, &[answer("Yes")], &options),
+            json!({"outcome": "selected", "optionId": "once"})
+        );
+        assert_eq!(
+            permission_outcome(&question, &[answer("No")], &options),
+            json!({"outcome": "selected", "optionId": "no"})
+        );
+        assert_eq!(
+            permission_outcome(&question, &[], &options),
+            json!({"outcome": "cancelled"})
+        );
     }
 
     #[test]

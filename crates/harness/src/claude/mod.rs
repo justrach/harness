@@ -196,7 +196,13 @@ impl ClaudeHarness {
         if let Some(effort) = to_effort(request.reasoning, request.model.as_deref()) {
             cmd.args(["--effort", effort]);
         }
-        if request.auto_approve {
+        if let Some(mode) = restricted_permission_mode(&request) {
+            // A restricted autonomy the user chose: Claude plans without
+            // touching anything (read only) or edits the workspace without
+            // asking (workspace); everything else asks through
+            // `handle_control_request`.
+            cmd.args(["--permission-mode", mode]);
+        } else if request.auto_approve {
             cmd.args([
                 "--permission-mode",
                 "bypassPermissions",
@@ -611,6 +617,7 @@ impl ClaudeHarness {
             event_tx,
             controls,
             reasoning: request.reasoning,
+            ask_permission: restricted_permission_mode(&request).is_some(),
             interrupt_grace: self.interrupt_grace,
             kill_grace: self.kill_grace,
             stderr_tail,
@@ -736,6 +743,9 @@ struct Session {
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,
     reasoning: Option<ReasoningLevel>,
+    /// The user's autonomy is restricted: tool permission requests ask
+    /// yes/no instead of being allowed outright.
+    ask_permission: bool,
     interrupt_grace: Duration,
     kill_grace: Duration,
     /// Rolling stderr tail for the crash message on an unexpected exit.
@@ -763,6 +773,7 @@ async fn run_session(session: Session) {
         event_tx,
         controls,
         reasoning,
+        ask_permission,
         interrupt_grace,
         kill_grace,
         stderr_tail,
@@ -822,7 +833,12 @@ async fn run_session(session: Session) {
                             }));
                             let _ = stdin_tx.send(StdinMsg::Line(line));
                         } else {
-                            handle_control_request(req, &request_input, &stdin_tx);
+                            handle_control_request(
+                                req,
+                                &request_input,
+                                &stdin_tx,
+                                ask_permission,
+                            );
                         }
                         continue;
                     }
@@ -1026,12 +1042,37 @@ fn handle_control_request(
     req: ControlRequestFrame,
     request_input: &Arc<RequestInputFn>,
     stdin_tx: &mpsc::UnboundedSender<StdinMsg>,
+    ask_permission: bool,
 ) {
     if req.request.subtype != "can_use_tool" {
         tracing::debug!(
             target: "harness_adapters::claude",
             "unhandled control_request subtype: {}", req.request.subtype
         );
+        return;
+    }
+    if req.request.tool_name != "AskUserQuestion" && ask_permission {
+        // A restricted autonomy: the user approves each tool Claude's
+        // permission mode didn't already allow. A dropped sender degrades to
+        // a deny so the agent is unblocked, never silently allowed.
+        let question = permission_question(&req.request.tool_name, &req.request.input);
+        let request_input = Arc::clone(request_input);
+        let stdin_tx = stdin_tx.clone();
+        tokio::spawn(async move {
+            let answers = (request_input)(vec![question.clone()]).await.unwrap_or_default();
+            let line = control_response_line(
+                &req.request_id,
+                if approved(&question, &answers) {
+                    allow_response(req.request.input)
+                } else {
+                    serde_json::json!({
+                        "behavior": "deny",
+                        "message": "The user declined this tool call"
+                    })
+                },
+            );
+            let _ = stdin_tx.send(StdinMsg::Line(line));
+        });
         return;
     }
     if req.request.tool_name != "AskUserQuestion" {
@@ -1059,6 +1100,50 @@ fn handle_control_request(
         let line = control_response_line(&request_id, allow_response(updated));
         let _ = stdin_tx.send(StdinMsg::Line(line));
     });
+}
+
+/// The `--permission-mode` for a restricted autonomy, or `None` when the run
+/// keeps today's behaviour (full access, or a caller predating the setting).
+fn restricted_permission_mode(request: &RunRequest) -> Option<&'static str> {
+    use harness_proto::SandboxLevel;
+    if request.auto_approve {
+        return None;
+    }
+    match request.sandbox {
+        SandboxLevel::ReadOnly => Some("plan"),
+        SandboxLevel::WorkspaceWrite => Some("acceptEdits"),
+        SandboxLevel::DangerFullAccess => None,
+    }
+}
+
+/// The yes/no question for one tool permission request.
+fn permission_question(tool: &str, input: &Value) -> UserInputQuestion {
+    let detail = input
+        .get("command")
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("path"))
+        .or_else(|| input.get("url"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    UserInputQuestion {
+        id: uuid::Uuid::new_v4().to_string(),
+        header: "Approve tool".into(),
+        question: match detail {
+            Some(detail) => format!("Claude wants to use {tool} on `{detail}`. Allow it?"),
+            None => format!("Claude wants to use {tool}. Allow it?"),
+        },
+        options: vec!["Yes".into(), "No".into()],
+        prefill: None,
+        multiline: false,
+        multi_select: false,
+    }
+}
+
+/// Whether the user answered Yes to `question`.
+fn approved(question: &UserInputQuestion, answers: &[UserInputAnswer]) -> bool {
+    answers.iter().any(|a| {
+        a.question_id == question.id && a.labels.iter().any(|l| l.eq_ignore_ascii_case("yes"))
+    })
 }
 
 /// Parse Claude's `AskUserQuestion` tool input into [`UserInputQuestion`]s
@@ -1137,6 +1222,36 @@ fn updated_input_with_answers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn autonomy_request(sandbox: &str, auto_approve: bool) -> RunRequest {
+        serde_json::from_value(json!({
+            "prompt": "p", "cwd": "", "sandbox": sandbox, "autoApprove": auto_approve
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn restricted_autonomy_picks_a_permission_mode() {
+        assert_eq!(restricted_permission_mode(&autonomy_request("read-only", false)), Some("plan"));
+        assert_eq!(
+            restricted_permission_mode(&autonomy_request("workspace-write", false)),
+            Some("acceptEdits")
+        );
+        assert_eq!(restricted_permission_mode(&autonomy_request("danger-full-access", false)), None);
+        assert_eq!(restricted_permission_mode(&autonomy_request("workspace-write", true)), None);
+    }
+
+    #[test]
+    fn permission_questions_are_yes_no_and_need_yes() {
+        let q = permission_question("Bash", &json!({"command": "rm -rf build"}));
+        assert_eq!(q.options, vec!["Yes".to_string(), "No".to_string()]);
+        assert!(q.question.contains("rm -rf build"));
+        let yes = UserInputAnswer { question_id: q.id.clone(), labels: vec!["Yes".into()] };
+        let no = UserInputAnswer { question_id: q.id.clone(), labels: vec!["No".into()] };
+        assert!(approved(&q, &[yes]));
+        assert!(!approved(&q, &[no]));
+        assert!(!approved(&q, &[]));
+    }
 
     #[cfg(unix)]
     #[test]
