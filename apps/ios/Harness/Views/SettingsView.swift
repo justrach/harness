@@ -11,6 +11,9 @@ struct SettingsView: View {
     @State private var showCrashReports: Bool
     /// The first-run setup, opened again from Agents.
     @State private var replaySetup = false
+    /// Screenshot rig: `-demo -open-autonomy` opens on Agents > Autonomy.
+    @State private var showAutonomy = ProcessInfo.processInfo.arguments.contains("-demo")
+        && ProcessInfo.processInfo.arguments.contains("-open-autonomy")
 
     init(openCrashReports: Bool = false) {
         _showCrashReports = State(initialValue: openCrashReports)
@@ -160,6 +163,7 @@ struct SettingsView: View {
             .harnessGroupedList()
             .navigationTitle("Settings")
             .navigationDestination(isPresented: $showCrashReports) { CrashReportsView() }
+            .navigationDestination(isPresented: $showAutonomy) { AutonomyView() }
             .fullScreenCover(isPresented: $replaySetup) {
                 OnboardingView { replaySetup = false }
                     .environment(model)
