@@ -320,7 +320,12 @@ fn main() -> anyhow::Result<()> {
                 state.context_usage = Some(harness_proto::ContextUsage {
                     tokens: Some(112_000),
                     window: Some(200_000),
-                    savings: None,
+                    // graff's savings meta, so the ring's card shows "Nk saved".
+                    savings: Some(harness_proto::ContextSavings {
+                        handle_bytes: 96_000,
+                        compacted_tokens: 0,
+                        cache_read_tokens: 0,
+                    }),
                 });
                 cx.notify();
             });

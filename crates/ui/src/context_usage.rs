@@ -1,6 +1,7 @@
 //! Context occupancy is read from the replicated chat snapshot, never local CLI state.
 use crate::context_window::compact_count;
 use crate::theme::Theme;
+use crate::typography::{TEXT_BODY, TEXT_CAPTION, TabularNums, WEIGHT_STRONG};
 use gpui::{
     Context, IntoElement, PathBuilder, Render, SharedString, Window, canvas, div, point,
     prelude::*, px,
@@ -55,22 +56,76 @@ pub fn render(
     let percent = fraction
         .map(|f| format!("{:.0}%", f * 100.0))
         .unwrap_or_else(|| "—".into());
-    div()
-        .id("context-usage")
-        .debug_selector(|| "context-usage".into())
-        .flex_none()
+    let pill = div()
         .flex()
         .items_center()
         .gap(px(5.0))
         .h(px(24.0))
         .px(px(6.0))
-        .rounded(px(6.0))
-        .text_size(px(11.0))
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .text_size(px(TEXT_BODY))
         .text_color(color)
-        .hover(|s| s.bg(crate::theme::ink(0.05)))
+        .tabular_nums()
+        .group_hover(HOVER_GROUP, |s| s.bg(crate::theme::ink(0.05)))
         .child(ring)
-        .child(SharedString::from(percent))
-        .tooltip(move |_, cx| card(state.clone(), cx))
+        .child(SharedString::from(percent));
+    hit_area("context-usage", HOVER_GROUP, HitSlop::RING, pill)
+        .debug_selector(|| "context-usage".into())
+        // hoverable: the pointer can move into the card to hover the savings
+        // meter's parts without the card closing
+        .hoverable_tooltip(move |_, cx| card(state.clone(), cx))
+}
+
+const HOVER_GROUP: &str = "context-usage";
+
+/// How far a footer chip's pointer target reaches past its pill, per side.
+/// Negative margins cancel the padding, so the pill does not move; the two
+/// chips meet in the 4 px gutter between them without overlapping.
+#[derive(Clone, Copy)]
+pub struct HitSlop {
+    pub left: f32,
+    pub right: f32,
+}
+
+impl HitSlop {
+    /// The context ring: 2 px into the gutter it shares with the agent
+    /// chip, 4 px into its own 10 px gutter on the right.
+    pub const RING: Self = Self {
+        left: 2.0,
+        right: 4.0,
+    };
+    /// The agent work chip, left of the ring.
+    pub const AGENT_WORK: Self = Self {
+        left: 4.0,
+        right: 2.0,
+    };
+}
+
+/// A footer chip's pointer target: the pill plus `slop` on each side, at
+/// least [`Theme::HIT_TARGET`] wide. The footer row is 24 px tall and clips
+/// its children, so the target takes the row's full height rather than
+/// [`Theme::HIT_TARGET`]. The pill's hover tint keys off `group`, so it
+/// lights up anywhere in the target.
+pub fn hit_area(
+    id: &'static str,
+    group: &'static str,
+    slop: HitSlop,
+    pill: gpui::Div,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .group(group)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h_full()
+        .min_w(px(Theme::HIT_TARGET))
+        .pl(px(slop.left))
+        .ml(px(-slop.left))
+        .pr(px(slop.right))
+        .mr(px(-slop.right))
+        .child(pill)
 }
 
 /// The card the usage ring opens on hover.
@@ -91,7 +146,7 @@ struct UsageCard {
     _subscription: gpui::Subscription,
 }
 
-fn with_separators(count: u64) -> String {
+pub(crate) fn with_separators(count: u64) -> String {
     let digits = count.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, digit) in digits.chars().enumerate() {
@@ -193,8 +248,8 @@ impl Render for UsageCard {
             .when(!has_window(usage), |card| {
                 card.child(
                     div()
-                        .text_size(px(12.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_size(px(TEXT_BODY))
+                        .font_weight(WEIGHT_STRONG)
                         .text_color(theme.text)
                         .child("Context window"),
                 )
@@ -203,21 +258,23 @@ impl Render for UsageCard {
                 // the lines break only at their own newlines: a tooltip sizes
                 // from the unwrapped text, so soft wrapping clipped the last line
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_BODY))
                     .line_height(px(19.0))
                     .whitespace_nowrap()
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(details(
-                        self.state.read(cx).context_usage,
-                    ))),
+                    .tabular_nums()
+                    .child(SharedString::from(details(usage))),
             )
-            .children(saved_label(self.state.read(cx).context_usage).map(|label| {
+            // With a window, the segment card shows graff's savings itself
+            // (crate::context_window::savings_meter).
+            .children(saved_label(usage).filter(|_| !has_window(usage)).map(|label| {
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(TEXT_BODY))
                     .text_color(theme.text_muted)
+                    .tabular_nums()
                     .child(SharedString::from(label))
             }))
-            .children(savings_details(self.state.read(cx).context_usage).map(|lines| {
+            .children(savings_details(usage).filter(|_| !has_window(usage)).map(|lines| {
                 div()
                     .flex()
                     .flex_col()
@@ -225,22 +282,23 @@ impl Render for UsageCard {
                     .pt(px(4.0))
                     .child(
                         div()
-                            .text_size(px(12.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_size(px(TEXT_BODY))
+                            .font_weight(WEIGHT_STRONG)
                             .text_color(theme.text)
                             .child("Kept out of context by graff"),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(px(TEXT_BODY))
                             .line_height(px(19.0))
                             .whitespace_nowrap()
                             .text_color(theme.text_muted)
+                            .tabular_nums()
                             .child(SharedString::from(lines)),
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(TEXT_CAPTION))
                             .whitespace_nowrap()
                             .text_color(theme.text_faint)
                             .child("Measured by graff in this session; tool output counted at 4 bytes a token."),
