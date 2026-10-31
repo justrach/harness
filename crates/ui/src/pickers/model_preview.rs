@@ -164,8 +164,11 @@ fn model_icon(model: &Model) -> &'static str {
         .and_then(maker_icon)
         .unwrap_or_else(|| provider(route(model)).1)
 }
-fn brand_accent(model: &Model, theme: &Theme) -> gpui::Hsla {
-    // Only sourced product/brand accents. Unverified brands stay neutral.
+/// The reasoning slider's color: the model maker's (or its route's) sourced
+/// accent. A model whose maker has no sourced accent takes its agent's color,
+/// so no slider falls back to plain grey and no brand color is made up.
+fn brand_accent(model: &Model, harness: HarnessId, theme: &Theme) -> gpui::Hsla {
+    let dark = theme.appearance.is_dark();
     match model_maker(model).unwrap_or(route(model)) {
         "openai" | "codex" | "chatgpt-new" => rgb(0x66b5ff).into(),
         "anthropic" => rgb(0xd97757).into(),
@@ -198,8 +201,17 @@ fn brand_accent(model: &Model, theme: &Theme) -> gpui::Hsla {
             0x4338ca
         })
         .into(),
-        "zai" | "xai" | "vercel" | "mlx" | "omlx" => theme.text,
-        _ => theme.text_muted,
+        // Monochrome brands: Grok in pure black or white, Z.ai a softer
+        // shade of the same so the two stay apart.
+        "xai" => rgb(if dark { 0xffffff } else { 0x000000 }).into(),
+        "zai" => rgb(if dark { 0xb4b4b4 } else { 0x4d4d4d }).into(),
+        "vercel" | "mlx" | "omlx" => theme.text,
+        _ => match harness {
+            HarnessId::Graff => rgb(0x0285ff).into(),
+            HarnessId::ClaudeCode => rgb(0xd97757).into(),
+            HarnessId::Codex => rgb(0x66b5ff).into(),
+            _ => theme.text_muted,
+        },
     }
 }
 
@@ -928,7 +940,7 @@ impl Pickers {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let accent = brand_accent(&p.model, theme);
+        let accent = brand_accent(&p.model, p.harness, theme);
         let binary = binary_reasoning_switch(Some(&p.model));
         let label = p
             .reasoning
@@ -2040,6 +2052,36 @@ mod tests {
                 assert_eq!(p.resolved(cx).reasoning, lowest);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn every_slider_has_a_color_and_grok_and_zai_differ() {
+        let model = |id: &str| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: Vec::new(),
+            options: Vec::new(),
+            maker: None,
+            billing: None,
+        };
+        for theme in [Theme::light(), Theme::dark()] {
+            let grok = brand_accent(&model("xai/grok-5"), HarnessId::Graff, &theme);
+            let zai = brand_accent(&model("zai/glm-5"), HarnessId::Graff, &theme);
+            assert_eq!(grok.s, 0.0, "Grok is black and white");
+            assert_eq!(zai.s, 0.0, "Z.ai is monochrome too");
+            assert_ne!(grok, zai, "in different shades");
+            assert_eq!(grok.l, if theme.appearance.is_dark() { 1.0 } else { 0.0 });
+            // A model no maker claims takes its agent's color, not grey.
+            let custom = model("custom-router/house-model");
+            let graff: gpui::Hsla = rgb(0x0285ff).into();
+            assert_eq!(brand_accent(&custom, HarnessId::Graff, &theme), graff);
+            let claude: gpui::Hsla = rgb(0xd97757).into();
+            assert_eq!(brand_accent(&custom, HarnessId::ClaudeCode, &theme), claude);
+            // A known maker keeps its own color whichever agent serves it.
+            let anthropic = brand_accent(&model("anthropic/claude-x"), HarnessId::Graff, &theme);
+            assert_eq!(anthropic, claude);
+        }
     }
 
     #[test]
