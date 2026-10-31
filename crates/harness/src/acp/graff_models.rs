@@ -33,6 +33,7 @@ pub(super) fn normalize_legacy_id(id: &str) -> Cow<'_, str> {
         || !matches!(
             provider,
             "anthropic"
+                | "claude-agent"
                 | "codegraff"
                 | "codex"
                 | "deepseek"
@@ -766,6 +767,10 @@ mod tests {
             vec!["--model", "codegraff/gpt-6-sol"]
         );
         assert_eq!(launch_args(Some("kimi/k3")), vec!["--model", "kimi/k3"]);
+        assert_eq!(
+            launch_args(Some("claude-agent:claude-opus-5-5")),
+            vec!["--model", "claude-agent/claude-opus-5-5"]
+        );
         assert_eq!(
             launch_args(Some("gpt-6-sol:batch")),
             vec!["--model", "gpt-6-sol:batch"]

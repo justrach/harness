@@ -56,6 +56,10 @@ struct Scene {
     /// Synthetic device capability, never the renderer host's installed CLI.
     #[serde(default)]
     dictation_available: bool,
+    /// The composer's remembered picks (`composer-defaults.json`), as a user
+    /// who picked before would have them. Absent: none.
+    #[serde(default)]
+    composer_defaults: Option<serde_json::Value>,
 }
 
 /// One interaction, in points from the window's top left. Keys as
@@ -174,6 +178,13 @@ fn main() -> anyhow::Result<()> {
 
     for scene in scenes {
         composer::set_scene_dictation_available(scene.dictation_available);
+        let defaults_path = data_dir.join("composer-defaults.json");
+        match &scene.composer_defaults {
+            Some(defaults) => std::fs::write(&defaults_path, serde_json::to_vec(defaults)?)?,
+            None => {
+                let _ = std::fs::remove_file(&defaults_path);
+            }
+        }
         *settings::accounts::SCENE_ACCOUNTS.lock().unwrap() = scene.accounts.clone();
         app.update(|cx| {
             appearance::set_mode(

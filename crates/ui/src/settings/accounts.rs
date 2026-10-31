@@ -201,6 +201,18 @@ pub fn openai_login(snapshot: &AgentAccountsSnapshot) -> (bool, Option<String>) 
     }
 }
 
+/// Whether a reload of graff's sign-ins changed which providers are signed
+/// in (the model list follows them).
+fn graff_sign_ins_changed(before: &[GraffLoginProvider], after: &[GraffLoginProvider]) -> bool {
+    let signed_in = |rows: &[GraffLoginProvider]| -> std::collections::BTreeSet<String> {
+        rows.iter()
+            .filter(|row| row.signed_in)
+            .map(|row| row.id.clone())
+            .collect()
+    };
+    signed_in(before) != signed_in(after)
+}
+
 /// A graff provider's display name for the sign-in dialog title.
 fn graff_provider_name(id: Option<&str>) -> &'static str {
     if id == Some("chatgpt-new") {
@@ -756,17 +768,34 @@ impl AccountsPage {
                 .call(methods::LIST_GRAFF_LOGINS, params)
                 .await;
             this.update(cx, |page, cx| {
-                page.graff_logins = match result {
+                let next = match result {
                     Ok(value) => match serde_json::from_value::<Vec<GraffLoginProvider>>(value) {
                         Ok(rows) => Loadable::Ready(rows),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                page.set_graff_logins(next, cx);
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Show a reloaded sign-in list. A provider signed in or out (Claude
+    /// Agent opted in, say) changes graff's model list, so the composers
+    /// reload theirs: a new chat must see `claude-agent/` rows to prefer them.
+    fn set_graff_logins(
+        &mut self,
+        next: Loadable<Vec<GraffLoginProvider>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let (Loadable::Ready(before), Loadable::Ready(after)) = (&self.graff_logins, &next)
+            && graff_sign_ins_changed(before, after)
+        {
+            crate::pickers::bump_graff_models(cx);
+        }
+        self.graff_logins = next;
     }
 
     fn load_codegraff_usage(&mut self, cx: &mut Context<Self>) {
@@ -1464,7 +1493,7 @@ impl AccountsPage {
                     serde_json::from_value::<Vec<GraffLoginProvider>>(value)
                         .map_err(|e| harness_rpc::RpcError::Failed(e.to_string()))
                 }) {
-                    Ok(rows) => page.graff_logins = Loadable::Ready(rows),
+                    Ok(rows) => page.set_graff_logins(Loadable::Ready(rows), cx),
                     Err(err) => page.error = Some(format!("Sign out failed: {err}").into()),
                 }
                 cx.notify();

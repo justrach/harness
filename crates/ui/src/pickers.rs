@@ -56,7 +56,7 @@ use crate::chat_mode;
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
 use crate::popover::{self, Loadable, MenuKey};
-use crate::settings::composer::ComposerDefaults;
+use crate::settings::composer::{ComposerDefaults, RememberedModel};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
 
@@ -89,6 +89,20 @@ impl gpui::Global for HarnessCatalogChanged {}
 /// the observers re-fetch from the engine (the source of truth).
 pub fn bump_harness_catalog(cx: &mut App) {
     cx.default_global::<HarnessCatalogChanged>();
+}
+
+/// Marker global: [`bump_graff_models`] pokes it when graff's sign-ins on
+/// some device changed (Settings → Accounts), and every [`Pickers`] reloads
+/// graff's model list. Opting in to Claude Agent adds `claude-agent/` rows; a
+/// list cached from before would keep new chats on `anthropic/`.
+#[derive(Default)]
+pub struct GraffModelsChanged;
+
+impl gpui::Global for GraffModelsChanged {}
+
+/// Notify all composers that graff's model list may have changed.
+pub fn bump_graff_models(cx: &mut App) {
+    cx.default_global::<GraffModelsChanged>();
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +277,36 @@ impl ResolvedRunConfig {
 /// the same row here).
 pub fn default_model(models: &[Model]) -> Option<&Model> {
     models.first()
+}
+
+/// graff's `claude-agent/<name>` row for an `anthropic/<name>` id, when the
+/// list has one: the user opted in to graff's Claude Agent route, which
+/// serves the same models through their Claude Code login.
+pub fn claude_agent_twin<'a>(id: &str, models: &'a [Model]) -> Option<&'a Model> {
+    let name = id.strip_prefix("anthropic/").filter(|name| !name.is_empty())?;
+    models
+        .iter()
+        .find(|model| model.id.strip_prefix("claude-agent/") == Some(name))
+}
+
+/// The model a NEW graff chat starts on, from the remembered pick (or, with
+/// none, the list's default): an `anthropic/<name>` pick moves to
+/// `claude-agent/<name>` when the list offers it, unless Anthropic was picked
+/// while Claude Agent was already listed. Other harnesses and ids keep theirs.
+pub fn new_chat_graff_model<'a>(
+    remembered: Option<&'a RememberedModel>,
+    models: &'a [Model],
+) -> Option<&'a str> {
+    let base = match remembered {
+        Some(pick) if pick.chose_over_claude_agent => return Some(pick.id.as_str()),
+        Some(pick) => pick.id.as_str(),
+        None => default_model(models)?.id.as_str(),
+    };
+    Some(
+        claude_agent_twin(base, models)
+            .map(|twin| twin.id.as_str())
+            .unwrap_or(base),
+    )
 }
 
 /// An explicit selection never silently becomes a different model after refresh.
@@ -940,6 +984,7 @@ pub struct Pickers {
     _search_events: Subscription,
     _state_observe: Subscription,
     _catalog_observe: Subscription,
+    _graff_models_observe: Subscription,
 }
 
 impl Pickers {
@@ -1025,6 +1070,11 @@ impl Pickers {
             this.ensure_harnesses(true, cx);
             cx.notify();
         });
+        let graff_models_observe =
+            cx.observe_global::<GraffModelsChanged>(|this: &mut Self, cx| {
+                this.ensure_models(HarnessId::Graff, true, cx);
+                cx.notify();
+            });
         // Dev/testing knob: `HARNESS_OPEN_PICKER=model|traits|repo|branch` boots
         // with that popover open — synthetic input can't reach the app on
         // headless compositors, so captures need a data-side path.
@@ -1124,6 +1174,7 @@ impl Pickers {
             _search_events: search_events,
             _state_observe: state_observe,
             _catalog_observe: catalog_observe,
+            _graff_models_observe: graff_models_observe,
         }
     }
 
@@ -1448,7 +1499,26 @@ impl Pickers {
                 .and_then(|models| chat_mode::default_id(models));
         }
         let harness = self.effective_harness(cx)?;
-        self.defaults.model_for(harness).map(|m| m.id.as_str())
+        let remembered = self.defaults.model_for(harness);
+        if harness == HarnessId::Graff
+            && let Some(models) = self.models.get(&harness).and_then(Loadable::ready)
+        {
+            return new_chat_graff_model(remembered, models);
+        }
+        remembered.map(|m| m.id.as_str())
+    }
+
+    /// Remember an explicit new-chat pick, noting whether it was graff's
+    /// Anthropic row chosen while Claude Agent listed the same model.
+    fn remember_pick(&mut self, harness: HarnessId, id: String, label: String) {
+        let chose_over_claude_agent = harness == HarnessId::Graff
+            && self
+                .models
+                .get(&harness)
+                .and_then(Loadable::ready)
+                .is_some_and(|models| claude_agent_twin(&id, models).is_some());
+        self.defaults
+            .remember_pick(harness, id, label, chose_over_claude_agent);
     }
 
     /// Effective reasoning — always concrete once the model is known: the
@@ -2326,7 +2396,7 @@ impl Pickers {
                     .and_then(|models| models.iter().find(|m| m.id == model_id))
                     .map(|m| m.label.clone())
                     .unwrap_or_else(|| model_id.clone());
-                self.defaults.remember_model(harness, model_id, label);
+                self.remember_pick(harness, model_id, label);
                 self.save_defaults();
             }
         }
@@ -7028,6 +7098,150 @@ mod tests {
                 .child(div().track_focus(&self.neutral))
                 .child(self.pickers.clone())
         }
+    }
+
+    #[test]
+    fn a_new_graff_chat_moves_an_old_anthropic_pick_to_claude_agent() {
+        let anthropic_only = vec![
+            bare_model("anthropic/claude-opus-5-5", "claude-opus-5-5"),
+            bare_model("openai/gpt-6-sol", "gpt-6-sol"),
+        ];
+        let both = vec![
+            bare_model("anthropic/claude-opus-5-5", "claude-opus-5-5"),
+            bare_model("claude-agent/claude-opus-5-5", "claude-opus-5-5"),
+            bare_model("openai/gpt-6-sol", "gpt-6-sol"),
+        ];
+        let pick = |id: &str, chose: bool| RememberedModel {
+            id: id.into(),
+            label: id.into(),
+            chose_over_claude_agent: chose,
+        };
+        assert_eq!(
+            claude_agent_twin("anthropic/claude-opus-5-5", &both).map(|m| m.id.as_str()),
+            Some("claude-agent/claude-opus-5-5")
+        );
+        for id in ["anthropic/", "claude-opus-5-5", "openai/claude-opus-5-5"] {
+            assert!(claude_agent_twin(id, &both).is_none(), "{id}");
+        }
+        assert!(claude_agent_twin("anthropic/claude-opus-5-5", &anthropic_only).is_none());
+
+        let old = pick("anthropic/claude-opus-5-5", false);
+        // Claude Agent not listed: the pick stands.
+        assert_eq!(
+            new_chat_graff_model(Some(&old), &anthropic_only),
+            Some("anthropic/claude-opus-5-5")
+        );
+        // Listed: a pick from before moves over.
+        assert_eq!(
+            new_chat_graff_model(Some(&old), &both),
+            Some("claude-agent/claude-opus-5-5")
+        );
+        // Anthropic chosen while Claude Agent was listed: kept.
+        assert_eq!(
+            new_chat_graff_model(Some(&pick("anthropic/claude-opus-5-5", true)), &both),
+            Some("anthropic/claude-opus-5-5")
+        );
+        // Other providers are never touched.
+        assert_eq!(
+            new_chat_graff_model(Some(&pick("openai/gpt-6-sol", false)), &both),
+            Some("openai/gpt-6-sol")
+        );
+        // Nothing remembered: graff's default row, moved the same way.
+        assert_eq!(
+            new_chat_graff_model(None, &both),
+            Some("claude-agent/claude-opus-5-5")
+        );
+        assert_eq!(new_chat_graff_model(None, &[]), None);
+    }
+
+    #[gpui::test]
+    fn claude_agent_swap_is_for_new_graff_chats_only(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id":"chat", "deviceId":"device", "archived":false,
+                    "createdAt":"2026-09-01T00:00:00Z",
+                    "config":{"harness":"graff", "model":"anthropic/claude-opus-5-5",
+                              "sandbox":"workspace-write"}
+                }))
+                .unwrap(),
+            );
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        let anthropic = || bare_model("anthropic/claude-opus-5-5", "claude-opus-5-5");
+        let agent = || bare_model("claude-agent/claude-opus-5-5", "claude-opus-5-5");
+        pickers.update(cx, |pickers, cx| {
+            pickers.defaults.remember_model(
+                HarnessId::Graff,
+                "anthropic/claude-opus-5-5".into(),
+                "claude-opus-5-5".into(),
+            );
+            // The cached list predates the opt-in.
+            pickers
+                .models
+                .insert(HarnessId::Graff, Loadable::Ready(vec![anthropic()]));
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("anthropic/claude-opus-5-5")
+            );
+            // graff's list now offers Claude Agent: a new chat takes it.
+            pickers
+                .models
+                .insert(HarnessId::Graff, Loadable::Ready(vec![anthropic(), agent()]));
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("claude-agent/claude-opus-5-5")
+            );
+            // An explicit Anthropic pick is honored and remembered as chosen.
+            pickers.pick_model("anthropic/claude-opus-5-5".into(), cx);
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("anthropic/claude-opus-5-5")
+            );
+            assert!(
+                pickers
+                    .defaults
+                    .model_for(HarnessId::Graff)
+                    .unwrap()
+                    .chose_over_claude_agent
+            );
+            // The next new chat (no draft pick) keeps it too.
+            pickers.config.model = None;
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("anthropic/claude-opus-5-5")
+            );
+            // Picking Claude Agent is remembered plainly.
+            pickers.pick_model("claude-agent/claude-opus-5-5".into(), cx);
+            assert!(
+                !pickers
+                    .defaults
+                    .model_for(HarnessId::Graff)
+                    .unwrap()
+                    .chose_over_claude_agent
+            );
+            // Back to an old-style memory for the existing-chat check.
+            pickers.config.model = None;
+            pickers.defaults.remember_model(
+                HarnessId::Graff,
+                "anthropic/claude-opus-5-5".into(),
+                "claude-opus-5-5".into(),
+            );
+        });
+        // An existing chat keeps the model it was started with.
+        state.update(cx, |state, cx| {
+            state.selected_chat = Some("chat".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        pickers.update(cx, |pickers, cx| {
+            assert_eq!(
+                pickers.resolved(cx).model.as_deref(),
+                Some("anthropic/claude-opus-5-5")
+            );
+        });
     }
 
     #[gpui::test]

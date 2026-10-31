@@ -2410,6 +2410,11 @@ fn strip_trailing_parenthetical(name: &str) -> &str {
 /// variants in either hint spelling. Exact match first (with the 1M compose
 /// when the run selects the 1M window), then a family-token fallback that
 /// prefers a variant matching the requested context window.
+///
+/// Among family matches, graff's provider-qualified values rank: the
+/// requested id's own provider first (an explicit `anthropic/...` pick stays
+/// Anthropic), then `claude-agent/` (graff's opted-in Claude Agent route,
+/// which serves the same model names) ahead of `anthropic/` and the rest.
 fn pick_model_value(requested: &str, available: &[&str], context_1m: bool) -> Option<String> {
     if context_1m {
         for composed in [format!("{requested}[1m]"), format!("{requested}-1m")] {
@@ -2425,10 +2430,16 @@ fn pick_model_value(requested: &str, available: &[&str], context_1m: bool) -> Op
     let family = ["fable", "opus", "sonnet", "haiku", "gpt"]
         .into_iter()
         .find(|f| norm_id(requested).contains(f))?;
-    let candidates: Vec<&&str> = available
+    let mut candidates: Vec<&&str> = available
         .iter()
         .filter(|v| norm_id(v).contains(family))
         .collect();
+    let requested_provider = requested.split_once('/').map(|(provider, _)| provider);
+    candidates.sort_by_key(|v| match v.split_once('/').map(|(provider, _)| provider) {
+        Some(provider) if Some(provider) == requested_provider => 0,
+        Some("claude-agent") => 1,
+        _ => 2,
+    });
     candidates
         .iter()
         .find(|v| context_hint_1m(v) == context_1m)
@@ -4985,6 +4996,59 @@ async fn run_session(session: Session) {
     }
 
     child.shutdown(kill_grace).await;
+}
+
+#[cfg(test)]
+mod pick_model_value_tests {
+    use super::pick_model_value;
+
+    #[test]
+    fn family_fallback_prefers_claude_agent_over_anthropic() {
+        let available = [
+            "anthropic/claude-opus-5",
+            "claude-agent/claude-opus-5",
+            "anthropic/claude-sonnet-5",
+        ];
+        // A bare or unrelated request: Claude Agent wins the tie.
+        for requested in ["claude-opus-5-5", "opus", "codegraff/claude-opus-5-5"] {
+            assert_eq!(
+                pick_model_value(requested, &available, false).as_deref(),
+                Some("claude-agent/claude-opus-5"),
+                "{requested}"
+            );
+        }
+        // Listed the other way round, the order is the same.
+        let reversed = ["claude-agent/claude-opus-5", "anthropic/claude-opus-5"];
+        assert_eq!(
+            pick_model_value("opus", &reversed, false).as_deref(),
+            Some("claude-agent/claude-opus-5")
+        );
+        // An explicit Anthropic pick keeps its provider.
+        assert_eq!(
+            pick_model_value("anthropic/claude-opus-5-5", &available, false).as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+        // An exact match is never re-routed.
+        assert_eq!(
+            pick_model_value("anthropic/claude-opus-5", &available, false).as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+        // The context-window preference still applies within the ranking.
+        let windows = [
+            "anthropic/claude-opus-5[1m]",
+            "claude-agent/claude-opus-5",
+            "claude-agent/claude-opus-5[1m]",
+        ];
+        assert_eq!(
+            pick_model_value("opus", &windows, true).as_deref(),
+            Some("claude-agent/claude-opus-5[1m]")
+        );
+        // Unqualified adapters (the Claude adapter's aliases) are unchanged.
+        assert_eq!(
+            pick_model_value("claude-opus-5", &["sonnet", "opus", "opus[1m]"], false).as_deref(),
+            Some("opus")
+        );
+    }
 }
 
 #[cfg(test)]

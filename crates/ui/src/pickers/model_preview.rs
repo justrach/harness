@@ -475,8 +475,7 @@ impl Pickers {
             self.defaults.harness = Some(p.harness);
             self.defaults.reasoning = p.reasoning;
             *self.defaults.model_options_mut(p.harness, &p.model.id) = p.options;
-            self.defaults
-                .remember_model(p.harness, p.model.id, p.model.label);
+            self.remember_pick(p.harness, p.model.id, p.model.label);
             self.save_defaults();
         }
         self.animate_close(cx);
