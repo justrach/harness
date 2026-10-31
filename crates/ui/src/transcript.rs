@@ -4051,6 +4051,9 @@ enum BlobFetch {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    /// Done in a transcript image's annotate mode (crate::annotate): stage
+    /// the flattened copy, with its notes, in the composer.
+    StageAnnotated(crate::annotate::Annotated),
     /// An error card's "Log in": the run was refused because this chat's
     /// agent is signed out or out of usage ([`harness_proto::run_errors`]).
     /// The shell routes it by the chat's own agent and host, never by the
@@ -11232,6 +11235,20 @@ impl Render for Transcript {
             .child(crate::markdown::render::selection_owner_end());
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
+        if let Some(preview) = self.attachment_preview.as_mut()
+            && preview.annotate.is_none()
+        {
+            let weak = cx.weak_entity();
+            *preview = preview.clone().annotatable(move |annotated, _, cx| {
+                weak.update(cx, |this, cx| {
+                    this.attachment_preview = None;
+                    this.release_diagram_zoom(cx);
+                    cx.emit(TranscriptEvent::StageAnnotated(annotated));
+                    cx.notify();
+                })
+                .ok();
+            });
+        }
         if let Some(preview) = self.attachment_preview.clone() {
             let weak = cx.weak_entity();
             // A diagram keeps its natural size; the image is a raster of it.

@@ -53,6 +53,14 @@ Some agents serve models from several providers at once. Graff lists every provi
 
 Each tab and pane owns its selection, project filter, and composer picks (agent, model, reasoning). A new pane or tab starts from the picks of the pane it was opened from. Leaving a pane or tab parks its picks, and coming back restores them. The sticky last-used defaults only seed a new-session canvas with nothing parked, such as after a restart. An existing chat's picks live on the chat itself. See [`crates/ui/src/shell/chat_split.rs`](crates/ui/src/shell/chat_split.rs) and [`crates/ui/src/shell/chat_tabs.rs`](crates/ui/src/shell/chat_tabs.rs).
 
+## Image annotation
+
+Clicking an image in the chat or the composer opens the preview, and its bottom-right **Annotate** pill turns it into the editor. A bottom-center pill holds the tools (Text, Rectangle, the default), four color dots (red, the default, then blue, green, yellow) and Undo. A second pill beside it holds Cancel and Done. Dragging draws a 2 px box with a numbered pin on its top-left corner, and letting go opens a one-line **Add a note…** popover under the box with a delete button. The Text tool drops a filled chip with the typed words. Enter commits a note, Esc commits it or leaves the editor, Backspace or Delete removes the selected mark, and ⌘Z undoes.
+
+Every control is at least 32 px to hit. Pin numbers and box coordinates use tabular figures. The editor uses the shared 180 ms ease-out-quint entrance and skips it under reduced motion. Type sticks to 11, 12 and 13 px in regular and medium. Radii nest: 21 px pills around 16 px buttons, 10 px popovers around 6 px controls. The popover and pills take theme surfaces, so both appearances read correctly; the mark colors are fixed so a flattened image means the same thing everywhere.
+
+Done flattens the marks into a new PNG at the image's own resolution (the marks are drawn at screen size, then scaled), stages it in place of the original, and sends the numbered notes with the prompt as text with box coordinates in image pixels. See [`crates/ui/src/annotate.rs`](crates/ui/src/annotate.rs) and [`docs/annotate.md`](docs/annotate.md).
+
 ## Extending the design
 
 Reuse semantic `Theme` colors, typography helpers, shared settings widgets, existing icons, and the current account-row layout. Check both Codegraff appearances and a contrasting third-party theme. Review ordinary, hover, focus, loading, offline, error, and high-usage states. [`docs/theme-system.md`](docs/theme-system.md) lists the theme validation and visual review surfaces.
