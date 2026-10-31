@@ -795,6 +795,9 @@ final class SessionStore {
                     fields[k] = list.map { "\($0.jsonObject)" }
                 }
             }
+            // A spawn's lifecycle and live tail ride the part, not the call (schema.rs set_subagent_*).
+            if let status = m["subagentStatus"]?.stringValue { fields[RenderToolCall.subagentStatusKey] = status }
+            if let tail = m["subagentTail"]?.stringValue { fields[RenderToolCall.subagentTailKey] = tail }
             // isError presence IS the resolution marker (schema.rs:96).
             let isError = m["isError"]?.boolValue
             return .tool(id: id, call: RenderToolCall(tag: tag, fields: fields),

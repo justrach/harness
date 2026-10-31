@@ -283,7 +283,12 @@ final class DemoDataset {
                     createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
             ])
         } else {
-            store.setEntries(Self.transcript(for: chatId))
+            var entries = Self.transcript(for: chatId)
+            // Rig: a running turn with to-do steps and subagents, for the agent work chip and card.
+            if chatId == "chat-veil", ProcessInfo.processInfo.arguments.contains("-demo-agent-work") {
+                entries += Self.agentWorkTurn(now: nowMs())
+            }
+            store.setEntries(entries)
         }
         store.demoResponder = { [weak self, weak store] prompt in
             guard let self, let store else { return }
@@ -327,6 +332,47 @@ final class DemoDataset {
     }
 
     // MARK: Scripted transcripts
+
+    /// A turn still streaming: three to-do snapshots (two steps done across messages, so both have a
+    /// duration), the active step's tool calls, and two subagents, one running and one done.
+    private static func agentWorkTurn(now: Int64) -> [MessageEntry] {
+        func todo(_ done: Int) -> MessagePart {
+            let steps = ["Read the desktop veil", "Port the opacity curve", "Wire the row lifecycle",
+                         "Add the cadence tests", "Run the transcript suite"]
+            let items = steps.enumerated().map { TaskItem(text: $0.element, done: $0.offset < done) }
+            return .tool(id: "todo-\(done)", call: RenderToolCall(tag: "todo", fields: ["items": items]),
+                         isError: false, resolved: true)
+        }
+        func spawn(_ id: String, _ name: String, status: String, tail: String? = nil) -> MessagePart {
+            var fields: [String: AnyHashable] = ["name": name, RenderToolCall.subagentStatusKey: status]
+            if let tail { fields[RenderToolCall.subagentTailKey] = tail }
+            return .tool(id: id, call: RenderToolCall(tag: "unknown", fields: fields), isError: false, resolved: true)
+        }
+        return [
+            MessageEntry(id: "aw-ask", role: .user, parts: [
+                .text(id: "t0", text: "Finish the veil port and prove the cadence on device."),
+            ], createdAt: now - 400_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
+            MessageEntry(id: "aw-1", role: .assistant, parts: [todo(0)],
+                         createdAt: now - 300_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            MessageEntry(id: "aw-2", role: .assistant, parts: [
+                .tool(id: "aw-read", call: RenderToolCall(tag: "readFile", fields: ["path": "crates/ui/src/markdown/veil.rs"]),
+                      isError: false, resolved: true),
+                todo(1),
+            ], createdAt: now - 228_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
+            MessageEntry(id: "aw-3", role: .assistant, parts: [
+                .tool(id: "aw-curve", call: RenderToolCall(tag: "editFile", fields: ["path": "Harness/Transcript/Veil.swift"]),
+                      isError: false, resolved: true),
+                todo(2),
+                spawn("aw-agent-1", "Agent: audit veil timing on iPad", status: "running",
+                      tail: "Comparing fade curves at 120 Hz"),
+                spawn("aw-agent-2", "Agent: check the reduced motion path", status: "done"),
+                .tool(id: "aw-edit", call: RenderToolCall(tag: "editFile", fields: ["path": "Harness/Transcript/TranscriptRows.swift"]),
+                      isError: false, resolved: true),
+                .tool(id: "aw-test", call: RenderToolCall(tag: "exec", fields: ["command": "xcodebuild test -only-testing:VeilTests"]),
+                      isError: false, resolved: false),
+            ], createdAt: now - 85_000, deviceId: "dev-mac", status: .streaming, continuationOf: nil),
+        ]
+    }
 
     private static func transcript(for chatId: String) -> [MessageEntry] {
         let now = nowMs()

@@ -495,11 +495,15 @@ struct SessionView: View {
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
                 .overlay(alignment: .bottomLeading) {
                     if pillShows(chat) {
-                        RunStatusPill(chatId: chat.id, startedAtMs: sessionStartedAt(chat: chat),
-                                      onStop: { store.sendInterrupt() })
-                            .padding(.leading, 16)
-                            .padding(.bottom, 8)
-                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        HStack(spacing: 8) {
+                            RunStatusPill(chatId: chat.id, startedAtMs: sessionStartedAt(chat: chat),
+                                          onStop: { store.sendInterrupt() })
+                            // The turn's steps and agents beside it, a separate tap from the pill's Stop.
+                            AgentWorkChip(store: store, glass: true)
+                        }
+                        .padding(.leading, 16)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
@@ -515,6 +519,10 @@ struct SessionView: View {
                     || model.sendState(for: chat) != nil || model.connectivity.state != .connected) {
                     statusStrip(chat: chat, status: status, store: store)
                         .allowsHitTesting(model.sendState(for: chat).map { $0 == .failed || $0 == .waiting } ?? false)
+                        // The turn's steps and agents, at the strip's far end; it takes taps, the strip doesn't.
+                        .overlay(alignment: .trailing) {
+                            AgentWorkChip(store: store).padding(.trailing, 20)
+                        }
                 }
                 Group {
                     if let request = store.openInputRequest {
