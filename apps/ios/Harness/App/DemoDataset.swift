@@ -357,7 +357,7 @@ final class DemoDataset {
                     > The curve is `1 − (1−p)^1.6` — fast attack, soft landing.
                     """),
                     .tool(id: "tool1", call: RenderToolCall(tag: "readFile", fields: ["path": "crates/ui/src/markdown/veil.rs"]), isError: false, resolved: true),
-                    .tool(id: "tool2", call: RenderToolCall(tag: "editFile", fields: ["path": "Harness/Transcript/Veil.swift"]), isError: false, resolved: true),
+                    .tool(id: "tool2", call: RenderToolCall(tag: "editFile", fields: ["path": "Harness/Transcript/Veil.swift", "additions": Int64(42), "deletions": Int64(9)]), isError: false, resolved: true),
                     .tool(id: "tool3", call: RenderToolCall(tag: "exec", fields: ["command": "xcodebuild -scheme Harness build"]), isError: false, resolved: true),
                     .text(id: "t1", text: """
                     Implementation lands in `Veil.swift`:
@@ -402,7 +402,9 @@ final class DemoDataset {
                 MessageEntry(id: "m2", role: .assistant, parts: [
                     .tool(id: "tool1", call: RenderToolCall(tag: "search", fields: ["pattern": "group_header_color"]), isError: false, resolved: true),
                     .tool(id: "tool2", call: RenderToolCall(tag: "exec", fields: ["command": "cargo test -p harness-ui tool_group"]), isError: true, resolved: true),
-                    .tool(id: "tool3", call: RenderToolCall(tag: "editFile", fields: ["path": "crates/ui/src/shell/transcript.rs"]), isError: false, resolved: true),
+                    .tool(id: "tool3", call: RenderToolCall(tag: "editFile", fields: ["path": "crates/ui/src/shell/transcript.rs", "additions": Int64(14), "deletions": Int64(6)]), isError: false, resolved: true),
+                    .tool(id: "tool4", call: RenderToolCall(tag: "editFile", fields: ["path": "crates/ui/src/shell/theme.rs", "additions": Int64(4), "deletions": Int64(2)]), isError: false, resolved: true),
+                    .tool(id: "tool5", call: RenderToolCall(tag: "exec", fields: ["command": "cargo test -p harness-ui tool_group"]), isError: false, resolved: true),
                     .text(id: "t0", text: "Done — the header keeps `text_muted` even on failure; only the chip label and the summary segment (\"1 failed\") pick up `danger`. Matches the desktop fix in `1749890`."),
                 ], createdAt: now - 950_000, deviceId: "dev-mac", status: .complete, continuationOf: nil),
             ]

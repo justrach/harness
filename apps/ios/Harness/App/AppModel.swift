@@ -224,6 +224,10 @@ final class AppModel {
                     launchRoute = .space(String(spec.dropFirst("space:".count)))
                 }
             }
+            // Rig: a draft already typed in the opened session (fold-transition recordings).
+            if let ix = args.firstIndex(of: "-demo-draft"), ix + 1 < args.count, case .chat(let id)? = launchRoute {
+                DraftStore.save(args[ix + 1], for: DraftStore.chatKey(id))
+            }
             if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {
                 launchSheet = args[ix + 1]
             }
