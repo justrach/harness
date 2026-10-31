@@ -21,6 +21,8 @@ struct TranscriptView: View {
     var duoChat = false
     /// Open a group's changes in the Inspect pane, where there is one.
     var inspectDiff: ((DiffSummary) -> Void)? = nil
+    /// Open one tool call in the Inspect pane (flat Duo).
+    var inspectTool: ((ToolItem) -> Void)? = nil
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -48,7 +50,8 @@ struct TranscriptView: View {
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,
             reduceMotion: reduceMotion,
             configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
-                ^ colorScheme.hashValue ^ duoChat.hashValue ^ (inspectDiff != nil).hashValue) { row in
+                ^ colorScheme.hashValue ^ duoChat.hashValue ^ (inspectDiff != nil).hashValue
+                ^ (inspectTool != nil).hashValue &* 31) { row in
                 AnyView(rowView(row, earlier: earlierErrors.contains(row.id))
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
@@ -57,6 +60,7 @@ struct TranscriptView: View {
                     .environment(\.colorScheme, ThemeStore.shared.colorScheme)
                     .environment(\.duoChat, duoChat)
                     .environment(\.inspectDiff, inspectDiff)
+                    .environment(\.inspectTool, inspectTool)
                     .environment(\.openURL, OpenURLAction { url in
                         guard let link = HostLink.classify(url, cwd: cwd) else { return .systemAction }
                         onHostLink(link)
@@ -720,9 +724,12 @@ struct ToolChipRow: View {
     var onResize: () -> Void = {}
     @State private var expanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.inspectTool) private var inspectTool
 
     var body: some View {
         Button {
+            // Lying flat on a Duo, the row opens in the Inspect pane beside the chat.
+            if let inspectTool { inspectTool(tool); return }
             withAnimation(reduceMotion ? nil : Motion.resize) { expanded.toggle() }
             onResize()
         } label: {

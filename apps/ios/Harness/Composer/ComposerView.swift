@@ -980,6 +980,7 @@ struct ComposerView: View {
 // MARK: - Question panel (composer.rs Wizard)
 
 struct QuestionPanel: View {
+    @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let requestId: String
     let questions: [UserInputQuestion]
     let respond: (String, [UserInputAnswer]) -> Void
@@ -1059,7 +1060,8 @@ struct QuestionPanel: View {
             }
         }
         .padding(16)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26))
+        // On a Duo the answer bar is solid: glass is kept for the status pill and the switchers.
+        .modifier(SolidOrGlass(solid: duoChat, shape: RoundedRectangle(cornerRadius: 26)))
         .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(hairline(0.05), lineWidth: 1))
         .padding(.horizontal, 12)
         .transition(.opacity)
@@ -1183,4 +1185,18 @@ struct QueuedAttachmentEdit: Identifiable {
     var id: String { draft.rowId }
     let lease: QueueEditLease?
     let draft: QueuedAttachmentDraft
+}
+
+/// A solid raised surface, or the regular glass.
+struct SolidOrGlass<S: Shape>: ViewModifier {
+    let solid: Bool
+    let shape: S
+
+    func body(content: Content) -> some View {
+        if solid {
+            content.background(Theme.surfaceRaised, in: shape)
+        } else {
+            content.glassEffect(.regular, in: shape)
+        }
+    }
 }

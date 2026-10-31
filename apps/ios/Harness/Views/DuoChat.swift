@@ -18,6 +18,12 @@ enum DuoChat {
     static func isFoldableWindow(phone: Bool, regularWidth: Bool, regularHeight: Bool, fold: FoldSplit) -> Bool {
         fold != .none || (phone && regularWidth && regularHeight)
     }
+
+    /// The inner display lying flat: a phone window regular both ways with no fold. The session splits at
+    /// the window's middle (where the fold is), chat on the left and Inspect on the right.
+    static func isFlat(phone: Bool, regularWidth: Bool, regularHeight: Bool, fold: FoldSplit) -> Bool {
+        fold == .none && phone && regularWidth && regularHeight
+    }
 }
 
 extension EnvironmentValues {

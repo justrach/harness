@@ -97,6 +97,12 @@ struct HomeView: View {
             fold: fold)
     }
 
+    private var flatDuo: Bool {
+        DuoChat.isFlat(phone: UIDevice.current.userInterfaceIdiom == .phone,
+                       regularWidth: horizontalSizeClass == .regular,
+                       regularHeight: verticalSizeClass == .regular, fold: fold)
+    }
+
     private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
 
     /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
@@ -371,7 +377,10 @@ struct HomeView: View {
             } else {
                 NavigationStack(path: $path) {
                     sidebar
-                        .navigationDestination(for: Route.self) { destination($0) }
+                        .navigationDestination(for: Route.self) {
+                            // iPhone Duo lying flat: the session splits at the fold, chat and Inspect.
+                            destination($0).environment(\.duoFlat, flatDuo)
+                        }
                 }
             }
         }

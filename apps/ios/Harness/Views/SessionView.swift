@@ -19,6 +19,11 @@ struct SessionView: View {
     @Environment(\.foldPaneHeader) private var foldPaneHeader
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// iPhone Duo lying flat: chat left of the fold, Inspect right (DuoInspect).
+    @Environment(\.duoFlat) private var duoFlat
+    @Environment(\.foldComposerFocus) private var foldComposerFocus
+    /// Flat Duo: the composer has the keyboard, so Inspect folds to its one-line peek.
+    @State private var keyboardUp = false
     /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let chatId: String
@@ -356,11 +361,31 @@ struct SessionView: View {
         let status = liveStatus(chat: chat)
         // The composer owns real layout space. The transcript's viewport ends
         // above it, so keyboard and glass morphs cannot cover the last row.
-        return VStack(spacing: 0) {
+        let flat = duoFlat && splitScreen == nil
+        let inspect = InspectState.of(chat.id)
+        let inspectModel = flat
+            ? InspectModel.build(store.entries,
+                                 source: model.demo != nil ? DemoInspectSource() as InspectDetailSource : LiveInspectSource())
+            : InspectModel()
+        // Flat Duo: two equal halves meet at the fold. The chat column keeps its place in the tree whether or
+        // not Inspect shows, so the transcript (and its scroll) survives the keyboard and the fold.
+        return HStack(spacing: 0) {
+        VStack(spacing: 0) {
+            if flat, keyboardUp {
+                InspectPeek(model: inspectModel, state: inspect) {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
                            onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
                            hostName: model.deviceName(store.hostDeviceId ?? chat.deviceId),
-                           duoChat: duoChat)
+                           duoChat: duoChat,
+                           inspectDiff: flat ? { summary in
+                               inspect.segment = .diff
+                               inspect.selectedFile = summary.files.first
+                           } : nil,
+                           inspectTool: flat ? { inspect.show($0) } : nil)
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
@@ -407,6 +432,9 @@ struct SessionView: View {
                             .id(chat.id)
                     }
                 }
+                .environment(\.foldComposerFocus, flat ? { up in
+                    withAnimation(Motion.collapse) { keyboardUp = up }
+                } : foldComposerFocus)
                 .padding(.bottom, 8)
             }
             .background {
@@ -422,6 +450,15 @@ struct SessionView: View {
                 .padding(.top, verticalSizeClass == .compact ? 0 : -24)
                 .ignoresSafeArea(.container, edges: .bottom)
                 .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity)
+            if flat, !keyboardUp {
+                Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea(.container, edges: .bottom)
+                InspectPane(model: inspectModel, state: inspect)
+                    .frame(maxWidth: .infinity)
+                    .ignoresSafeArea(.container, edges: .bottom)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .background(Theme.bg.ignoresSafeArea())
