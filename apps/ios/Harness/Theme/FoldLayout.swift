@@ -59,11 +59,13 @@ extension EnvironmentValues {
     @Entry var foldComposerFocus: ((Bool) -> Void)? = nil
 }
 
-/// Where the session list's search field goes. Folded, the floating field covered a row of a half-height
-/// list (laptop) or a column (book), so it moves into the bar like the phone split's.
+/// Where the session list's search field goes. In laptop pose the floating field covered a row of the
+/// half-height list, so it moves into the bar like the phone split's. Book pose keeps it floating: the list
+/// column is full height, and a field in the column's bar sat over the list's title.
 enum SessionSearchPlacement {
     static func inBar(phoneSplit: Bool, fold: FoldSplit) -> Bool {
-        phoneSplit || fold != .none
+        if case .stacked = fold { return true }
+        return phoneSplit
     }
 }
 

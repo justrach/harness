@@ -473,8 +473,8 @@ struct HomeView: View {
                 withAnimation(Motion.collapse) { proxy.scrollTo(id) }
             }
         }
-        // In the phone split and on a fold the field sits in the pane's own bar: the floating one overlaps the
-        // rows of a short pane or a column.
+        // In the phone split and in laptop pose the field sits in the pane's own bar: the floating one overlaps
+        // the rows of a short pane.
         .searchable(text: $searchText,
                     placement: SessionSearchPlacement.inBar(phoneSplit: phoneArrangement != nil, fold: fold)
                         ? .navigationBarDrawer(displayMode: .always) : .automatic,

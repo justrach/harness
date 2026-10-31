@@ -71,9 +71,9 @@ final class FoldLayoutTests: XCTestCase {
     }
 
     func testFoldedSearchSitsInTheBar() {
-        // Folded either way, the floating field covered a row of the half-height list or the column.
+        // Laptop pose: the floating field covered a row of the half-height list. Book pose keeps it floating.
         XCTAssertTrue(SessionSearchPlacement.inBar(phoneSplit: false, fold: .stacked(top: 455.5, gap: 40)))
-        XCTAssertTrue(SessionSearchPlacement.inBar(phoneSplit: false, fold: .sideBySide(leading: 314.5, gap: 40)))
+        XCTAssertFalse(SessionSearchPlacement.inBar(phoneSplit: false, fold: .sideBySide(leading: 314.5, gap: 40)))
         XCTAssertTrue(SessionSearchPlacement.inBar(phoneSplit: true, fold: .none))
         XCTAssertFalse(SessionSearchPlacement.inBar(phoneSplit: false, fold: .none))
     }
