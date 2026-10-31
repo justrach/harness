@@ -72,7 +72,6 @@ struct SessionView: View {
     /// iPhone Duo in laptop pose draws the strip too: the bar shares its row with the status bar there and
     /// clipped the title under the back arrow.
     private var paneChrome: Bool { splitScreen != nil || foldPaneHeader != nil }
-    /// Upright Duo with the session on both halves: the header moves up into the status bar's row.
 
     /// Rename and paging are sibling controls: tapping an arrow must never rename.
     private func headerTitle(_ chat: Chat) -> some View {
