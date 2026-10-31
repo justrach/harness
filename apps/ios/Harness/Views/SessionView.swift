@@ -335,6 +335,12 @@ struct SessionView: View {
         .onAppear {
             model.attachSessionView(chatId: chatId)
             model.markSeen(chatId: chatId)
+            #if DEBUG
+            // Screenshot rig: open on Inspect (the wide Duo swaps the list for it).
+            if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-duo-inspect") {
+                InspectState.of(chatId).open = true
+            }
+            #endif
         }
         .onDisappear {
             model.markSeen(chatId: chatId)
