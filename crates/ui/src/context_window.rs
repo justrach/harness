@@ -1247,6 +1247,36 @@ mod tests {
         tool(meta.call(), 0, resolved)
     }
 
+    #[test]
+    fn tool_output_folded_by_a_live_chat_counts_where_it_belongs() {
+        // Live chats (Claude Code, Codex, graff) fold tool results with
+        // harness_doc's fold. It used to drop each output's size along with
+        // its text, so every tool result fell into "System & other".
+        let mut parts = Vec::new();
+        harness_doc::fold_event_into_parts(
+            &mut parts,
+            &harness_proto::AgentEvent::ToolCall {
+                id: "t1".into(),
+                call: ToolCall::Exec {
+                    command: "cargo test".into(),
+                },
+            },
+        );
+        harness_doc::fold_event_into_parts(
+            &mut parts,
+            &harness_proto::AgentEvent::ToolResult {
+                id: "t1".into(),
+                is_error: false,
+                output: Some("x".repeat(40_000)),
+                diff: None,
+            },
+        );
+        let transcript = vec![entry(MessageRole::Assistant, parts)];
+        let b = breakdown(usage(50_000, 0), &transcript).unwrap();
+        let commands = b.items.iter().find(|(slot, _)| *slot == Slot::Commands);
+        assert_eq!(commands, Some(&(Slot::Commands, 10_000)), "{:?}", b.items);
+    }
+
     fn usage(tokens: u64, freed: u64) -> Option<ContextUsage> {
         Some(ContextUsage {
             tokens: Some(tokens),
