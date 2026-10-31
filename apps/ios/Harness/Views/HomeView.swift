@@ -130,6 +130,10 @@ struct HomeView: View {
             .accessibilityIdentifier("fold-list-overlay")
     }
 
+    private var searchInBar: Bool {
+        SessionSearchPlacement.inBar(phoneSplit: phoneArrangement != nil, fold: fold)
+    }
+
     /// Book pose: the list column's glass toolbar sits over the top of the list, so its title starts below it.
     private var listTopMargin: CGFloat {
         if case .sideBySide = fold { return 52 }
@@ -316,6 +320,8 @@ struct HomeView: View {
                 // it (no squeeze to nothing) and can be brought over the upper half from the session header.
                 VStack(spacing: 0) {
                     primaryStack
+                        // The keyboard sits below the fold; it must not squeeze the session above it.
+                        .ignoresSafeArea(.keyboard)
                         .frame(height: top)
                         .overlay(alignment: .top) {
                             if laptopListShown { laptopListOverlay }
@@ -479,13 +485,14 @@ struct HomeView: View {
         // In the phone split and in laptop pose the field sits in the pane's own bar: the floating one overlaps
         // the rows of a short pane.
         .searchable(text: $searchText,
-                    placement: SessionSearchPlacement.inBar(phoneSplit: phoneArrangement != nil, fold: fold)
-                        ? .navigationBarDrawer(displayMode: .always) : .automatic,
+                    placement: searchInBar ? .navigationBarDrawer(displayMode: .always) : .automatic,
                     prompt: "Search sessions")
         .sessionDeleteConfirmation(pending: $pendingDelete, onDelete: delete)
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 10)
         .contentMargins(.top, listTopMargin, for: .scrollContent)
+        // The floating search field: the last row scrolls clear of it instead of ending underneath.
+        .contentMargins(.bottom, searchInBar ? 0 : 64, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(Theme.surface.ignoresSafeArea())
