@@ -469,10 +469,12 @@ struct SessionView: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
-        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minX } action: { columnMinX = $0 }
-        .background {
-            Color.clear.ignoresSafeArea()
-                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midX } action: { windowMidX = $0 }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+            columnMinX = frame.minX
+            // The fold is the window's middle; the side bar's column is outside this view's frame.
+            let window = UIApplication.shared.connectedScenes
+                .compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+            windowMidX = window.map { $0.bounds.midX } ?? frame.midX
         }
         .overlay(alignment: .top) {
             #if DEBUG
