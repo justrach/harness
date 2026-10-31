@@ -24,6 +24,9 @@ struct SessionView: View {
     @Environment(\.foldComposerFocus) private var foldComposerFocus
     /// Flat Duo: the composer has the keyboard, so Inspect folds to its one-line peek.
     @State private var keyboardUp = false
+    /// Flat Duo: where the chat column starts and where the window's middle (the fold) is, in global space.
+    @State private var columnMinX: CGFloat = 0
+    @State private var windowMidX: CGFloat = 0
     /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
     let chatId: String
@@ -376,6 +379,8 @@ struct SessionView: View {
                     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
+                // Above the transcript, whose rows draw past its top edge.
+                .zIndex(1)
             }
             TranscriptView(store: store, chatId: chat.id, scroll: scroll, cwd: chat.cwd,
                            onHostLink: { hostLink = $0 }, chat: chat, runLive: status == .working,
@@ -452,7 +457,9 @@ struct SessionView: View {
                 .allowsHitTesting(false)
             }
         }
-        .frame(maxWidth: .infinity)
+        // Flat: the chat column ends on the fold (the window's middle), not the middle of what the side bar leaves.
+        .frame(width: flat && !keyboardUp && windowMidX - columnMinX > 240 ? windowMidX - columnMinX : nil)
+        .frame(maxWidth: flat && !keyboardUp ? nil : .infinity)
             if flat, !keyboardUp {
                 Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea(.container, edges: .bottom)
                 InspectPane(model: inspectModel, state: inspect)
@@ -462,6 +469,11 @@ struct SessionView: View {
             }
         }
         .background(Theme.bg.ignoresSafeArea())
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minX } action: { columnMinX = $0 }
+        .background {
+            Color.clear.ignoresSafeArea()
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midX } action: { windowMidX = $0 }
+        }
         .overlay(alignment: .top) {
             #if DEBUG
             if model.demo != nil, ProcessInfo.processInfo.arguments.contains("-image-drop-fixture") {
