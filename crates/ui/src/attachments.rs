@@ -198,6 +198,9 @@ pub struct StagedAttachment {
     pub name: String,
     pub image: Option<Arc<Image>>,
     pub file: Option<Arc<[u8]>>,
+    /// Numbered notes from [`crate::annotate`], sent with the prompt when
+    /// this image was annotated (the image is the flattened copy).
+    pub annotations: Option<Arc<str>>,
 }
 
 impl StagedAttachment {
@@ -207,6 +210,7 @@ impl StagedAttachment {
             name,
             image: Some(image),
             file: None,
+            annotations: None,
         }
     }
 
@@ -315,6 +319,7 @@ pub fn stage_any_file(path: &Path) -> Result<StagedAttachment, String> {
         name: display_name,
         image: None,
         file: Some(bytes.into()),
+        annotations: None,
     })
 }
 
@@ -979,6 +984,8 @@ pub struct PreviewImage {
     pub name: SharedString,
     pub image: Arc<Image>,
     pub(crate) viewer: crate::image_viewer::ImageView,
+    /// Set when the preview offers Annotate (crate::annotate).
+    pub(crate) annotate: Option<crate::annotate::editor::AnnotateHook>,
 }
 
 impl PreviewImage {
@@ -987,6 +994,48 @@ impl PreviewImage {
             name: name.into(),
             image,
             viewer: Default::default(),
+            annotate: None,
+        }
+    }
+
+    /// Offer Annotate; `on_done` gets the flattened copy and its notes.
+    pub fn annotatable(
+        mut self,
+        on_done: impl Fn(crate::annotate::Annotated, &mut gpui::Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        self.annotate = Some(crate::annotate::editor::AnnotateHook::new(on_done));
+        self
+    }
+
+    /// Whether the preview is in annotate mode (its Escape and clicks are
+    /// the editor's).
+    pub fn annotating(&self) -> bool {
+        self.annotate.as_ref().is_some_and(|hook| hook.is_open())
+    }
+
+    /// The open annotate editor, for tests and fixtures.
+    pub fn annotate_editor(&self) -> Option<gpui::Entity<crate::annotate::editor::AnnotateEditor>> {
+        self.annotate.as_ref().and_then(|hook| hook.editor())
+    }
+
+    /// Enter annotate mode as the Annotate button does. `owner` is the view
+    /// that renders the lightbox.
+    pub fn open_annotate(
+        &self,
+        owner: gpui::EntityId,
+        return_focus: gpui::FocusHandle,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        if let Some(hook) = &self.annotate {
+            hook.open(
+                self.name.clone(),
+                self.image.clone(),
+                owner,
+                return_focus,
+                window,
+                cx,
+            );
         }
     }
 }
@@ -1012,6 +1061,53 @@ pub(crate) fn lightbox_with_size(
     on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
     cx: &mut gpui::App,
 ) -> AnyElement {
+    if let Some(editor) = preview.annotate_editor() {
+        return gpui::deferred(
+            gpui::anchored()
+                .position(gpui::point(px(0.0), px(0.0)))
+                .child(editor),
+        )
+        .priority(3)
+        .into_any_element();
+    }
+    let annotate_button = preview.annotate.as_ref().map(|_| {
+        let owner = window.current_view();
+        let preview = preview.clone();
+        let focus = focus.clone();
+        let theme = crate::theme::Theme::of(cx);
+        div()
+            .id("attachment-lightbox-annotate")
+            .absolute()
+            .right(px(24.0))
+            .bottom(px(24.0))
+            .h(px(32.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(16.0))
+            .bg(crate::popover::surface_bg(theme))
+            .border_1()
+            .border_color(crate::theme::hairline(0.10))
+            .when(!theme.is_frost(), |el| el.shadow_lg())
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .cursor_pointer()
+            .hover(|s| s.bg(crate::theme::Theme::of(cx).element_hover))
+            .aria_label("Annotate")
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                preview.open_annotate(owner, focus.clone(), window, cx);
+            })
+            .child(
+                crate::icons::icon(crate::icons::PEN)
+                    .size(px(14.0))
+                    .text_color(theme.text),
+            )
+            .child("Annotate")
+    });
     let viewport = window.viewport_size();
     let max_h = px(f32::from(viewport.height) * 0.85);
     let max_w = px(f32::from(viewport.width) * 0.9);
@@ -1083,7 +1179,8 @@ pub(crate) fn lightbox_with_size(
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(ink(0.45))
                             .child(preview.name.clone()),
-                    ),
+                    )
+                    .children(annotate_button),
             ),
     )
     .priority(3)

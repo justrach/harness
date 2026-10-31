@@ -185,6 +185,11 @@ icon_assets![
     (TERMINAL, "terminal"),
     (PLUS, "plus"),
     (CLOSE, "close"),
+    // Hand-drawn annotate tools and undo in the Solar Linear style (24px,
+    // 1.5 stroke) for the image annotation toolbar (annotate.rs).
+    (ANNOTATE_TEXT, "annotate-text"),
+    (ANNOTATE_RECT, "annotate-rect"),
+    (UNDO, "undo"),
     // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
     // restore stacked squares) in the same style as `close` — drawn for the
     // client-side-decoration window controls; no system glyph font exists on

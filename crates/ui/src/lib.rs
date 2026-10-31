@@ -14,6 +14,7 @@
 
 mod agent_message;
 pub mod agent_work;
+pub mod annotate;
 pub mod app_menus;
 pub mod appearance;
 pub mod appshots;
