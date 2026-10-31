@@ -125,6 +125,10 @@ name = "markdown-math-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "inline-code-link-fixture"
+required-features = ["browser-fixture"]
+
+[[example]]
 name = "composer-completion-fade-fixture"
 required-features = ["appshots-fixture"]
 
