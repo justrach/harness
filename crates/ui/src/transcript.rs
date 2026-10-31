@@ -1428,6 +1428,36 @@ fn reply_image_path(source: &str, workspace_root: Option<&str>) -> Option<String
     )
 }
 
+/// The image files a transcript's rows show: user attachments and the images
+/// replies reference (`![caption](shot.png)`), resolved like
+/// [`reply_image_path`]. These are shielded from image-cache eviction: a
+/// reply's screenshots share the attachment budget, and with several large
+/// ones on screen, each load evicted another visible image, which reloaded
+/// and evicted the next, so the images flashed. Generated images use bounded
+/// LRU retention instead.
+fn transcript_image_paths(rows: &[Row], workspace_root: Option<&str>) -> Vec<String> {
+    let mut paths = Vec::new();
+    for row in rows {
+        match &row.kind {
+            RowKind::User { attachments, .. } => {
+                paths.extend(attachments.iter().map(|att| att.path.clone()));
+            }
+            RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix, .. } => {
+                let Some(top) = tree.blocks.get(*block_ix) else {
+                    continue;
+                };
+                paths.extend(
+                    crate::files::markdown_media::block_image_sources(&top.block)
+                        .iter()
+                        .filter_map(|source| reply_image_path(source, workspace_root)),
+                );
+            }
+            _ => {}
+        }
+    }
+    paths
+}
+
 fn generated_image_devices(owner: &str, fallback: &[String]) -> Vec<String> {
     let mut devices = Vec::new();
     for device in std::iter::once(owner).chain(fallback.iter().map(String::as_str)) {
@@ -6339,15 +6369,11 @@ impl Transcript {
 
     fn protected_attachment_keys(&self, cx: &Context<Self>) -> HashSet<(String, String)> {
         let devices = self.attachment_device_ids(cx);
+        let workspace_root = self.workspace_root(cx);
         let mut keys = std::collections::HashSet::new();
-        for row in &self.rows {
-            // Generated images use bounded LRU retention, not history-wide protection.
-            if let RowKind::User { attachments, .. } = &row.kind {
-                for att in attachments.iter() {
-                    for dev in &devices {
-                        keys.insert((dev.clone(), att.path.clone()));
-                    }
-                }
+        for path in transcript_image_paths(&self.rows, workspace_root.as_deref()) {
+            for dev in &devices {
+                keys.insert((dev.clone(), path.clone()));
             }
         }
         keys
@@ -15523,6 +15549,39 @@ mod tests {
             subagent_tail,
             view,
         }
+    }
+
+    #[test]
+    fn images_in_replies_are_shielded_from_cache_eviction() {
+        // Before, only user attachments were shielded, so a reply with
+        // several large screenshots evicted its own images in turn and they
+        // flashed between loaded and "Loading image…".
+        let root = if cfg!(windows) { "C:/work" } else { "/work" };
+        let absolute = if cfg!(windows) {
+            "C:/shots/after.png"
+        } else {
+            "/shots/after.png"
+        };
+        let entry = assistant(
+            "m1",
+            MessageStatus::Complete,
+            vec![text_part(
+                "t1",
+                &format!(
+                    "Before:\n\n![before](shots/before.png)\n\nAfter:\n\n![after]({absolute})\n\n![remote](https://example.com/a.png)"
+                ),
+            )],
+        );
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let paths = transcript_image_paths(&rows, Some(root));
+        let in_root = std::path::Path::new(root)
+            .join("shots/before.png")
+            .to_string_lossy()
+            .into_owned();
+        assert!(paths.contains(&in_root), "{paths:?}");
+        assert!(paths.contains(&absolute.to_owned()), "{paths:?}");
+        // A remote image is never fetched, so it has nothing to shield.
+        assert_eq!(paths.len(), 2, "{paths:?}");
     }
 
     #[test]
