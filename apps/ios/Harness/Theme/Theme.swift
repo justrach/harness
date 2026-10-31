@@ -5,6 +5,7 @@
 // numbers and never depend on which color is painted.
 
 import SwiftUI
+import UIKit
 
 enum Theme {
     private static var palette: ThemePalette { ThemeStore.shared.palette }
@@ -279,5 +280,41 @@ extension View {
     /// Style this as a status or tag chip in `hue` (see `TintedChipStyle`). Capsule unless a shape is given.
     func tintedChip(_ hue: Color, in shape: some Shape = Capsule()) -> some View {
         modifier(TintedChipStyle(hue: hue, shape: AnyShape(shape)))
+    }
+}
+
+// MARK: - Accent controls and the writing plane (after the desktop composer)
+
+extension Theme {
+    /// Foreground for a control filled with the accent: black or white,
+    /// whichever reads better on it (the desktop's `on_primary_accent`).
+    static var onAccent: Color { Color(readableForeground(on: UIColor(accent))) }
+
+    /// Black or white, whichever has the higher contrast ratio against `fill`.
+    static func readableForeground(on fill: UIColor) -> UIColor {
+        contrastRatio(.black, fill) >= contrastRatio(.white, fill) ? .black : .white
+    }
+
+    /// WCAG contrast ratio between two opaque colors, 1 to 21.
+    static func contrastRatio(_ a: UIColor, _ b: UIColor) -> Double {
+        let (la, lb) = (relativeLuminance(a), relativeLuminance(b))
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    private static func relativeLuminance(_ color: UIColor) -> Double {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, alpha: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &alpha)
+        func linear(_ c: CGFloat) -> Double {
+            let c = Double(c)
+            return c <= 0.03928 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
+    /// The composer's writing plane over its glass: light themes lift it
+    /// toward white so the draft sits on a bright surface; dark themes keep
+    /// the faint raised ink.
+    static var composerPlane: Color {
+        ThemeStore.shared.palette.isDark ? ink(0.04) : Color.white.opacity(0.62)
     }
 }
