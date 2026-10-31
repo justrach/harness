@@ -170,7 +170,8 @@ struct ComposerEditor: UIViewRepresentable {
             for: UIFont(name: "Geist-Regular", size: 17) ?? .systemFont(ofSize: 17),
             compatibleWith: UITraitCollection(preferredContentSizeCategory: dynamicTypeSize.uiCategory))
         view.textColor = UIColor(Theme.text)
-        view.tintColor = UIColor(Theme.text)
+        // The caret takes the accent, as on the desktop.
+        view.tintColor = UIColor(Theme.accent)
         view.accessibilityLabel = placeholder
         controller.apply(text: text)
         if focused, !view.isFirstResponder { view.becomeFirstResponder() }
