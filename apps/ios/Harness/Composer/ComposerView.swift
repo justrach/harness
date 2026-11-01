@@ -113,52 +113,60 @@ struct ComposerShell<Chips: View>: View {
     /// (attach circle · scrolling chips · pinned send) along the card's
     /// bottom edge — everything stays inside the glass.
     private var surface: some View {
-        shellLayout {
-            if expanded, !attachments.isEmpty, !singleLine {
+        VStack(alignment: .leading, spacing: 6) {
+            // The one-line composer (iPhone Duo) has no room beside the text, so
+            // staged images sit above the line, still inside the glass.
+            if singleLine, !attachments.isEmpty {
                 AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
-                    .padding(.bottom, 10)
+                    .padding([.horizontal, .top], 7)
             }
-            if singleLine, expanded, onAttach != nil {
-                attachButton
-            }
-            input
-                .padding(.leading, expanded && !singleLine ? 4 : (singleLine && expanded ? 0 : 13))
-                .padding(.trailing, expanded && !singleLine ? 4 : 0)
-                .padding(.vertical, expanded && !singleLine ? 4 : 5)
-                .frame(minWidth: compact || singleLine ? 140 : nil,
-                       minHeight: expanded && !compact && !singleLine ? 64 : nil, alignment: .topLeading)
-                .fixedSize(horizontal: false, vertical: true)
-            if singleLine {
-                if expanded, let token {
-                    token
+            shellLayout {
+                if expanded, !attachments.isEmpty, !singleLine {
+                    AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
+                        .padding(.bottom, 10)
                 }
-                actionButton
-            } else if expanded {
-                HStack(spacing: 8) {
-                    if onAttach != nil {
-                        attachButton
+                if singleLine, expanded, onAttach != nil {
+                    attachButton
+                }
+                input
+                    .padding(.leading, expanded && !singleLine ? 4 : (singleLine && expanded ? 0 : 13))
+                    .padding(.trailing, expanded && !singleLine ? 4 : 0)
+                    .padding(.vertical, expanded && !singleLine ? 4 : 5)
+                    .frame(minWidth: compact || singleLine ? 140 : nil,
+                           minHeight: expanded && !compact && !singleLine ? 64 : nil, alignment: .topLeading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if singleLine {
+                    if expanded, let token {
+                        token
                     }
-                    // Chips scroll; the send button stays pinned.
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            chips
+                    actionButton
+                } else if expanded {
+                    HStack(spacing: 8) {
+                        if onAttach != nil {
+                            attachButton
                         }
-                    }
-                    .scrollClipDisabled(false)
-                    .mask {
-                        HStack(spacing: 0) {
-                            Rectangle()
-                            LinearGradient(colors: [.black, .clear],
-                                           startPoint: .leading, endPoint: .trailing)
-                                .frame(width: 24)
+                        // Chips scroll; the send button stays pinned.
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                chips
+                            }
                         }
+                        .scrollClipDisabled(false)
+                        .mask {
+                            HStack(spacing: 0) {
+                                Rectangle()
+                                LinearGradient(colors: [.black, .clear],
+                                               startPoint: .leading, endPoint: .trailing)
+                                    .frame(width: 24)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        actionButton
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, compact ? 0 : 8)
+                } else {
                     actionButton
                 }
-                .padding(.top, compact ? 0 : 8)
-            } else {
-                actionButton
             }
         }
         .padding(.horizontal, expanded && !singleLine ? 12 : 5)
