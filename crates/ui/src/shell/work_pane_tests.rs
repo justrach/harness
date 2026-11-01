@@ -15,12 +15,14 @@ fn entry(id: &str, role: MessageRole, parts: Vec<MessagePart>) -> SessionMessage
     }
 }
 
-/// A turn running a command leaves the work pane as the person left it: the
-/// running pill and the changes card open it in one click. Opening it by
-/// itself filled a third of the window with "No uncommitted changes" for as
-/// long as an agent worked, and came back whenever another pane was focused.
-#[gpui::test]
-fn a_running_command_does_not_open_the_work_pane(cx: &mut gpui::TestAppContext) {
+/// A Ready shell whose selected chat is working, its latest turn running `cargo test`.
+fn running_turn(
+    cx: &mut gpui::TestAppContext,
+) -> (
+    tempfile::TempDir,
+    Entity<Shell>,
+    &mut gpui::VisualTestContext,
+) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -132,8 +134,30 @@ fn a_running_command_does_not_open_the_work_pane(cx: &mut gpui::TestAppContext) 
         working && running,
         "the fixture is a turn running a command"
     );
+    (dir, shell, cx)
+}
+
+/// A turn running a command leaves the work pane as the person left it: the
+/// changes card opens it in one click. Opening it by
+/// itself filled a third of the window with "No uncommitted changes" for as
+/// long as an agent worked, and came back whenever another pane was focused.
+#[gpui::test]
+fn a_running_command_does_not_open_the_work_pane(cx: &mut gpui::TestAppContext) {
+    let (_dir, shell, cx) = running_turn(cx);
     assert!(
         shell.read_with(cx, |shell, cx| !shell.right_pane_open(cx)),
         "a running command opened the work pane"
+    );
+}
+
+/// No floating "Running ... Stop" bar over the composer: the transcript already
+/// shows the command and the composer has Stop. In a split pane the bar ran past
+/// both edges of its column.
+#[gpui::test]
+fn a_running_command_draws_no_bar_over_the_composer(cx: &mut gpui::TestAppContext) {
+    let (_dir, _shell, cx) = running_turn(cx);
+    assert!(
+        cx.debug_bounds("turn-running-pill").is_none(),
+        "the running-command bar showed over the composer"
     );
 }
