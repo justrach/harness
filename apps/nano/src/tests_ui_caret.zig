@@ -54,9 +54,16 @@ const Harness = struct {
     fn carets(h: *const Harness) usize {
         var count: usize = 0;
         for (h.t.ctx.nodes.items) |n| {
+            // GPUI's message caret: 3 wide, 2 short of the 22.75-point line
+            // at either end, 1.5 round, in the accent.
             if (n.content == .none and n.style.absolute and
-                n.style.width == .px and n.style.width.px == 1.5 and
-                n.style.height == .px and n.style.height.px == 22.75) count += 1;
+                n.style.width == .px and n.style.width.px == 3 and
+                n.style.height == .px and n.style.height.px == 22.75 - 4)
+            {
+                std.debug.assert(n.style.radius == 1.5);
+                std.debug.assert(std.meta.eql(n.style.background.?, theme.colors(true).accent));
+                count += 1;
+            }
         }
         return count;
     }

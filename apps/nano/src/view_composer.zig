@@ -220,6 +220,8 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .placeholder_color = k.faint,
         .multiline = true,
         .max_lines = if (shape == .compact) 1 else max_lines,
+        .caret = message_caret,
+        .caret_color = k.accent,
     });
     // "Send messages with" (Settings › Shortcuts): Enter sends, or starts a
     // new line and ⌘↩ sends (`composerSendBehavior`).
@@ -245,6 +247,13 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         ui.text(c, n, .{ .size = 11, .color = k.danger });
     }
 }
+
+/// The message caret (composer.rs, the input's paint: "a rounded accent
+/// bar, inset from the line box"): 3 points wide, 2 short of the line box
+/// top and bottom, 1.5 round, in the primary accent (the user's accent
+/// override included). It blinks at 500 ms and is solid after an edit or
+/// a caret move, as nanoui's caret already does.
+pub const message_caret: ui.TextFieldCaret = .{ .width = 3, .inset = 2, .radius = 1.5 };
 
 /// ↑ at the text's start or ↓ at its end steps through the chat's earlier
 /// prompts (`history_step`, `navigate_prompt_history`), unless a question,
