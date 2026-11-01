@@ -114,70 +114,6 @@ pub fn running_command(entries: &[SessionMessageEntry]) -> Option<String> {
         })
 }
 
-/// The latest turn's identity: its user prompt's entry id. `None` before the
-/// first prompt. Lets a cue act once per turn.
-pub fn turn_key(entries: &[SessionMessageEntry]) -> Option<String> {
-    entries
-        .iter()
-        .rposition(|entry| entry.role == MessageRole::User)
-        .map(|ix| entries[ix].id.clone())
-}
-
-/// The work pane the shell opened by itself for one turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutoWorkPane {
-    pub chat_id: String,
-    pub turn: Option<String>,
-    /// The pane was closed and the cue opened it (so it may close it again).
-    pub opened: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkPaneStep {
-    Open,
-    Close,
-    Nothing,
-}
-
-/// What a running turn does to the work pane, once per turn. A command
-/// starting opens the pane (unless it is already open). If the user closes
-/// it, the same turn leaves it closed. When the turn ends, a pane the cue
-/// opened closes again only if the turn changed no files; with changes it
-/// stays open on the review.
-pub fn work_pane_step(
-    auto: &mut Option<AutoWorkPane>,
-    chat_id: &str,
-    turn: Option<&str>,
-    working: bool,
-    running: bool,
-    pane_open: bool,
-    has_changes: bool,
-) -> WorkPaneStep {
-    let same = auto
-        .as_ref()
-        .is_some_and(|a| a.chat_id == chat_id && a.turn.as_deref() == turn);
-    if working {
-        if running && !same {
-            *auto = Some(AutoWorkPane {
-                chat_id: chat_id.to_string(),
-                turn: turn.map(str::to_string),
-                opened: !pane_open,
-            });
-            return if pane_open { WorkPaneStep::Nothing } else { WorkPaneStep::Open };
-        }
-        return WorkPaneStep::Nothing;
-    }
-    if !same {
-        return WorkPaneStep::Nothing;
-    }
-    let opened = auto.take().is_some_and(|a| a.opened);
-    if opened && pane_open && !has_changes {
-        WorkPaneStep::Close
-    } else {
-        WorkPaneStep::Nothing
-    }
-}
-
 /// First line of a command, at most 40 characters.
 fn short_command(command: &str) -> String {
     let line = command.lines().next().unwrap_or("").trim();
@@ -301,26 +237,5 @@ mod tests {
         assert_eq!(running_label("npm run build"), "Running npm run build");
         let done = vec![entries[0].clone(), entry(MessageRole::Assistant, vec![tool("a", ToolCall::Exec { command: "ls".into() }, true, false)])];
         assert_eq!(running_command(&done), None);
-    }
-
-    #[test]
-    fn work_pane_opens_once_per_turn_and_closes_only_without_changes() {
-        let mut auto = None;
-        // A command starts with the pane closed: open it, once.
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u1"), true, true, false, false), WorkPaneStep::Open);
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u1"), true, true, true, false), WorkPaneStep::Nothing);
-        // The user closed it mid-turn: a later command in the same turn leaves it.
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u1"), true, true, false, false), WorkPaneStep::Nothing);
-        // Done with no file changes and the pane open: close what we opened.
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u1"), false, false, true, false), WorkPaneStep::Close);
-        assert_eq!(auto, None);
-        // Next turn with edits: it stays open for the review.
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u2"), true, true, false, false), WorkPaneStep::Open);
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u2"), false, false, true, true), WorkPaneStep::Nothing);
-        // Already open when the command started: never closed by the cue.
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u3"), true, true, true, false), WorkPaneStep::Nothing);
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u3"), false, false, true, false), WorkPaneStep::Nothing);
-        // Working without a command running yet: nothing.
-        assert_eq!(work_pane_step(&mut auto, "c", Some("u4"), true, false, false, false), WorkPaneStep::Nothing);
     }
 }
