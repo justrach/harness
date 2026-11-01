@@ -11,8 +11,7 @@ final class AppshotUITests: XCTestCase {
 
     func testRemoteAppshotsRemainReadableAndOpenOnPhone() {
         let app = XCUIApplication()
-        // Pin the phone split off: PhoneSplitUITests' "Try it" saves a split mode in the app's defaults, and a
-        // stacked split leaves the strip too little room to swipe.
+        // Pin the phone split off: PhoneSplitUITests' "Try it" saves a split mode in the app's defaults.
         app.launchArguments = ["-demo", "-phoneSplit", "off", "-route", "chat:chat-tabs", "-appshots"]
         XCUIDevice.shared.orientation = .portrait
         app.launch()

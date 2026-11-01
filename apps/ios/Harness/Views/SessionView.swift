@@ -11,10 +11,6 @@ struct SessionView: View {
     @Environment(\.pageSession) private var pageSession
     /// Open another session beside this one, or close this pane: set only on a Max-class iPhone (SplitScreen).
     @Environment(\.splitScreen) private var splitScreen
-    /// Open a new session below this one, in the phone's stacked split (⌘D on the desktop).
-    @Environment(\.stackedSplit) private var stackedSplit
-    /// Close this pane of the stacked split, while two are shown.
-    @Environment(\.stackedClose) private var stackedClose
     /// Above the fold in laptop pose: draw the header strip here, with a back button (FoldPaneHeader).
     @Environment(\.foldPaneHeader) private var foldPaneHeader
     @Environment(\.dismiss) private var dismiss
@@ -48,14 +44,6 @@ struct SessionView: View {
     /// trailing edge so the title can use the space before the controls.
     private static let headerChromeInset: CGFloat = 100
     private static let topFadeHeight: CGFloat = 28
-
-    /// Room the stacked split's trailing buttons take from the title: the titled Split button (about 90pt),
-    /// or the × (36pt), each plus the bar's 16pt gap before it. The header is a trailing item too, so any
-    /// shortfall pushes the button into the bar's "More" menu instead of narrowing the title.
-    private var stackedButtonsWidth: CGFloat {
-        if stackedSplit != nil { return 112 }
-        return stackedClose == nil ? 0 : 56
-    }
 
     /// The view's own width, the only reliable basis for capping the principal
     /// toolbar item (its container proposes an unbounded width).
@@ -300,43 +288,15 @@ struct SessionView: View {
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarTrailing) {
                     headerTitle(chat)
-                        // Claim the remaining bar width, less the stacked split's
-                        // trailing buttons: the title expands before the
-                        // fixed-size navigation and status marks. The title and
+                        // Claim the remaining bar width: the title expands before
+                        // the fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).
                         // A folded Duo's back button is in the side bar, so the title can start at the edge.
-                        .frame(width: max(140, viewWidth - headerInset - stackedButtonsWidth),
+                        .frame(width: max(140, viewWidth - headerInset),
                                alignment: .leading)
                 }
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
-            }
-            if let stackedSplit {
-                ToolbarItem(placement: .topBarTrailing) {
-                    // Titled: the icon alone read as a plain box. A Label in the bar drops its title, so the
-                    // icon and the word are laid out here.
-                    Button(action: stackedSplit) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "rectangle.split.1x2")
-                                .fontWeight(.semibold)
-                            Text("Split")
-                                .font(Theme.sans(15, weight: .semibold))
-                        }
-                        .padding(.horizontal, 4)
-                        .fixedSize()
-                    }
-                    .accessibilityLabel("Open another session below this one")
-                    .accessibilityIdentifier("stacked-split-open")
-                }
-            }
-            if let stackedClose {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: stackedClose) {
-                        Label("Close this pane", systemImage: "xmark")
-                    }
-                    .fontWeight(.semibold)
-                    .accessibilityIdentifier("stacked-pane-close")
-                }
             }
         }
         .alert("Rename session", isPresented: $renamingSession) {

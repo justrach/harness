@@ -61,8 +61,6 @@ struct ComposerShell<Chips: View>: View {
     private var compact: Bool { verticalSizeClass == .compact }
     @State private var focused = false
     @State private var editor = ComposerEditorController()
-    /// Inside a stacked phone split: where this composer reports its keyboard focus (PhoneSplitContainer).
-    @Environment(\.stackedComposerFocus) private var stackedComposerFocus
     /// Above the fold in laptop pose: where this composer reports its keyboard focus (HomeView).
     @Environment(\.foldComposerFocus) private var foldComposerFocus
 
@@ -102,15 +100,11 @@ struct ComposerShell<Chips: View>: View {
             }
             .onChange(of: focusTick) { _, _ in focused = true }
             .onChange(of: focused) { _, focused in
-                stackedComposerFocus?(focused)
                 foldComposerFocus?(focused)
             }
-            // Leaving the session while typing (switching sessions, closing it) lets the split have its rest back.
+            // Leaving the session while typing (switching sessions, closing it) gives laptop pose its list back.
             .onDisappear {
-                if focused {
-                    stackedComposerFocus?(false)
-                    foldComposerFocus?(false)
-                }
+                if focused { foldComposerFocus?(false) }
             }
     }
 
@@ -247,8 +241,6 @@ struct ComposerShell<Chips: View>: View {
                 editor.commit()
                 onSend()
                 editor.apply(text: draft)
-                // In a stacked split the session took the screen for typing; sending hands it back.
-                if stackedComposerFocus != nil { focused = false }
             }
         } label: {
             Group {
@@ -1089,9 +1081,6 @@ struct QuestionPanel: View {
     @State private var promptHeight: CGFloat = 0
     @FocusState private var typing: Bool
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    /// Inside a stacked phone split: typing an answer gives the session the screen, as the composer does.
-    /// Without it the list kept the top half and the answer field sat behind the keyboard.
-    @Environment(\.stackedComposerFocus) private var stackedComposerFocus
 
     /// The question and its options scroll inside this height, so a long
     /// question leaves the transcript above it readable and keeps the answer
@@ -1106,9 +1095,6 @@ struct QuestionPanel: View {
             EmptyView()
         } else {
             panel(for: questions[min(max(page, 0), questions.count - 1)])
-                .onChange(of: typing) { _, typing in stackedComposerFocus?(typing) }
-                // Answered or dismissed while typing: the split gets its rest back.
-                .onDisappear { if typing { stackedComposerFocus?(false) } }
         }
     }
 

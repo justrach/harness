@@ -28,12 +28,6 @@ final class SplitKeyboardUITests: XCTestCase {
                        "the text did not reach the composer", file: file, line: line)
     }
 
-    func testTypingInTheStackedSplit() {
-        let app = launch(phoneSplit: "stacked", orientation: .portrait)
-        typeInComposer(app)
-        XCTAssertTrue(app.buttons["new-session"].exists, "the list left while typing: the split collapsed")
-    }
-
     func testTypingInTheSideBySideSplit() {
         let app = launch(phoneSplit: "sideBySide", orientation: .landscapeLeft)
         typeInComposer(app)

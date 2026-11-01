@@ -80,7 +80,7 @@ struct MiniSpinner: View {
 
 /// The gradient spinners' cells, animated by Core Animation. A TimelineView redrew the spinner in SwiftUI on
 /// every display frame, and a spinner in a list row (a Working session) made the list update that row every
-/// frame on the main thread: with the stacked split's list on screen, scrolling the session below it lagged.
+/// frame on the main thread: with the list on screen beside a session, scrolling the session lagged.
 /// The render server runs these animations, so the main thread does nothing per frame.
 private struct GradientSpinCells: UIViewRepresentable {
     let cellSize: CGFloat
