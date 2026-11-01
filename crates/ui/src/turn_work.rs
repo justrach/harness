@@ -125,19 +125,6 @@ fn short_command(command: &str) -> String {
     }
 }
 
-/// Pill label: tests get their own wording, anything else says what runs.
-pub fn running_label(command: &str) -> String {
-    let lower = command.to_ascii_lowercase();
-    let is_test = ["test", "pytest", "jest", "vitest", "xcodebuild test", "go test"]
-        .iter()
-        .any(|word| lower.contains(word));
-    if is_test {
-        "Running tests".to_string()
-    } else {
-        format!("Running {command}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,8 +220,6 @@ mod tests {
         ];
         let command = running_command(&entries).expect("running");
         assert_eq!(command, "cargo test -p sgbus");
-        assert_eq!(running_label(&command), "Running tests");
-        assert_eq!(running_label("npm run build"), "Running npm run build");
         let done = vec![entries[0].clone(), entry(MessageRole::Assistant, vec![tool("a", ToolCall::Exec { command: "ls".into() }, true, false)])];
         assert_eq!(running_command(&done), None);
     }

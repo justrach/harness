@@ -11229,19 +11229,17 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Above the composer, the latest turn's work: while a command runs, a
-    /// floating glass "Running tests" pill with Stop (the only glass here);
-    /// once the turn is done, a solid "N files changed" card that opens the
-    /// Changes pane.
+    /// Above the composer, once the latest turn is done: a solid "N files
+    /// changed" card that opens the Changes pane.
     fn render_turn_work_cue(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.state.read(cx);
         let chat_id = state.selected_chat.clone()?;
         let working =
             state.indicator_for(&chat_id, Utc::now()) == harness_proto::view::Indicator::Working;
         let transcript = &state.transcript;
+        // While it works, the transcript shows the command and the composer has Stop.
         if working {
-            let command = crate::turn_work::running_command(transcript)?;
-            return Some(self.render_running_pill(crate::turn_work::running_label(&command), cx));
+            return None;
         }
         let changes = crate::turn_work::latest_turn_changes(transcript)?;
         let theme = Theme::of(cx).clone();
@@ -11349,77 +11347,6 @@ impl Shell {
             None => self.add_diff_surface(cx),
         }
         cx.notify();
-    }
-
-    /// The floating "Running tests ... Stop" pill: glass, because it floats
-    /// over the transcript. Stop interrupts the selected chat's turn.
-    fn render_running_pill(&mut self, label: String, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).for_popup();
-        let glass = theme.is_frost();
-        let pill = div()
-            .id("turn-running-pill")
-            .debug_selector(|| "turn-running-pill".into())
-            .h(px(36.0))
-            .pl(px(14.0))
-            .pr(px(4.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .when(!glass, |el| el.shadow_md())
-            .bg(if glass { popover::surface_bg(&theme) } else { theme.surface_raised })
-            .child(crate::loaders::gradient_spinner(
-                "turn-running-spinner",
-                &theme,
-                2.0,
-                cx.entity_id(),
-                cx,
-            ))
-            .child(
-                div()
-                    .max_w(px(280.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(label)),
-            )
-            .child(
-                div()
-                    .id("turn-running-stop")
-                    .role(gpui::Role::Button)
-                    .aria_label("Stop")
-                    .h(px(28.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .bg(theme.ink(0.08))
-                    .hover(|el| el.bg(theme.ink(0.14)))
-                    .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.composer.update(cx, |composer, cx| composer.interrupt_selected(cx));
-                    }))
-                    .child(SharedString::from("Stop")),
-            );
-        div()
-            .absolute()
-            .top(px(-46.0))
-            .left_0()
-            .right(px(10.0))
-            .flex()
-            .justify_center()
-            .child(crate::frost::frosted(
-                18.0,
-                crate::frost::MENU_BLUR,
-                motion::dialog_in("turn-running-pill", pill),
-            ))
-            .into_any_element()
     }
 
     /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
