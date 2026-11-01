@@ -77,6 +77,10 @@ name = "browse-link-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "notifications-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "error-cards-fixture"
 required-features = ["appshots-fixture"]
 
