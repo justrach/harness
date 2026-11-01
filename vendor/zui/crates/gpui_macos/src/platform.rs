@@ -1071,12 +1071,9 @@ impl Platform for MacPlatform {
 
     fn hide_cursor_until_mouse_moves(&self) {
         let cursor_visible = self.0.lock().cursor_visible.clone();
-        if !cursor_visible.swap(false, Ordering::Relaxed) {
-            return;
-        }
-        unsafe {
+        hide_until_mouse_moves(&cursor_visible, || unsafe {
             let _: () = msg_send![class!(NSCursor), setHiddenUntilMouseMoves: YES];
-        }
+        });
     }
 
     fn is_cursor_visible(&self) -> bool {
@@ -1562,4 +1559,33 @@ mod security {
     pub const errSecSuccess: OSStatus = 0;
     pub const errSecUserCanceled: OSStatus = -128;
     pub const errSecItemNotFound: OSStatus = -25300;
+}
+
+/// Hides the pointer for a keystroke, through `hide` (AppKit's
+/// `setHiddenUntilMouseMoves:`), and records it in `cursor_visible`.
+///
+/// Every keystroke asks AppKit again, even when `cursor_visible` already says
+/// hidden: AppKit can show the pointer without an event reaching the view (it
+/// moved over a web view or a menu), and skipping left it over the caret.
+fn hide_until_mouse_moves(cursor_visible: &AtomicBool, hide: impl FnOnce()) {
+    cursor_visible.store(false, Ordering::Relaxed);
+    hide();
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn every_keystroke_hides_the_pointer_even_when_it_was_hidden_before() {
+        // The pointer was hidden by an earlier keystroke, then AppKit showed
+        // it again without an event reaching the view: the mouse moved over
+        // a web view or a menu, or the cursor under it changed.
+        let cursor_visible = AtomicBool::new(true);
+        let mut hides = 0;
+        hide_until_mouse_moves(&cursor_visible, || hides += 1);
+        hide_until_mouse_moves(&cursor_visible, || hides += 1);
+        assert_eq!(hides, 2);
+        assert!(!cursor_visible.load(Ordering::Relaxed));
+    }
 }
