@@ -13,6 +13,7 @@ struct HarnessApp: App {
 
     init() {
         Perf.shared.startWatching()
+        PhoneSplit.migrateStored()
         let model = AppModel()
         _model = State(initialValue: model)
         // A Watch message can launch the app with no window to restore from.

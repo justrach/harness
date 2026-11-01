@@ -8,18 +8,13 @@
 
 import Foundation
 
-enum RolloutFeature: String, CaseIterable {
-    /// The stacked phone split's drag handle (fold the list away, bring it back).
-    case stackedSplitDrag = "stackedSplitDrag"
-
+/// A feature being rolled out. None is in rollout right now; declare one as a static in an extension, for
+/// example `static let newThing = RolloutFeature(rawValue: "newThing", percentOn: 50)`.
+struct RolloutFeature: Hashable {
+    /// The name in the `rollout.<name>`, `onboarding.<name>.seen` and `usage.<name>...` keys.
+    let rawValue: String
     /// Share of installs in the "on" half, 0...100.
-    var percentOn: Int {
-        switch self {
-        // Everyone: without the handle a stacked split cannot give either pane the screen, and the usage counts
-        // that were to compare the halves never leave the phone.
-        case .stackedSplitDrag: return 100
-        }
-    }
+    let percentOn: Int
 }
 
 enum FeatureRollout {
@@ -67,14 +62,8 @@ enum FeatureOnboarding {
 
 /// Fixed usage events per feature. Counts only: never what was in the session, or which one.
 enum FeatureUsageEvent: String, CaseIterable {
-    /// A stacked split appeared (counted for both halves, so the halves can be compared).
-    case splitShown = "split_shown"
-    case folded = "folded"
-    case unfolded = "unfolded"
     case onboardingShown = "onboarding_shown"
     case onboardingDismissed = "onboarding_dismissed"
-    /// The handle dragged down so the list has the whole screen.
-    case listExpanded = "list_expanded"
 }
 
 enum FeatureUsage {

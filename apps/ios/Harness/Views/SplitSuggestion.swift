@@ -1,7 +1,8 @@
 // A one-time, gentle offer of the phone split. The split is a setting most people will never open, so the app
 // offers it at the moment it helps: the window has room for it AND the person is juggling sessions (opening one
-// after another). A wide window is offered Auto (side by side); a tall one, a phone in portrait, Stacked. Everything here is local — a few timestamps in UserDefaults, never uploaded — and the rule is
-// pure so the trigger and the frequency cap are unit-tested.
+// after another). A wide enough window is offered Auto (side by side); a phone in portrait has no split to offer.
+// Everything here is local — a few timestamps in UserDefaults, never uploaded — and the rule is pure so the
+// trigger and the frequency cap are unit-tested.
 //
 // It never offers when there is nothing to offer (no room), when the setting is already on, for large text, or
 // more than twice, a week apart. "Not now" and "Try it" both count as an answer.
@@ -38,12 +39,9 @@ struct SplitSuggestion: Equatable {
         lastShownAt = now
     }
 
-    /// The split that fits the window: side by side (Auto) when it is wide enough, else Stacked when it is
-    /// tall enough, else none.
+    /// The split that fits the window: side by side (Auto) when it is wide enough, else none.
     static func offeredMode(for size: CGSize) -> PhoneSplit? {
-        if size.width >= PhoneSplit.minimumWidthSideBySide { return .auto }
-        if size.height >= PhoneSplit.minimumHeightStacked { return .stacked }
-        return nil
+        size.width >= PhoneSplit.minimumWidthSideBySide ? .auto : nil
     }
 
     func shouldOffer(_ context: Context, now: TimeInterval) -> Bool {
@@ -86,19 +84,18 @@ struct SplitSuggestion: Equatable {
 
 /// The inline offer, above the session list. Two plain answers, and where to change it later.
 struct SplitOfferBanner: View {
-    /// What Try it turns on: side by side (Auto) or Stacked.
-    let mode: PhoneSplit
+    /// Turns on Auto (side by side).
     let tryIt: () -> Void
     let notNow: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: mode == .stacked ? "rectangle.split.1x2" : "rectangle.split.2x1")
+            Image(systemName: "rectangle.split.2x1")
                 .font(.system(size: 18, weight: .regular))
                 .foregroundStyle(Theme.textMuted)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 6) {
-                Text(mode == .stacked ? "Keep your list above the session" : "Keep your list beside the session")
+                Text("Keep your list beside the session")
                     .font(Theme.sans(14, weight: .medium))
                     .foregroundStyle(Theme.text)
                 Text("There's room for both. Split view shows your sessions while you work. You can change it in Settings → Layout.")

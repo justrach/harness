@@ -62,18 +62,15 @@ struct HomeView: View {
     /// Offer the split once there is room for it and the person is juggling sessions (see SplitSuggestion).
     private func refreshSplitOffer() {
         let context = SplitSuggestion.Context(
-            mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off,
+            mode: PhoneSplit.stored(phoneSplitRaw),
             compactWidth: horizontalSizeClass == .compact,
             size: containerSize,
             largeText: dynamicTypeSize.isAccessibilitySize)
         showSplitOffer = splitSuggestion.shouldOffer(context, now: Date().timeIntervalSince1970)
     }
 
-    /// The split the offer would turn on for this window: Auto when it is wide, Stacked on a phone in portrait.
-    private var offeredSplit: PhoneSplit { SplitSuggestion.offeredMode(for: containerSize) ?? .auto }
-
     private func answerSplitOffer(tryIt: Bool) {
-        if tryIt { phoneSplitRaw = offeredSplit.rawValue }
+        if tryIt { phoneSplitRaw = PhoneSplit.auto.rawValue }
         splitSuggestion.markShown(at: Date().timeIntervalSince1970)
         splitSuggestion.save()
         showSplitOffer = false
@@ -81,7 +78,7 @@ struct HomeView: View {
 
     private var phoneArrangement: PhoneSplit.Arrangement? {
         guard horizontalSizeClass == .compact else { return nil }
-        return PhoneSplit.arrangement(mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off, in: containerSize)
+        return PhoneSplit.arrangement(mode: PhoneSplit.stored(phoneSplitRaw), in: containerSize)
     }
 
     /// iPad and other wide windows: the session list becomes a sidebar next to
@@ -237,94 +234,6 @@ struct HomeView: View {
                                    toggleList: two ? nil : { toggleList() })
     }
 
-    // MARK: Stacked split (the phone split's stacked shape)
-
-    /// The pane below the open session in a stacked split, like the desktop's ⌘D: its path, which starts empty
-    /// (the session list, to pick another session) and holds the session picked there. Nil while the list
-    /// shares the screen instead.
-    @State private var stackedSecond: [Route]?
-    /// Which stacked pane's composer has the keyboard; that pane keeps the room above it.
-    @State private var stackedFocus: SplitPanes.Pane?
-
-    private var stackedSplitAvailable: Bool { phoneArrangement?.axis == .stacked }
-
-    /// ⌘D for the stacked split: the session list below the open session, to open another one there.
-    private func openStackedSplit() {
-        stackedSecond = []
-    }
-
-    /// The upper pane's session, which the lower pane's list leaves out.
-    private var stackedPrimaryChat: String? {
-        guard case .chat(let id) = path.first else { return nil }
-        return id
-    }
-
-    /// A new session for the upper pane's project, in the lower pane.
-    private func newStackedSession() {
-        guard let id = stackedPrimaryChat, let chat = model.chat(id: id) else { return }
-        let destination: NewSessionDestination = if let space = chat.spaceId {
-            .project(spaceId: space)
-        } else {
-            .projectless(deviceId: chat.deviceId)
-        }
-        stackedSecond = [.newSession(destination)]
-    }
-
-    /// × on the lower pane: back to one session, with the list above it.
-    private func closeStackedSecondary() {
-        stackedSecond = nil
-        stackedFocus = nil
-    }
-
-    /// × on the upper pane: the lower pane's session takes its place; with only the lower pane's list open,
-    /// both go and the list comes back.
-    private func closeStackedPrimary() {
-        let second = stackedSecond ?? []
-        stackedSecond = nil
-        stackedFocus = nil
-        path = second
-    }
-
-    /// Offered on a session alone in the stacked split's detail; nil everywhere else.
-    private var stackedSplitAction: (() -> Void)? {
-        guard stackedSplitAvailable, stackedSecond == nil, case .chat = path.first else { return nil }
-        return { openStackedSplit() }
-    }
-
-    private var stackedSecondPath: Binding<[Route]> {
-        // Back out of the lower pane's session returns to its list; × closes the pane.
-        Binding(get: { stackedSecond ?? [] }, set: { next in
-            if stackedSecond != nil { stackedSecond = next }
-        })
-    }
-
-    /// Two panes stacked, each its own navigation stack with its own bar and an ×. The lower pane opens on the
-    /// session list (Home's rows); closing either pane leaves one, and the list comes back above it.
-    private var stackedPanes: some View {
-        VStack(spacing: 0) {
-            primaryStack
-                .frame(maxHeight: stackedFocus == .secondary ? Self.stackedPeek : .infinity)
-                .environment(\.stackedComposerFocus) { stackedFocus = $0 ? .primary : (stackedFocus == .primary ? nil : stackedFocus) }
-            Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
-            NavigationStack(path: stackedSecondPath) {
-                StackedSessionPicker(excluding: stackedPrimaryChat,
-                                     pick: { stackedSecond = [.chat($0)] },
-                                     newSession: stackedPrimaryChat == nil ? nil : { newStackedSession() },
-                                     close: { closeStackedSecondary() })
-                    .navigationDestination(for: Route.self) { route in
-                        destination(route, in: stackedSecondPath)
-                            .environment(\.stackedClose) { closeStackedSecondary() }
-                    }
-            }
-            .frame(maxHeight: stackedFocus == .primary ? Self.stackedPeek : .infinity)
-            .environment(\.stackedComposerFocus) { stackedFocus = $0 ? .secondary : (stackedFocus == .secondary ? nil : stackedFocus) }
-        }
-        .animation(Motion.collapse, value: stackedFocus)
-    }
-
-    /// What the other stacked pane keeps while one is typing: its bar and the last rows.
-    private static let stackedPeek: CGFloat = 150
-
     private var primaryStack: some View { primaryStack(lifted: false) }
 
     /// `lifted`: the session sits beside the list, on the lifted page (ContentPlane).
@@ -340,8 +249,6 @@ struct HomeView: View {
                         .environment(\.splitScreen, controls(for: .primary))
                         .environment(\.foldPaneHeader, foldPaneHeader)
                         .environment(\.duoLaptop, laptopLayout)
-                        .environment(\.stackedSplit, stackedSplitAction)
-                        .environment(\.stackedClose, stackedSecond == nil ? nil : { closeStackedPrimary() })
                 }
         }
     }
@@ -421,16 +328,12 @@ struct HomeView: View {
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
-            } else if stackedSplitAvailable, stackedSecond != nil, !path.isEmpty {
-                stackedPanes
             } else if let arrangement = phoneArrangement {
-                PhoneSplitContainer(arrangement: arrangement, selection: selectedChatId,
-                                    detailRoute: path.first.map(AnyHashable.init), hasDetail: !path.isEmpty) {
+                PhoneSplitContainer(arrangement: arrangement) {
                     NavigationStack { sidebar }
                 } detail: {
-                    // Side by side the session is the lifted page beside the list (PhoneSplitContainer rounds
-                    // the seam); stacked, the handle between them marks it.
-                    primaryStack(lifted: arrangement.axis == .sideBySide)
+                    // The session is the lifted page beside the list (PhoneSplitContainer rounds the seam).
+                    primaryStack(lifted: true)
                 }
             } else {
                 // One stack in every pose, so folding keeps the session (draft, scroll) in place. Wide (an iPhone
@@ -495,10 +398,6 @@ struct HomeView: View {
         .onChange(of: laptopPose) { _, isLaptop in
             if !isLaptop { laptopListShown = false; laptopTyping = false }
         }
-        .onChange(of: path) { _, next in
-            // Backing out of the upper stacked pane promotes the lower one into its place.
-            if next.isEmpty, stackedSecond != nil { closeStackedPrimary() }
-        }
         .onChange(of: splitLayout) { _, isSplit in
             // Opening or closing a foldable swaps the stack and the split. The
             // split's detail column shows one route, a phone stack can hold
@@ -517,21 +416,16 @@ struct HomeView: View {
         }
     }
 
-    private func destination(_ route: Route) -> some View {
-        destination(route, in: $path)
-    }
-
-    /// `stack`: the navigation path this screen lives in (the lower stacked pane has its own).
     @ViewBuilder
-    private func destination(_ route: Route, in stack: Binding<[Route]>) -> some View {
+    private func destination(_ route: Route) -> some View {
         Group {
             switch route {
-            case .space(let id): SpaceView(spaceId: id, path: stack)
+            case .space(let id): SpaceView(spaceId: id, path: $path)
             // Compact: a pager host, so the open session swipes to its
             // neighbours. The split layout keeps its own sidebar selection.
             case .chat(let id):
                 if splitLayout { SessionView(chatId: id) } else { SessionPagerHost(chatId: id) }
-            case .newSession(let destination): NewSessionView(destination: destination, path: stack)
+            case .newSession(let destination): NewSessionView(destination: destination, path: $path)
             }
         }
         // Tap to the page it opened.
@@ -938,7 +832,7 @@ struct HomeView: View {
         }
         if showSplitOffer {
             Section {
-                SplitOfferBanner(mode: offeredSplit, tryIt: { answerSplitOffer(tryIt: true) },
+                SplitOfferBanner(tryIt: { answerSplitOffer(tryIt: true) },
                                  notNow: { answerSplitOffer(tryIt: false) })
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)

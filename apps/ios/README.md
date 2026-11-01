@@ -31,12 +31,12 @@ scripts/ios-walkthrough.sh --open
 ```
 
 Installs the app fresh on a simulator, walks it the way a new install meets
-it (Home, a session, Settings → Split view → Stacked, the split button, closing
-each pane, typing and sending, rotating) in the offline demo, and writes a
+it (Home, a session, Settings → Split view → Auto, typing and sending,
+rotating) in the offline demo, and writes a
 numbered screenshot per step plus notes on what got in the way to
 `apps/ios/build/walkthrough/<time>/`. Notes don't fail the run; they are for
-reading. `--args "-rollout.stackedSplitDrag off"` walks the other half of a
-rollout, and `--device "iPhone 17"` picks another simulator. The walk itself is
+reading. `--args "-phoneSplit sideBySide"` adds launch arguments, and
+`--device "iPhone 17"` picks another simulator. The walk itself is
 `HarnessUITests/WalkthroughUITests`.
 
 ## TestFlight release
