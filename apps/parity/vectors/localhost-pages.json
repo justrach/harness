@@ -1,0 +1,30 @@
+{
+  "comment": "Which addresses open on the phone as a page its computer renders (WatchLocalhostPage), and the address the browser opens. Only http and https on the computer's own loopback: localhost, any *.localhost name, 127.0.0.0/8 and [::1]. 0.0.0.0, which dev servers print when they listen everywhere, opens as localhost. A missing scheme means http; an empty path becomes /, and the scheme and host are lower-cased. A user name or password, another scheme, or any other host is refused (opens: null). The engine (crates/engine/src/localhost_view/url_rule.rs) enforces it; the phone (LocalhostPages.swift) checks it before offering to open a link or sending an address typed into the page's address bar.",
+  "cases": [
+    { "input": "http://localhost:3000", "opens": "http://localhost:3000/" },
+    { "input": "localhost:5173/app?x=1#top", "opens": "http://localhost:5173/app?x=1#top" },
+    { "input": "https://localhost:8443/", "opens": "https://localhost:8443/" },
+    { "input": "HTTP://LOCALHOST:3000/Plots", "opens": "http://localhost:3000/Plots" },
+    { "input": "http://garden.localhost:3000/", "opens": "http://garden.localhost:3000/" },
+    { "input": "http://127.0.0.1:8080/x", "opens": "http://127.0.0.1:8080/x" },
+    { "input": "http://127.1.2.3:8080/", "opens": "http://127.1.2.3:8080/" },
+    { "input": "http://[::1]:4000/", "opens": "http://[::1]:4000/" },
+    { "input": "http://0.0.0.0:3000/docs", "opens": "http://localhost:3000/docs" },
+    { "input": "  http://localhost:3000  ", "opens": "http://localhost:3000/" },
+    { "input": "http://localhost:80/", "opens": "http://localhost/" },
+    { "input": "", "opens": null },
+    { "input": "https://example.com", "opens": null },
+    { "input": "http://192.168.1.20:3000", "opens": null },
+    { "input": "http://10.0.0.1/", "opens": null },
+    { "input": "http://localhost.example.com:3000", "opens": null },
+    { "input": "http://127.0.0.1.example.com/", "opens": null },
+    { "input": "http://[fe80::1]/", "opens": null },
+    { "input": "file:///etc/hosts", "opens": null },
+    { "input": "javascript:alert(1)", "opens": null },
+    { "input": "ftp://localhost/", "opens": null },
+    { "input": "ws://localhost:3000", "opens": null },
+    { "input": "http://user:secret@localhost:3000/", "opens": null },
+    { "input": "http://example.com@localhost:3000/", "opens": null },
+    { "input": "http://localhost:99999/", "opens": null }
+  ]
+}

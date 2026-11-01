@@ -786,6 +786,26 @@ final class WorkspaceStore {
                                                                  "input": input.params])
     }
 
+    // MARK: Localhost pages (a page the computer serves, rendered there and streamed here)
+
+    func watchLocalhostPage(deviceId: String, watch: LocalhostWatch) async throws
+        -> AsyncThrowingStream<LocalhostPageEvent, Error> {
+        try await relay(for: deviceId).stream(method: "WatchLocalhostPage", params: watch.params)
+    }
+
+    func localhostPageInput(deviceId: String, viewId: String, input: LocalhostPageInput) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "LocalhostPageInput",
+                                                        params: ["viewId": viewId, "input": input.params],
+                                                        timeoutSeconds: 25, retry: false)
+    }
+
+    func listLocalhostServers(deviceId: String) async throws -> [LocalServer] {
+        let list: LocalServerList = try await relay(for: deviceId).call(method: "ListLocalhostServers",
+                                                                        params: [:], timeoutSeconds: 20)
+        return list.servers
+    }
+
     /// ListRefs on the target device — branches with current/worktree markers
     /// (default branch first, per the engine's ordering).
     func listRefs(deviceId: String, repoPath: String) async -> [RepoRef]? {
@@ -1061,3 +1081,4 @@ final class WorkspaceStore {
 }
 
 extension WorkspaceStore: SimulatorHost {}
+extension WorkspaceStore: LocalhostPageHost {}
