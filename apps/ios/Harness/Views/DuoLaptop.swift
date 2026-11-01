@@ -113,3 +113,89 @@ struct KeyboardOverlap: ViewModifier {
         if next != overlap { withAnimation(Motion.collapse) { overlap = next } }
     }
 }
+
+// MARK: - Half-open control pad
+
+/// Half open, the lower half is for hands: four big buttons by default, the
+/// work view one tap away. Less to read on the keyboard side of the fold.
+enum DuoHalfPanel: Equatable {
+    case controls
+    case work
+
+    enum Control: String, CaseIterable, Identifiable {
+        case stop, showChanges, terminal, talk
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .stop: return "Stop"
+            case .showChanges: return "Show changes"
+            case .terminal: return "Terminal"
+            case .talk: return "Talk to Graff"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .stop: return "stop.fill"
+            case .showChanges: return "doc.text.magnifyingglass"
+            case .terminal: return "terminal"
+            case .talk: return "text.bubble"
+            }
+        }
+
+        /// Stop only does something while a turn runs; the rest always work.
+        func enabled(running: Bool) -> Bool { self == .stop ? running : true }
+
+        /// The work segment a control opens, if any.
+        var segment: InspectSegment? {
+            switch self {
+            case .showChanges: return .diff
+            case .terminal: return .terminal
+            case .stop, .talk: return nil
+            }
+        }
+    }
+}
+
+struct DuoControlPad: View {
+    let running: Bool
+    let perform: (DuoHalfPanel.Control) -> Void
+
+    var body: some View {
+        let controls = DuoHalfPanel.Control.allCases
+        VStack(spacing: 10) {
+            ForEach(0..<2, id: \.self) { row in
+                HStack(spacing: 10) {
+                    ForEach(controls[(row * 2)..<(row * 2 + 2)]) { control in button(control) }
+                }
+            }
+        }
+        .padding(.horizontal, Theme.gutter)
+        .padding(.vertical, 12)
+        .accessibilityIdentifier("duo-control-pad")
+    }
+
+    private func button(_ control: DuoHalfPanel.Control) -> some View {
+        let enabled = control.enabled(running: running)
+        let primary = control == .stop && running
+        return Button { perform(control) } label: {
+            VStack(spacing: 8) {
+                Image(systemName: control.symbol).font(.system(size: 22, weight: .semibold))
+                Text(control.title).font(Theme.sans(16, weight: .semibold))
+            }
+            .foregroundStyle(primary ? Theme.bg : Theme.text)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(minHeight: 88)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(primary ? Theme.danger : Theme.surfaceRaised))
+            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Theme.border, lineWidth: primary ? 0 : 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressWashButtonStyle(cornerRadius: 16))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.45)
+        .accessibilityIdentifier("duo-control-\(control.rawValue)")
+    }
+}

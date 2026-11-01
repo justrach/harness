@@ -30,6 +30,8 @@ struct SessionView: View {
     @Environment(\.duoLaptop) private var duoLaptop
     /// Laptop pose: how far the keyboard reaches into this view, and the header strip's height.
     @State private var keyboardOverlap: CGFloat = 0
+    /// Half open: the lower half shows the control pad until work is asked for.
+    @State private var halfPanel: DuoHalfPanel = .controls
     @State private var paneHeaderHeight: CGFloat = 0
     /// Upright Duo: this view's top in the window (the fold is measured from the window's top).
     @State private var viewMinY: CGFloat = 0
@@ -424,10 +426,12 @@ struct SessionView: View {
                                inspectDiff: { summary in
                                    inspect.segment = .diff
                                    inspect.selectedFile = summary.files.first
+                                   halfPanel = .work
                                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                },
                                inspectTool: { tool in
                                    inspect.show(tool)
+                                   halfPanel = .work
                                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                })
                     .frame(maxHeight: .infinity)
@@ -458,11 +462,26 @@ struct SessionView: View {
             .frame(maxHeight: typing ? .infinity : nil)
             if !typing {
                 Color.clear.frame(height: layout.gap)
-                InspectCard(model: inspectModel, state: inspect, title: true,
-                            approve: approveAction(store),
-                            askForChanges: { DuoComposerFocus.shared.request(chat.id) })
+                if halfPanel == .controls {
+                    DuoControlPad(running: running) { control in
+                        switch control {
+                        case .stop: store.sendInterrupt()
+                        case .talk: DuoComposerFocus.shared.request(chat.id)
+                        case .showChanges, .terminal:
+                            if let segment = control.segment { inspect.segment = segment }
+                            halfPanel = .work
+                        }
+                    }
                     .frame(maxHeight: .infinity)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(.opacity)
+                } else {
+                    InspectCard(model: inspectModel, state: inspect, title: true,
+                                close: { halfPanel = .controls },
+                                approve: approveAction(store),
+                                askForChanges: { DuoComposerFocus.shared.request(chat.id) })
+                        .frame(maxHeight: .infinity)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
         }
         .padding(.bottom, keyboardOverlap)

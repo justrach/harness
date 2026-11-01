@@ -36,8 +36,8 @@ final class HomeListControlsUITests: XCTestCase {
         XCTAssertLessThan(grouping.frame.minX - project.frame.maxX, 40, "the pair should sit together")
         // Visible text says what each one chooses.
         XCTAssertTrue(app.staticTexts["All projects"].exists)
-        XCTAssertTrue(app.staticTexts["By time"].exists)
-        XCTAssertFalse(app.staticTexts["Time"].exists)
+        XCTAssertTrue(app.staticTexts["By status"].exists)
+        XCTAssertFalse(app.staticTexts["Status"].exists)
     }
 
     func testAccessibilityLabelsCarryTheCurrentChoice() {
@@ -45,7 +45,7 @@ final class HomeListControlsUITests: XCTestCase {
         XCTAssertEqual(project.label, "Filter by space")
         XCTAssertEqual(project.value as? String, "All projects")
         XCTAssertEqual(grouping.label, "Group by")
-        XCTAssertEqual(grouping.value as? String, "Time")
+        XCTAssertEqual(grouping.value as? String, "Status")
 
         choose("harness", in: project)
         XCTAssertTrue(app.staticTexts["harness"].waitForExistence(timeout: 5))

@@ -597,8 +597,10 @@ fn flush_latest(cx: &mut App) {
 pub enum SidebarOrganization {
     ByProject,
     ByDevice,
-    #[default]
     InOneList,
+    /// "Needs you", "Today" and "Earlier": chats waiting on you first.
+    #[default]
+    ByStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -953,7 +955,7 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
-            sidebar_organization: SidebarOrganization::InOneList,
+            sidebar_organization: SidebarOrganization::ByStatus,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_show_project_label: true,
             sidebar_compact: true,
@@ -1655,6 +1657,17 @@ impl UiSettings {
     }
 
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
+    /// A new install shows less (as #417 and #614 did): a turn's tool steps
+    /// fold into one line and sidebar rows drop branch names. Both stay one
+    /// toggle away, and existing settings files keep what they chose.
+    pub fn first_run() -> Self {
+        Self {
+            transcript_compact_mode: true,
+            sidebar_show_branch: false,
+            ..Self::default()
+        }
+    }
+
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => {
@@ -1777,7 +1790,7 @@ impl UiSettings {
                     }
                 }
             }
-            Err(_) => Self::default(),
+            Err(_) => Self::first_run(),
         }
     }
 
@@ -2937,7 +2950,10 @@ mod tests {
     #[test]
     fn missing_and_corrupt_files_yield_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+        let fresh = UiSettings::load(dir.path());
+        assert_eq!(fresh, UiSettings::first_run());
+        assert!(fresh.transcript_compact_mode && !fresh.sidebar_show_branch);
+        assert_eq!(fresh.sidebar_organization, SidebarOrganization::ByStatus);
         std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
     }
