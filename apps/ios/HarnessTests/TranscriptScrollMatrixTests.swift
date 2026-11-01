@@ -187,6 +187,23 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         TranscriptLayoutProbe.sample()
     }
 
+    /// Wait until the visible rows stop changing: a slow machine may still be
+    /// measuring after a fixed pause, and a row settling later reads as the
+    /// next change moving it.
+    private func settleLayout(timeout: Duration = .seconds(3)) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        var previous = visibleLayout()
+        var stable = 0
+        while stable < 2, clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            let current = visibleLayout()
+            stable = current == previous ? stable + 1 : 0
+            previous = current
+        }
+    }
+
     /// Apply chunk `index` (0-based) of the corpus as the streaming reply.
     private func applyChunk(_ corpus: Corpus, index: Int) {
         let chars = Array(corpus.markdown)
@@ -459,6 +476,8 @@ final class TranscriptScrollMatrixTests: XCTestCase {
             applyChunk(corpus, index: chunk)
             await settle(80)
         }
+        // Record the rows once they have settled; the claim is about the final append.
+        await settleLayout()
         let viewportTop = table.superview!.convert(table.superview!.bounds, to: window).minY
         let anchors = table.visibleCells.compactMap { cell -> (String, CGFloat, CGFloat)? in
             guard let id = cell.accessibilityIdentifier else { return nil }
