@@ -481,7 +481,8 @@ impl FilesSurface {
             | ComposerInputEvent::PastedText { .. }
             | ComposerInputEvent::CursorMoved
             | ComposerInputEvent::ViewportChanged
-            | ComposerInputEvent::FollowUpSubmitted => {}
+            | ComposerInputEvent::FollowUpSubmitted
+            | ComposerInputEvent::ToggleWrite => {}
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| {
             if this.sync_target(cx) {

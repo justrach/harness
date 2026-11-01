@@ -125,6 +125,10 @@ name = "composer-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "write-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "queue-steer-fixture"
 required-features = ["appshots-fixture"]
 

@@ -190,6 +190,10 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
             Box::new(SelectChatTab(chat_tabs::LAST_TAB_SLOT)),
         ),
         row("Jump to the message box", Box::new(FocusComposer)),
+        row(
+            "Write the message on a full page (and back)",
+            Box::new(crate::composer::ToggleWriteDocument),
+        ),
         row("Command palette", Box::new(ToggleCommandPalette)),
         row("Search sessions", Box::new(OpenSessionSearch)),
         row("Settings", Box::new(OpenSettings)),
@@ -11071,6 +11075,21 @@ impl Shell {
 
         let status = self.render_status_strip(composer_width, cx);
         let drop_target = self.attachment_drop_target(None, cx);
+        // The Write page takes the pane: the draft on a page where the
+        // transcript was, its own Send in place of the composer.
+        let write_page = self.composer.read(cx).write_open().then(|| {
+            self.composer.update(cx, |composer, cx| {
+                composer.render_write_page(Theme::TITLEBAR_HEIGHT, window, cx)
+            })
+        });
+        let write_open = write_page.is_some();
+        let composer_shown = (has_spaces || no_project || has_appshots) && !write_open;
+        // The transcript steps aside while the page is up.
+        let outlet = if write_open {
+            Empty.into_any_element()
+        } else {
+            outlet
+        };
         // Attachment dropzone over the ENTIRE conversation column (transcript
         // + composer, not just the pill). OS images keep using the upload
         // pipeline; workspace files/directories and file tabs become the same
@@ -11116,7 +11135,7 @@ impl Shell {
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
-            .children(new_thread_background_layer)
+            .children(new_thread_background_layer.filter(|_| !write_open))
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -11159,6 +11178,9 @@ impl Shell {
                     )
                 },
             )
+            .children(
+                write_page.map(|page| div().absolute().inset_0().bottom(px(term_h)).child(page)),
+            )
             // The glass chrome stack, floating over the transcript's bottom:
             // reserved status strip (h-6, the WorkingIndicator — the composer
             // below never shifts), composer, terminal dock. A paint-time
@@ -11169,7 +11191,7 @@ impl Shell {
             .child({
                 let measured = self.bottom_stack.clone();
                 let measured_has_composer = self.bottom_stack_has_composer.clone();
-                let contains_composer = (has_spaces || no_project || has_appshots) && has_selection;
+                let contains_composer = composer_shown && has_selection;
                 let composer = self.composer.clone();
                 div()
                     .flex_none()
@@ -11195,8 +11217,8 @@ impl Shell {
                         .absolute()
                         .inset_0(),
                     )
-                    .child(status)
-                    .when(has_spaces || no_project || has_appshots, |el| {
+                    .when(!write_open, |el| el.child(status))
+                    .when(composer_shown, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
                         el.child(crate::composer_dock::docked_composer(
                             div()
