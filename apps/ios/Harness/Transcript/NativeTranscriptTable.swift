@@ -161,7 +161,7 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         super.init(frame: .zero, style: .plain)
         dataSource = self
         delegate = self
-        register(UITableViewCell.self, forCellReuseIdentifier: "message")
+        register(TranscriptCell.self, forCellReuseIdentifier: "message")
         rowHeight = UITableView.automaticDimension
         estimatedRowHeight = 140
         separatorStyle = .none
@@ -717,4 +717,14 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         cancelFollowAnimation()
         if follow.pinned { goToLatest(animated: false) }
     }
+}
+
+/// Rows scroll beneath the top safe area (status bar, fading header). A
+/// hosted row sizes itself with its cell's safe-area insets added, even
+/// though its content ignores them, so a row measured there grew by its
+/// overlap and kept that height until something re-measured it: scrolling
+/// under the status bar stalled, and a later update shrank the row. Row
+/// content never insets for the safe area, so the cell reports none.
+final class TranscriptCell: UITableViewCell {
+    override var safeAreaInsets: UIEdgeInsets { .zero }
 }

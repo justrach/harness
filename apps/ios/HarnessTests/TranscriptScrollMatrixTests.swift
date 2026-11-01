@@ -511,6 +511,41 @@ final class TranscriptScrollMatrixTests: XCTestCase {
                        "appending below a reader must not evict/reindex existing history rows")
     }
 
+    /// Rows scroll beneath the top safe area (the status bar and the fading
+    /// header). A row's height must not depend on how far it overlaps that
+    /// area: a row measured there kept the extra height until something
+    /// re-measured it, so scrolling under the status bar stalled and the next
+    /// streamed chunk shrank an unchanged history row.
+    func testRowHeightsDoNotDependOnTheTopSafeArea() async {
+        let corpus = Self.corpora.first { $0.name == "long-code" }!
+        await mount(corpus)
+        applyChunk(corpus, index: 0)
+        await settle(120)
+        await drag(by: -900)
+        await settle(120)
+        XCTAssertFalse(harness.scroll.pinned)
+        XCTAssertLessThan(table.convert(table.bounds, to: window).minY, window.safeAreaInsets.top,
+                          "precondition: rows scroll beneath the top safe area")
+        var heights: [String: CGFloat] = [:]
+        var failures: [String] = []
+        for step in 0..<40 {
+            table.setContentOffset(CGPoint(x: 0, y: table.contentOffset.y - 10), animated: false)
+            table.layoutIfNeeded()
+            try? await Task.sleep(for: .milliseconds(16))
+            for cell in table.visibleCells {
+                guard let id = cell.accessibilityIdentifier else { continue }
+                let top = table.convert(cell.frame, to: window).minY
+                guard let height = heights[id] else { heights[id] = cell.bounds.height; continue }
+                if abs(cell.bounds.height - height) > 0.5 {
+                    failures.append("step \(step) \(id): \(height) -> \(cell.bounds.height) at y=\(top)")
+                    heights[id] = cell.bounds.height
+                }
+            }
+        }
+        XCTAssertTrue(failures.isEmpty, "unchanged rows changed height while scrolling:\n"
+                      + failures.joined(separator: "\n"))
+    }
+
     /// A structural (non-append) row change while reading history must not
     /// pass through an estimated-height content size. UITableView resets
     /// every height on `reloadData`; a 300-turn transcript collapsed toward
