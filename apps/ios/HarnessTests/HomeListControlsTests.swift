@@ -10,11 +10,12 @@ final class HomeListControlsTests: XCTestCase {
     }
 
     func testGroupingPillSaysItArrangesTheList() {
+        XCTAssertEqual(HomeGroupBy.status.pillTitle, "By status")
         XCTAssertEqual(HomeGroupBy.none.pillTitle, "By time")
         XCTAssertEqual(HomeGroupBy.project.pillTitle, "By project")
         XCTAssertEqual(HomeGroupBy.device.pillTitle, "By device")
         // The menu's choices and the accessibility value keep the short names.
-        XCTAssertEqual(HomeGroupBy.allCases.map(\.label), ["Time", "Project", "Device"])
+        XCTAssertEqual(HomeGroupBy.allCases.map(\.label), ["Status", "Time", "Project", "Device"])
     }
 
     func testRowShowsWhileThereIsAnythingToScope() {
