@@ -1713,6 +1713,9 @@ pub enum ChangesEvent {
     /// The working-tree trash button was clicked. The shell owns the global
     /// confirmation dialog and only then dispatches the destructive RPC.
     DiscardWorkingTree(DiscardWorkingTreeRequest),
+    /// The footer's "Keep changes": the review is done, close the pane.
+    /// Nothing on disk changes (edits are already in the working tree).
+    KeepChanges,
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
@@ -4919,6 +4922,9 @@ impl Render for Changes {
             diff_phase(active.as_ref())
         };
         let error = self.error.clone();
+        let show_review_footer = matches!(phase, DiffPhase::List)
+            && scope == DiffScope::WorkingTree
+            && self.discard_request(cx).is_some();
         // Scoped fetch failures replace the content area. "no turn recorded"
         // is the expected pre-first-turn state, not an error; "unknown
         // method" is version skew — the chat's host engine predates
@@ -5058,6 +5064,49 @@ impl Render for Changes {
                 )
             })
             .child(content)
+            .when(show_review_footer, |el| el.child(self.render_review_footer(&theme, cx)))
+            .into_any_element()
+    }
+}
+
+impl Changes {
+    /// "Undo" / "Keep changes" under a working-tree diff. Undo goes through
+    /// the shell's existing discard confirmation, which names exactly what it
+    /// throws away (every uncommitted change in the checkout).
+    fn render_review_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_none()
+            .px(px(Theme::SPACE_MD))
+            .py(px(Theme::SPACE_SM))
+            .border_t_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(Theme::SPACE_SM))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from("Changes are on disk. Keep them or undo.")),
+            )
+            .child(
+                crate::popover::btn_ghost(theme, "Undo", "changes-review-undo")
+                    .id("changes-review-undo")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(request) = this.discard_request(cx) {
+                            cx.emit(ChangesEvent::DiscardWorkingTree(request));
+                        }
+                    })),
+            )
+            .child(
+                crate::popover::btn_primary(theme, "Keep changes")
+                    .id("changes-review-keep")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::KeepChanges))),
+            )
             .into_any_element()
     }
 }

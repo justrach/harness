@@ -1958,6 +1958,7 @@ impl Render for SidebarViewOptionsTooltip {
 
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
+    ByStatus,
     ByProject,
     Compact,
     ShowProjectIcon,
@@ -1977,15 +1978,21 @@ impl SidebarViewRow {
     fn closes_submenu(self) -> bool {
         matches!(
             self,
-            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::ByStatus
+                | Self::ByProject
+                | Self::ByDevice
+                | Self::InOneList
+                | Self::LastUpdated
+                | Self::Created
         )
     }
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 3] =
-    [("Organize", 0..3), ("Sort", 3..5), ("Show", 5..10)];
+    [("Organize", 0..4), ("Sort", 4..6), ("Show", 6..11)];
 
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 11] = [
+    SidebarViewRow::ByStatus,
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
@@ -1997,6 +2004,33 @@ const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 10] = [
     SidebarViewRow::ShowProjectLabel,
     SidebarViewRow::ShowArchived,
 ];
+
+/// The "By status" section a chat sits in: waiting on you (a question or a
+/// failure) first, then anything active today, then the rest.
+pub(super) fn status_group(
+    status: ChatIndicator,
+    at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> (&'static str, &'static str) {
+    match status {
+        ChatIndicator::AwaitingInput | ChatIndicator::Errored => ("needs", "Needs you"),
+        _ if at.with_timezone(&chrono::Local).date_naive()
+            == now.with_timezone(&chrono::Local).date_naive() =>
+        {
+            ("today", "Today")
+        }
+        _ => ("earlier", "Earlier"),
+    }
+}
+
+/// "Needs you" above "Today" above "Earlier", whatever order recency gave.
+fn status_group_rank(key: Option<&str>) -> u8 {
+    match key {
+        Some("needs") => 0,
+        Some("today") => 1,
+        _ => 2,
+    }
+}
 
 // list items stay tightly related at 2px, while section boundaries use 12px
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
@@ -3137,6 +3171,9 @@ impl Shell {
         self.cancel_sidebar_session_transfer(cx);
         self.cancel_pinned_session_drag(cx);
         match row {
+            SidebarViewRow::ByStatus => {
+                self.settings.sidebar_organization = SidebarOrganization::ByStatus
+            }
             SidebarViewRow::ByProject => {
                 self.settings.sidebar_organization = SidebarOrganization::ByProject
             }
@@ -3320,6 +3357,7 @@ impl Shell {
         let show_branch = self.settings.sidebar_show_branch;
 
         let labels = [
+            "By status",
             "By device",
             "By project",
             "None",
@@ -3332,6 +3370,7 @@ impl Shell {
             "Archived",
         ];
         let icons = [
+            icons::BELL,
             icons::LAPTOP,
             icons::FOLDER,
             icons::LIST,
@@ -3344,6 +3383,7 @@ impl Shell {
             icons::ARCHIVE_MINIMALISTIC,
         ];
         let selected = [
+            organization == SidebarOrganization::ByStatus,
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::InOneList,
@@ -3356,8 +3396,8 @@ impl Shell {
             self.settings.sidebar_show_archived,
         ];
         let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[selected[..4].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[4 + selected[4..6].iter().position(|v| *v).unwrap_or(0)].to_string(),
         ];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
@@ -4071,10 +4111,16 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
+        let now = Utc::now();
+        let mut statuses: std::collections::HashMap<String, ChatIndicator> =
+            std::collections::HashMap::new();
         let mut chats: Vec<harness_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+            .sidebar_chats(now, filter.as_deref())
             .into_iter()
-            .map(|(_, chat)| chat.clone())
+            .map(|(status, chat)| {
+                statuses.insert(chat.id.clone(), status);
+                chat.clone()
+            })
             .collect();
         chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
@@ -4084,7 +4130,15 @@ impl Shell {
             let mut groups: Vec<(Option<(String, String)>, Vec<harness_proto::Chat>)> = Vec::new();
             for chat in chats {
                 let key = Some((
-                    if self.settings.sidebar_organization == SidebarOrganization::ByProject {
+                    if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+                        status_group(
+                            statuses.get(&chat.id).copied().unwrap_or(ChatIndicator::Idle),
+                            chat.last_message_at.unwrap_or(chat.created_at),
+                            now,
+                        )
+                        .0
+                        .to_string()
+                    } else if self.settings.sidebar_organization == SidebarOrganization::ByProject {
                         chat.space_id
                             .clone()
                             .unwrap_or_else(|| format!("home:{}", chat.device_id))
@@ -4101,6 +4155,11 @@ impl Shell {
             }
             if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
                 promote_local_device_group(&mut groups, state.local_device_id.as_deref());
+            }
+            if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+                groups.sort_by_key(|(group, _)| {
+                    status_group_rank(group.as_ref().map(|(key, _)| key.as_str()))
+                });
             }
             groups
                 .into_iter()
@@ -4168,6 +4227,14 @@ impl Shell {
                 project,
             )),
             SidebarOrganization::InOneList => None,
+            SidebarOrganization::ByStatus => {
+                let (key, label) = status_group(
+                    status,
+                    chat.last_message_at.unwrap_or(chat.created_at),
+                    Utc::now(),
+                );
+                Some((key.to_string(), label.to_string()))
+            }
         };
         ActiveChatRow {
             status,
@@ -4264,6 +4331,9 @@ impl Shell {
         if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
+        }
+        if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+            regular_groups.sort_by_key(|(group, _)| status_group_rank(group.as_ref().map(|(key, _)| key.as_str())));
         }
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
         if !pinned_rows.is_empty() {
@@ -4567,6 +4637,7 @@ impl Shell {
                 SidebarOrganization::ByDevice => "device",
                 SidebarOrganization::ByProject => "project",
                 SidebarOrganization::InOneList => "list",
+                SidebarOrganization::ByStatus => "status",
             };
             let collapse_key = format!("{organization}:{key}");
             let motion_key = format!("group:{collapse_key}");
@@ -6476,6 +6547,19 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn status_groups_put_needs_you_first_then_today_then_earlier() {
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::days(3);
+        assert_eq!(super::status_group(harness_proto::ChatIndicator::AwaitingInput, old, now).1, "Needs you");
+        assert_eq!(super::status_group(harness_proto::ChatIndicator::Errored, now, now).1, "Needs you");
+        assert_eq!(super::status_group(harness_proto::ChatIndicator::Completed, now, now).1, "Today");
+        assert_eq!(super::status_group(harness_proto::ChatIndicator::Idle, old, now).1, "Earlier");
+        let mut keys = vec![Some("earlier"), Some("needs"), Some("today")];
+        keys.sort_by_key(|k| super::status_group_rank(*k));
+        assert_eq!(keys, vec![Some("needs"), Some("today"), Some("earlier")]);
+    }
     use chrono::{TimeZone as _, Utc};
 
     use super::{compare_sidebar_chats, connected_first, promote_local_device_group};

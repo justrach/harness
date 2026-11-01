@@ -34,6 +34,7 @@ extension HomeGroupBy {
     /// "Time" read like another filter.
     var pillTitle: String {
         switch self {
+        case .status: return "By status"
         case .none: return "By time"
         case .project: return "By project"
         case .device: return "By device"

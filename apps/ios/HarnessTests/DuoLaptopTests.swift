@@ -50,4 +50,14 @@ final class DuoLaptopTests: XCTestCase {
         XCTAssertEqual(QuickActions.lastPrompt(entries), "fix the header")
         XCTAssertNil(QuickActions.lastPrompt([entries[1]]))
     }
+
+    func testHalfOpenPadOffersFourBigControlsAndStopOnlyWhileRunning() {
+        XCTAssertEqual(DuoHalfPanel.Control.allCases.map(\.title),
+                       ["Stop", "Show changes", "Terminal", "Talk to Graff"])
+        XCTAssertFalse(DuoHalfPanel.Control.stop.enabled(running: false))
+        XCTAssertTrue(DuoHalfPanel.Control.stop.enabled(running: true))
+        XCTAssertEqual(DuoHalfPanel.Control.showChanges.segment, .diff)
+        XCTAssertEqual(DuoHalfPanel.Control.terminal.segment, .terminal)
+        XCTAssertNil(DuoHalfPanel.Control.talk.segment)
+    }
 }

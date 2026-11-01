@@ -8,7 +8,7 @@ final class SessionSwitcherUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         XCUIDevice.shared.orientation = .portrait
-        app.launchArguments = ["-demo", "-sethomefilter", "", "-phoneSplit", "off"]
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-homeGroupBy", "none", "-phoneSplit", "off"]
         app.launch()
     }
 

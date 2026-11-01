@@ -36,7 +36,9 @@ struct HomeView: View {
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     // Start with Time each launch; a saved grouping can hide recent sessions
     // inside collapsed projects. Project/device views are opt-in for this visit.
-    @State private var groupByRaw = HomeGroupBy.none.rawValue
+    /// Status by default; `-homeGroupBy none|project|device` picks another at launch.
+    @State private var groupByRaw = UserDefaults.standard.string(forKey: "homeGroupBy")
+        .flatMap(HomeGroupBy.init(rawValue:))?.rawValue ?? HomeGroupBy.status.rawValue
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
@@ -833,7 +835,7 @@ struct HomeView: View {
             }
             .pickerStyle(.inline)
         } label: {
-            HomeControlPill(symbol: grouping.symbol, title: grouping.pillTitle, active: grouping != .none)
+            HomeControlPill(symbol: grouping.symbol, title: grouping.pillTitle, active: grouping != .status)
         }
         .buttonStyle(.plain)
         .fixedSize()
@@ -894,16 +896,15 @@ struct HomeView: View {
         // the phone split: a narrow pane keeps its rows for sessions.
         if phoneArrangement == nil {
             Section {
-                Text("Sessions")
-                    .font(Theme.sans(Theme.titleSize, weight: .semibold, relativeTo: .largeTitle))
-                    .foregroundStyle(Theme.text)
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilityIdentifier("home-title")
+                HomeStartHeader(hasProject: startSpaceId != nil,
+                                compose: { startNewSession(prompt: nil) },
+                                start: { startNewSession(prompt: $0.prompt) })
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 4, leading: Theme.gutter, bottom: 6, trailing: Theme.gutter))
+                    .listRowInsets(EdgeInsets(top: 4, leading: Theme.gutter, bottom: 10, trailing: Theme.gutter))
                 let pinnedChats = scoped.filter { model.isPinned(chatId: $0.id) }
-                if searchText.isEmpty, !pinnedChats.isEmpty {
+                // Grouped by status, pins already lead the list: no second copy.
+                if searchText.isEmpty, !pinnedChats.isEmpty, grouping != .status {
                     PinnedRow(chats: pinnedChats) { open(.chat($0)) }
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -939,7 +940,9 @@ struct HomeView: View {
             let now = NowStrip.active(in: scoped, model: model)
             // Not in the phone split: the list beside the open session already shows what is running or
             // waiting, and the cards would take most of a narrow pane.
-            if searchText.isEmpty, !now.isEmpty, phoneArrangement == nil {
+            // Grouped by status, "Needs you" already lists what waits on you:
+            // the strip would repeat it (less by default, #417).
+            if searchText.isEmpty, !now.isEmpty, phoneArrangement == nil, grouping != .status {
                 Section {
                     NowStrip(chats: now) { open(.chat($0)) }
                         .listRowBackground(Color.clear)
@@ -972,7 +975,8 @@ struct HomeView: View {
             }
         } else {
             let pinned = Set(chats.map(\.id).filter(model.isPinned(chatId:)))
-            ForEach(Perf.measure(PerfSpan.homeGroup) { HomeGrouping.groups(chats, by: grouping, pinned: pinned) }) { group in
+            ForEach(Perf.measure(PerfSpan.homeGroup) { HomeGrouping.groups(chats, by: grouping, pinned: pinned,
+                                                                               indicator: { model.indicator(for: $0) }) }) { group in
                 let collapsed = grouping != .none && collapsedGroups.contains(group.id)
                 Section {
                     if !collapsed {
@@ -992,6 +996,27 @@ struct HomeView: View {
             }
             .motionAnimation(Motion.resort, value: chats.map(\.id))
         }
+    }
+
+    /// Where a session started from Home's composer or a starter lands: the
+    /// chosen project, else the newest session's project, else the first.
+    private var startSpaceId: String? {
+        selectedSpace?.id
+            ?? model.overviewChats.lazy.compactMap(\.spaceId).first
+            ?? model.spaces.first?.id
+    }
+
+    /// Opens a new session, prefilled with a starter's prompt when given.
+    /// With no project yet, the picker asks where it should run.
+    private func startNewSession(prompt: String?) {
+        guard let spaceId = startSpaceId else {
+            showNewSessionPicker = true
+            return
+        }
+        if let prompt {
+            DraftStore.save(prompt, for: DraftStore.newSessionKey(.project(spaceId: spaceId)))
+        }
+        open(.newSession(spaceId: spaceId))
     }
 
     /// Collapsed section ids, persisted (comma-separated).
@@ -1081,7 +1106,9 @@ struct ChatRow: View {
         let _ = model.connectivity.pulse
         let indicator = model.indicator(for: chat)
         let sendState = model.sendState(for: chat)
-        let pullRequest = model.changeRequest(for: chat)
+        // Less by default (#417, #614): the PR badge lives in the session's
+        // composer, one tap away, not on every row.
+        let pullRequest = ChatRow.showsCodeDetails ? model.changeRequest(for: chat) : nil
         ZStack(alignment: .bottomTrailing) {
             Button(action: onSelect) {
                 content(indicator: indicator, sendState: sendState,
@@ -1100,6 +1127,9 @@ struct ChatRow: View {
     /// The pressed and selected wash. Concentric with the avatar: its 22pt
     /// radius plus the row's 12pt inset, rounded to the list's rhythm.
     static let washRadius: CGFloat = 18
+    /// Branch and pull request on every row. Off: the list reads as names
+    /// and status; the session itself shows both.
+    static let showsCodeDetails = false
     /// Inside the wash: horizontal and vertical padding around the content.
     static let insetH: CGFloat = 8
     static let insetV: CGFloat = 12
@@ -1163,7 +1193,8 @@ struct ChatRow: View {
                 // spinner rides bottom-right. Always laid out, so every row is
                 // the same height.
                 HStack(spacing: 4) {
-                    if let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
+                    if ChatRow.showsCodeDetails,
+                       let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
                         LineIconView(.gitBranch, size: 11, color: subline)
                         Text(branch)
                             .font(Theme.sans(Theme.metaSize))

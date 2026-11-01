@@ -80,13 +80,14 @@ pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
 /// The new-session heading ("New session in <project>") floats this far
 /// above the destination chips, in a slot this tall.
-const NEW_THREAD_HEADING_HEIGHT: f32 = 52.0;
+const NEW_THREAD_HEADING_HEIGHT: f32 = 60.0;
 const NEW_THREAD_HEADING_GAP: f32 = 14.0;
 /// Starter chips ("Build something new", "Research a topic", …) sit in a
 /// slot this far below the empty new-session composer. Tall enough for two
 /// wrapped rows in a narrow pane.
-const STARTER_ROW_HEIGHT: f32 = 62.0;
-const STARTER_ROW_GAP: f32 = 4.0;
+const STARTER_ROW_HEIGHT: f32 =
+    2.0 * crate::starters::TILE_HEIGHT + crate::starters::TILE_GAP;
+const STARTER_ROW_GAP: f32 = 12.0;
 // Accommodate the 24px usage indicator and PR badge without overflowing the
 // row's equal 8px top/bottom gutters.
 const SESSION_FOOTER_HEIGHT: f32 = 24.0;
@@ -7688,14 +7689,23 @@ impl Composer {
         Some(
             div()
                 .flex()
-                .flex_row()
-                .flex_wrap()
-                .justify_center()
-                .gap(px(6.0))
-                .children(crate::starters::available(has_project).map(|starter| {
-                    crate::starters::chip(starter, theme).on_click(cx.listener(
-                        move |this, _, _, cx| this.apply_starter(starter, cx),
-                    ))
+                .flex_col()
+                .gap(px(crate::starters::TILE_GAP))
+                .children(crate::starters::grid_rows(has_project).into_iter().map(|row| {
+                    let lone = row.len() == 1;
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(crate::starters::TILE_GAP))
+                        .children(row.into_iter().map(|starter| {
+                            crate::starters::tile(starter, theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.apply_starter(starter, cx)
+                                }))
+                                .into_any_element()
+                        }))
+                        // A lone last tile keeps its half width.
+                        .when(lone, |row| row.child(div().flex_1()))
                 }))
                 .into_any_element(),
         )
@@ -7718,20 +7728,33 @@ impl Composer {
                 crate::chat_mode::HEADING_EYEBROW,
                 crate::chat_mode::HEADING_TITLE.to_string(),
             ),
-            Some(name) => ("New session in", name),
-            None => ("New session in your home folder", "No project".to_string()),
+            Some(name) => ("Working in", name),
+            None => ("Working in your home folder", "No project".to_string()),
+        };
+        let name = self
+            .state
+            .read(cx)
+            .auth_user()
+            .and_then(|user| user.name.clone());
+        let greeting = if chat_mode {
+            crate::chat_mode::HEADING_TITLE.to_string()
+        } else {
+            crate::starters::greeting(name.as_deref())
         };
         let id = "new-thread-heading";
         div()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(4.0))
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(eyebrow)),
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(24.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from(greeting)),
             )
             .child(
                 div()
@@ -7740,11 +7763,11 @@ impl Composer {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(4.0))
                     .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(22.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(motion::hover_blend(id, theme.text.opacity(0.9), theme.text))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(motion::hover_blend(id, theme.text_muted, theme.text))
+                    .child(div().flex_none().child(SharedString::from(eyebrow)))
                     .when(!chat_mode, |el| {
                         el.on_hover(motion::hover_listener(id))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -7754,11 +7777,19 @@ impl Composer {
                             }))
                     })
                     .when(chat_mode, |el| el.cursor_default())
-                    .child(div().min_w_0().truncate().child(SharedString::from(title)))
+                    .when(!chat_mode, |el| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(SharedString::from(title)),
+                        )
+                    })
                     .when(!chat_mode, |el| {
                         el.child(
                             crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                                .size(px(16.0))
+                                .size(px(12.0))
                                 .flex_none()
                                 .text_color(theme.text_muted.opacity(0.6)),
                         )
