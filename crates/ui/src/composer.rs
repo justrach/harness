@@ -6011,7 +6011,9 @@ impl Composer {
                     .iter()
                     .map(|image| attachments::stage_clipboard_image(image.clone()))
                     .collect();
-                this.add_staged(staged, cx);
+                if this.add_staged(staged, cx) {
+                    crate::sound::play_attach();
+                }
             }
             ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
             ComposerInputEvent::PastedText { range, revision } => {
@@ -6401,7 +6403,9 @@ impl Composer {
                 *slot = staged;
                 cx.notify();
             }
-            None => self.add_staged(vec![staged], cx),
+            None => {
+                self.add_staged(vec![staged], cx);
+            }
         }
         let focus = self.input.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
@@ -6417,8 +6421,9 @@ impl Composer {
         self.add_staged(vec![annotated.into_staged()], cx);
     }
 
-    fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
-        self.add_staged_for(self.current_key.clone(), staged, cx);
+    /// Whether anything was staged.
+    fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) -> bool {
+        self.add_staged_for(self.current_key.clone(), staged, cx)
     }
 
     fn add_staged_for(
@@ -6426,16 +6431,17 @@ impl Composer {
         key: String,
         staged: Vec<StagedAttachment>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.queue_edit_finishing {
-            return;
+            return false;
         }
         if staged.is_empty() {
-            return;
+            return false;
         }
         self.attachments.entry(key).or_default().extend(staged);
         self.focus_pending = true;
         cx.notify();
+        true
     }
 
     /// Stage files (picker / drop / pasted paths). Images get thumbnails;
@@ -6480,7 +6486,10 @@ impl Composer {
                 }
             }
         }
-        self.add_staged_for(key, staged, cx);
+        // Pasted, dropped and picked files land with a small cue.
+        if self.add_staged_for(key, staged, cx) {
+            crate::sound::play_attach();
+        }
     }
 
     /// Add a file-tree or file-tab drop through the existing file-mention
@@ -13558,6 +13567,39 @@ mod tests {
             assert!(input.read(cx).focus_handle.is_focused(window));
         })
         .unwrap();
+    }
+
+    /// A pasted, dropped or picked file lands with the attach cue: once per
+    /// attach, never for a file that failed, and not when it's turned off.
+    #[gpui::test]
+    fn attaching_a_file_plays_the_attach_cue_once(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let image_path = dir.path().join("attachment.png");
+        let png = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1cAAAAASUVORK5CYII=",
+        )
+        .unwrap();
+        std::fs::write(&image_path, png).unwrap();
+        let cues = || crate::sound::ATTACH_CUES.with(|n| n.get());
+        let attach = |cx: &mut gpui::TestAppContext, path: std::path::PathBuf| {
+            handle
+                .update(cx, |composer, _, cx| composer.add_paths(vec![path], cx))
+                .unwrap();
+        };
+        crate::sound::set_attach_sound_enabled(true);
+        let before = cues();
+        attach(cx, image_path.clone());
+        assert_eq!(cues(), before + 1, "a dropped image plays the cue");
+        attach(cx, dir.path().join("missing.png"));
+        assert_eq!(cues(), before + 1, "a failed attach stays quiet");
+        crate::sound::set_attach_sound_enabled(false);
+        attach(cx, image_path);
+        assert_eq!(cues(), before + 1, "turned off in Settings");
+        let staged = handle
+            .read_with(cx, |composer, _| composer.staged().len())
+            .unwrap();
+        assert_eq!(staged, 2);
     }
 
     #[cfg(all(feature = "model-picker-preview", feature = "appshots-fixture"))]

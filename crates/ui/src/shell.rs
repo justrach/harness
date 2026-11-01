@@ -2414,6 +2414,7 @@ impl Shell {
         state.update(cx, |state, cx| state.set_change_requests_visible(true, cx));
         crate::appshots::set_enabled(settings.appshots_enabled);
         crate::appshots::set_capture_sound_enabled(settings.appshot_sound_enabled);
+        crate::sound::set_attach_sound_enabled(settings.attach_sound_enabled);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
         // Dev/testing knob: `HARNESS_OPEN_ROUTE=settings[/<section>]` boots
@@ -5544,6 +5545,7 @@ impl Shell {
                             self.settings.sound_completion_enabled,
                             self.settings.sound_input_enabled,
                             self.settings.sound_attention_enabled,
+                            self.settings.attach_sound_enabled,
                             self.settings.notifications_enabled,
                             self.settings.notifications_background_only,
                             self.settings.share_performance_stats,
@@ -5559,6 +5561,7 @@ impl Shell {
                                 completion_sound,
                                 input_sound,
                                 attention_sound,
+                                attach_sound,
                                 desktop,
                                 background_only,
                                 performance_stats,
@@ -5567,6 +5570,8 @@ impl Shell {
                             this.settings.sound_completion_enabled = completion_sound;
                             this.settings.sound_input_enabled = input_sound;
                             this.settings.sound_attention_enabled = attention_sound;
+                            this.settings.attach_sound_enabled = attach_sound;
+                            crate::sound::set_attach_sound_enabled(attach_sound);
                             this.settings.notifications_enabled = desktop;
                             this.settings.notifications_background_only = background_only;
                             this.settings.share_performance_stats = performance_stats;

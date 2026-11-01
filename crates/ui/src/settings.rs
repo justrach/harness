@@ -842,6 +842,9 @@ pub struct UiSettings {
     pub sound_input_enabled: bool,
     /// Chime when a run fails or the durable connection state degrades.
     pub sound_attention_enabled: bool,
+    /// A soft cue when a file or image is attached to the composer by
+    /// paste, drop or the file picker.
+    pub attach_sound_enabled: bool,
     /// Desktop banner notifications on the same transitions.
     /// `HARNESS_DISABLE_NOTIFICATIONS` overrides.
     pub notifications_enabled: bool,
@@ -982,6 +985,7 @@ impl Default for UiSettings {
             sound_completion_enabled: true,
             sound_input_enabled: true,
             sound_attention_enabled: true,
+            attach_sound_enabled: true,
             notifications_enabled: true,
             notifications_background_only: true,
             share_performance_stats: true,
@@ -2562,6 +2566,7 @@ mod tests {
             sound_completion_enabled: false,
             sound_input_enabled: true,
             sound_attention_enabled: false,
+            attach_sound_enabled: false,
             notifications_enabled: false,
             notifications_background_only: false,
             share_performance_stats: false,
