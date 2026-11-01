@@ -213,6 +213,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
         Model {
             id: "grok-4.7-build-fast".into(),
@@ -222,6 +223,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
         Model {
             id: "grok-4.6".into(),
@@ -231,6 +233,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
         Model {
             id: "grok-4.5".into(),
@@ -240,6 +243,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
     ]
 }
@@ -360,6 +364,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "claude-fable-5-1-high".into(),
@@ -369,6 +374,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "adaptive".into(),
@@ -378,6 +384,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
             ]
         },
@@ -442,6 +449,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "hermes-4-70b".into(),
@@ -451,6 +459,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
             ]
         },
@@ -620,6 +629,7 @@ fn exo_spec() -> AcpAgentSpec {
                 options: Vec::new(),
                 maker: None,
                 billing: None,
+                context: None,
             }]
         },
         // One reply per agent-cli exchange: steers queue for the next turn.
@@ -909,6 +919,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "gemini-3.1-pro".into(),
@@ -918,6 +929,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
             ]
         },
@@ -1811,6 +1823,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
             options,
             maker: None,
             billing: None,
+            context: None,
         }
     };
 
@@ -3440,6 +3453,7 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
                 options: first.options.clone(),
                 maker: None,
                 billing: None,
+                context: None,
             })
         })
         .collect()

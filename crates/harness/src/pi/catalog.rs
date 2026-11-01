@@ -40,6 +40,7 @@ pub(super) async fn models(process: &mut Process) -> Result<Vec<Model>, HarnessE
             options: thinking_option(&supported),
             maker: None,
             billing: None,
+            context: None,
         });
         backlog.clear();
     }

@@ -494,6 +494,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
                 options,
                 maker: None,
                 billing: None,
+                context: None,
             },
             item.get("isDefault").and_then(Value::as_bool) == Some(true),
         ));

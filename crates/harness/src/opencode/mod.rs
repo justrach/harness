@@ -1091,6 +1091,7 @@ fn models_from_providers(providers: &ProviderCatalog) -> Vec<Model> {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 }
             })
             .collect();
