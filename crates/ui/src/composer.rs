@@ -10138,7 +10138,12 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, max_height: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(
+        &mut self,
+        max_height: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -10315,15 +10320,23 @@ impl Composer {
                             }),
                     )
                     .child(
+                        // Agents write questions in Markdown (bold, code spans, lists), like their replies.
                         div()
                             .w_full()
                             .min_w_0()
                             .mt(px(6.0))
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
+                            .child(crate::markdown::render::render_tree(
+                                &question_markdown(&question.question),
+                                &crate::markdown::render::RenderOptions::settled(
+                                    "composer-question".into(),
+                                ),
+                                &theme,
+                                window,
+                                &|_| None,
+                            )),
                     )
                     .when(question.multi_select, |el| {
                         el.child(
@@ -11020,7 +11033,7 @@ impl Render for Composer {
                 let width = (viewport.width - px(16.0))
                     .min(px(pane_width.max(QUESTION_POPOVER_MIN_WIDTH)))
                     .min(px(COMPOSER_MAX_WIDTH));
-                let panel = self.render_wizard(max_height - 36.0, cx);
+                let panel = self.render_wizard(max_height - 36.0, window, cx);
                 return container.child(
                     gpui::deferred(
                         gpui::anchored()
@@ -11097,7 +11110,7 @@ impl Render for Composer {
                 .max(QUESTION_INLINE_FLOOR)
                 .min(available - Theme::SPACE_LG)
                 .max(120.0);
-            let wizard = self.render_wizard(cap, cx);
+            let wizard = self.render_wizard(cap, window, cx);
             return container.child(motion::fade_quick(
                 "composer-wizard",
                 div().min_h_0().flex().flex_col().child(wizard),
@@ -11990,6 +12003,12 @@ fn dictation_unavailable_message(
     }
 }
 
+/// An agent's question, parsed as the Markdown agents write it in (bold, code spans, lists), like their
+/// replies. Shown as plain text it read `**What happens now**` with its asterisks and backticks.
+fn question_markdown(question: &str) -> crate::markdown::BlockTree {
+    crate::markdown::parse_full(question)
+}
+
 #[cfg(test)]
 #[path = "composer/fade_tests.rs"]
 mod fade_tests;
@@ -12005,6 +12024,51 @@ mod question_recovery_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_questions_render_their_markdown_not_its_markup() {
+        use crate::markdown::{Block, InlineRun};
+        let tree = question_markdown(
+            "**What happens now** (checked in code):\n\n\
+             - `viewer-image-stage.tsx:72-73` sets `original = active`.\n\
+             - The slide loads the **original**.",
+        );
+        fn runs(block: &Block, out: &mut Vec<InlineRun>) {
+            match block {
+                Block::Paragraph { runs: r } => out.extend(r.iter().cloned()),
+                Block::List { items, .. } => {
+                    for item in items {
+                        for child in item {
+                            runs(child, out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        for top in &tree.blocks {
+            runs(&top.block, &mut all);
+        }
+        let text: String = all.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            !text.contains('*') && !text.contains('`'),
+            "markup shown as text: {text}"
+        );
+        assert!(
+            all.iter()
+                .any(|run| run.style.bold && run.text == "What happens now")
+        );
+        assert!(
+            all.iter()
+                .any(|run| run.style.code && run.text == "original = active")
+        );
+        assert!(
+            tree.blocks
+                .iter()
+                .any(|top| matches!(top.block, Block::List { .. }))
+        );
+    }
 
     pub(super) fn composer_focus_window(
         cx: &mut gpui::TestAppContext,
