@@ -904,16 +904,7 @@ fn modal_with(
 /// listener — `fade_key` must be unique app-wide and stable across frames
 /// (the id string is a good choice).
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
-    let row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(8.0))
-        .py(px(6.0))
-        .rounded(px(MENU_ITEM_RADIUS))
-        .text_size(crate::typography::ui_rems(13.0))
-        .cursor_pointer();
+    let row = menu_row_base();
     if active {
         row.bg(crate::theme::card_selected_bg())
             .text_color(theme.text)
@@ -936,6 +927,30 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
             .on_hover(motion::hover_listener(fade_key));
         row
     }
+}
+
+/// A row whose only highlight is the caller-owned mouse/keyboard cursor.
+/// No independent hover wash can linger on a second row after a key press.
+pub fn menu_cursor_row(theme: &Theme, highlighted: bool) -> gpui::Div {
+    menu_row_base()
+        .text_color(theme.text.opacity(0.9))
+        .when(highlighted, |row| {
+            row.bg(crate::theme::card_selected_bg())
+                .text_color(theme.text)
+        })
+}
+
+fn menu_row_base() -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(MENU_ITEM_RADIUS))
+        .text_size(crate::typography::ui_rems(13.0))
+        .cursor_pointer()
 }
 
 /// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
