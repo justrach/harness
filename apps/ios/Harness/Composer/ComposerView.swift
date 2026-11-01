@@ -55,6 +55,8 @@ struct ComposerShell<Chips: View>: View {
     var token: AnyView? = nil
     /// Bumped to put the cursor here from outside (Inspect's Ask for changes).
     var focusTick = 0
+    /// Open the draft on the full-height Write page; nil hides the button.
+    var onExpand: (() -> Void)? = nil
     @ViewBuilder var chips: Chips
 
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -67,6 +69,12 @@ struct ComposerShell<Chips: View>: View {
     private var expanded: Bool {
         alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
             || draft.contains("\n") || draft.count > 26
+    }
+
+    /// The Write button rides the expanded card's top-right corner; the
+    /// one-line and landscape layouts have no corner to spare.
+    private var showsExpand: Bool {
+        onExpand != nil && expanded && !compact && !singleLine
     }
 
     /// One animatable shape for background/glass/hairline: capsule-radius
@@ -135,6 +143,9 @@ struct ComposerShell<Chips: View>: View {
                     .frame(minWidth: compact || singleLine ? 140 : nil,
                            minHeight: expanded && !compact && !singleLine ? 64 : nil, alignment: .topLeading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .overlay(alignment: .topTrailing) {
+                        if showsExpand { expandButton }
+                    }
                 if singleLine {
                     if expanded, let token {
                         token
@@ -204,6 +215,8 @@ struct ComposerShell<Chips: View>: View {
                            editor.apply(text: draft)
                        },
                        onPasteImages: onPasteImages)
+            // Room for the Write button, so text never runs under it.
+            .padding(.trailing, showsExpand ? 34 : 0)
             .overlay(alignment: .topLeading) {
                 if draft.isEmpty {
                     Text(placeholder)
@@ -213,6 +226,27 @@ struct ComposerShell<Chips: View>: View {
                         .accessibilityHidden(true)
                 }
             }
+    }
+
+    private var expandButton: some View {
+        Button {
+            editor.commit()
+            onExpand?()
+        } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: 28, height: 28)
+                .background(ink(0.06), in: Circle())
+                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .offset(x: 8, y: -8)
+        .transition(.opacity)
+        .accessibilityLabel("Write in full screen")
+        .accessibilityIdentifier("composer-expand")
     }
 
     private var attachButton: some View {
@@ -312,6 +346,10 @@ struct ComposerView: View {
     @State private var showModelPicker = false
     @State private var showTraitPicker = false
     @State private var showOptionPicker: ModelOptionInfo?
+    /// The draft open on the full-height Write page.
+    @State private var showWrite = false
+    /// The model picker opened from the Write page's dock (a sheet over it).
+    @State private var showWriteModelPicker = false
     /// Live catalog for the chat's harness from its space's device.
     @State private var catalogs: [String: [ModelInfo]] = [:]
     @State private var catalogsLoading = true
@@ -511,7 +549,7 @@ struct ComposerView: View {
                 // A Duo stops from the status pill above the composer, never next to Send.
                 showStop: runLive && !duoChat,
                 busy: uploading || queueEditBusy || attachmentDraft.loading,
-                keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil,
+                keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil || showWrite,
                 onSend: send,
                 onStop: { store.sendInterrupt() },
                 onAdvanceQueue: advanceQueue,
@@ -525,7 +563,8 @@ struct ComposerView: View {
                 autoFocus: model.launchFocusComposer,
                 singleLine: duoChat,
                 token: duoChat ? AnyView(chipToken) : nil,
-                focusTick: DuoComposerFocus.shared.tick(chat.id)
+                focusTick: DuoComposerFocus.shared.tick(chat.id),
+                onExpand: { showWrite = true }
             ) {
                 if let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)
@@ -567,22 +606,23 @@ struct ComposerView: View {
                 _ = await store.renewQueuedEdit(lease)
             }
         }
-        .sheet(isPresented: $showModelPicker) {
-            ModelPickerSheet(
-                harness: .constant(harness),
-                modelId: Binding(
-                    get: { currentModel.id },
-                    set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
-                ),
-                reasoning: Binding(
-                    get: { chat.config?.reasoning },
-                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
-                ),
-                lockedHarness: true,
-                catalogs: isChat ? [harness: models] : scopedCatalogs,
-                catalogsLoading: catalogsLoading || catalogSource != catalogKey,
-                onRetry: { catalogRetry += 1 }
-            )
+        .sheet(isPresented: $showModelPicker) { modelPicker }
+        .sheet(isPresented: $showWrite) {
+            WriteSheet(
+                text: $text,
+                attachmentDraft: attachmentDraft,
+                sendLabel: editingQueuedId != nil ? "Save queued message"
+                    : (runLive ? "Queue message" : "Send message"),
+                busy: uploading || queueEditBusy || attachmentDraft.loading,
+                onSend: send,
+                onPasteImages: { stagePasted($0) },
+                pickerItems: $pickerItems
+            ) {
+                ComposerChip(label: currentModel.label, badgeHarness: harness) {
+                    showWriteModelPicker = true
+                }
+            }
+            .sheet(isPresented: $showWriteModelPicker) { modelPicker }
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(
@@ -651,6 +691,9 @@ struct ComposerView: View {
             } else if model.launchSheet == "reasoning" {
                 model.launchSheet = nil
                 showTraitPicker = true
+            } else if model.launchSheet == "write" {
+                model.launchSheet = nil
+                showWrite = true
             }
         }
         .onDisappear {
@@ -666,6 +709,25 @@ struct ComposerView: View {
             guard model.demo == nil else { return }
             Task { _ = await store.finishQueuedEdit(lease, action: "cancel") }
         }
+    }
+
+    /// The model picker, from the composer's chip or the Write page's.
+    private var modelPicker: some View {
+        ModelPickerSheet(
+            harness: .constant(harness),
+            modelId: Binding(
+                get: { currentModel.id },
+                set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
+            ),
+            reasoning: Binding(
+                get: { chat.config?.reasoning },
+                set: { writeConfig(model: chat.config?.model, reasoning: $0) }
+            ),
+            lockedHarness: true,
+            catalogs: isChat ? [harness: models] : scopedCatalogs,
+            catalogsLoading: catalogsLoading || catalogSource != catalogKey,
+            onRetry: { catalogRetry += 1 }
+        )
     }
 
     /// Merge a model/effort change into the chat's config row (LWW; the host

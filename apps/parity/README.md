@@ -48,3 +48,7 @@ Android's drafts survive navigation but not the process being killed, while iOS 
 The Attachments editor on a queued message (add, preview, replace and remove its images; #187, #493) is iOS-only
 for now. Its copy goes into `ux-contract.json` when the Compose app gets the editor, since the string check would
 otherwise fail the Android build.
+
+The Write page (the composer's draft on a full-height sheet, with markdown styled as it is typed) is iOS-only for
+now too. Its copy ("Write in full screen", "Done", "Send", "N words") goes into `ux-contract.json` with the Compose
+port, for the same reason.
