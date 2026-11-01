@@ -7,12 +7,15 @@
 //! reads the list [`AppState`] keeps fresh, so it is hidden when signed out, when the feature
 //! is off, and when nothing is running.
 //!
-//! With the sidebar collapsed the strip is out of sight, so a compact chip takes its place
-//! under the sidebar toggle: the live dot and a cloud (hover says what it costs, click opens
-//! the Settings card) beside the same one-click Turn off.
+//! With the sidebar collapsed the strip is out of sight, so a cloud button with a live dot
+//! joins the titlebar's left cluster, the same size as its other buttons so it never covers
+//! anything. Hover says what it costs; a click opens a small card with the details, Settings
+//! and Turn off.
 
 use super::*;
-use crate::codegraff_sandboxes::{TURN_OFF, TURN_OFF_HINT, compact_tooltip, running_summary};
+use crate::codegraff_sandboxes::{
+    RunningSummary, TURN_OFF, TURN_OFF_HINT, compact_tooltip, running_summary,
+};
 
 impl Shell {
     pub(super) fn render_cloud_sandbox_strip(
@@ -21,7 +24,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let summary = running_summary(self.state.read(cx).cloud_sandboxes()?, chrono::Utc::now())?;
-        let turning_off = self.cloud_turning_off;
         let tone = if summary.warning {
             theme.warning
         } else {
@@ -36,6 +38,10 @@ impl Shell {
             .flex_col()
             .gap(px(1.0))
             .cursor_pointer()
+            .tooltip(crate::settings::widgets::text_tooltip(compact_tooltip(
+                &summary,
+            )))
+            .tooltip_show_delay(std::time::Duration::from_millis(350))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.open_settings(SettingsSection::Agents, cx);
             }))
@@ -52,22 +58,21 @@ impl Shell {
                             .truncate()
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(summary.label)),
+                            .child(SharedString::from(summary.label.clone())),
                     ),
             )
-            .child(
-                div()
-                    .pl(px(12.0))
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(10.5))
-                    .text_color(if summary.warning {
-                        theme.warning
-                    } else {
-                        theme.text_muted
-                    })
-                    .child(SharedString::from(summary.detail)),
-            );
+            // One line at rest (the detail is in the tooltip); a problem gets its own line.
+            .when(summary.warning, |el| {
+                el.child(
+                    div()
+                        .pl(px(12.0))
+                        .min_w_0()
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(10.5))
+                        .text_color(theme.warning)
+                        .child(SharedString::from(summary.detail.clone())),
+                )
+            });
         let turn_off = (!summary.running_ids.is_empty()).then(|| {
             self.cloud_turn_off_button(
                 "cloud-sandbox-turn-off",
@@ -83,7 +88,7 @@ impl Shell {
                 .mx(px(Theme::SPACE_SM))
                 .mt(px(4.0))
                 .px(px(Theme::SPACE_SM))
-                .py(px(6.0))
+                .py(px(4.0))
                 .rounded(px(Theme::CONTROL_RADIUS))
                 .bg(if summary.warning {
                     theme.warning.opacity(0.12)
@@ -103,78 +108,205 @@ impl Shell {
         )
     }
 
-    /// The collapsed-sidebar stand-in for the strip: a small floating chip under the sidebar
-    /// toggle. `None` while the sidebar is open (the strip shows) or nothing runs.
-    pub(super) fn render_cloud_sandbox_chip(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// What the titlebar cloud button reports: a running sandbox while the sidebar (and so the
+    /// strip) is collapsed out of sight.
+    fn cloud_sandbox_button_summary(&self, cx: &App) -> Option<RunningSummary> {
         if !self.settings.sidebar_collapsed {
             return None;
         }
-        let summary = running_summary(self.state.read(cx).cloud_sandboxes()?, chrono::Utc::now())?;
+        running_summary(self.state.read(cx).cloud_sandboxes()?, chrono::Utc::now())
+    }
+
+    /// Width the titlebar's left cluster gains while the cloud button shows.
+    pub(super) fn titlebar_cloud_slot(&self, cx: &App) -> f32 {
+        if self.cloud_sandbox_button_summary(cx).is_some() {
+            TITLEBAR_ACTION_SLOT_WIDTH
+        } else {
+            0.0
+        }
+    }
+
+    /// The collapsed-sidebar stand-in for the strip: a cloud button in the titlebar's left
+    /// cluster with a live dot. Hover says what it costs; a click opens a small card with the
+    /// details, Settings and Turn off. `None` while the sidebar is open (the strip shows) or
+    /// nothing runs.
+    pub(super) fn render_cloud_sandbox_button(
+        &mut self,
+        theme: &Theme,
+        control_gap: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let Some(summary) = self.cloud_sandbox_button_summary(cx) else {
+            // Gone (turned off, or the sidebar opened): don't reopen the card next time.
+            self.cloud_sandbox_menu = popover::Popup::default();
+            return None;
+        };
         let tone = if summary.warning {
             theme.warning
         } else {
             theme.accent
         };
-        let tooltip = compact_tooltip(&summary);
-        let open = div()
-            .id("cloud-sandbox-chip-open")
-            .debug_selector(|| "cloud-sandbox-chip-open".into())
+        let fade_key = "window-control-titlebar-cloud";
+        let mut button = div()
+            .id("cloud-sandbox-button")
+            .debug_selector(|| "cloud-sandbox-button".into())
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(compact_tooltip(&summary)))
+            .relative()
+            .size(px(24.0))
+            .flex_none()
             .flex()
-            .flex_row()
             .items_center()
-            .gap(px(5.0))
-            .px(px(7.0))
-            .py(px(4.0))
-            .rounded(px(Theme::CONTROL_RADIUS))
+            .justify_center()
+            .rounded(px(6.0))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.ink(0.06)))
-            .tooltip(crate::settings::widgets::text_tooltip(tooltip))
-            .tooltip_show_delay(std::time::Duration::from_millis(350))
+            .bg(motion::hover_blend(
+                fade_key,
+                theme.glass_hover().opacity(0.0),
+                theme.glass_hover(),
+            ))
+            .on_hover(motion::hover_listener(fade_key))
+            // Over the titlebar drag strip: carve the button out of it (see
+            // `window_control_button`).
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, _| {
+                    window.prevent_default();
+                    this.cloud_sandbox_menu.note_trigger_press();
+                }),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.open_settings(SettingsSection::Agents, cx);
+                cx.stop_propagation();
+                if this.cloud_sandbox_menu.take_press_was_open() {
+                    this.close_cloud_sandbox_menu(cx);
+                } else {
+                    this.cloud_sandbox_menu.open(());
+                    cx.notify();
+                }
             }))
-            .child(div().size(px(6.0)).flex_none().rounded_full().bg(tone))
             .child(
                 icon(icons::CLOUD)
-                    .size(px(13.0))
-                    .flex_none()
+                    .size(px(16.0))
                     .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(3.0))
+                    .right(px(3.0))
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(tone),
             );
+        if self.cloud_sandbox_menu.get().is_some() {
+            let closing = self.cloud_sandbox_menu.closing_since();
+            let card = self.cloud_sandbox_card(&summary, theme, cx);
+            button = button.child(popover::anchored_menu_below_gap(
+                "cloud-sandbox-menu",
+                card,
+                closing,
+                8.0,
+            ));
+        } else {
+            button = button
+                .tooltip(crate::settings::widgets::text_tooltip(compact_tooltip(
+                    &summary,
+                )))
+                .tooltip_show_delay(std::time::Duration::from_millis(350));
+        }
+        Some(
+            div()
+                .flex_none()
+                .ml(px(control_gap))
+                .child(button)
+                .into_any_element(),
+        )
+    }
+
+    /// The cloud button's card: what runs and what it costs, then Settings and Turn off.
+    fn cloud_sandbox_card(
+        &mut self,
+        summary: &RunningSummary,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ui = crate::typography::ui_rems;
+        let tone = if summary.warning {
+            theme.warning
+        } else {
+            theme.accent
+        };
         let turn_off = (!summary.running_ids.is_empty()).then(|| {
             self.cloud_turn_off_button(
-                "cloud-sandbox-chip-turn-off",
+                "cloud-sandbox-menu-turn-off",
                 summary.running_ids.clone(),
                 theme,
                 cx,
             )
         });
-        Some(
-            div()
-                .id("cloud-sandbox-chip")
-                .debug_selector(|| "cloud-sandbox-chip".into())
-                .occlude()
-                .absolute()
-                .left(px(Theme::SPACE_MD))
-                .top(px(Theme::TITLEBAR_HEIGHT + 4.0))
-                .p(px(3.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .rounded(px(Theme::CONTROL_RADIUS + 3.0))
-                .border_1()
-                .border_color(tone.opacity(0.35))
-                .bg(crate::popover::surface_bg(theme))
-                .when(!theme.is_frost(), |el| el.shadow_md())
-                .text_size(crate::typography::ui_rems(11.0))
-                .child(open)
-                .children(turn_off)
-                .into_any_element(),
-        )
+        popover::popover_card(theme)
+            .id("cloud-sandbox-card")
+            .debug_selector(|| "cloud-sandbox-card".into())
+            .w(px(260.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_cloud_sandbox_menu(cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(div().size(px(6.0)).flex_none().rounded_full().bg(tone))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(ui(12.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(SharedString::from(summary.label.clone())),
+                    ),
+            )
+            .child(
+                div()
+                    .pl(px(12.0))
+                    .text_size(ui(11.5))
+                    .text_color(if summary.warning {
+                        theme.warning
+                    } else {
+                        theme.text_muted
+                    })
+                    .child(SharedString::from(summary.detail.clone())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(ui(11.0))
+                    .child(
+                        popover::btn_ghost(theme, "Settings", "cloud-sandbox-menu-settings-fade")
+                            .id("cloud-sandbox-menu-settings")
+                            .debug_selector(|| "cloud-sandbox-menu-settings".into())
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_cloud_sandbox_menu(cx);
+                                this.open_settings(SettingsSection::Agents, cx);
+                            })),
+                    )
+                    .children(turn_off),
+            )
+            .into_any_element()
+    }
+
+    fn close_cloud_sandbox_menu(&mut self, cx: &mut Context<Self>) {
+        if self.cloud_sandbox_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.cloud_sandbox_menu);
+        }
+        cx.notify();
     }
 
     /// "Turn off" (or "Turn off all"), busy while the pause is under way.
@@ -359,8 +491,8 @@ mod tests {
         assert!(cx.debug_bounds("cloud-sandbox-strip").is_some());
         assert!(cx.debug_bounds("cloud-sandbox-turn-off").is_some());
         assert!(
-            cx.debug_bounds("cloud-sandbox-chip").is_none(),
-            "the open sidebar has the strip; no chip"
+            cx.debug_bounds("cloud-sandbox-button").is_none(),
+            "the open sidebar has the strip; no titlebar button"
         );
 
         shell.update(cx, |shell, cx| {
@@ -397,7 +529,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_collapsed_sidebar_keeps_a_chip_with_turn_off_in_view(cx: &mut gpui::TestAppContext) {
+    fn a_collapsed_sidebar_keeps_a_titlebar_button_with_turn_off_one_click_away(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (state, shell, cx) = open_shell(cx, dir.path(), true);
         state.update(cx, |state, cx| {
@@ -405,32 +539,56 @@ mod tests {
         });
         redraw(cx);
         assert!(
-            cx.debug_bounds("cloud-sandbox-chip").is_none(),
+            cx.debug_bounds("cloud-sandbox-button").is_none(),
             "nothing runs"
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.titlebar_cloud_slot(cx)),
+            0.0
         );
 
         state.update(cx, |state, cx| {
             state.apply_cloud_sandboxes(sandboxes("running"), cx)
         });
         redraw(cx);
-        let chip = cx
-            .debug_bounds("cloud-sandbox-chip")
+        let button = cx
+            .debug_bounds("cloud-sandbox-button")
             .expect("a running sandbox stays in view with the sidebar collapsed");
-        assert!(f32::from(chip.size.width) > 0.0 && f32::from(chip.size.height) > 0.0);
+        let toggle = cx.debug_bounds("toggle-sidebar").unwrap();
+        assert_eq!(button.size, toggle.size, "a titlebar button like the rest");
+        assert_eq!(
+            button.origin.y, toggle.origin.y,
+            "in the titlebar row, not under it"
+        );
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.titlebar_cloud_slot(cx)),
+            TITLEBAR_ACTION_SLOT_WIDTH,
+            "the tab strip makes room for it"
+        );
         assert!(
-            cx.debug_bounds("cloud-sandbox-chip-turn-off").is_some(),
-            "Turn off is one click away"
+            cx.debug_bounds("cloud-sandbox-card").is_none(),
+            "closed at rest"
         );
 
-        let open = cx.debug_bounds("cloud-sandbox-chip-open").unwrap();
-        cx.simulate_click(open.center(), Default::default());
+        cx.simulate_click(button.center(), Default::default());
+        cx.run_until_parked();
+        redraw(cx);
+        let card = cx
+            .debug_bounds("cloud-sandbox-card")
+            .expect("a click opens the card");
+        assert!(card.origin.y >= button.origin.y + button.size.height);
+        assert!(cx.debug_bounds("cloud-sandbox-menu-turn-off").is_some());
+
+        let settings = cx.debug_bounds("cloud-sandbox-menu-settings").unwrap();
+        cx.simulate_click(settings.center(), Default::default());
         cx.run_until_parked();
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.route, Route::Settings(SettingsSection::Agents));
+            assert!(!shell.cloud_sandbox_menu.is_open());
         });
         redraw(cx);
         assert!(
-            cx.debug_bounds("cloud-sandbox-chip").is_some(),
+            cx.debug_bounds("cloud-sandbox-button").is_some(),
             "still there in Settings"
         );
 
@@ -440,8 +598,9 @@ mod tests {
         });
         redraw(cx);
         assert!(
-            cx.debug_bounds("cloud-sandbox-chip").is_none(),
+            cx.debug_bounds("cloud-sandbox-button").is_none(),
             "an open sidebar shows the strip instead"
         );
+        assert!(cx.debug_bounds("cloud-sandbox-strip").is_some());
     }
 }

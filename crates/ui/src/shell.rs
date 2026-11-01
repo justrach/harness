@@ -52,6 +52,7 @@ use crate::settings::{
     TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
+use crate::sidebar_motion::MotionKind;
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
@@ -80,6 +81,8 @@ mod files_panel;
 mod link_tests;
 mod project_icon;
 mod reauth;
+#[cfg(test)]
+mod sidebar_motion_tests;
 mod sidebar_pins;
 mod sidebar_search;
 mod spaces;
@@ -87,6 +90,8 @@ mod stale_input;
 mod tabs;
 #[cfg(test)]
 mod titlebar_tests;
+#[cfg(test)]
+mod typing_tests;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
@@ -1896,6 +1901,7 @@ impl Render for SidebarPane {
         };
         let inner = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
+            shell.sidebar_motion_slots.borrow_mut().begin_frame();
             shell.focus_sidebar_search(window, cx);
             match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, window, cx),
@@ -1918,6 +1924,10 @@ enum PendingExit {
 pub struct Shell {
     state: Entity<AppState>,
     sidebar_pane: Entity<SidebarPane>,
+    /// The sidebar's spinners, painted beside it so their ticks don't
+    /// re-render it (`sidebar_motion.rs`).
+    sidebar_motion: Entity<crate::sidebar_motion::SidebarMotion>,
+    sidebar_motion_slots: crate::sidebar_motion::SharedMotionSlots,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
     /// Measured height of the bottom chrome stack (status strip + composer +
@@ -2024,6 +2034,8 @@ pub struct Shell {
     /// The cloud sandbox strip's Turn off is in flight (`shell/cloud_sandbox_strip.rs`).
     cloud_turning_off: bool,
     cloud_turn_off_task: Option<Task<()>>,
+    /// The titlebar cloud button's popover (sidebar collapsed).
+    cloud_sandbox_menu: popover::Popup<()>,
     /// In-chat ChatGPT reconnects in flight, one per host and route (`shell/reauth.rs`).
     reauth_tasks: std::collections::HashMap<crate::reauth_recovery::ReauthKey, Task<()>>,
     codegraff_status_task: Option<Task<()>>,
@@ -2109,6 +2121,9 @@ pub struct Shell {
     chat_status_hover: Option<String>,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
+    /// Where each session row sat on the last frame (`shell/spaces.rs`,
+    /// `sidebar_row_window`): rows far off screen render as empty slots.
+    sidebar_row_tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
     /// In-flight reorder for the pinned section only.
     pinned_session_drag: Option<PinnedSessionDragState>,
     pinned_session_drag_generation: u64,
@@ -2503,6 +2518,11 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
+        let sidebar_motion_slots = crate::sidebar_motion::SharedMotionSlots::default();
+        let sidebar_motion = {
+            let slots = sidebar_motion_slots.clone();
+            cx.new(|_| crate::sidebar_motion::SidebarMotion::new(slots))
+        };
         // Only a cold start waits for the engine. A window reopened from the
         // Dock (or a notification) around a ready engine must not replay the
         // setup splash and look like a restart (#369).
@@ -2513,6 +2533,8 @@ impl Shell {
         let mut this = Self {
             state,
             sidebar_pane,
+            sidebar_motion,
+            sidebar_motion_slots,
             transcript,
             composer,
             // Seed with the compact composer stack's rough height so the
@@ -2565,6 +2587,7 @@ impl Shell {
             codegraff: None,
             codegraff_flow: None,
             cloud_turning_off: false,
+            cloud_sandbox_menu: popover::Popup::default(),
             cloud_turn_off_task: None,
             reauth_tasks: std::collections::HashMap::new(),
             codegraff_status_task: None,
@@ -2620,6 +2643,7 @@ impl Shell {
             project_icons: Default::default(),
             chat_status_hover: None,
             sidebar_scroll: gpui::ScrollHandle::new(),
+            sidebar_row_tops: Default::default(),
             pinned_session_drag: None,
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
@@ -6785,7 +6809,7 @@ impl Shell {
                     .items_center()
                     .pt(px(Theme::TITLEBAR_TOP_PAD))
                     .pl(px(
-                        self.title_bar_content_start() + self.titlebar_update_slot(cx)
+                        self.title_bar_content_start() + self.titlebar_extra_slots(cx)
                     ))
                     .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)));
                 let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
@@ -6868,11 +6892,12 @@ impl Shell {
         // the first prompt turns the canvas into an established session.
         let plus_alpha = self.titlebar_plus_alpha(cx);
         let show_plus = plus_alpha > 0.01;
-        let control_gap = if self.titlebar_update_slot(cx) > 0.0 {
+        let extra_slots = self.titlebar_extra_slot_count(cx);
+        let control_gap = if extra_slots > 0 {
             distributed_titlebar_gap(
                 self.sidebar_now(),
                 self.title_bar_content_start() - CLUSTER_BUTTONS_WIDTH - TITLEBAR_IDENTITY_GAP,
-                4 + usize::from(show_plus),
+                3 + extra_slots + usize::from(show_plus),
                 window.scale_factor(),
             )
         } else {
@@ -6993,6 +7018,7 @@ impl Shell {
                         cx.listener(|this, _, window, cx| this.new_chat_tab(None, window, cx)),
                     ))
             }))
+            .children(self.render_cloud_sandbox_button(&theme, control_gap, cx))
             .children(self.render_update_control(&theme, control_gap, cx))
             .into_any_element()
     }
@@ -7332,6 +7358,11 @@ impl Shell {
         out
     }
 
+    /// A sidebar animation's slot, painted by [`Self::sidebar_motion`].
+    fn sidebar_motion_slot(&self, key: impl Into<SharedString>, kind: MotionKind) -> AnyElement {
+        crate::sidebar_motion::slot(&self.sidebar_motion_slots, key, kind)
+    }
+
     fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is part of the resolved theme. A second fixed-Harness
         // palette here made imported families look split in half and froze
@@ -7347,11 +7378,15 @@ impl Shell {
         // full window height (the titlebar overlays it), so the column pads
         // itself below the chrome.
         div()
+            .relative()
             .h_full()
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
             .child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+            // After the sidebar, outside it: paints its spinners into the
+            // slots it placed, so a tick leaves the cached sidebar alone.
+            .child(self.sidebar_motion.clone())
             .into_any_element()
     }
 
@@ -7703,16 +7738,20 @@ impl Shell {
         let working = status == harness_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
             let glyph = if build_waiting {
-                loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx).into_any_element()
-            } else if working {
-                loaders::mini_glyph_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    theme.glyph,
-                    self.sidebar_pane.entity_id(),
-                    cx,
+                self.sidebar_motion_slot(
+                    format!("{row_id}-wait"),
+                    MotionKind::WaitDot {
+                        color: theme.text_muted,
+                    },
                 )
-                .into_any_element()
+            } else if working {
+                self.sidebar_motion_slot(
+                    format!("{row_id}-working"),
+                    MotionKind::Spinner {
+                        cell_px: 2.0,
+                        tints: theme.glyph.rows(),
+                    },
+                )
             } else if status == harness_proto::ChatIndicator::Completed && !queued && !undelivered {
                 icon(icons::CHECK)
                     .size(px(11.0))
@@ -7829,17 +7868,20 @@ impl Shell {
                             .text_color(status_color)
                             .into_any_element()
                     } else if build_waiting {
-                        loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx)
-                            .into_any_element()
-                    } else if working {
-                        loaders::mini_glyph_spinner(
-                            format!("{row_id}-working"),
-                            2.0,
-                            theme.glyph,
-                            self.sidebar_pane.entity_id(),
-                            cx,
+                        self.sidebar_motion_slot(
+                            format!("{row_id}-wait"),
+                            MotionKind::WaitDot {
+                                color: theme.text_muted,
+                            },
                         )
-                        .into_any_element()
+                    } else if working {
+                        self.sidebar_motion_slot(
+                            format!("{row_id}-working"),
+                            MotionKind::Spinner {
+                                cell_px: 2.0,
+                                tints: theme.glyph.rows(),
+                            },
+                        )
                     } else {
                         div()
                             .size(px(6.0))
@@ -8339,10 +8381,13 @@ impl Shell {
                 };
                 (
                     caption.into(),
-                    loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
+                    self.sidebar_motion_slot(
+                        "chat-sync-spinner",
+                        MotionKind::Spinner {
+                            cell_px: 2.0,
+                            tints: [theme.text_muted; 3],
+                        },
+                    ),
                 )
             }
             S::Offline => (
@@ -8355,14 +8400,13 @@ impl Shell {
             ),
             S::Reconnecting => (
                 "Reconnecting…".into(),
-                loaders::mini_mono_spinner(
+                self.sidebar_motion_slot(
                     "connection-spinner",
-                    2.0,
-                    theme.text_muted,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
+                    MotionKind::Spinner {
+                        cell_px: 2.0,
+                        tints: [theme.text_muted; 3],
+                    },
+                ),
             ),
         };
         Some(
@@ -10104,12 +10148,6 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let mut overlays: Vec<AnyElement> = Vec::new();
-
-        // First, so menus and dialogs layer above it: with the sidebar collapsed, a running
-        // cloud sandbox (billed until turned off) still shows under the sidebar toggle.
-        if let Some(chip) = self.render_cloud_sandbox_chip(&theme, cx) {
-            overlays.push(chip);
-        }
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;

@@ -55,6 +55,7 @@ mod new_thread_background_mask;
 mod notice;
 pub mod notify;
 pub mod perf_stats;
+mod sidebar_motion;
 
 /// Tests that stand up real native platform pieces (CoreText via
 /// `current_platform`, the macOS dispatcher behind `background_executor`)
