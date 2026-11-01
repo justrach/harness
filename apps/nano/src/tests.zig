@@ -98,4 +98,7 @@ test {
     _ = @import("surface_palette.zig");
     _ = @import("tests_ui_surfaces.zig");
     _ = @import("tests_browser_native.zig");
+    _ = @import("theme.zig");
+    _ = @import("view_newchat.zig");
+    _ = @import("turn_work.zig");
 }

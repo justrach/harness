@@ -54,9 +54,20 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     // for it (`SESSION_FOOTER_HEIGHT`, 8 under the pill); drawn over that
     // padding so the queue tray's tuck needn't move it.
     const pill_h: f32 = if (!expanded) 49 else if (a.view.composer_anchor) |r| r.h else 49;
-    const f = ui.div(c).row().absolute().offset(0, pill_h + footer_view.gap);
-    defer f.end();
-    footer_view.footer(c, a, k, w);
+    {
+        const f = ui.div(c).row().absolute().offset(0, pill_h + footer_view.gap);
+        defer f.end();
+        footer_view.footer(c, a, k, w);
+    }
+    // The finished turn's "N files changed" card floats over the
+    // transcript's foot, 8 clear of the pill and 8 wider either side.
+    const work = @import("view_turn_work.zig");
+    if (work.changes(c, a)) |t| {
+        ui.key(c, "turn-work-cue");
+        const cue = ui.div(c).row().absolute().offset(-8, -work.lift);
+        defer cue.end();
+        work.card(c, a, k, t, w + 16);
+    }
 }
 
 /// `composer_target_width` less the composer's own 16-point sides: the

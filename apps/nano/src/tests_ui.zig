@@ -1753,3 +1753,33 @@ test "a live snapshot asking for Settings draws it in that frame alone: the wind
     try testing.expectEqual(section, h.a.settings.section);
     try testing.expect(!h.t.hasText("Search settings"));
 }
+
+test "a finished turn's edits show as a changes card over the composer; it opens the Changes pane" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Tidy it"}]},
+        \\ {"id":"r","role":"assistant","parts":[
+        \\  {"id":"e1","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"src/parser.rs"},"diffStats":[{"path":"src/parser.rs","additions":3,"deletions":1}]},
+        \\  {"id":"e2","kind":"tool","resolved":true,"call":{"kind":"writeFile","path":"notes/CHANGELOG.md"},"diff":{"path":"notes/CHANGELOG.md","newText":"a\nb\n"}},
+        \\  {"id":"x","kind":"tool","resolved":true,"call":{"kind":"exec","command":"ls"}},
+        \\  {"id":"d","kind":"text","text":"Done."}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    h.snap("turn-changes-card");
+    try testing.expect(h.t.hasText("2 files changed"));
+    try testing.expect(h.t.hasText("parser.rs, CHANGELOG.md"));
+    try testing.expect(h.t.hasText("+5"));
+    try testing.expect(h.t.hasText("-1"));
+    // Over the composer, clear of the pill.
+    const pill = h.a.view.composer_anchor.?;
+    try testing.expect(h.t.findText("2 files changed").?.y + 30 < pill.y);
+    try h.t.clickText("Review");
+    h.t.settle(1);
+    try testing.expect(h.a.panels.host_open);
+    try testing.expect(h.a.panels.activeTab().?.kind == .diffs);
+    try testing.expect(h.t.hasText("Showing"));
+}

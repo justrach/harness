@@ -97,9 +97,10 @@ const phi: f32 = 1.618;
 fn heading(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const box = ui.div(c).column().w(w).gap(4);
     defer box.end();
-    var buf: [128]u8 = undefined;
+    // The frame keeps the words: not a buffer on this stack.
+    const buf = c.alloc().alloc(u8, 128) catch return;
     const name = if (a.account.user) |u| u.name else null;
-    kit.ellipsisText(c, greeting(&buf, name), .{ .size = 24, .line_height = 24 * phi, .weight = .semibold, .color = k.text }, w);
+    kit.ellipsisText(c, greeting(buf, name), .{ .size = 24, .line_height = 24 * phi, .weight = .semibold, .color = k.text }, w);
     const space = a.newChatSpace();
     const t = ui.div(c).row().gap(4).itemsCenter();
     defer t.end();

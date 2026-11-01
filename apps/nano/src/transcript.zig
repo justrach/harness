@@ -51,6 +51,11 @@ pub const Part = struct {
     subagent_title: []u8 = &.{},
     subagent_status: ?@import("agent_link.zig").Status = null,
     saved_view: ?@import("saved_view.zig").View = null,
+    /// An edit's lines added and removed (`diffStats`, or its inline
+    /// `diff`), and the stats' paths one to a line when they name any.
+    additions: u64 = 0,
+    deletions: u64 = 0,
+    stat_paths: []u8 = &.{},
     /// A tool has finished, or an input request was answered.
     resolved: bool = false,
     is_error: bool = false,
@@ -69,6 +74,7 @@ pub const Part = struct {
         gpa.free(p.output_ref);
         gpa.free(p.subagent_ref);
         gpa.free(p.subagent_title);
+        gpa.free(p.stat_paths);
         p.text.deinit(gpa);
         if (p.arena) |a| {
             a.deinit();
@@ -271,6 +277,7 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             if (string(o.get("subagentRef"))) |s| p.subagent_ref = try gpa.dupe(u8, s);
             p.subagent_status = std.meta.stringToEnum(@import("agent_link.zig").Status, string(o.get("subagentStatus")) orelse "");
             if (o.get("view")) |v| p.saved_view = @import("saved_view.zig").View.parse(v);
+            try diffStats(gpa, &p, o);
         },
         .input => {
             p.resolved = if (o.get("resolved")) |r| r == .bool and r.bool else false;
@@ -281,6 +288,31 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
         .delegation, .other => {},
     }
     return p;
+}
+
+/// `diff_stats` when the fold kept them, else the inline `diff` an older
+/// document carries (`turn_work::latest_turn_changes`).
+fn diffStats(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
+    if (o.get("diffStats")) |v| if (v == .array) {
+        var paths: std.ArrayList(u8) = .empty;
+        errdefer paths.deinit(gpa);
+        for (v.array.items) |s| if (s == .object) {
+            p.additions += uint(s.object.get("additions")) orelse 0;
+            p.deletions += uint(s.object.get("deletions")) orelse 0;
+            if (string(s.object.get("path"))) |path| {
+                try paths.appendSlice(gpa, path);
+                try paths.append(gpa, '\n');
+            }
+        };
+        p.stat_paths = try paths.toOwnedSlice(gpa);
+        return;
+    };
+    const d = o.get("diff") orelse return;
+    if (d != .object) return;
+    const stat = @import("turn_work.zig").diffStat(gpa, string(d.object.get("oldText")), string(d.object.get("newText")) orelse "");
+    p.additions = stat.additions;
+    p.deletions = stat.deletions;
+    if (string(d.object.get("path"))) |path| p.stat_paths = try std.fmt.allocPrint(gpa, "{s}\n", .{path});
 }
 
 fn parseQuestions(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
