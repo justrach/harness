@@ -42,6 +42,21 @@ final class MessageQueueTests: XCTestCase {
         XCTAssertNil(edit.textToCommit(""))
     }
 
+    func testImagesAttachedWhileRetypingAQueuedRowJoinItsOwn() {
+        let lease = QueueEditLease(rowId: "row", leaseId: "lease", text: "queued",
+                                   baseTextHash: "hash", expiresAtMs: 60_000)
+        var edit = QueueComposerEdit(lease: lease, originalDraft: "draft", hasAttachments: false)
+        // A text-only edit leaves the row's images alone.
+        XCTAssertNil(edit.attachmentsToCommit(uploaded: []))
+        // An image alone is enough to save a row with no text.
+        XCTAssertNil(edit.textToCommit(""))
+        XCTAssertEqual(edit.textToCommit("", addingImages: true), attachmentOnlyText)
+        XCTAssertEqual(edit.attachmentsToCommit(uploaded: ["uploads/new.png"]), ["uploads/new.png"])
+        edit.rowAttachments = ["uploads/old.png"]
+        XCTAssertEqual(edit.attachmentsToCommit(uploaded: ["uploads/new.png"]),
+                       ["uploads/old.png", "uploads/new.png"])
+    }
+
     private func store() -> SessionStore {
         SessionStore(chatId: "chat-1", config: AppConfig(
             edgeURL: URL(string: "https://example.test")!,

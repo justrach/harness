@@ -516,9 +516,10 @@ struct ComposerView: View {
                 onStop: { store.sendInterrupt() },
                 onAdvanceQueue: advanceQueue,
                 questionClosedAtMs: questionClosedAtMs,
-                attachments: editingQueuedId == nil ? attachments : [],
-                onAttach: editingQueuedId == nil ? { showPicker = true } : nil,
-                onPasteImages: editingQueuedId == nil ? { stagePasted($0) } : nil,
+                // While a queued row is retyped, these are images to add to it.
+                attachments: attachments,
+                onAttach: { showPicker = true },
+                onPasteImages: { stagePasted($0) },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 attachmentDraft: attachmentDraft,
                 autoFocus: model.launchFocusComposer,
@@ -621,7 +622,7 @@ struct ComposerView: View {
             catalogsLoading = false
         }
         .task(id: queueEdit?.terminal == true ? nil : queueEditLease?.leaseId) {
-            guard let lease = queueEditLease, queueEdit?.terminal != true else { return }
+            guard let lease = queueEditLease, queueEdit?.terminal != true, model.demo == nil else { return }
             while !Task.isCancelled, queueEditLease?.leaseId == lease.leaseId {
                 try? await Task.sleep(for: .seconds(20))
                 guard !Task.isCancelled else { return }
@@ -635,14 +636,14 @@ struct ComposerView: View {
         .onChange(of: text) { _, new in
             if editingQueuedId == nil { DraftStore.save(new, for: DraftStore.chatKey(chat.id)) }
         }
-        .onChange(of: uploading || queueEditBusy || editingQueuedId != nil, initial: true) { _, blocked in
+        .onChange(of: uploading || queueEditBusy, initial: true) { _, blocked in
             attachmentDraft.enabled = !blocked
         }
         .onChange(of: ObjectIdentifier(attachmentDraft)) { _, _ in
-            attachmentDraft.enabled = !uploading && !queueEditBusy && editingQueuedId == nil
+            attachmentDraft.enabled = !uploading && !queueEditBusy
         }
         .onAppear {
-            attachmentDraft.enabled = !uploading && !queueEditBusy && editingQueuedId == nil
+            attachmentDraft.enabled = !uploading && !queueEditBusy
             queueEditorVisible = true
             if model.launchSheet == "config" {
                 model.launchSheet = nil
@@ -659,8 +660,10 @@ struct ComposerView: View {
             releaseAttachmentLease()
             guard let lease = queueEditLease else { return }
             text = queueEdit?.originalDraft ?? ""
+            attachments = queueEdit?.originalImages ?? []
             queueEdit = nil
             queueEditBusy = false
+            guard model.demo == nil else { return }
             Task { _ = await store.finishQueuedEdit(lease, action: "cancel") }
         }
     }
@@ -723,23 +726,35 @@ struct ComposerView: View {
     @MainActor
     private func beginQueueEdit(_ item: QueuedMessage) async {
         guard editingQueuedId == nil, !queueEditBusy, !attachmentDraft.loading else { return }
-        guard model.hostSupportsQueueEditLease(chat) else {
-            uploadError = "Update the chat host to edit queued messages safely."
-            return
+        let result: QueueEditStartResult
+        if model.demo != nil {
+            // No host in demo mode; the edit writes the local row.
+            result = .acquired(QueueEditLease(rowId: item.id, leaseId: "demo", text: item.text,
+                                              baseTextHash: "", expiresAtMs: .max,
+                                              attachments: item.attachments))
+        } else {
+            guard model.hostSupportsQueueEditLease(chat) else {
+                uploadError = "Update the chat host to edit queued messages safely."
+                return
+            }
+            queueEditBusy = true
+            result = await store.beginQueuedEdit(id: item.id, instanceId: queueEditInstanceId)
+            queueEditBusy = false
         }
-        queueEditBusy = true
-        let result = await store.beginQueuedEdit(id: item.id, instanceId: queueEditInstanceId)
-        queueEditBusy = false
         switch result {
         case .acquired(let lease):
             guard queueEditorVisible else {
                 // Navigation won the race with the host ACK. Release the
                 // newly acquired lease instead of leaving a ghost editor.
-                _ = await store.finishQueuedEdit(lease, action: "cancel")
+                if model.demo == nil { _ = await store.finishQueuedEdit(lease, action: "cancel") }
                 return
             }
+            let rowAttachments = lease.attachments ?? item.attachments
             queueEdit = QueueComposerEdit(lease: lease, originalDraft: text,
-                                          hasAttachments: !item.attachments.isEmpty)
+                                          hasAttachments: !rowAttachments.isEmpty,
+                                          rowAttachments: rowAttachments,
+                                          originalImages: attachments)
+            attachments = []
             text = MessageQueue.visibleText(lease.text, attachments: item.attachments)
             uploadError = nil
         case .locked:
@@ -858,6 +873,7 @@ struct ComposerView: View {
     @MainActor
     private func cancelQueueEdit() async {
         guard let lease = queueEditLease, !queueEditBusy else { return }
+        guard model.demo == nil else { return finishLocalQueueEdit(.finished, failure: "") }
         queueEditBusy = true
         let result = await store.finishQueuedEdit(lease, action: "cancel")
         queueEditBusy = false
@@ -866,16 +882,44 @@ struct ComposerView: View {
 
     @MainActor
     private func commitQueueEdit() async {
-        guard let lease = queueEditLease, !queueEditBusy else { return }
-        let edited = queueEdit?.textToCommit(text)
+        guard let lease = queueEditLease, let edit = queueEdit, !queueEditBusy else { return }
+        let added = attachments
+        let edited = edit.textToCommit(text, addingImages: !added.isEmpty)
         queueEditBusy = true
+        defer { queueEditBusy = false }
+        // Images attached while retyping upload to the host first, then ride
+        // on the commit after the row's own.
+        let deviceId = queueImageDeviceId
+        var uploaded: [String] = []
+        for staged in added {
+            let path: String
+            if model.demo != nil {
+                path = "/demo/queued/\(staged.name)"
+            } else {
+                do {
+                    path = try await store.uploadAttachment(name: staged.name, data: staged.data)
+                } catch {
+                    uploadError = "Attachment upload failed — \(error.localizedDescription)"
+                    return
+                }
+            }
+            AttachmentImageCache.shared.seed(deviceId: deviceId, path: path,
+                                             name: staged.name, data: staged.data)
+            uploaded.append(path)
+        }
+        let paths = edit.attachmentsToCommit(uploaded: uploaded)
         let result: QueueEditFinishResult
-        if let edited {
-            result = await store.finishQueuedEdit(lease, action: "commit", text: edited)
+        if model.demo != nil {
+            let saved = store.applyQueuedAttachmentsLocally(
+                id: lease.rowId, text: edited ?? lease.text,
+                attachments: paths ?? edit.rowAttachments)
+            result = saved ? .finished : .missing
+        } else if let edited {
+            result = await store.finishQueuedEdit(lease, params: SessionStore.finishQueuedEditParams(
+                chatId: store.chatId, lease: lease, action: "commit", text: edited, attachments: paths))
         } else {
             result = await store.finishQueuedEdit(lease, action: "discard")
         }
-        queueEditBusy = false
         finishLocalQueueEdit(result, failure: "Couldn't save the protected edit.")
     }
 
@@ -885,6 +929,7 @@ struct ComposerView: View {
         switch result {
         case .finished:
             text = queueEdit?.originalDraft ?? ""
+            attachments = queueEdit?.originalImages ?? []
             queueEdit = nil
             uploadError = nil
         case .conflict:

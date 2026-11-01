@@ -57,6 +57,36 @@ final class AppshotUITests: XCTestCase {
         return app
     }
 
+    /// Retyping a queued message in the composer can attach images to it.
+    /// Seed the simulator library with an image via simctl addmedia first.
+    func testRetypingAQueuedMessageCanAttachImages() {
+        let app = launchQueue()
+        let edit = app.buttons.matching(NSPredicate(format: "label == %@", "Edit"))
+        XCTAssertTrue(edit.element(boundBy: 1).waitForExistence(timeout: 10))
+        edit.element(boundBy: 1).tap()
+        XCTAssertTrue(app.buttons["Stop editing"].firstMatch.waitForExistence(timeout: 5))
+        let attach = app.buttons["Attach photos"]
+        XCTAssertTrue(attach.waitForExistence(timeout: 5), "editing a queued message keeps Attach")
+        XCTAssertTrue(attach.isEnabled)
+        capture("queued-edit-attach")
+        attach.tap()
+        let photos = app.navigationBars["Photos"]
+        XCTAssertTrue(photos.waitForExistence(timeout: 10))
+        let image = app.images.matching(identifier: "PXGGridLayout-Info").firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 10), "Seed the simulator photo library before running")
+        image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        photos.buttons["Done"].tap()
+        let staged = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "composer-attachment-")).firstMatch
+        XCTAssertTrue(staged.waitForExistence(timeout: 10))
+        capture("queued-edit-staged")
+        app.buttons["composer-send"].tap()
+        // The text-only row now has the image, and the draft is back as it was.
+        XCTAssertTrue(app.buttons["Preview image"].waitForExistence(timeout: 10))
+        XCTAssertFalse(staged.exists)
+        capture("queued-edit-saved")
+    }
+
     /// Open Attachments on the second, text-only queued message.
     private func openAttachments(_ app: XCUIApplication) {
         let more = app.buttons.matching(identifier: "More queue actions")
