@@ -204,3 +204,7 @@ Copyright 2025 The Google Sans Code Project Authors. Both are licensed under the
 SIL Open Font License 1.1; the notices are retained in
 [`third_party/licenses/Geist-OFL.txt`](third_party/licenses/Geist-OFL.txt) and
 [`third_party/licenses/GoogleSansCode-OFL.txt`](third_party/licenses/GoogleSansCode-OFL.txt).
+
+## Stageshow (.agents/skills/stageshow)
+
+Agent skill by Benji Taylor, MIT. Source: https://github.com/benjitaylor/skills/tree/802057409787133703c56001080169e347305572/stageshow. App icons and brand assets inside keep their own licenses; see that folder's NOTICE.md and kit/brands/SOURCES.md.
