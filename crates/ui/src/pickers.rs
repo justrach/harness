@@ -4876,15 +4876,17 @@ impl Pickers {
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let height = self.menu_geometry().height.min(self.open_model_height);
-        #[cfg(feature = "model-picker-preview")]
-        let height = if self.preview.enabled {
-            height.min(self.preview.preferred_height())
-        } else {
-            height
-        };
-        popover::popover_card_flush(&theme)
+        let frame = popover::popover_card_flush(&theme)
             .w(px(width))
-            .h(px(height))
+            .h(px(height));
+        #[cfg(feature = "model-picker-preview")]
+        let frame = if self.preview.enabled && self.preview.pending.is_some() {
+            // Fit the reasoning controls, but keep scrolling in short windows.
+            frame.h_auto().max_h(px(height))
+        } else {
+            frame
+        };
+        frame
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)

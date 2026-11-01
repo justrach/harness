@@ -104,6 +104,7 @@ struct HostLinkSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    @State private var contentHeight: CGFloat = 240
 
     private var title: String {
         switch link.kind {
@@ -154,6 +155,9 @@ struct HostLinkSheet: View {
                     .accessibilityIdentifier("host-link-copy")
                 }
                 .padding(20)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                    contentHeight = height
+                }
             }
             .background(Theme.bg)
             .navigationTitle(title)
@@ -164,7 +168,8 @@ struct HostLinkSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        // Allow for the grabber and inline navigation bar, keeping the content's bottom inset.
+        .presentationDetents([.height(contentHeight + 72), .large])
         .harnessAppearance()
     }
 
