@@ -128,6 +128,40 @@ pub struct Model {
     /// (CodeGraff hosted) or `api` (the user's own metered key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<String>,
+    /// Context window in tokens, where the harness reports it (graff's
+    /// `context`). Render it with [`context_label`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+}
+
+/// A context window in tokens, short: `272k`, `1M`, `1.05M`.
+///
+/// Decimal units, rounded to whole thousands below a million and to at most
+/// two decimals (trailing zeros dropped) from there up. A power-of-two window
+/// is a binary size and reads the way model cards quote it: 2^17 is `128k`
+/// and 2^20 (1,048,576) is `1M`, not `131k` / `1.05M`.
+pub fn context_label(tokens: u64) -> String {
+    if tokens >= 1 << 10 && tokens.is_power_of_two() {
+        return if tokens >= 1 << 20 {
+            format!("{}M", tokens >> 20)
+        } else {
+            format!("{}k", tokens >> 10)
+        };
+    }
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    let thousands = (tokens + 500) / 1_000;
+    if thousands < 1_000 {
+        return format!("{thousands}k");
+    }
+    let hundredths = (tokens + 5_000) / 10_000;
+    let (whole, frac) = (hundredths / 100, hundredths % 100);
+    match frac {
+        0 => format!("{whole}M"),
+        f if f % 10 == 0 => format!("{whole}.{}M", f / 10),
+        f => format!("{whole}.{f:02}M"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -739,6 +773,44 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_label_is_short_and_rounded() {
+        for (tokens, label) in [
+            (1_000_000, "1M"),
+            (1_050_000, "1.05M"),
+            (1_500_000, "1.5M"),
+            (2_000_000, "2M"),
+            (1_048_576, "1M"),
+            (2_097_152, "2M"),
+            (131_072, "128k"),
+            (272_000, "272k"),
+            (200_000, "200k"),
+            (204_800, "205k"),
+            (128_000, "128k"),
+            (999_499, "999k"),
+            (999_500, "1M"),
+            (1_004_999, "1M"),
+            (1_005_000, "1.01M"),
+            (512, "512"),
+            (0, "0"),
+        ] {
+            assert_eq!(context_label(tokens), label, "{tokens}");
+        }
+    }
+
+    #[test]
+    fn model_context_is_optional_on_the_wire() {
+        let model: Model =
+            serde_json::from_value(serde_json::json!({"id": "m", "label": "m"})).unwrap();
+        assert_eq!(model.context, None);
+        assert_eq!(serde_json::to_value(&model).unwrap().get("context"), None);
+        let model: Model = serde_json::from_value(
+            serde_json::json!({"id": "m", "label": "m", "context": 1_000_000}),
+        )
+        .unwrap();
+        assert_eq!(model.context, Some(1_000_000));
+    }
 
     #[test]
     fn turn_origins_are_explicit_and_legacy_runs_default_to_human() {

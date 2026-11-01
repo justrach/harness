@@ -313,6 +313,7 @@ impl Harness for PiHarness {
             options: vec![],
             maker: None,
             billing: None,
+            context: None,
         }]
     }
     async fn run(

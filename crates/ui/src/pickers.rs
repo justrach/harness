@@ -2705,6 +2705,7 @@ impl Pickers {
                             options: vec![],
                             maker: None,
                             billing: None,
+                            context: None,
                         },
                     },
                 );
@@ -6330,6 +6331,7 @@ fn scoped_model_rows<'a>(
                         options: Vec::new(),
                         maker: None,
                         billing: None,
+                        context: None,
                     },
                 )
             };
@@ -8775,6 +8777,7 @@ mod tests {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         }
     }
 
@@ -9940,6 +9943,7 @@ mod tests {
             ],
             maker: None,
             billing: None,
+            context: None,
         };
         let mut selections = serde_json::Map::new();
         selections.insert("context".into(), serde_json::Value::String("1m".into()));
@@ -10144,6 +10148,7 @@ mod tests {
                 options: vec![],
                 maker: None,
                 billing: None,
+                context: None,
             },
             Model {
                 id: "fast".into(),
@@ -10153,6 +10158,7 @@ mod tests {
                 options: vec![],
                 maker: None,
                 billing: None,
+                context: None,
             },
         ];
         assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));

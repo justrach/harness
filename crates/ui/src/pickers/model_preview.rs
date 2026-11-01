@@ -911,6 +911,7 @@ impl Pickers {
         // Only what the catalog says: no ratings or prices are made up.
         let facts = [
             ("Reasoning", reasoning_range(model)),
+            ("Context", model.context.map(harness_proto::context_label)),
             ("Billing", model.billing.as_deref().map(billing_label)),
         ];
         panel
@@ -1432,6 +1433,7 @@ mod section_tests {
                 options: Vec::new(),
                 maker: Some("anthropic".into()),
                 billing: Some("plan".into()),
+                context: None,
             },
             selected_only: false,
             header: None,
