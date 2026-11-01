@@ -110,11 +110,15 @@ test "composer expansion uses GPUI's width threshold and collapse hysteresis" {
 
 pub const Shape = enum { compact, expanded };
 
+/// `TEXTAREA_MIN`, and the expanded pill it gives (`COMPOSER_MIN_HEIGHT`).
+pub const textarea_min: f32 = 60;
+pub const expanded_min: f32 = textarea_min + 42 + 2;
+
 pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radius: f32) void {
     // `border_1` takes its point from inside the box in GPUI: the pill is
-    // 49 tall compact (`COMPACT_TOTAL_HEIGHT`), 76 + 42 + 2 expanded
+    // 49 tall compact (`COMPACT_TOTAL_HEIGHT`), 60 + 42 + 2 = 104 expanded
     // (`COMPOSER_MIN_HEIGHT`), its controls a point in from each edge.
-    const p = kit.shadowLg(ui.div(c).w(w).bg(k.composer).border(k.border).borderW(1).rounded(radius).p(1)).bg(k.composer).clip();
+    const p = kit.shadowLg(ui.div(c).w(w).bg(k.pill()).border(k.border).borderW(1).rounded(radius).p(1)).bg(k.pill()).clip();
     const box = if (shape == .compact) p.row().h(49).px(8 + 1).itemsCenter() else p.column();
     defer box.end();
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r;
@@ -126,10 +130,11 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radi
     }
     attachmentStrip(c, a, k, w);
     {
-        // At least 76 tall, as GPUI's text area, growing with its lines.
+        // At least 60 tall, as GPUI's text area (`TEXTAREA_MIN`), growing
+        // with its lines.
         const area = ui.div(c).row().wFull();
         defer area.end();
-        _ = c.leaf(.{ .width = .{ .px = 0 }, .height = .{ .px = 76 } }, .none, null);
+        _ = c.leaf(.{ .width = .{ .px = 0 }, .height = .{ .px = textarea_min } }, .none, null);
         // `pt(16)`, less the point and a half GPUI's input draws its first
         // line above nano's (measured: parity/scenes/settings-*.json).
         const inner = ui.div(c).column().grow().w(0).px(16).pt(16 - 1.5).pb(4 + 1.5);

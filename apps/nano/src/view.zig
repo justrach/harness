@@ -111,11 +111,14 @@ pub fn view(a: *App, c: *ui.Context) void {
                 const content = ui.div(c).absolute().offset(a.view.sidebar_width - sidebar.width, 0).w(sidebar.width).hFull();
                 defer content.end();
                 if (a.view.settings_open) settings_view.nav(c, a, k) else sidebar.sidebar(c, a, k);
-                ui.div(c).absolute().offset(sidebar.width - 1, 0).size(1, c.size.h).bg(k.border).end();
+                // A rounded column draws the seam itself, along its curve.
+                if (!seamRounded(a, k)) ui.div(c).absolute().offset(sidebar.width - 1, 0).size(1, c.size.h).bg(k.border).end();
             }
         }
+        defer if (seamRounded(a, k)) seam(c, a, k);
         ui.key(c, "main-column");
-        const main = ui.div(c).row().grow().w(0).hFull();
+        var main = ui.div(c).row().grow().w(0).hFull();
+        if (k.plane()) |p| main = main.bg(p);
         defer main.end();
         column: {
             const chat = ui.div(c).column().grow().w(0).hFull().clip();
@@ -155,6 +158,33 @@ pub fn view(a: *App, c: *ui.Context) void {
     // First-run setup, over the whole window.
     @import("view_setup.zig").overlay(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
+}
+
+/// The column's corners where it meets the open sidebar (`SEAM_RADIUS`).
+const seam_radius: f32 = 12;
+
+/// Whether the column rounds where it meets the sidebar: open at least two
+/// radii wide, as GPUI's `seam_rounded`. Frosted glass keeps the straight
+/// edge: its corners can't be filled with an opaque tone.
+fn seamRounded(a: *const App, k: theme.Colors) bool {
+    return !k.frosted and a.view.sidebar_width >= 2 * seam_radius;
+}
+
+/// The rounded seam (2bc9308f3): the hairline down the column's left edge
+/// and, in each left corner, the sidebar's tone outside a quarter circle of
+/// the column's colour whose edge carries the same hairline.
+fn seam(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const x = a.view.sidebar_width;
+    const r = seam_radius;
+    ui.key(c, "sidebar-seam");
+    ui.div(c).absolute().offset(x, r).size(1, @max(0, c.size.h - 2 * r)).bg(k.border).end();
+    for ([_]f32{ 0, c.size.h - r }) |y| {
+        const box = ui.div(c).absolute().offset(x, y).size(r, r).clip().bg(k.sidebar);
+        defer box.end();
+        // The circle's other three quarters fall outside the clip.
+        const disc = ui.div(c).absolute().offset(0, if (y == 0) 0 else -r).size(2 * r, 2 * r).rounded(r).bg(k.column()).border(k.border).borderW(1);
+        disc.end();
+    }
 }
 
 /// The focused pane: its chat's transcript over the composer, or a new

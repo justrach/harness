@@ -64,11 +64,13 @@ pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     // either side of the pill (`composer_target_width`).
     const main_w = transcript_view.paneWidth(c, a);
     const w = @min(main_w, 768) - 32;
-    // The pill's top: half the window less 72 (`DockedComposer::prepaint`:
-    // its 160-point box centred, 8 down), from the area under the title bar.
-    var pill_top = c.size.h * 0.5 - 72 - sidebar.titlebar_h;
+    // The pill's top (`DockedComposer::prepaint`): its box, the pill and
+    // the 40 the footer takes under it, centred and 8 down, from the area
+    // under the title bar. It follows the pill as the draft grows.
+    const box_h = (if (a.view.composer_anchor) |r| @max(r.h, composer.expanded_min) else composer.expanded_min) + 40;
+    var pill_top = (c.size.h - box_h) * 0.5 + 8 - sidebar.titlebar_h;
     // In a pane of a split down the window, centred in the pane.
-    if (transcript_view.paneHeight(c, a)) |h| pill_top = h * 0.5 - 72;
+    if (transcript_view.paneHeight(c, a)) |h| pill_top = (h - box_h) * 0.5 + 8;
     const area = ui.div(c).column().wFull().grow().itemsCenter();
     defer area.end();
     // The heading ends 42 above the pill (its 60-point slot, bottom-aligned,
@@ -83,9 +85,8 @@ pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     // project the checkout and the ref a session starts from.
     _ = c.leaf(.{ .height = .{ .px = 8 } }, .none, null);
     footer(c, a, k, w);
-    // The grid's slot, 12 under the composer's box (whose foot is 8 above
-    // the footer's).
-    _ = c.leaf(.{ .height = .{ .px = 12 - 8 } }, .none, null);
+    // The grid's slot, 12 under the composer's box: 52 under the pill.
+    _ = c.leaf(.{ .height = .{ .px = 52 - 8 - 24 } }, .none, null);
     // Only while nothing at all is typed, a space included.
     if (a.composer.text().len == 0) starterGrid(c, a, k, w);
 }

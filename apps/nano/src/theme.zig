@@ -72,6 +72,24 @@ pub const Colors = struct {
         return (if (k.dark) Color.hex(0xebebeb) else Color.hex(0x1a1a1a)).alpha(a);
     }
 
+    /// The conversation column's lift over the shell (`content_plane`):
+    /// light palettes wash it toward white, so the sidebar reads as chrome
+    /// around a bright page; dark ones keep it flush.
+    pub fn plane(k: Colors) ?Color {
+        return if (k.dark) null else white.alpha(0.55);
+    }
+
+    /// The column as painted: the shell under its plane.
+    pub fn column(k: Colors) Color {
+        return if (k.plane()) |p| k.shell.mix(white, p.a) else k.shell;
+    }
+
+    /// The composer's writing plane (`composer_bg`): light palettes lift
+    /// the input tint toward white; dark ones keep the raised input.
+    pub fn pill(k: Colors) Color {
+        return if (k.dark) k.composer else k.composer.mix(white, 0.82);
+    }
+
     /// Words and glyphs on an accent fill (`on_primary_accent`): the
     /// near-white `on_accent` where it reads at 4.5:1, else black or white,
     /// whichever reads better.
