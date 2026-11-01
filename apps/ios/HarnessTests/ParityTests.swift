@@ -260,6 +260,7 @@ final class ParityTests: XCTestCase {
                 case .pinned: kind = "pinned"
                 case .project: kind = "project"
                 case .device: kind = "device"
+                case .status: kind = "status"
                 }
                 return ["id": group.id, "kind": kind, "chats": group.chats.map(\.id)]
             }
