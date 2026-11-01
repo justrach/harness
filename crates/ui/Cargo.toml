@@ -149,6 +149,10 @@ name = "onboarding-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "turn-work-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 

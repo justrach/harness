@@ -2084,6 +2084,8 @@ pub struct Shell {
     add_space: Option<AddSpaceFlow>,
     command_palette: Option<command_palette::CommandPalette>,
     sidebar_search: Option<sidebar_search::SidebarSearch>,
+    /// The work pane the running-command cue opened for the current turn.
+    work_pane_auto: Option<crate::turn_work::AutoWorkPane>,
     sidebar_search_trigger_focus: gpui::FocusHandle,
     /// Conversations from other tools on this device (Claude Code, Codex, graff) that
     /// `/resume` can import; listed again when the palette opens and the last
@@ -2607,6 +2609,7 @@ impl Shell {
             add_space: None,
             command_palette: None,
             sidebar_search: None,
+            work_pane_auto: None,
             sidebar_search_trigger_focus: cx.focus_handle().tab_stop(true),
             external_sessions: Vec::new(),
             external_task: None,
@@ -11162,6 +11165,7 @@ impl Shell {
                                 .mx_auto()
                                 .child(self.composer.clone())
                                 .children(if has_selection {
+                                    self.sync_work_pane_auto(cx);
                                     self.render_jump_to_bottom(cx)
                                         .or_else(|| self.render_turn_work_cue(cx))
                                 } else {
@@ -11193,6 +11197,42 @@ impl Shell {
     /// floating glass "Running tests" pill with Stop (the only glass here);
     /// once the turn is done, a solid "N files changed" card that opens the
     /// Changes pane.
+    /// Opens the work pane when the selected chat's turn starts a command,
+    /// and closes it after if the turn changed nothing (see
+    /// [`crate::turn_work::work_pane_step`]). Deferred: never mid-render.
+    fn sync_work_pane_auto(&mut self, cx: &mut Context<Self>) {
+        let pane_open = self.right_pane_open(cx);
+        let state = self.state.read(cx);
+        let Some(chat_id) = state.selected_chat.clone() else {
+            return;
+        };
+        let working =
+            state.indicator_for(&chat_id, Utc::now()) == harness_proto::view::Indicator::Working;
+        let transcript = &state.transcript;
+        let running = working && crate::turn_work::running_command(transcript).is_some();
+        let turn = crate::turn_work::turn_key(transcript);
+        let has_changes = crate::turn_work::latest_turn_changes(transcript).is_some();
+        let step = crate::turn_work::work_pane_step(
+            &mut self.work_pane_auto,
+            &chat_id,
+            turn.as_deref(),
+            working,
+            running,
+            pane_open,
+            has_changes,
+        );
+        let this = cx.entity();
+        match step {
+            crate::turn_work::WorkPaneStep::Open => cx.defer(move |cx| {
+                this.update(cx, |this, cx| this.show_turn_changes(cx));
+            }),
+            crate::turn_work::WorkPaneStep::Close => cx.defer(move |cx| {
+                this.update(cx, |this, cx| this.set_surfaces_open(false, cx));
+            }),
+            crate::turn_work::WorkPaneStep::Nothing => {}
+        }
+    }
+
     fn render_turn_work_cue(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let state = self.state.read(cx);
         let chat_id = state.selected_chat.clone()?;
@@ -18940,6 +18980,10 @@ impl Shell {
             self.composer
                 .update(cx, |composer, cx| composer.apply_starter(starter, cx));
         }
+    }
+    /// Turn work QA: whether the work pane is open.
+    pub fn fixture_right_pane_open(&self, cx: &App) -> bool {
+        self.right_pane_open(cx)
     }
     /// Onboarding QA: ⌘D, or close the focused pane.
     pub fn fixture_onboarding_split(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
