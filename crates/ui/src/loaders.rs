@@ -23,10 +23,12 @@ pub use harness_proto::motion::{
     MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, HARNESS_CELLS, mark_cell_stagger,
 };
 
+/// The queued-build dot's breath.
+pub(crate) const WAIT_PULSE: motion::MotionSpec = motion::MotionSpec::new(1900, motion::EASE);
+
 /// Confirmed queue wait: a quiet 1.9-second breath on the bounded shared
 /// clock, not the working spinner. Reduced motion schedules no animation.
 pub(crate) fn build_wait_dot(theme: &Theme, view: EntityId, cx: &mut App) -> impl IntoElement {
-    const WAIT_PULSE: motion::MotionSpec = motion::MotionSpec::new(1900, motion::EASE);
     let reduced = motion::reduced_motion(cx);
     let phase = motion::pulse_delta_slow(&WAIT_PULSE, view, cx);
     let pulse = crate::build_wait::pulse(phase, reduced);
@@ -271,18 +273,50 @@ impl Render for MiniSpinnerView {
     }
 }
 
+const MINI_COLS: usize = 2;
+const MINI_ROWS: usize = 3;
+/// Clockwise ring position of each `(row, col)` cell of the mini spinner,
+/// top-left first: (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
+const MINI_RING: [[usize; MINI_COLS]; MINI_ROWS] = [[0, 1], [5, 2], [4, 3]];
+const MINI_RING_LEN: f32 = (MINI_COLS * MINI_ROWS) as f32;
+
+/// The mini spinner's cells painted directly at `origin` (the sidebar's
+/// [`crate::sidebar_motion`] overlay), at the layout [`mini_spinner_cells`]
+/// produces: `cell_px` squares half a cell apart.
+pub(crate) fn paint_mini_spinner(
+    origin: gpui::Point<gpui::Pixels>,
+    cell_px: f32,
+    row_tints: [gpui::Hsla; 3],
+    delta: f32,
+    window: &mut Window,
+) {
+    for (row, tint) in row_tints.iter().enumerate() {
+        for col in 0..MINI_COLS {
+            let phase = MINI_RING[row][col] as f32 / MINI_RING_LEN;
+            let cell = gpui::Bounds::new(
+                point(
+                    origin.x + px(col as f32 * cell_px * 1.5),
+                    origin.y + px(row as f32 * cell_px * 1.5),
+                ),
+                gpui::size(px(cell_px), px(cell_px)),
+            );
+            window.paint_quad(
+                gpui::fill(
+                    cell,
+                    tint.opacity(motion::gspin_opacity(delta + phase, GSPIN_DIM)),
+                )
+                .corner_radii(px(cell_px / 2.0)),
+            );
+        }
+    }
+}
+
 fn mini_spinner_cells(
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
     view: EntityId,
     cx: &mut App,
 ) -> impl IntoElement {
-    const COLS: usize = 2;
-    const ROWS: usize = 3;
-    /// Clockwise ring position of each `(row, col)` cell, top-left first:
-    /// (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
-    const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
-    const RING_LEN: f32 = (COLS * ROWS) as f32;
     // 15Hz, like the shell's cell loaders: this snake stays mounted for a
     // whole agent run, and every tick redraws the entire window.
     let delta = motion::pulse_delta_slow(&GRADIENT_SPIN, view, cx);
@@ -290,14 +324,14 @@ fn mini_spinner_cells(
         .flex()
         .flex_col()
         .gap(px(cell_px / 2.0))
-        .children((0..ROWS).map(move |row| {
+        .children((0..MINI_ROWS).map(move |row| {
             let tint = row_tints[row];
             div()
                 .flex()
                 .flex_row()
                 .gap(px(cell_px / 2.0))
-                .children((0..COLS).map(move |col| {
-                    let phase = RING[row][col] as f32 / RING_LEN;
+                .children((0..MINI_COLS).map(move |col| {
+                    let phase = MINI_RING[row][col] as f32 / MINI_RING_LEN;
                     div()
                         .size(px(cell_px))
                         .rounded(px(cell_px / 2.0))

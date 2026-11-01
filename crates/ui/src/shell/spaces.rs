@@ -2035,6 +2035,60 @@ fn status_group_rank(key: Option<&str>) -> u8 {
 // list items stay tightly related at 2px, while section boundaries use 12px
 // (well over 2x the intra-list gap). Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
+/// Rows this far past either edge of the session list still render, so a
+/// scroll or a few new rows above don't reach a skipped one before the next
+/// render places it.
+const SIDEBAR_ROW_OVERSCAN: f32 = 600.0;
+
+/// The span of the session list worth rendering rows for, in the coordinates
+/// [`sidebar_row_recorder`] stores: a row's window top with the scroll offset
+/// it was painted at taken out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct SidebarRowWindow {
+    lo: f32,
+    hi: f32,
+}
+
+impl SidebarRowWindow {
+    /// Whether a row whose last placement was `top` (`None`: never placed)
+    /// renders. Pure.
+    pub(super) fn keeps(self, top: Option<f32>, height: f32) -> bool {
+        top.is_none_or(|top| top < self.hi && top + height > self.lo)
+    }
+}
+
+/// Records where a session slot sat (for the next render's
+/// [`Shell::sidebar_row_window`]); a skipped slot found on screen after all
+/// (a large reshuffle since the last frame) re-renders the sidebar at once.
+fn sidebar_row_recorder(
+    chat_id: String,
+    height: f32,
+    skipped: bool,
+    tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
+    scroll: gpui::ScrollHandle,
+    sidebar: gpui::EntityId,
+) -> impl IntoElement {
+    gpui::canvas(
+        move |bounds, window, _| {
+            let offset = f32::from(scroll.offset().y);
+            let top = f32::from(bounds.top());
+            tops.borrow_mut().insert(chat_id, top - offset);
+            let viewport = scroll.bounds();
+            if skipped
+                && top < f32::from(viewport.bottom())
+                && top + height > f32::from(viewport.top())
+            {
+                window.on_next_frame(move |_, cx| cx.notify(sidebar));
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_0()
+}
+
 const SIDEBAR_SECTION_GAP: f32 = 12.0;
 pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
@@ -4245,6 +4299,28 @@ impl Shell {
         }
     }
 
+    /// The rows worth rendering this frame, or `None` to render them all: on
+    /// the first frame (nothing placed yet), and while rows move (a drag, a
+    /// return, a group opening or closing).
+    pub(super) fn sidebar_row_window(&self) -> Option<SidebarRowWindow> {
+        let viewport = self.sidebar_scroll.bounds();
+        let moving = self.sidebar_session_transfer.is_some()
+            || self.sidebar_session_return.is_some()
+            || self.pinned_session_drag.is_some()
+            || self
+                .sidebar_disclosure_motion
+                .values()
+                .any(|motion| motion.animating());
+        if moving || viewport.size.height <= px(0.0) || self.sidebar_row_tops.borrow().is_empty() {
+            return None;
+        }
+        let offset = f32::from(self.sidebar_scroll.offset().y);
+        Some(SidebarRowWindow {
+            lo: f32::from(viewport.top()) - SIDEBAR_ROW_OVERSCAN - offset,
+            hi: f32::from(viewport.bottom()) + SIDEBAR_ROW_OVERSCAN - offset,
+        })
+    }
+
     pub(super) fn render_active_rows(
         &mut self,
         theme: &Theme,
@@ -4292,6 +4368,10 @@ impl Shell {
                 .unwrap_or(usize::MAX)
         });
         let active: HashSet<&str> = base_ids.iter().map(String::as_str).collect();
+        // Forget rows that left the list.
+        self.sidebar_row_tops
+            .borrow_mut()
+            .retain(|id, _| active.contains(id.as_str()));
         let pinned_count = pinned_order
             .iter()
             .filter(|id| active.contains(id.as_str()))
@@ -4452,6 +4532,10 @@ impl Shell {
         let mut rendered = Vec::new();
         let mut moving_row = None;
         let provisional = self.state.read(cx).provisional_title();
+        let row_window = self.sidebar_row_window();
+        let row_tops = self.sidebar_row_tops.clone();
+        let sidebar_scroll = self.sidebar_scroll.clone();
+        let sidebar_pane = self.sidebar_pane.entity_id();
         for (group, rows) in sections {
             let pinned_group = slot < pinned_count;
             let drag_group = if pinned_group {
@@ -4527,32 +4611,43 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(&crate::state::chat_label(
-                        &chat,
-                        &provisional,
-                        "New session",
-                    ))
-                    .into(),
-                    time_ago,
-                    folder.into(),
-                    branch.map(SharedString::from),
-                    None,
-                    harness,
-                    status,
-                    is_selected,
-                    false,
-                    is_moving,
-                    if is_moving { None } else { drag },
-                    jump_label,
-                    None,
-                    theme,
-                    cx,
-                );
+                // Far off screen on the last frame: keep the slot's height, skip
+                // the row (`sidebar_row_window`).
+                let skipped = row_window.is_some_and(|window| {
+                    !window.keeps(row_tops.borrow().get(&chat.id).copied(), slot_height)
+                });
+                let element = if skipped {
+                    div().into_any_element()
+                } else {
+                    self.render_chat_row(
+                        chat.id.clone(),
+                        transcript::single_line(&crate::state::chat_label(
+                            &chat,
+                            &provisional,
+                            "New session",
+                        ))
+                        .into(),
+                        time_ago,
+                        folder.into(),
+                        branch.map(SharedString::from),
+                        None,
+                        harness,
+                        status,
+                        is_selected,
+                        false,
+                        is_moving,
+                        if is_moving { None } else { drag },
+                        jump_label,
+                        None,
+                        theme,
+                        cx,
+                    )
+                };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
-                let element = if let Some(origin) = origin {
+                let element = if skipped {
+                    element
+                } else if let Some(origin) = origin {
                     moving_row = Some((element, height));
                     div()
                         .child(div().h(px(slot_height.max(0.0))))
@@ -4578,6 +4673,14 @@ impl Shell {
                     .mb(px(slot_height.min(0.0)))
                     .flex_none()
                     .child(element)
+                    .child(sidebar_row_recorder(
+                        chat.id.clone(),
+                        slot_height,
+                        skipped,
+                        row_tops.clone(),
+                        sidebar_scroll.clone(),
+                        sidebar_pane,
+                    ))
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                             if !event.bounds.contains(&event.event.position)

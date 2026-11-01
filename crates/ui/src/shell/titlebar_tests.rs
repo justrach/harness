@@ -104,6 +104,8 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
                 path: PathBuf::from("/nonexistent/staged"),
                 version: "9.9.9".into(),
             });
+            // Postponed, so it waits on the person and the control shows.
+            shell.app_update.postponed = Some("9.9.9".into());
             shell
         }))
     });
@@ -225,6 +227,9 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
                 };
                 shell.update_dismissed = None;
                 shell.app_update.dev_preview = mode == "preview";
+                // A staged update restarting on its own shows nothing; "Later"
+                // brings the control back.
+                shell.app_update.postponed = (mode == "ready").then(|| "9.9.9".into());
                 shell.update_flow = match mode {
                     "downloading" => UpdateFlow::Downloading,
                     "ready" => UpdateFlow::Ready(StagedUpdate {
@@ -254,8 +259,9 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
             assert_eq!(cx.debug_bounds("nav-back").is_none(), in_settings);
             assert_eq!(cx.debug_bounds("nav-forward").is_none(), in_settings);
             let update = cx.debug_bounds("titlebar-update");
-            if mode == "none" {
-                assert!(update.is_none());
+            // An automatic download shows nothing either.
+            if mode == "none" || mode == "downloading" {
+                assert!(update.is_none(), "mode={mode}");
                 continue;
             }
             let update = update.expect("every visible update state owns the same slot");
@@ -731,10 +737,11 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear());
-    assert!(cx.debug_bounds("titlebar-update").is_some());
+    // It restarts into the update on its own: only the heads-up shows.
+    assert!(cx.debug_bounds("titlebar-update").is_none());
     assert_eq!(
         shell.read_with(cx, |shell, cx| shell.titlebar_update_slot(cx)),
-        TITLEBAR_ACTION_SLOT_WIDTH
+        0.0
     );
     assert!(cx.debug_bounds("app-update-countdown").is_some());
 
@@ -751,6 +758,7 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
     });
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("app-update-countdown").is_none());
+    // Postponed, it waits on the person: the control comes back.
     assert!(cx.debug_bounds("titlebar-update").is_some());
 
     // Settings → Devices sees the same flow, and its button does what the
