@@ -1696,6 +1696,11 @@ pub struct Changes {
     _observe: Subscription,
 }
 
+/// The review footer's words. Undo discards the whole working tree (the
+/// engine has no per-turn revert), so the label says "all".
+pub(crate) const REVIEW_FOOTER_NOTE: &str = "Undo reverts every uncommitted file.";
+pub(crate) const REVIEW_UNDO_LABEL: &str = "Undo all changes";
+
 /// What the working-tree trash button asks the shell to confirm and send.
 #[derive(Debug, Clone)]
 pub struct DiscardWorkingTreeRequest {
@@ -5091,10 +5096,10 @@ impl Changes {
                     .truncate()
                     .text_size(px(11.0))
                     .text_color(theme.text_muted)
-                    .child(SharedString::from("Changes are on disk. Keep them or undo.")),
+                    .child(SharedString::from(REVIEW_FOOTER_NOTE)),
             )
             .child(
-                crate::popover::btn_ghost(theme, "Undo", "changes-review-undo")
+                crate::popover::btn_ghost(theme, REVIEW_UNDO_LABEL, "changes-review-undo")
                     .id("changes-review-undo")
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(request) = this.discard_request(cx) {
@@ -5115,6 +5120,13 @@ impl Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn review_undo_says_it_reverts_everything_uncommitted() {
+        assert!(REVIEW_UNDO_LABEL.contains("all"));
+        assert!(REVIEW_FOOTER_NOTE.contains("every uncommitted file"));
+        assert!(!REVIEW_FOOTER_NOTE.contains('\u{2014}') && !REVIEW_UNDO_LABEL.contains('\u{2014}'));
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(
