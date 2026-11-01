@@ -225,6 +225,53 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
         .unwrap_or("graff")
 }
 
+/// graff's Claude Agent: Claude through the user's own Claude Code login, so
+/// it spends their Claude plan. Leads the "graff providers" card.
+const CLAUDE_AGENT_ID: &str = "claude-agent";
+
+/// One "graff providers" row: (provider id — `None` for the shared Codex
+/// login —, name, status line, signed in).
+type GraffEntry<'a> = (Option<&'a str>, &'a str, String, bool);
+
+/// A graff provider row's status line. Pure.
+fn graff_provider_status(provider: &GraffLoginProvider) -> String {
+    let claude_agent = provider.id == CLAUDE_AGENT_ID;
+    match (provider.signed_in, &provider.account) {
+        (true, Some(account)) if claude_agent => {
+            format!("Signed in as {account} · your Claude plan")
+        }
+        (true, None) if claude_agent => "Uses your Claude Code login · your Claude plan".into(),
+        (false, _) if claude_agent => "Use your Claude plan through Claude Code".into(),
+        (true, Some(account)) => format!("Signed in as {account}"),
+        (true, None) => "Signed in on this device".into(),
+        (false, _) => "Not signed in".into(),
+    }
+}
+
+/// The "graff providers" rows in display order: Claude Agent first, then
+/// the engine's order with the legacy shared Codex login (`codex`) right
+/// after the first of them. ChatGPT has its own section above. Pure.
+fn graff_provider_entries<'a>(
+    providers: &'a [GraffLoginProvider],
+    codex: GraffEntry<'a>,
+) -> Vec<GraffEntry<'a>> {
+    let (claude_agent, rest): (Vec<_>, Vec<_>) = providers
+        .iter()
+        .filter(|p| p.id != "chatgpt-new")
+        .partition(|p| p.id == CLAUDE_AGENT_ID);
+    let entry = |p: &'a GraffLoginProvider| -> GraffEntry<'a> {
+        (
+            Some(p.id.as_str()),
+            p.name.as_str(),
+            graff_provider_status(p),
+            p.signed_in,
+        )
+    };
+    let mut entries: Vec<GraffEntry<'a>> = rest.into_iter().map(entry).collect();
+    entries.insert(entries.len().min(1), codex);
+    claude_agent.into_iter().map(entry).chain(entries).collect()
+}
+
 /// What "Update key" shows: graff keeps API keys on the computer it runs on
 /// (its keychain, a `<PROVIDER>_API_KEY` variable, or the key the metered
 /// Console sign-in minted), and the error names which one it used.
@@ -2326,22 +2373,8 @@ impl AccountsPage {
                     .snapshot
                     .ready()
                     .is_some_and(|snapshot| openai_login(snapshot).0);
-                // (provider id — `None` for the shared Codex login —, name,
-                // status line, signed in)
-                let mut entries: Vec<(Option<&str>, &str, String, bool)> = providers
-                    .iter()
-                    .filter(|p| p.id != "chatgpt-new")
-                    .map(|p| {
-                        let status = match (p.signed_in, &p.account) {
-                            (true, Some(account)) => format!("Signed in as {account}"),
-                            (true, None) => "Signed in on this device".to_string(),
-                            (false, _) => "Not signed in".to_string(),
-                        };
-                        (Some(p.id.as_str()), p.name.as_str(), status, p.signed_in)
-                    })
-                    .collect();
-                entries.insert(
-                    entries.len().min(1),
+                let entries = graff_provider_entries(
+                    providers,
                     (None, "ChatGPT (old Codex)", openai, openai_signed_in),
                 );
                 div()
@@ -2373,12 +2406,21 @@ impl AccountsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let initial: SharedString = name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
+        // Claude Agent wears the Claude mark; the rest show their initial.
+        let avatar: AnyElement = if provider == Some(CLAUDE_AGENT_ID) {
+            crate::icons::icon(crate::icons::CLAUDE_MARK)
+                .size(px(16.0))
+                .text_color(crate::icons::claude_brand())
+                .into_any_element()
+        } else {
+            let initial: SharedString = name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".into())
+                .into();
+            initial.into_any_element()
+        };
         let busy = provider.is_some() && self.busy_graff.as_deref() == provider;
         let actions = provider.map(str::to_string).map(|id| {
             let sign_out_id = id.clone();
@@ -2452,7 +2494,7 @@ impl AccountsPage {
                     .text_size(crate::typography::ui_rems(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
-                    .child(initial),
+                    .child(avatar),
             )
             .child(
                 div()
@@ -3449,6 +3491,87 @@ impl Render for AccountsPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    fn graff_row(id: &str, name: &str, signed_in: bool) -> GraffLoginProvider {
+        GraffLoginProvider {
+            id: id.into(),
+            name: name.into(),
+            signed_in,
+            account: None,
+            plan_usage: None,
+        }
+    }
+
+    #[test]
+    fn graff_providers_lead_with_claude_agent() {
+        let providers: Vec<_> = GRAFF_LOGIN_PROVIDERS
+            .iter()
+            .map(|(id, name)| graff_row(id, name, false))
+            .collect();
+        let codex = (None, "ChatGPT (old Codex)", "codex".to_string(), false);
+        let order: Vec<_> = graff_provider_entries(&providers, codex)
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "Claude Agent",
+                "xAI",
+                "ChatGPT (old Codex)",
+                "Kimi",
+                "Z.AI",
+                "Anthropic Console",
+            ]
+        );
+        // Without Claude Agent the card keeps the engine's order.
+        let without: Vec<_> = providers
+            .iter()
+            .filter(|p| p.id != CLAUDE_AGENT_ID)
+            .cloned()
+            .collect();
+        let codex = (None, "ChatGPT (old Codex)", "codex".to_string(), false);
+        let order: Vec<_> = graff_provider_entries(&without, codex)
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "xAI",
+                "ChatGPT (old Codex)",
+                "Kimi",
+                "Z.AI",
+                "Anthropic Console"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_agent_status_names_the_claude_plan() {
+        let mut agent = graff_row(CLAUDE_AGENT_ID, "Claude Agent", false);
+        assert_eq!(
+            graff_provider_status(&agent),
+            "Use your Claude plan through Claude Code"
+        );
+        agent.signed_in = true;
+        assert_eq!(
+            graff_provider_status(&agent),
+            "Uses your Claude Code login · your Claude plan"
+        );
+        agent.account = Some("a@b.c".into());
+        assert_eq!(
+            graff_provider_status(&agent),
+            "Signed in as a@b.c · your Claude plan"
+        );
+        // Other providers keep the generic lines.
+        let xai = graff_row("xai", "xAI", true);
+        assert_eq!(graff_provider_status(&xai), "Signed in on this device");
+        assert_eq!(
+            graff_provider_status(&graff_row("kimi", "Kimi", false)),
+            "Not signed in"
+        );
+    }
 
     #[test]
     fn chatgpt_row_is_ready_only_with_plan_usage() {
