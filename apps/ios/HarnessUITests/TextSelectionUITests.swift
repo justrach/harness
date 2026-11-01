@@ -1,0 +1,67 @@
+import XCTest
+
+@MainActor
+final class TextSelectionUITests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        app = XCUIApplication()
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-route", "chat:chat-tabs",
+                               "-textselection", "-phoneSplit", "off"]
+        app.launch()
+        XCTAssertTrue(app.otherElements["transcript"].waitForExistence(timeout: 15))
+    }
+
+    private var output: XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@ OR value BEGINSWITH %@", "Select this word", "Select this word"
+        )).firstMatch
+    }
+
+    private func capture(_ name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func menu(_ title: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
+    }
+
+    private func copyAndPaste() -> String {
+        let copy = menu("Copy")
+        XCTAssertTrue(copy.waitForExistence(timeout: 5), "Long-press must show the native Copy menu")
+        capture("output-selection")
+        copy.tap()
+        let composer = app.descendants(matching: .any)["composer-input"].firstMatch
+        composer.tap()
+        composer.press(forDuration: 1.2)
+        let paste = menu("Paste")
+        XCTAssertTrue(paste.waitForExistence(timeout: 5))
+        paste.tap()
+        return composer.value as? String ?? ""
+    }
+
+    func testLongPressSelectsOneWordAndCopiesOnlyThatWord() {
+        XCTAssertTrue(output.waitForExistence(timeout: 10))
+        capture("output-before-selection")
+        output.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 22, dy: 13))
+            .press(forDuration: 1.2)
+        XCTAssertEqual(copyAndPaste(), "Select")
+    }
+
+    func testLongPressDragCopiesMultipleWordsAcrossLines() {
+        XCTAssertTrue(output.waitForExistence(timeout: 10))
+        let start = output.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 22, dy: 13))
+        // iOS keeps the selection endpoint above the finger so it remains
+        // visible. Move below the second line, not just onto its glyphs.
+        let end = output.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 180, dy: 95))
+        start.press(forDuration: 1.2, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.5)
+        let copied = copyAndPaste()
+        XCTAssertTrue(copied.hasPrefix("Select this word"), "Copied: \(copied)")
+        XCTAssertTrue(copied.contains("multiple lines"), "Drag must extend selection past the first line: \(copied)")
+        XCTAssertFalse(copied.contains("stays unselected"), "Copy must not copy the whole message")
+    }
+}

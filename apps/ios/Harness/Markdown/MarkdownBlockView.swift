@@ -143,23 +143,18 @@ struct MarkdownBlockView: View {
     let block: MDBlock
     /// Identity for async highlight caching (row id).
     var cacheKey: String = ""
+    var veil: RowVeil? = nil
 
     var body: some View {
         switch block {
         case .paragraph(let runs):
-            runs.styled()
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(MD.lineHeight - MD.textSize - 4)
-                .fixedSize(horizontal: false, vertical: true)
+            SelectableMarkdownText(runs: runs, veil: veil)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .tint(Theme.text)
 
         case .heading(let level, let runs):
             let m = MD.headingMetrics(level)
-            runs.styled(size: m.size, weight: .semibold)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(m.line - m.size - 4)
-                .fixedSize(horizontal: false, vertical: true)
+            SelectableMarkdownText(runs: runs, size: m.size, weight: .semibold,
+                                   lineHeight: m.line, veil: veil)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
         case .codeBlock(let language, let code):
@@ -191,6 +186,7 @@ struct CodeBlockView: View {
 
     @State private var spans: [[TokenSpan]] = []
     @ScaledMetric(relativeTo: .body) private var codeLineHeight = MD.codeLineHeight
+    @ScaledMetric(relativeTo: .body) private var codeTextSize = MD.codeTextSize
 
     private var lines: [String] { code.components(separatedBy: "\n") }
 
@@ -204,19 +200,19 @@ struct CodeBlockView: View {
                     .padding(.vertical, 5)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(ink(0.02))
+                    .contextMenu {
+                        Button {
+                            UIPasteboard.general.string = code
+                        } label: {
+                            Label("Copy code", systemImage: "doc.on.doc")
+                        }
+                    }
                     .overlay(alignment: .bottom) {
                         Rectangle().fill(Theme.border).frame(height: 1)
                     }
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { ix, line in
-                        Text(attributedLine(line, spans: ix < spans.count ? spans[ix] : []))
-                            .font(Theme.mono(MD.codeTextSize))
-                            .lineLimit(1)
-                            .frame(height: codeLineHeight, alignment: .leading)
-                    }
-                }
+                SelectableText(text: attributedCode, wraps: false)
                 .padding(.horizontal, MD.codePaddingX)
                 .padding(.vertical, MD.codePaddingY)
             }
@@ -227,13 +223,6 @@ struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: Theme.panelRadius)
                 .strokeBorder(hairline(0.06), lineWidth: 1)
         )
-        .contextMenu {
-            Button {
-                UIPasteboard.general.string = code
-            } label: {
-                Label("Copy code", systemImage: "doc.on.doc")
-            }
-        }
         .task(id: code) {
             guard let lang = HighlightLanguage.forTag(language) else { return }
             let source = code
@@ -244,22 +233,33 @@ struct CodeBlockView: View {
         }
     }
 
-    /// Recolor a line by its token spans — same string, same font, paint only.
-    private func attributedLine(_ line: String, spans: [TokenSpan]) -> AttributedString {
-        var attr = AttributedString(line)
-        attr.foregroundColor = Theme.text.opacity(0.9)
-        guard !spans.isEmpty else { return attr }
-        let chars = Array(line)
-        for span in spans {
-            guard span.range.lowerBound < chars.count else { continue }
-            let upper = min(span.range.upperBound, chars.count)
-            let prefix = String(chars[0..<span.range.lowerBound])
-            let body = String(chars[span.range.lowerBound..<upper])
-            guard let start = attr.index(afterCharacters: prefix.count),
-                  let end = attr.index(afterCharacters: prefix.count + body.count) else { continue }
-            attr[start..<end].foregroundColor = color(for: span.cls)
+    /// One text storage preserves literal newlines when selecting across code
+    /// lines. Syntax highlighting remains a paint-only update.
+    private var attributedCode: NSAttributedString {
+        let result = NSMutableAttributedString(string: "")
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = codeLineHeight
+        for (ix, line) in lines.enumerated() {
+            if ix > 0 { result.append(NSAttributedString(string: "\n")) }
+            let attr = NSMutableAttributedString(string: line, attributes: [
+                .font: Theme.monoUI(codeTextSize), .paragraphStyle: paragraph,
+                .foregroundColor: UIColor(Theme.text.opacity(0.9)),
+            ])
+            let chars = Array(line)
+            for span in ix < spans.count ? spans[ix] : [] {
+                guard span.range.lowerBound < chars.count else { continue }
+                let upper = min(span.range.upperBound, chars.count)
+                let start = String(chars[..<span.range.lowerBound]).utf16.count
+                let length = String(chars[span.range.lowerBound..<upper]).utf16.count
+                attr.addAttribute(.foregroundColor, value: UIColor(color(for: span.cls)),
+                                  range: NSRange(location: start, length: length))
+            }
+            result.append(attr)
         }
-        return attr
+        // Newline characters need the same metrics, including empty code lines.
+        result.addAttributes([.font: Theme.monoUI(codeTextSize), .paragraphStyle: paragraph],
+                             range: NSRange(location: 0, length: result.length))
+        return result
     }
 
     private func color(for cls: TokenClass) -> Color {
@@ -390,9 +390,7 @@ struct TableBlockView: View {
         let alignment: Alignment = column < align.count
             ? (align[column] == .center ? .center : align[column] == .right ? .trailing : .leading)
             : .leading
-        return runs.styled(weight: weight)
-            .textRenderer(InlineCodeRenderer())
-            .lineSpacing(MD.lineHeight - MD.textSize - 4)
+        return SelectableMarkdownText(runs: runs, weight: weight == .bold ? .bold : .regular)
             .padding(12)
             .frame(minWidth: 48, maxWidth: .infinity, alignment: alignment)
     }

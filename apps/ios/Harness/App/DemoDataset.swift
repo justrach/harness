@@ -243,6 +243,15 @@ final class DemoDataset {
             seedAppshots(store)
         } else if ProcessInfo.processInfo.arguments.contains("-longhistory") {
             store.setEntries(BenchRunner.syntheticEntries(turns: 200))
+        } else if ProcessInfo.processInfo.arguments.contains("-textselection") {
+            store.setEntries([
+                MessageEntry(id: "selection-ask", role: .user,
+                    parts: [.text(id: "t0", text: "Show a response I can select and copy.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "selection-reply", role: .assistant,
+                    parts: [.text(id: "t0", text: "Select this word and drag across multiple lines to copy only the highlighted passage. The rest of this response stays unselected.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
+            ])
         } else if ProcessInfo.processInfo.arguments.contains("-links") {
             // Link-tap UI checks: a settled reply with a bare URL and a
             // markdown link, both loopback so a tap opens the host-link sheet.
