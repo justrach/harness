@@ -92,7 +92,9 @@ struct HomeView: View {
     /// the single stack, unless the person turned on the phone split and the
     /// window has room for it.
     private var listBesideSession: Bool {
-        HomeColumns.listBesideSession(
+        // The flat Duo rig lays home out as the inner display lying flat instead (DuoChat.demoFlat).
+        guard !DuoChat.demoFlat else { return false }
+        return HomeColumns.listBesideSession(
             regularWidth: horizontalSizeClass == .regular,
             regularHeight: verticalSizeClass == .regular,
             phone: UIDevice.current.userInterfaceIdiom == .phone,
@@ -100,17 +102,23 @@ struct HomeView: View {
     }
 
     private var flatDuo: Bool {
-        DuoChat.isFlat(phone: UIDevice.current.userInterfaceIdiom == .phone,
+        DuoChat.isFlat(phone: UIDevice.current.userInterfaceIdiom == .phone || DuoChat.demoFlat,
                        regularWidth: horizontalSizeClass == .regular,
                        regularHeight: verticalSizeClass == .regular, fold: fold)
     }
 
+    /// Flat Duo: the session list beside an open session, off until the session's sidebar button asks for it.
+    /// The inner display is about 669pt wide, so a 296pt list left the chat a cramped column; alone, the
+    /// session has the whole display and its back button returns to the list.
+    @AppStorage(DuoChat.flatListKey) private var flatListShown = false
+
     private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
 
-    /// Wide Duo with a session open and Inspect closed: the session list stands beside it.
+    /// Wide Duo with a session open, Inspect closed and the list asked for: the session list stands beside it.
     private var flatSidebar: Bool {
-        guard flatDuo, case .chat(let id) = path.last else { return false }
-        return !InspectState.of(id).open
+        guard case .chat(let id) = path.last else { return false }
+        return DuoChat.listBesideSession(flat: flatDuo, listShown: flatListShown, sessionOpen: true,
+                                         inspectOpen: InspectState.of(id).open)
     }
 
     /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
@@ -445,7 +453,11 @@ struct HomeView: View {
                         sidebar
                             .navigationDestination(for: Route.self) {
                                 // iPhone Duo lying flat: the session beside the list, or chat and Inspect.
-                                destination($0).environment(\.duoFlat, flatDuo)
+                                destination($0)
+                                .environment(\.duoFlat, flatDuo)
+                                .environment(\.toggleFlatList, flatDuo ? {
+                                    withAnimation(Motion.collapse) { flatListShown.toggle() }
+                                } : nil)
                             }
                     }
                 }
