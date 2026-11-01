@@ -21,6 +21,8 @@ struct SessionView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// iPhone Duo lying flat: chat left of the fold, Inspect right (DuoInspect).
     @Environment(\.duoFlat) private var duoFlat
+    /// Flat Duo: bring the session list in beside this session, or put it away (HomeView).
+    @Environment(\.toggleFlatList) private var toggleFlatList
     /// Beside the list: the session's page is lifted (ContentPlane).
     @Environment(\.liftedPlane) private var liftedPlane
     /// Flat Duo: the chat column's width, for the rounded seam at the fold.
@@ -92,8 +94,9 @@ struct SessionView: View {
     }
 
     private var headerInset: CGFloat {
-        // A Duo's back button is in the side bar (folded, or lying flat), so the title can start at the edge.
-        duoChat && (horizontalSizeClass == .compact || duoFlat) ? 32 : Self.headerChromeInset
+        DuoChat.headerInset(duoChat: duoChat, compactWidth: horizontalSizeClass == .compact, flat: duoFlat,
+                            listToggle: toggleFlatList != nil, chrome: Self.headerChromeInset,
+                            hitTarget: Theme.hitTarget)
     }
 
     /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
@@ -282,6 +285,16 @@ struct SessionView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(paneChrome ? .hidden : .automatic, for: .navigationBar)  // a Max draws its own header
         .toolbar {
+            if let toggleFlatList {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: toggleFlatList) {
+                        Image(systemName: "sidebar.leading")
+                            .fontWeight(.semibold)
+                    }
+                    .accessibilityLabel("Show or hide the session list")
+                    .accessibilityIdentifier("duo-flat-toggle-list")
+                }
+            }
             if let chat {
                 // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.

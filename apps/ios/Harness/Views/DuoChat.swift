@@ -12,6 +12,8 @@ import SwiftUI
 enum DuoChat {
     /// UserDefaults: this device has reported a fold or its inner display, so it is an iPhone Duo.
     static let foldableKey = "foldableDevice"
+    /// UserDefaults: the session list stands beside an open session on the inner display lying flat.
+    static let flatListKey = "duoFlatListShown"
 
     /// A window that only an iPhone Duo has: an active fold, or a phone window regular both ways (the inner
     /// display lying flat).
@@ -25,9 +27,25 @@ enum DuoChat {
         fold == .none && phone && regularWidth && regularHeight
     }
 
-    /// Rig (DEBUG): `-demo-duo-flat` lays a session out as on a Duo lying flat, chat and Inspect, on any wide
-    /// simulator. The Duo simulator has no command to unfold, so its inner display can't be captured from a
-    /// script.
+    /// Lying flat, the session list stands beside an open session only once the person asks for it (the
+    /// session bar's sidebar button), and never beside Inspect, which takes its place. Beside a 296pt list the
+    /// chat was left a cramped column of the 669pt display.
+    static func listBesideSession(flat: Bool, listShown: Bool, sessionOpen: Bool, inspectOpen: Bool) -> Bool {
+        flat && listShown && sessionOpen && !inspectOpen
+    }
+
+    /// Room the session bar keeps before its title. Folded on the cover display the back button is in the
+    /// side bar, so the title starts at the edge. Lying flat the session is pushed onto the list's stack: its
+    /// bar has the back button and the list's toggle, which the folded inset let the title slide under.
+    static func headerInset(duoChat: Bool, compactWidth: Bool, flat: Bool, listToggle: Bool,
+                            chrome: CGFloat, hitTarget: CGFloat) -> CGFloat {
+        if flat { return chrome + (listToggle ? hitTarget + 8 : 0) }
+        return duoChat && compactWidth ? 32 : chrome
+    }
+
+    /// Rig (DEBUG): `-demo-duo-flat` lays home and a session out as on a Duo lying flat (one stack, the list
+    /// beside a session when asked for, chat and Inspect) on any wide simulator. The Duo simulator has no
+    /// command to unfold, so its inner display can't be captured from a script.
     #if DEBUG
     static let demoFlat = ProcessInfo.processInfo.arguments.contains("-demo-duo-flat")
     #else
@@ -38,6 +56,8 @@ enum DuoChat {
 extension EnvironmentValues {
     /// The session is on an iPhone Duo: chips, diff card and the status pill (DuoChat).
     @Entry var duoChat: Bool = false
+    /// Flat Duo: show or hide the session list beside the open session (HomeView's `flatListShown`).
+    @Entry var toggleFlatList: (() -> Void)? = nil
 }
 
 /// The folded chat's type scale: two sizes plus mono, two weights.

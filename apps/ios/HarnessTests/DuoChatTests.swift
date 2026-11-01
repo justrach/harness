@@ -52,4 +52,28 @@ final class DuoChatTests: XCTestCase {
         XCTAssertFalse(DuoChat.isFoldableWindow(phone: true, regularWidth: true, regularHeight: false, fold: .none))
         XCTAssertFalse(DuoChat.isFoldableWindow(phone: false, regularWidth: true, regularHeight: true, fold: .none))
     }
+
+    /// Lying flat with a session open, the list stays out of the way until asked for (it was always beside
+    /// the session, leaving the chat a cramped column), and Inspect always takes its place.
+    func testFlatDuoKeepsTheListHiddenUntilAskedFor() {
+        XCTAssertFalse(DuoChat.listBesideSession(flat: true, listShown: false, sessionOpen: true, inspectOpen: false))
+        XCTAssertTrue(DuoChat.listBesideSession(flat: true, listShown: true, sessionOpen: true, inspectOpen: false))
+        XCTAssertFalse(DuoChat.listBesideSession(flat: true, listShown: true, sessionOpen: true, inspectOpen: true))
+        XCTAssertFalse(DuoChat.listBesideSession(flat: true, listShown: true, sessionOpen: false, inspectOpen: false))
+        XCTAssertFalse(DuoChat.listBesideSession(flat: false, listShown: true, sessionOpen: true, inspectOpen: false))
+    }
+
+    /// Lying flat the session bar has a back button (and the list's toggle) before the title, so the title
+    /// must leave them room; folded on the cover display it starts at the edge as before.
+    func testFlatDuoTitleLeavesRoomForTheBackButtonAndListToggle() {
+        let inset = { (flat: Bool, toggle: Bool, compact: Bool) in
+            DuoChat.headerInset(duoChat: true, compactWidth: compact, flat: flat, listToggle: toggle,
+                                chrome: 100, hitTarget: 44)
+        }
+        XCTAssertEqual(inset(true, true, false), 152)
+        XCTAssertEqual(inset(true, false, false), 100)
+        XCTAssertEqual(inset(false, false, true), 32)
+        XCTAssertEqual(DuoChat.headerInset(duoChat: false, compactWidth: true, flat: false, listToggle: false,
+                                           chrome: 100, hitTarget: 44), 100)
+    }
 }
