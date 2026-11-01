@@ -1191,7 +1191,9 @@ struct ChatRow: View {
 
                 // Line 3: the branch when the engine stamped one; the Working
                 // spinner rides bottom-right. Always laid out, so every row is
-                // the same height.
+                // the same height. Left out while rows show less: the corner
+                // already says Working.
+                if ChatRow.showsCodeDetails {
                 HStack(spacing: 4) {
                     if ChatRow.showsCodeDetails,
                        let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
@@ -1210,6 +1212,7 @@ struct ChatRow: View {
                     }
                 }
                 .padding(.trailing, reservesPullRequest ? 46 : 0)
+                }
             }
         }
         .padding(.horizontal, ChatRow.insetH)
