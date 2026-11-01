@@ -1,5 +1,6 @@
-//! The session footer under an open chat's composer (pickers.rs
-//! `render_footer`): for a project with git, read-only labels at the left,
+//! The footer under an open chat's composer (composer.rs `composer-footer`):
+//! the model chip at its leading edge, then (pickers.rs `render_footer`)
+//! for a project with git, read-only labels,
 //! where the chat runs ("Graff worktree", "Worktree" or "Local checkout")
 //! and its branch (else "No ref"); a Graff worktree adds its actions
 //! (`render_graff_worktree_actions`). At the right, the branch's pull
@@ -54,16 +55,23 @@ pub fn checkoutOf(chat: workspace.Chat, space: workspace.Space) Checkout {
     return if (std.mem.eql(u8, cwd, space.path)) .local else .worktree;
 }
 
-/// The footer's row, `w` wide, for the open chat; nothing without a
-/// project that has git.
+/// The footer's row, `w` wide: `px(10)`, the model chip, then the open
+/// chat's workspace labels when its project has git.
 pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+    const row = ui.div(c).row().w(w).h(height).px(10).gap(4).itemsCenter().clip();
+    defer row.end();
+    @import("view_composer.zig").chip(c, a, k);
+    session(c, a, k);
+}
+
+fn session(c: *ui.Context, a: *App, k: theme.Colors) void {
     const id = a.selected orelse return;
     const chat = a.findChat(id) orelse return;
     const space = a.findSpace(chat.space_id) orelse return;
     if (!space.git) return;
     const kind = checkoutOf(chat, space);
-    // `workspace_footer_row().px(10).pr_0()`.
-    const row = ui.div(c).row().w(w).h(height).pl(10).gap(4).itemsCenter().clip();
+    // The slot's `workspace_footer_row().px(10)`.
+    const row = ui.div(c).row().grow().w(0).hFull().px(10).gap(4).itemsCenter().clip();
     defer row.end();
     label(c, k, kind.icon(), kind.label());
     label(c, k, .@"git-branch", chat.row_branch orelse "No ref");

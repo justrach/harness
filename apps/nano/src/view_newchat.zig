@@ -1,28 +1,63 @@
 //! A new chat, before its first message (crates/ui/src/composer.rs,
 //! composer_dock.rs, starters.rs): the composer floats a little below the
-//! middle, expanded, under "New session in" and the project's name (which
-//! picks another), with starter prompts below it while it is empty.
+//! middle, expanded, under a greeting ("Hi Rach. What should Graff do?")
+//! and "Working in" the project's name (which picks another). The footer
+//! under it leads with the model chip; while nothing is typed, a 2×2 grid
+//! of starter tiles sits below.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const icons = @import("icons.zig");
+const kit = @import("view_kit.zig");
 const composer = @import("view_composer.zig");
 const transcript_view = @import("view_transcript.zig");
 const sidebar = @import("view_sidebar.zig");
 const App = @import("app.zig").App;
 
-/// The heading's height: its two lines and the 2 between them.
-const heading_h: f32 = 12 * 1.618 + 2 + 22 * 1.618;
+/// The heading's height: the greeting, the 4 under it and "Working in".
+const heading_h: f32 = 24 * phi + 4 + 13 * phi;
 
-const Starter = struct { icon: icons.Name, title: []const u8, prompt: []const u8, needs_project: bool = false };
+const Starter = struct {
+    icon: icons.Name,
+    title: []const u8,
+    /// One line on its tile saying what you get.
+    blurb: []const u8,
+    prompt: []const u8,
+    needs_project: bool = false,
+};
 
 const starters = [_]Starter{
-    .{ .icon = .@"magic-stick-3", .title = "Build something new", .prompt = "Build something new from scratch. Create a new folder for it under ~/Projects, set it up, and get a first working version running. Ask me anything you need to know before you start.\n\nMy idea: " },
-    .{ .icon = .magnifer, .title = "Research a topic", .prompt = "Research the topic below and give me a concise, well-sourced write-up: key takeaways first, then the details, with links to your sources.\n\nTopic: " },
-    .{ .icon = .global, .title = "Plan a launch", .prompt = "Help me take my product to market. Ask me about the product, who it's for, and my goals, then draft positioning, a go-to-market plan, and landing page copy.\n\nThe product: " },
-    .{ .icon = .@"file-code", .title = "Tour this project", .prompt = "Give me a tour of this project: what it does, how it's organized, how to run it, and where I'd start making changes.", .needs_project = true },
+    .{ .icon = .@"magic-stick-3", .title = "Build something new", .blurb = "Describe an idea. The agent makes a folder, writes the code, and runs it.", .prompt = "Build something new from scratch. Create a new folder for it under ~/Projects, set it up, and get a first working version running. Ask me anything you need to know before you start.\n\nMy idea: " },
+    .{ .icon = .magnifer, .title = "Research a topic", .blurb = "Get a sourced write-up on anything, with the key takeaways up front.", .prompt = "Research the topic below and give me a concise, well-sourced write-up: key takeaways first, then the details, with links to your sources.\n\nTopic: " },
+    .{ .icon = .global, .title = "Plan a launch", .blurb = "Positioning, a go-to-market plan, and landing page copy for your product.", .prompt = "Help me take my product to market. Ask me about the product, who it's for, and my goals, then draft positioning, a go-to-market plan, and landing page copy.\n\nThe product: " },
+    .{ .icon = .@"file-code", .title = "Tour this project", .blurb = "Learn what the code does, how it's organized, and where to start.", .prompt = "Give me a tour of this project: what it does, how it's organized, how to run it, and where I'd start making changes.", .needs_project = true },
 };
+
+/// A tile's height and the gap between tiles, across and down
+/// (`TILE_HEIGHT`, `TILE_GAP`).
+const tile_h: f32 = 64;
+const tile_gap: f32 = 8;
+
+/// The greeting over the composer (`starters::greeting`): "Hi Rach. What
+/// should Graff do?", by the first name only and never by an email; else
+/// just the question.
+pub fn greeting(buf: []u8, name: ?[]const u8) []const u8 {
+    const question = "What should Graff do?";
+    const n = std.mem.trim(u8, name orelse return question, " \t\n");
+    var words = std.mem.tokenizeAny(u8, n, " \t\n");
+    const first = words.next() orelse return question;
+    if (std.mem.indexOfScalar(u8, first, '@') != null) return question;
+    return std.fmt.bufPrint(buf, "Hi {s}. {s}", .{ first, question }) catch question;
+}
+
+test "the greeting uses the first name only (greeting_uses_the_first_name_only)" {
+    var b: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("Hi Rach. What should Graff do?", greeting(&b, "Rach Pradhan"));
+    try std.testing.expectEqualStrings("What should Graff do?", greeting(&b, "  "));
+    try std.testing.expectEqualStrings("What should Graff do?", greeting(&b, "rach@example.com"));
+    try std.testing.expectEqualStrings("What should Graff do?", greeting(&b, null));
+}
 
 pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The composer's column is the main column's, 768 at most, with 16 on
@@ -36,34 +71,45 @@ pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (transcript_view.paneHeight(c, a)) |h| pill_top = h * 0.5 - 72;
     const area = ui.div(c).column().wFull().grow().itemsCenter();
     defer area.end();
-    // The heading ends 42 above the pill; it's 57 tall.
+    // The heading ends 42 above the pill (its 60-point slot, bottom-aligned,
+    // 28 + 14 over the pill).
     _ = c.leaf(.{ .height = .{ .px = @max(pill_top - 42 - heading_h, 0) } }, .none, null);
     heading(c, a, k, w - 20);
     _ = c.leaf(.{ .height = .{ .px = 42 - 28 } }, .none, null);
     pickersAbove(c, a, k, w - 20);
     _ = c.leaf(.{ .height = .{ .px = 8 } }, .none, null);
     composer.pill(c, a, k, w, .expanded, 26);
-    _ = c.leaf(.{ .height = .{ .px = 10 } }, .none, null);
-    pickersBelow(c, a, k, w - 20);
-    _ = c.leaf(.{ .height = .{ .px = 44 - 10 - 20 } }, .none, null);
+    // The footer, 8 under the pill: the model chip, then for a git
+    // project the checkout and the ref a session starts from.
+    _ = c.leaf(.{ .height = .{ .px = 8 } }, .none, null);
+    footer(c, a, k, w);
+    // The grid's slot, 12 under the composer's box (whose foot is 8 above
+    // the footer's).
+    _ = c.leaf(.{ .height = .{ .px = 12 - 8 } }, .none, null);
     // Only while nothing at all is typed, a space included.
-    if (a.composer.text().len == 0) starterRow(c, a, k, w);
+    if (a.composer.text().len == 0) starterGrid(c, a, k, w);
 }
 
 const phi: f32 = 1.618;
 
+/// `render_new_thread_heading`: the greeting, then "Working in" and the
+/// project (or "Working in your home folder"), which picks another.
 fn heading(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const box = ui.div(c).column().w(w).gap(2);
+    const box = ui.div(c).column().w(w).gap(4);
     defer box.end();
+    var buf: [128]u8 = undefined;
+    const name = if (a.account.user) |u| u.name else null;
+    kit.ellipsisText(c, greeting(&buf, name), .{ .size = 24, .line_height = 24 * phi, .weight = .semibold, .color = k.text }, w);
     const space = a.newChatSpace();
-    ui.text(c, if (space != null) "New session in" else "New session in your home folder", .{ .size = 12, .line_height = 12 * phi, .color = k.muted.alpha(0.7) });
-    const t = ui.div(c).row().gap(6).itemsCenter();
+    const t = ui.div(c).row().gap(4).itemsCenter();
     defer t.end();
     const hot = t.hovered();
     if (t.clicked() and a.spaces.items.len > 0) a.view.space_menu = !a.view.space_menu;
     if (c.rects.get(c.node(t.index).id)) |r| a.view.space_anchor = r;
-    ui.text(c, if (space) |s| s.name else "No project", .{ .size = 22, .line_height = 22 * phi, .weight = .semibold, .color = if (hot) k.text else k.text.alpha(0.9) });
-    icons.icon(c, .@"alt-arrow-down", 16, k.muted.alpha(0.6), 0);
+    const color = if (hot) k.text else k.muted;
+    ui.text(c, if (space != null) "Working in" else "Working in your home folder", .{ .size = 13, .line_height = 13 * phi, .color = color });
+    if (space) |s| kit.ellipsisText(c, s.name, .{ .size = 13, .line_height = 13 * phi, .weight = .medium, .color = color }, w - 80 - 16);
+    icons.icon(c, .@"alt-arrow-down", 12, k.muted.alpha(0.6), 0);
 }
 
 /// Over the pill's right end: the device the session runs on and its
@@ -76,11 +122,12 @@ fn pickersAbove(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     if (footerChip(c, k, .folder, if (space) |s| s.name else "No project") and a.spaces.items.len > 0) a.view.space_menu = !a.view.space_menu;
 }
 
-/// Under the pill's left end, for a git project: the checkout and the ref
-/// a session starts from.
-fn pickersBelow(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const r = ui.div(c).row().w(w).h(20).gap(4);
+/// `composer-footer` on a new chat: `px(10)`, the model chip, then for a
+/// git project the checkout and the ref a session starts from.
+fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+    const r = ui.div(c).row().w(w).h(24).px(10).gap(4).itemsCenter().clip();
     defer r.end();
+    composer.chip(c, a, k);
     const space = a.newChatSpace() orelse return;
     if (!space.git) return;
     if (footerChip(c, k, .folder, "Current checkout")) a.setNotice("Choosing a checkout isn't in Harness Nano yet.");
@@ -98,11 +145,9 @@ fn footerChip(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const 
     return b.clicked();
 }
 
-/// The starters under an empty composer, as chips in rows that wrap at
-/// the composer's width, each row centred, 6 points apart either way
-/// (`render_starter_chips`: flex_wrap, justify_center, gap 6).
-fn starterRow(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const st: ui.TextStyle = .{ .size = 12 };
+/// The starters under an empty composer (`render_starter_chips`): two to
+/// a row, 8 apart either way; a lone last tile keeps its half width.
+fn starterGrid(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const has_project = a.newChatSpace() != null;
     var shown: [starters.len]Starter = undefined;
     var n: usize = 0;
@@ -111,40 +156,32 @@ fn starterRow(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         shown[n] = s;
         n += 1;
     }
-    const box = ui.div(c).column().w(w).gap(6).itemsCenter();
+    const tile_w = @max(0, (w - tile_gap) / 2);
+    const box = ui.div(c).column().w(w).gap(tile_gap);
     defer box.end();
     var i: usize = 0;
-    while (i < n) {
-        // As many chips as fit on this row; always at least one.
-        var end = i + 1;
-        var used = chipWidth(c, shown[i], st);
-        while (end < n) : (end += 1) {
-            const next = used + 6 + chipWidth(c, shown[end], st);
-            if (next > w) break;
-            used = next;
-        }
-        const row = ui.div(c).row().gap(6).justifyCenter();
+    while (i < n) : (i += 2) {
+        const row = ui.div(c).row().w(w).gap(tile_gap);
         defer row.end();
-        for (shown[i..end]) |s| chip(c, a, k, s, st);
-        i = end;
+        for (shown[i..@min(n, i + 2)]) |s| tile(c, a, k, s, tile_w);
     }
 }
 
-/// A chip's width: 10 points either side, the 13-point icon, 6 between.
-/// Its border, `px(10)` inside it, the icon, the gap and the title.
-fn chipWidth(c: *ui.Context, s: Starter, st: ui.TextStyle) f32 {
-    return 1 + 10 + 13 + 6 + c.text.width(s.title, st) + 10 + 1;
-}
-
-fn chip(c: *ui.Context, a: *App, k: theme.Colors, s: Starter, st: ui.TextStyle) void {
+/// `starters::tile`: a solid card, the accent icon and the title over a
+/// one-line blurb. GPUI's `border_1` sits inside the box, so its `px(14)`
+/// starts a point in.
+fn tile(c: *ui.Context, a: *App, k: theme.Colors, s: Starter, w: f32) void {
     ui.key(c, s.title);
-    // GPUI's `border_1` sits inside the box, so its `px(10)` starts a point in.
-    const ch = ui.div(c).row().h(28).px(10 + 1).gap(6).itemsCenter().rounded(14).border(k.border).borderW(1).hover(k.hover);
-    defer ch.end();
-    const hot = ch.hovered();
-    if (ch.clicked()) a.composer.set(s.prompt);
-    icons.icon(c, s.icon, 13, if (hot) k.text else k.muted, 0);
-    var t = st;
-    t.color = if (hot) k.text else k.muted;
-    ui.text(c, s.title, t);
+    var t = ui.div(c).column().w(w).h(tile_h).px(14 + 1).gap(4).justifyCenter().rounded(10).border(k.border).borderW(1).bg(k.card);
+    if (t.hovered()) t = t.bg(k.raised);
+    defer t.end();
+    if (t.clicked()) a.composer.set(s.prompt);
+    const room = @max(0, w - 2 * 15);
+    {
+        const head = ui.div(c).row().gap(8).itemsCenter();
+        defer head.end();
+        icons.icon(c, s.icon, 15, k.accent, 0);
+        kit.ellipsisText(c, s.title, .{ .size = 13, .line_height = 13 * phi, .weight = .medium, .color = k.text }, @max(0, room - 15 - 8));
+    }
+    kit.ellipsisText(c, s.blurb, .{ .size = 12, .line_height = 12 * phi, .color = k.muted }, room);
 }

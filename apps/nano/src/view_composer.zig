@@ -1,9 +1,9 @@
 //! The composer, as the GPUI composer draws it (crates/ui/src/composer.rs,
 //! pickers.rs): one rounded pill with attach and dictate on the left, the
-//! input ("Do anything…"), the model chip (the agent's mark, the model,
-//! the reasoning level) and a round send button that becomes Stop while a
-//! run goes with nothing typed. It expands with a line break, and always on
-//! a new chat.
+//! input ("Do anything…") and a round accent send button that becomes Stop
+//! while a run goes with nothing typed. It expands with a line break, and
+//! always on a new chat. The model chip (the agent's mark, the model, the
+//! reasoning level) leads the footer under the pill.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -43,7 +43,7 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     const expanded = attachments.count(a) > 0 or composerFlip(
         a.view.composer_expanded,
         c.text.width(a.composer.text(), .{ .size = 14, .line_height = 22.75 }),
-        compactCapacity(c, a, w),
+        compactCapacity(a, w),
         std.mem.indexOfScalar(u8, a.composer.text(), '\n') != null,
     );
     a.view.composer_expanded = expanded;
@@ -81,17 +81,11 @@ pub fn composerFlip(expanded: bool, text_width: f32, capacity: f32, newline: boo
     return if (expanded) text_width >= capacity - 32 else text_width > capacity;
 }
 
-fn compactCapacity(c: *ui.Context, a: *App, w: f32) f32 {
-    const target = a.target();
-    const st: ui.TextStyle = .{ .size = 12, .weight = .medium };
-    var chip_w: f32 = 12 + 16;
-    if (a.models.items.len == 0 and target.model == null) {
-        chip_w += 6 + 56;
-    } else {
-        chip_w += 6 + c.text.width(a.modelLabel(target.model), st);
-        if (target.reasoning) |level| chip_w += 6 + c.text.width(rules.reasoningLabel(level), st);
-    }
-    return @max(0, w - 100 - (if (dictate.shown(a)) @as(f32, 30) else 0) - @min(248, chip_w));
+/// The compact input's width less 8 (`compact_capacity`): the pill less
+/// its edges, attach (and the mic), Send and their insets. The model chip
+/// no longer shares the line.
+fn compactCapacity(a: *App, w: f32) f32 {
+    return @max(0, w - 100 - (if (dictate.shown(a)) @as(f32, 30) else 0));
 }
 
 test "composer expansion uses GPUI's width threshold and collapse hysteresis" {
@@ -116,7 +110,6 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radi
     if (shape == .compact) {
         attachButtons(c, a, k);
         input(c, a, k, .compact);
-        chip(c, a, k);
         send(c, a, k);
         return;
     }
@@ -132,16 +125,10 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radi
         defer inner.end();
         input(c, a, k, .expanded);
     }
-    // Expanded, the model sits after the paperclip, at most 45% of the
-    // pill; Send keeps the end (`morph_cluster`).
+    // Expanded: attach (and the mic) at the start, Send at the end.
     const actions = ui.div(c).row().wFull().h(42).px(12).pt(2).pb(8).itemsCenter();
     defer actions.end();
     attachButtons(c, a, k);
-    {
-        const m = ui.div(c).row().pl(2).maxW(w * 0.45).clip();
-        defer m.end();
-        chip(c, a, k);
-    }
     ui.spacer(c);
     send(c, a, k);
 }
@@ -277,10 +264,11 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
     a.view.composer_id = id;
 }
 
-/// The model chip: what the next message runs on.
-fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
+/// The model chip: what the next message runs on, 24 tall at the footer's
+/// leading edge (`PickerKind::HarnessModel`'s trigger).
+pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     const t = a.target();
-    const base = ui.div(c).row().h(32).maxW(248).px(6).gap(6).itemsCenter().rounded(8).clip();
+    const base = ui.div(c).row().h(24).maxW(248).px(6).gap(6).itemsCenter().rounded(8).clip();
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -319,15 +307,17 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
     const blocked = !stop and (a.engine.state != .connected or !attachments.ready(a));
     const pad = ui.div(c).row().pl(8);
     defer pad.end();
-    var b = ui.div(c).row().size(28, 28).center().roundedFull().bg(k.text);
+    // Filled with the primary accent, its glyph contrast-checked on it
+    // (`render_send_button`, `on_primary_accent`).
+    var b = ui.div(c).row().size(28, 28).center().roundedFull().bg(k.accent);
     b = b.opacity(if (blocked) 0.35 else if (b.hovered()) 0.85 else 1);
     defer b.end();
     if (b.clicked() and !blocked and (stop or !empty)) {
         if (stop) a.interrupt() else a.send();
     }
     if (stop) {
-        _ = c.leaf(.{ .width = .{ .px = 11 }, .height = .{ .px = 11 }, .radius = 3, .background = k.shell }, .none, null);
+        _ = c.leaf(.{ .width = .{ .px = 11 }, .height = .{ .px = 11 }, .radius = 3, .background = k.onAccent() }, .none, null);
     } else {
-        icons.icon(c, .@"arrow-up", 14, k.background, 0);
+        icons.icon(c, .@"arrow-up", 14, k.onAccent(), 0);
     }
 }

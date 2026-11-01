@@ -358,7 +358,81 @@ pub fn unseen(chat: Chat) bool {
     return chat.last_message_ms != 0 and chat.last_seen_ms < chat.last_message_ms;
 }
 
+/// The "By status" section a chat sits in (spaces.rs `status_group`):
+/// waiting on you (a question or a failure) first, then anything active
+/// today, then the rest. "Today" is the local calendar day, `offset_s` the
+/// local zone's distance from UTC.
+pub const StatusGroup = enum {
+    needs,
+    today,
+    earlier,
+
+    pub fn key(g: StatusGroup) []const u8 {
+        return @tagName(g);
+    }
+
+    pub fn label(g: StatusGroup) []const u8 {
+        return switch (g) {
+            .needs => "Needs you",
+            .today => "Today",
+            .earlier => "Earlier",
+        };
+    }
+
+    /// "Needs you" above "Today" above "Earlier" (`status_group_rank`).
+    pub fn fromKey(k: []const u8) ?StatusGroup {
+        return std.meta.stringToEnum(StatusGroup, k);
+    }
+};
+
+pub fn statusGroup(mark: Mark, at_ms: i64, now_ms: i64, offset_s: i64) StatusGroup {
+    if (mark == .awaiting_input or mark == .errored) return .needs;
+    const day = std.time.ms_per_day;
+    const shift = offset_s * std.time.ms_per_s;
+    return if (@divFloor(at_ms + shift, day) == @divFloor(now_ms + shift, day)) .today else .earlier;
+}
+
+const Tm = extern struct {
+    sec: c_int,
+    min: c_int,
+    hour: c_int,
+    mday: c_int,
+    mon: c_int,
+    year: c_int,
+    wday: c_int,
+    yday: c_int,
+    isdst: c_int,
+    gmtoff: c_long,
+    zone: ?[*:0]const u8,
+};
+extern "c" fn localtime_r(t: *const c_long, out: *Tm) ?*Tm;
+
+/// The local zone's offset from UTC at `now_ms`, in seconds.
+pub fn utcOffsetSeconds(now_ms: i64) i64 {
+    const t: c_long = @intCast(@divFloor(now_ms, std.time.ms_per_s));
+    var tm: Tm = undefined;
+    return if (localtime_r(&t, &tm) != null) tm.gmtoff else 0;
+}
+
 const testing = std.testing;
+
+test "status groups put needs-you first, then today, then earlier (status_groups_put_needs_you_first_then_today_then_earlier)" {
+    const now: i64 = 1_793_000_000_000;
+    const old = now - 3 * std.time.ms_per_day;
+    try testing.expectEqual(StatusGroup.needs, statusGroup(.awaiting_input, old, now, 0));
+    try testing.expectEqual(StatusGroup.needs, statusGroup(.errored, now, now, 0));
+    try testing.expectEqual(StatusGroup.today, statusGroup(.completed, now, now, 0));
+    try testing.expectEqual(StatusGroup.earlier, statusGroup(.idle, old, now, 0));
+    // Midnight is local: an hour before UTC midnight is yesterday at UTC+0
+    // and today at UTC+2.
+    const midnight = @divFloor(now, std.time.ms_per_day) * std.time.ms_per_day;
+    const before = midnight - std.time.ms_per_hour;
+    try testing.expectEqual(StatusGroup.earlier, statusGroup(.idle, before, midnight + std.time.ms_per_hour, 0));
+    try testing.expectEqual(StatusGroup.today, statusGroup(.idle, before, midnight + std.time.ms_per_hour, 2 * 3600));
+    try testing.expect(@intFromEnum(StatusGroup.needs) < @intFromEnum(StatusGroup.today));
+    try testing.expect(@intFromEnum(StatusGroup.today) < @intFromEnum(StatusGroup.earlier));
+    try testing.expectEqual(@as(?StatusGroup, .today), StatusGroup.fromKey("today"));
+}
 
 test "the sidebar orders by last called, and marks what finished unseen" {
     var chats = [_]Chat{

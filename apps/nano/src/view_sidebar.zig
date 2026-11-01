@@ -23,10 +23,11 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     const side = ui.div(c).column().w(width).hFull().bg(k.sidebar).pt(titlebar_h);
     defer side.end();
     tabList(c, a, k);
+    const search = @import("view_sidebar_search.zig");
+    if (!a.view.search.open) quickActions(c, a, k);
     filterRow(c, a, k);
     // The session search's field, and its results in the lists' place
     // while it filters (view_sidebar_search.zig).
-    const search = @import("view_sidebar_search.zig");
     search.controls(c, a, k);
     if (!search.results(c, a, k)) lists(c, a, k);
     footer(c, a, k);
@@ -69,6 +70,32 @@ fn tabList(c: *ui.Context, a: *App, k: theme.Colors) void {
         kit.ellipsisText(c, title, .{ .size = 12.5, .color = if (lit) k.text else k.muted }, width - 20 - 16 - 16 - 6);
     }
     if (close) |i| a.closeTab(i) else if (show) |i| a.showTab(i);
+}
+
+/// Top of the sidebar (`render_sidebar_quick_actions`): one big accent
+/// "New chat" button and a field that opens the session search in place.
+/// Solid controls, no glass; gone while the search is open.
+fn quickActions(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const box = ui.div(c).column().wFull().px(8).pt(4).pb(8).gap(8);
+    defer box.end();
+    {
+        ui.key(c, "sidebar-new-chat");
+        const on = k.onAccent();
+        var b = ui.div(c).row().wFull().h(36).px(12).gap(8).itemsCenter().rounded(10).bg(k.accent);
+        if (b.hovered()) b = b.bg(k.accent.mix(k.background, 0.12));
+        defer b.end();
+        if (b.clicked()) a.replaceCurrent(null);
+        icons.icon(c, .@"pen-new-square", 16, on, 0);
+        ui.text(c, "New chat", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = on });
+    }
+    {
+        ui.key(c, "sidebar-search-field");
+        const s = ui.div(c).row().wFull().h(32).px(12).gap(8).itemsCenter().rounded(10).bg(k.raised);
+        defer s.end();
+        if (s.clicked()) @import("view_sidebar_search.zig").toggle(a);
+        icons.icon(c, .magnifer, 14, k.muted, 0);
+        ui.text(c, "Search chats", .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted });
+    }
 }
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
@@ -194,6 +221,7 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8) f32 {
     var archive_height: f32 = 0;
     var keys: std.StringHashMapUnmanaged(void) = .empty;
     const grouped = a.settings.organization() != .in_one_list;
+    const by = Grouping.of(a);
     for (a.chats.items) |ch| if (listed(a, ch)) {
         if (ch.archived) {
             if (archived < a.view.archived_limit) archive_height += rowHeight(a, ch) + 2;
@@ -201,20 +229,17 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8) f32 {
         } else if (pinned(pins, ch.id) == null) {
             active += 1;
             if (grouped) {
-                const project = a.settings.organization() == .by_project;
-                const key = groupKey(c, ch, project);
-                const open = a.view.groupOpen(c.print("{s}:{s}", .{ if (project) "project" else "device", key }), true);
+                const key = groupKey(c, a, ch, by);
+                const open = a.view.groupOpen(c.print("{s}:{s}", .{ by.prefix(), key }), true);
                 const entry = keys.getOrPut(c.alloc(), key) catch continue;
                 if (!entry.found_existing) height += if (open) @as(f32, 44) else 42;
                 if (open) height += rowHeight(a, ch) + 2;
             } else if (a.view.sessions_open) height += rowHeight(a, ch) + 2;
         }
     };
-    if (!grouped) {
-        if (active > 0) {
-            height += 30 + (if (a.view.sessions_open) @as(f32, 2) else 0);
-        } else if (pins.len == 0) height += 8 + c.text.lineHeight(.{ .size = 12 });
-    }
+    if (active == 0 and pins.len == 0) {
+        height += 8 + c.text.lineHeight(.{ .size = 12 });
+    } else if (!grouped and active > 0) height += 30 + (if (a.view.sessions_open) @as(f32, 2) else 0);
     if (archived > 0 and a.settings.get(.sidebar_show_archived)) {
         height += 6 + 30;
         if (a.view.archived_open) {
@@ -296,7 +321,15 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         a.view.pin_rows = null;
     }
     if (a.settings.organization() != .in_one_list) {
-        groups(c, a, k, pins, moving, &window);
+        // Grouped or not, an empty list says so.
+        if (active == 0 and pins.len == 0 and moving == null) {
+            a.view.sessions_header = null;
+            a.view.session_rows = null;
+            const empty = ui.div(c).row().px(8).pb(8);
+            defer empty.end();
+            ui.text(c, "No sessions yet", .{ .size = 12, .color = k.faint });
+            window.y += 8 + c.text.lineHeight(.{ .size = 12 });
+        } else groups(c, a, k, pins, moving, &window);
     } else regular: {
         // GPUI has no Sessions disclosure when the regular list is empty.
         // A drag still needs that section as its drop target.
@@ -376,19 +409,26 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
 }
 
-/// By project or by device (`sidebar_organization`): a disclosure for
-/// each, in the order their newest sessions come; this device's first.
+/// By status, by project or by device (`sidebar_organization`): a
+/// disclosure for each, in the order their newest sessions come; this
+/// device's first, and "Needs you" above "Today" above "Earlier".
 fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, moving: ?[]const u8, window: *Window) void {
-    const by_project = a.settings.organization() == .by_project;
+    const by = Grouping.of(a);
+    const by_project = by.org == .by_project;
     const gpa = c.alloc();
     var keys: std.ArrayList([]const u8) = .empty;
     for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null) {
-        const key = groupKey(c, ch, by_project);
+        const key = groupKey(c, a, ch, by);
         for (keys.items) |have| {
             if (std.mem.eql(u8, have, key)) break;
         } else keys.append(gpa, key) catch {};
     };
-    if (!by_project) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
+    if (by.org == .by_status) std.mem.sort([]const u8, keys.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return @intFromEnum(workspace.StatusGroup.fromKey(x).?) < @intFromEnum(workspace.StatusGroup.fromKey(y).?);
+        }
+    }.lt);
+    if (by.org == .by_device) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
         std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
         keys.items[0] = me;
         break;
@@ -399,11 +439,11 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
     for (keys.items) |key| {
         var count: usize = 0;
         var height: f32 = 0;
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, ch, by_project), key)) {
+        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, a, ch, by), key)) {
             count += 1;
             height += rowHeight(a, ch) + 2;
         };
-        const collapse = c.print("{s}:{s}", .{ if (by_project) "project" else "device", key });
+        const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
         const open = a.view.groupOpen(collapse, true);
         const extent: f32 = 12 + 28 + (if (open) 4 + @max(0, height - 2) else @as(f32, 0));
         const start = window.y;
@@ -412,7 +452,9 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
         // Keep the existing group/body hierarchy and ID-based keys.
         const box = ui.div(c).column().wFull().pt(12);
         defer box.end();
-        const label = if (by_project)
+        const label = if (by.org == .by_status)
+            workspace.StatusGroup.fromKey(key).?.label()
+        else if (by_project)
             (if (std.mem.startsWith(u8, key, "home:")) "~" else if (a.findSpace(key)) |sp| sp.name else "?")
         else
             a.deviceName(key);
@@ -431,7 +473,7 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
         var inside = window.*;
         inside.y = start + 12 + 28 + 4;
         var rows: Rows = .{};
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, ch, by_project), key)) {
+        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, a, ch, by), key)) {
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
             if (rows.include(c, &inside, rowHeight(a, ch))) slotRow(c, a, k, ch, 0, held);
         };
@@ -440,10 +482,39 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
     omitted.flush(c);
 }
 
-/// A session's group: its project (or its device's home), or its device.
-fn groupKey(c: *ui.Context, ch: workspace.Chat, by_project: bool) []const u8 {
-    if (by_project) return ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""});
-    return ch.device_id orelse "";
+/// How the lists group this frame: the organization, and for "By status"
+/// the clock and the local zone it reads "Today" by.
+const Grouping = struct {
+    org: @import("settings.zig").Organization,
+    now: i64 = 0,
+    offset: i64 = 0,
+
+    fn of(a: *App) Grouping {
+        const org = a.settings.organization();
+        if (org != .by_status) return .{ .org = org };
+        const now = a.nowMs();
+        return .{ .org = org, .now = now, .offset = workspace.utcOffsetSeconds(now) };
+    }
+
+    /// The collapse key's prefix, as GPUI saves it.
+    fn prefix(g: Grouping) []const u8 {
+        return switch (g.org) {
+            .by_status => "status",
+            .by_project => "project",
+            .by_device => "device",
+            .in_one_list => "list",
+        };
+    }
+};
+
+/// A session's group: its status section, its project (or its device's
+/// home), or its device.
+fn groupKey(c: *ui.Context, a: *App, ch: workspace.Chat, by: Grouping) []const u8 {
+    return switch (by.org) {
+        .by_status => workspace.statusGroup(workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), by.now), ch.timeMs(), by.now, by.offset).key(),
+        .by_project => ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""}),
+        else => ch.device_id orelse "",
+    };
 }
 
 /// A row, moved `dy` while rows give way; the held one keeps its place
@@ -861,7 +932,9 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
     @import("view_sandbox_strip.zig").strip(c, a, k, 0);
     const f = ui.div(c).row().wFull().p(8);
     defer f.end();
-    var b = ui.div(c).row().size(21, 21).center().roundedFull();
+    // The account row (`render_user_menu`): avatar, name and what the
+    // workspace is, the whole row opening the menu.
+    var b = ui.div(c).row().wFull().h(40).px(6).gap(8).itemsCenter().rounded(10);
     b = if (a.view.account_menu) b.bg(k.hover) else b.hover(k.hover.alpha(0.8));
     defer b.end();
     if (b.clicked()) {
@@ -870,9 +943,17 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (a.view.account_menu) @import("app_account.zig").refresh(a);
     }
     if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
-    const av = ui.div(c).row().size(13, 13).center().roundedFull().bg(k.text);
-    defer av.end();
+    const account = @import("app_account.zig");
     const acc = &a.account;
-    const letter = @import("app_account.zig").initial(@import("app_account.zig").menu(acc.scope, acc.user, acc.codegraff).line);
-    ui.text(c, c.print("{c}", .{letter}), .{ .size = 9, .weight = .semibold, .mono = true, .color = k.shell });
+    const line = account.menu(acc.scope, acc.user, acc.codegraff).line;
+    {
+        const av = ui.div(c).row().size(13, 13).center().roundedFull().bg(k.text);
+        defer av.end();
+        ui.text(c, c.print("{c}", .{account.initial(line)}), .{ .size = 9, .weight = .semibold, .mono = true, .color = k.shell });
+    }
+    const words = ui.div(c).column().grow().w(0).clip();
+    defer words.end();
+    const room = width - 16 - 12 - 13 - 8;
+    kit.ellipsisText(c, line, .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.text }, room);
+    kit.ellipsisText(c, account.subtitle(acc.scope, acc.user != null), .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted }, room);
 }

@@ -131,6 +131,9 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     std.Io.Dir.cwd().deleteTree(init.io, data) catch {};
     try std.Io.Dir.cwd().createDirPath(init.io, data);
     a.settings.path = try std.fs.path.join(gpa, &.{ data, "ui-settings.json" });
+    // No file yet: a first run's settings, as the renderer's
+    // `settings::init` reads them (`UiSettings::load` → `first_run`).
+    a.settings.load();
     @import("themes.zig").loadLibrary(init.io, data);
     a.env = init.environ_map;
     // Match the scene's synthetic device, not the host's installed Codex or

@@ -96,6 +96,24 @@ pub fn menu(scope: ?Scope, user: ?User, cg: Codegraff) Menu {
     };
 }
 
+/// The account row's second line (`account_subtitle`): where the
+/// workspace lives, else whether it syncs.
+pub fn subtitle(scope: ?Scope, signed_in: bool) []const u8 {
+    if (scope) |s| switch (s) {
+        .local => return "This device",
+        .development => return "Development build",
+        .synced => {},
+    };
+    return if (signed_in) "CodeGraff account" else "Sign in to sync";
+}
+
+test "the account row says where the workspace lives (account_subtitle)" {
+    try std.testing.expectEqualStrings("This device", subtitle(.local, true));
+    try std.testing.expectEqualStrings("Development build", subtitle(.development, false));
+    try std.testing.expectEqualStrings("CodeGraff account", subtitle(.synced, true));
+    try std.testing.expectEqualStrings("Sign in to sync", subtitle(null, false));
+}
+
 /// The badge's letter: the line's first, upper case (`initial`).
 pub fn initial(line: []const u8) u8 {
     const t = std.mem.trim(u8, line, " ");

@@ -400,6 +400,7 @@ fn labelWeight(c: *ui.Context, k: theme.Colors, text: []const u8, lit: bool, wei
 // The view options.
 
 pub const Choice = enum {
+    by_status,
     by_device,
     by_project,
     in_one_list,
@@ -413,6 +414,7 @@ pub const Choice = enum {
 
     fn label(ch: Choice) []const u8 {
         return switch (ch) {
+            .by_status => "By status",
             .by_device => "By device",
             .by_project => "By project",
             .in_one_list => "None",
@@ -428,6 +430,7 @@ pub const Choice = enum {
 
     fn icon(ch: Choice) icons.Name {
         return switch (ch) {
+            .by_status => .bell,
             .by_device => .laptop,
             .by_project, .location => .folder,
             .in_one_list => .list,
@@ -444,7 +447,7 @@ pub const Choice = enum {
 const Group = struct { label: []const u8, rows: []const Choice };
 
 const groups = [_]Group{
-    .{ .label = "Organize", .rows = &.{ .by_device, .by_project, .in_one_list } },
+    .{ .label = "Organize", .rows = &.{ .by_status, .by_device, .by_project, .in_one_list } },
     .{ .label = "Sort", .rows = &.{ .last_called, .created } },
     .{ .label = "Show", .rows = &.{ .branch, .harness, .project_icon, .location, .archived } },
 };
@@ -452,6 +455,7 @@ const groups = [_]Group{
 pub fn chosen(a: *const App, ch: Choice) bool {
     const s = &a.settings;
     return switch (ch) {
+        .by_status => s.organization() == .by_status,
         .by_device => s.organization() == .by_device,
         .by_project => s.organization() == .by_project,
         .in_one_list => s.organization() == .in_one_list,
@@ -469,6 +473,7 @@ pub fn chosen(a: *const App, ch: Choice) bool {
 pub fn choose(a: *App, ch: Choice) void {
     const s = &a.settings;
     switch (ch) {
+        .by_status => s.setText("sidebarOrganization", settings.Organization.by_status.key()),
         .by_device => s.setText("sidebarOrganization", settings.Organization.by_device.key()),
         .by_project => s.setText("sidebarOrganization", settings.Organization.by_project.key()),
         .in_one_list => s.setText("sidebarOrganization", settings.Organization.in_one_list.key()),
@@ -481,7 +486,7 @@ pub fn choose(a: *App, ch: Choice) void {
         .archived => s.toggle(.sidebar_show_archived),
     }
     switch (ch) {
-        .by_device, .by_project, .in_one_list, .last_called, .created => {
+        .by_status, .by_device, .by_project, .in_one_list, .last_called, .created => {
             a.view.menus.open = null;
             a.view.menus.sub_active = null;
         },

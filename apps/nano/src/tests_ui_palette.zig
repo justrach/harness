@@ -44,6 +44,8 @@ const Harness = struct {
         try h.a.chats.replace(parsed.value);
         @import("workspace.zig").sortChats(h.a.chats.items);
         h.a.openChat(open, null);
+        // The one-list sidebar, whose Sessions disclosure these tests read.
+        h.a.settings.setText("sidebarOrganization", "inOneList");
         try h.t.init(testing.allocator, .init(&h.a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
         h.t.settle(1);
     }
@@ -61,6 +63,25 @@ const Harness = struct {
     fn typed(h: *Harness, s: []const u8) void {
         h.t.typeText(s);
         h.t.settle(1);
+    }
+
+    /// The filter row's magnifier: right of the project trigger, 4 along.
+    fn clickMagnifier(h: *Harness) void {
+        const r = h.a.view.filter_anchor.?;
+        h.t.click(r.x + r.w + 4 + 14.5, r.y + r.h / 2);
+    }
+
+    /// How many times `s` is drawn (the sidebar's New chat and the
+    /// palette's, say).
+    fn count(h: *Harness, s: []const u8) usize {
+        var n: usize = 0;
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |t| if (std.mem.eql(u8, t.str, s)) {
+                n += 1;
+            },
+            else => {},
+        };
+        return n;
     }
 
     fn selected(h: *Harness) []const u8 {
@@ -94,7 +115,8 @@ test "⌘K opens the palette with its actions and chats; typing narrows it; ↓ 
     // "a": New chat, New project ("Open settings" hasn't one), the theme, both chats.
     try testing.expect(!h.t.hasText("Open settings"));
     h.typed("lpha");
-    try testing.expect(!h.t.hasText("New chat"));
+    // Only the sidebar's New chat is left.
+    try testing.expectEqual(@as(usize, 1), h.count("New chat"));
     try testing.expect(!h.t.hasText("Switch to light theme"));
     // Return answers the query as typed: Alpha is the only result.
     h.press(.{ .key = S.enter });
@@ -260,7 +282,7 @@ test "the sidebar search: the magnifier opens it focused; it finds names, the ar
     try h.init(sidebar_chats, "current");
     defer h.deinit();
     try testing.expect(!h.t.hasText("Include archived sessions"));
-    h.t.click(200, 96);
+    h.clickMagnifier();
     h.t.settle(1);
     try testing.expect(h.a.view.search.open);
     try testing.expect(h.t.hasText("Search session names…"));
@@ -305,7 +327,7 @@ test "the sidebar search: whitespace is cleared before closing; the arrows go ro
     var h: Harness = undefined;
     try h.init(sidebar_chats, "current");
     defer h.deinit();
-    h.t.click(200, 96);
+    h.clickMagnifier();
     h.t.settle(1);
     h.typed("   ");
     h.press(.{ .key = S.escape });
@@ -337,7 +359,7 @@ test "the sidebar search: a click picks the result under the keys too; another p
     var h: Harness = undefined;
     try h.init(sidebar_chats, "current");
     defer h.deinit();
-    h.t.click(200, 96);
+    h.clickMagnifier();
     h.t.settle(1);
     h.typed("sidebar");
     search.toggleArchived(null, &h.a);
@@ -363,7 +385,7 @@ test "the sidebar search and the palette take each other's place" {
     var h: Harness = undefined;
     try h.init(sidebar_chats, "current");
     defer h.deinit();
-    h.t.click(200, 96);
+    h.clickMagnifier();
     h.t.settle(1);
     h.press(cmd_k);
     try testing.expect(h.a.view.palette.open);

@@ -20,7 +20,9 @@ pub fn placement(anchor: ui.Rect, size: ui.Size, new_chat: bool, wanted: f32) st
     const h = @min(wanted, @min(640, if (down) below else above));
     const w = @min(menu_width, size.w - 16);
     return .{
-        .x = std.math.clamp(anchor.x + anchor.w - w, 8, @max(8, size.w - w - 8)),
+        // From the chip's leading edge: it sits at the footer's left now
+        // (pickers.rs `attach_overlay`, no longer `attach_overlay_end`).
+        .x = std.math.clamp(anchor.x, 8, @max(8, size.w - w - 8)),
         .y = if (down) anchor.y + anchor.h + 6 else @max(8, anchor.y - h - 6),
         .h = h,
     };

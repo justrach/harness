@@ -24,6 +24,10 @@ const Harness = struct {
         defer parsed.deinit();
         try h.a.chats.replace(parsed.value);
         h.a.openChat("a", null);
+        // These tests drive the one-list sidebar (its Sessions disclosure,
+        // pins dragged to and from it), as GPUI's sidebar tests pick their
+        // organization; "By status", the default, has its own test.
+        h.a.settings.setText("sidebarOrganization", "inOneList");
         try h.t.init(testing.allocator, .init(&h.a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
         h.t.settle(1);
     }
@@ -101,15 +105,68 @@ test "a live ACP thought remains visible before the empty answer receives text" 
 }
 
 test "an empty sidebar matches GPUI without a Sessions disclosure" {
+    for ([_][]const u8{ "inOneList", "byStatus" }) |organization| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        h.a.settings.setText("sidebarOrganization", organization);
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[]", .{});
+        defer parsed.deinit();
+        try h.a.chats.replace(parsed.value);
+        h.t.settle(1);
+        try testing.expect(h.t.hasText("No sessions yet"));
+        try testing.expect(!h.t.hasText("Sessions"));
+    }
+}
+
+test "By status, the default: Needs you above Today above Earlier, with New chat and Search chats on top" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
-    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "[]", .{});
+    h.a.settings.setText("sidebarOrganization", "byStatus");
+    const now = h.a.nowMs();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const iso = struct {
+        fn of(a: std.mem.Allocator, ms: i64) ![]const u8 {
+            const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@divFloor(ms, 1000)) };
+            const day = es.getEpochDay().calculateYearDay();
+            const md = day.calculateMonthDay();
+            const ds = es.getDaySeconds();
+            return std.fmt.allocPrint(a, "{d}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute() });
+        }
+    }.of;
+    const text = try std.fmt.allocPrint(arena.allocator(),
+        \\[{{"id":"old","deviceId":"d","title":"Last week's","archived":false,"lastMessageAt":"2026-01-02T00:00:00Z"}},
+        \\ {{"id":"new","deviceId":"d","title":"Fresh one","archived":false,"lastMessageAt":"{s}"}},
+        \\ {{"id":"ask","deviceId":"d","title":"Has a question","archived":false,"lastMessageAt":"2026-01-01T00:00:00Z"}}]
+    , .{try iso(arena.allocator(), now)});
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text, .{});
     defer parsed.deinit();
     try h.a.chats.replace(parsed.value);
+    const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator, try std.fmt.allocPrint(arena.allocator(),
+        \\[{{"chatId":"ask","status":"awaitingInput","updatedAt":"{s}"}}]
+    , .{try iso(arena.allocator(), now)}), .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.resort();
     h.t.settle(1);
-    try testing.expect(h.t.hasText("No sessions yet"));
-    try testing.expect(!h.t.hasText("Sessions"));
+    h.snap("by-status");
+    const needs = h.t.findText("Needs you") orelse return error.NoNeedsYou;
+    const today = h.t.findText("Today") orelse return error.NoToday;
+    const earlier = h.t.findText("Earlier") orelse return error.NoEarlier;
+    try testing.expect(needs.y < today.y and today.y < earlier.y);
+    try testing.expect(needs.y < (h.t.findText("Has a question") orelse return error.NoRow).y);
+    try testing.expect(today.y < (h.t.findText("Fresh one") orelse return error.NoRow).y);
+    try testing.expect(earlier.y < (h.t.findText("Last week's") orelse return error.NoRow).y);
+    // The top block: New chat over Search chats, both above the lists.
+    const new_chat = h.t.findText("New chat") orelse return error.NoNewChat;
+    const field = h.t.findText("Search chats") orelse return error.NoSearch;
+    try testing.expect(new_chat.y < field.y and field.y < needs.y);
+    try h.t.clickText("Search chats");
+    h.t.settle(1);
+    try testing.expect(h.a.view.search.open);
+    try testing.expect(!h.t.hasText("Search chats"));
 }
 
 test "file tool badges preserve Harness identity colors and reuse their cached SVGs" {
@@ -416,7 +473,7 @@ test "a new pane starts with an empty prompt; each pane and tab keeps its own" {
     try testing.expectEqualStrings("about alpha", h.a.composer.text());
 }
 
-test "in a narrow pane the starter chips wrap inside it, each with its icon's room" {
+test "in a narrow pane the starter tiles stay inside it, each with its icon's room" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -428,14 +485,21 @@ test "in a narrow pane the starter chips wrap inside it, each with its icon's ro
     try h.a.spaces.replace(parsed.value);
     h.a.select(null, "s");
     for (0..3) |_| h.press(.{ .key = 'd', .cmd = true });
-    h.snap("narrow-chips");
-    const titles = [_][]const u8{ "Build something new", "Research a topic", "Plan a launch", "Tour this project" };
+    h.snap("narrow-tiles");
+    // Titles are cut short with an ellipsis in a tile this narrow: find
+    // each by its first letter, under the focused pane's pill.
+    const titles = [_][]const u8{ "B", "R", "P", "T" };
     const pane_left = 1100 - h.a.tabs.layout().?.shares.items[3] * @import("view_transcript.zig").mainWidth(&h.t.ctx, &h.a);
+    const pill = h.a.view.composer_anchor orelse return error.NoComposer;
     for (titles) |title| {
-        const r = h.t.findText(title) orelse return error.ChipMissing;
-        // 10 points of padding, the 13-point icon and 6 between, inside the pane.
-        try testing.expect(r.x - 29 >= pane_left);
-        try testing.expect(r.x + r.w + 10 <= 1100);
+        const r = for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |t| if (std.mem.startsWith(u8, t.str, title) and node.rect.y > pill.y + pill.h and node.rect.x > pill.x) break node.rect,
+            else => {},
+        } else return error.TileMissing;
+        // The tile's edge and 14 of padding, the 15-point icon and 8 between,
+        // inside the pane.
+        try testing.expect(r.x - 38 >= pane_left);
+        try testing.expect(r.x + r.w + 15 <= 1100);
     }
 }
 
@@ -881,7 +945,9 @@ test "the project menu: All projects, then by name with the away device's last; 
     // The search takes the keys: "le" puts Ledger first.
     h.t.typeText("le");
     h.t.settle(1);
-    try testing.expect(!h.t.hasText("All projects") or h.t.findText("All projects").?.y < 120);
+    // Only the trigger's own label, not the menu's row.
+    const trigger = h.a.view.filter_anchor.?;
+    try testing.expect(!h.t.hasText("All projects") or h.t.findText("All projects").?.y < trigger.y + trigger.h);
     h.press(.{ .key = ui.Shortcut.enter });
     try testing.expect(!h.a.view.filter_menu);
     try testing.expectEqualStrings("s2", h.a.view.filter.?);

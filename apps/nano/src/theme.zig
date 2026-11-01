@@ -71,7 +71,38 @@ pub const Colors = struct {
     pub fn wash(k: Colors, a: f32) Color {
         return (if (k.dark) Color.hex(0xebebeb) else Color.hex(0x1a1a1a)).alpha(a);
     }
+
+    /// Words and glyphs on an accent fill (`on_primary_accent`): the
+    /// near-white `on_accent` where it reads at 4.5:1, else black or white,
+    /// whichever reads better.
+    pub fn onAccent(k: Colors) Color {
+        const on: Color = .{ .r = 0.985, .g = 0.985, .b = 0.985 };
+        if (contrast(on, k.accent) >= 4.5) return on;
+        return if (contrast(black, k.accent) >= contrast(white, k.accent)) black else white;
+    }
 };
+
+fn channel(v: f32) f32 {
+    return if (v <= 0.04045) v / 12.92 else std.math.pow(f32, (v + 0.055) / 1.055, 2.4);
+}
+
+fn luminance(c: Color) f32 {
+    return 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+}
+
+/// WCAG contrast ratio between two opaque colours.
+pub fn contrast(x: Color, y: Color) f32 {
+    const a = luminance(x);
+    const b = luminance(y);
+    return (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
+}
+
+const std = @import("std");
+
+test "accent fills carry black on Codegraff's amber, as GPUI's on_primary_accent picks" {
+    try std.testing.expectEqual(black, builtin(true).onAccent());
+    try std.testing.expectEqual(black, builtin(false).onAccent());
+}
 
 const white: Color = .{ .r = 1, .g = 1, .b = 1 };
 const black: Color = .{};

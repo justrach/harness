@@ -140,12 +140,15 @@ pub const Organization = enum {
     by_device,
     by_project,
     in_one_list,
+    /// "Needs you", "Today" and "Earlier": the default since Home B+D.
+    by_status,
 
     pub fn key(o: Organization) []const u8 {
         return switch (o) {
             .by_device => "byDevice",
             .by_project => "byProject",
             .in_one_list => "inOneList",
+            .by_status => "byStatus",
         };
     }
 };
@@ -162,6 +165,16 @@ pub const Sort = enum {
         };
     }
 };
+
+/// A new install shows less (`UiSettings::first_run`): a turn's tool steps
+/// fold into one line and sidebar rows drop branch names. Both stay one
+/// toggle away, and an existing settings file keeps what it chose.
+pub fn firstRun() Prefs {
+    var p: Prefs = .{};
+    p.transcript_compact_mode = true;
+    p.sidebar_show_branch = false;
+    return p;
+}
 
 fn fromKey(comptime E: type, k: ?[]const u8, default: E) E {
     const want = k orelse return default;
@@ -396,6 +409,7 @@ pub const Store = struct {
         const path = s.path orelse return;
         const body = std.Io.Dir.cwd().readFileAlloc(s.io, path, s.gpa, .limited(8 << 20)) catch {
             s.fresh = true;
+            s.prefs = firstRun();
             return;
         };
         defer s.gpa.free(body);
@@ -462,7 +476,7 @@ pub const Store = struct {
     }
 
     pub fn organization(s: *const Store) Organization {
-        return fromKey(Organization, s.text("sidebarOrganization"), .in_one_list);
+        return fromKey(Organization, s.text("sidebarOrganization"), .by_status);
     }
 
     pub fn sort(s: *const Store) Sort {
@@ -559,10 +573,23 @@ test "the file's switches are read, and a change keeps every other key" {
     try testing.expect((try json.parseFromSliceLeaky(json.Value, arena.allocator(), fresh, .{})).object.get("filesShowAll").?.bool);
 }
 
+test "a new install shows less; an existing file keeps its choices (missing_and_corrupt_files_yield_defaults)" {
+    var s: Store = .{ .gpa = testing.allocator, .io = testing.io, .path = try testing.allocator.dupe(u8, "/nonexistent/harness-nano-test/ui-settings.json") };
+    defer s.deinit();
+    s.load();
+    try testing.expect(s.fresh);
+    try testing.expect(s.get(.transcript_compact_mode) and !s.get(.sidebar_show_branch));
+    try testing.expectEqual(Organization.by_status, s.organization());
+    var old: Store = .{ .gpa = testing.allocator, .io = testing.io };
+    defer old.deinit();
+    old.apply("{}");
+    try testing.expect(!old.get(.transcript_compact_mode) and old.get(.sidebar_show_branch));
+}
+
 test "the sidebar's view options read as the GPUI app saves them" {
     var s: Store = .{ .gpa = testing.allocator, .io = testing.io };
     defer s.deinit();
-    try testing.expectEqual(Organization.in_one_list, s.organization());
+    try testing.expectEqual(Organization.by_status, s.organization());
     try testing.expectEqual(Sort.last_updated, s.sort());
     try testing.expect(s.get(.sidebar_compact) and s.get(.sidebar_show_archived));
     try testing.expect(s.spaceFilter() == null);
@@ -576,5 +603,7 @@ test "the sidebar's view options read as the GPUI app saves them" {
     s.setSpaceFilter(null);
     try testing.expect(s.spaceFilter() == null);
     s.setText("sidebarOrganization", "nonsense");
+    try testing.expectEqual(Organization.by_status, s.organization());
+    s.setText("sidebarOrganization", "inOneList");
     try testing.expectEqual(Organization.in_one_list, s.organization());
 }
