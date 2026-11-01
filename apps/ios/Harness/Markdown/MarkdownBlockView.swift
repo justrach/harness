@@ -212,7 +212,7 @@ struct CodeBlockView: View {
                     }
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                SelectableText(text: attributedCode, wraps: false)
+                SelectableText(text: attributedCode, wraps: false, lineHeight: codeLineHeight)
                 .padding(.horizontal, MD.codePaddingX)
                 .padding(.vertical, MD.codePaddingY)
             }
@@ -390,7 +390,12 @@ struct TableBlockView: View {
         let alignment: Alignment = column < align.count
             ? (align[column] == .center ? .center : align[column] == .right ? .trailing : .leading)
             : .leading
-        return SelectableMarkdownText(runs: runs, weight: weight == .bold ? .bold : .regular)
+        let textAlignment: NSTextAlignment = column < align.count
+            ? (align[column] == .center ? .center : align[column] == .right ? .right
+                : align[column] == .left ? .left : .natural)
+            : .natural
+        return SelectableMarkdownText(runs: runs, weight: weight == .bold ? .bold : .regular,
+                                      alignment: textAlignment)
             .padding(12)
             .frame(minWidth: 48, maxWidth: .infinity, alignment: alignment)
     }

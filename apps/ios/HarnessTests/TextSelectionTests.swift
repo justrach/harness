@@ -84,6 +84,211 @@ final class TextSelectionTests: XCTestCase {
         XCTAssertEqual(view.selectedRange, range)
     }
 
+    func testCorrectedOrShortenedTextDoesNotLeaveAStaleSelection() async throws {
+        for replacement in ["Read THAT passage", "Short", ""] {
+            let original = "Keep THIS passage"
+            let (window, host) = await mount(SelectableText(text: NSAttributedString(string: original)))
+            defer { window.isHidden = true; window.rootViewController = nil }
+            let view = try XCTUnwrap(textViews(in: host.view).first)
+            view.selectedRange = (original as NSString).range(of: "THIS")
+            SelectableText.update(NSAttributedString(string: replacement), in: view)
+            XCTAssertEqual(view.selectedRange.length, 0,
+                           "A replaced row must not keep highlighting unrelated text: \(replacement)")
+        }
+    }
+
+    func testBlurClearsInactiveRangeAndRepaintsDoNotStealComposerFocus() async throws {
+        let original = "Keep this passage selected"
+        let (window, host) = await mount(SelectableText(text: NSAttributedString(string: original)))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = try XCTUnwrap(textViews(in: host.view).first)
+        XCTAssertTrue(view.becomeFirstResponder())
+        view.selectedRange = (original as NSString).range(of: "this passage")
+        let composer = UITextView(frame: CGRect(x: 10, y: 500, width: 300, height: 80))
+        host.view.addSubview(composer)
+        XCTAssertTrue(composer.becomeFirstResponder())
+        XCTAssertEqual(view.selectedRange, NSRange(location: 0, length: 0))
+        SelectableText.update(NSAttributedString(string: original, attributes: [.foregroundColor: UIColor.red]), in: view)
+        XCTAssertTrue(composer.isFirstResponder)
+        SelectableText.update(NSAttributedString(string: original + " while streaming"), in: view)
+        XCTAssertTrue(composer.isFirstResponder)
+        XCTAssertEqual(view.selectedRange, NSRange(location: 0, length: 0))
+    }
+
+    func testSelectionRetentionRuleRejectsInvalidAndSplitRanges() {
+        let text = "👩🏽‍💻e\u{301} end"
+        for range in [NSRange(location: NSNotFound, length: 0),
+                      NSRange(location: 0, length: Int.max),
+                      NSRange(location: -1, length: 1),
+                      NSRange(location: 0, length: -1),
+                      NSRange(location: text.utf16.count + 1, length: 0),
+                      NSRange(location: 1, length: 1),
+                      NSRange(location: 0, length: 2),
+                      NSRange(location: "👩🏽‍💻".utf16.count, length: 1)] {
+            XCTAssertEqual(SelectableText.retainedSelection(range, from: text, to: text + "!"),
+                           NSRange(location: 0, length: 0), "Invalid/split range: \(range)")
+        }
+        let cursor = NSRange(location: text.utf16.count, length: 0)
+        XCTAssertEqual(SelectableText.retainedSelection(cursor, from: text, to: text + "!"), cursor)
+    }
+
+    func testGraphemeExtensionPreservesASelectionEarlierInTheText() async throws {
+        let original = "Keep e"
+        let (window, host) = await mount(SelectableText(text: NSAttributedString(string: original)))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = try XCTUnwrap(textViews(in: host.view).first)
+        let range = (original as NSString).range(of: "Keep")
+        view.selectedRange = range
+        SelectableText.update(NSAttributedString(string: "Keep e\u{301}"), in: view)
+        XCTAssertEqual(view.selectedRange, range)
+        view.copy(nil)
+        XCTAssertEqual(UIPasteboard.general.string, "Keep")
+    }
+
+    func testCanonicalUnicodeReplacementDoesNotReuseOldUTF16Offsets() async throws {
+        // String.hasPrefix considers these canonically equal, but TextKit's
+        // UTF-16 offsets differ: keeping the old range would copy "ail ".
+        let original = "cafe\u{301} tail"
+        let (window, host) = await mount(SelectableText(text: NSAttributedString(string: original)))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = try XCTUnwrap(textViews(in: host.view).first)
+        view.selectedRange = (original as NSString).range(of: "tail")
+        SelectableText.update(NSAttributedString(string: "café tail plus"), in: view)
+        XCTAssertEqual(view.selectedRange.length, 0,
+                       "Normalization is a replacement, not a UTF-16-preserving append")
+    }
+
+    func testAppendThatExtendsAGraphemeDoesNotSplitTheSelection() async throws {
+        for (original, appended) in [("👩", "👩🏽‍💻"), ("e", "e\u{301}"), ("🇺", "🇺🇸")] {
+            let (window, host) = await mount(SelectableText(text: NSAttributedString(string: original)))
+            defer { window.isHidden = true; window.rootViewController = nil }
+            let view = try XCTUnwrap(textViews(in: host.view).first)
+            view.selectedRange = NSRange(location: 0, length: original.utf16.count)
+            SelectableText.update(NSAttributedString(string: appended), in: view)
+            let selection = view.selectedRange
+            let selected = (appended as NSString).substring(with: selection)
+            XCTAssertTrue(selection.length == 0 || selected == appended,
+                          "An append must not select only part of a grapheme: \(selected)")
+        }
+    }
+
+    func testSelectionAcrossMixedStylesCopiesLiteralUnicodeAndHardBreaks() async throws {
+        let runs = [
+            InlineRun(text: "العربية ", style: .plain),
+            InlineRun(text: "bold", style: InlineStyle(bold: true)),
+            InlineRun(text: "\n👩🏽‍💻 café\t", style: InlineStyle(code: true)),
+            InlineRun(text: "a link", style: InlineStyle(italic: true, link: "https://example.com")),
+            InlineRun(text: " 終わり", style: InlineStyle(strikethrough: true)),
+        ]
+        let (window, host) = await mount(SelectableMarkdownText(runs: runs))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = try XCTUnwrap(textViews(in: host.view).first)
+        let expected = "bold\n👩🏽‍💻 café\ta link"
+        view.selectedRange = (view.text as NSString).range(of: expected)
+        view.copy(nil)
+        XCTAssertEqual(UIPasteboard.general.string, expected)
+        XCTAssertEqual(view.text, runs.map(\.text).joined())
+    }
+
+    func testEmptyAndWhitespaceOnlyCodePreservesEveryNewlineAndTab() async throws {
+        for code in ["", "\n", "\n\n", "a\n", "a\n\n", "\t\n  \t\n", "👩🏽‍💻\t café\n"] {
+            let (window, host) = await mount(CodeBlockView(language: nil, code: code))
+            defer { window.isHidden = true; window.rootViewController = nil }
+            let view = try XCTUnwrap(textViews(in: host.view).first)
+            XCTAssertEqual(view.text, code)
+            XCTAssertTrue(view.bounds.width.isFinite)
+            XCTAssertTrue(view.bounds.height.isFinite)
+            XCTAssertGreaterThanOrEqual(view.bounds.height, 0)
+            if !code.isEmpty {
+                view.selectedRange = NSRange(location: 0, length: code.utf16.count)
+                view.copy(nil)
+                XCTAssertEqual(UIPasteboard.general.string, code)
+            }
+        }
+    }
+
+    func testEmptyCodeUsesTheSameLineMetricsAsNonemptyCode() async throws {
+        for typeSize in [DynamicTypeSize.large, .accessibility3] {
+            var heights: [CGFloat] = []
+            for code in ["x", "", "\n", "\n\n"] {
+                let (window, host) = await mount(CodeBlockView(language: nil, code: code)
+                    .environment(\.dynamicTypeSize, typeSize))
+                defer { window.isHidden = true; window.rootViewController = nil }
+                let view = try XCTUnwrap(textViews(in: host.view).first)
+                heights.append(view.bounds.height)
+            }
+            let line = heights[0]
+            XCTAssertGreaterThan(line, 0)
+            XCTAssertEqual(heights[1], line, accuracy: 1, "Empty code needs one code-height line: \(typeSize)")
+            XCTAssertEqual(heights[2], line * 2, accuracy: 1, "One newline needs two lines: \(typeSize)")
+            XCTAssertEqual(heights[3], line * 3, accuracy: 1, "Two newlines need three lines: \(typeSize)")
+        }
+    }
+
+    func testTableAlignmentReachesNativeParagraphs() async throws {
+        let header = [InlineRun(text: "A wider column", style: .plain)]
+        let cell = [InlineRun(text: "x", style: .plain)]
+        let block = MDBlock.table(header: [header, header, header], rows: [[cell, cell, cell]],
+                                  align: [.left, .center, .right])
+        let (window, host) = await mount(MarkdownBlockView(block: block))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let views = textViews(in: host.view)
+        XCTAssertEqual(views.count, 6)
+        let expected: [NSTextAlignment] = [.left, .center, .right, .left, .center, .right]
+        for (view, alignment) in zip(views, expected) {
+            let paragraph = try XCTUnwrap(view.attributedText.attribute(.paragraphStyle, at: 0,
+                                                                       effectiveRange: nil) as? NSParagraphStyle)
+            XCTAssertEqual(paragraph.alignment, alignment)
+            if view.text == "x" {
+                view.layoutManager.ensureLayout(for: view.textContainer)
+                let glyphs = view.layoutManager.glyphRange(forCharacterRange: NSRange(location: 0, length: 1),
+                                                           actualCharacterRange: nil)
+                let bounds = view.layoutManager.boundingRect(forGlyphRange: glyphs, in: view.textContainer)
+                switch alignment {
+                case .center: XCTAssertEqual(bounds.midX, view.bounds.midX, accuracy: 2)
+                case .right: XCTAssertEqual(bounds.maxX, view.bounds.maxX, accuracy: 2)
+                default: XCTAssertEqual(bounds.minX, 0, accuracy: 2)
+                }
+            }
+        }
+    }
+
+    func testNarrowAccessibilityLayoutDoesNotClipSelectableText() async throws {
+        let runs = [InlineRun(text: String(repeating: "Long 👩🏽‍💻 café output ", count: 12), style: .plain)]
+        let (window, host) = await mount(SelectableMarkdownText(runs: runs)
+            .environment(\.dynamicTypeSize, .accessibility3), width: 180)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = try XCTUnwrap(textViews(in: host.view).first)
+        view.layoutManager.ensureLayout(for: view.textContainer)
+        let used = view.layoutManager.usedRect(for: view.textContainer)
+        XCTAssertLessThanOrEqual(view.bounds.width, 181)
+        XCTAssertLessThanOrEqual(used.maxY, view.bounds.height + 1)
+        XCTAssertGreaterThan(view.bounds.height, 100)
+        let font = try XCTUnwrap(view.attributedText.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)
+        XCTAssertGreaterThan(font.pointSize, MD.textSize)
+    }
+
+    func testVeilUsesCharacterOffsetsAcrossEmojiAndStyleBoundaries() {
+        var now: Double = 0
+        let veil = RowVeil(seededLength: 1, clock: { now })
+        let runs = [InlineRun(text: "A👩🏽‍💻", style: .plain),
+                    InlineRun(text: "café", style: InlineStyle(code: true))]
+        veil.noteLength(6)
+        let faded = runs.selectableAttributed(veil: veil)
+        XCTAssertEqual(faded.string, "A👩🏽‍💻café")
+        let settled = faded.attribute(.foregroundColor, at: 0, effectiveRange: nil) as! UIColor
+        let emoji = faded.attribute(.foregroundColor, at: 1, effectiveRange: nil) as! UIColor
+        let code = faded.attribute(.foregroundColor, at: ("A👩🏽‍💻" as NSString).length,
+                                   effectiveRange: nil) as! UIColor
+        XCTAssertGreaterThan(settled.cgColor.alpha, 0.9)
+        XCTAssertEqual(emoji.cgColor.alpha, 0, accuracy: 0.001)
+        XCTAssertEqual(code.cgColor.alpha, 0, accuracy: 0.001)
+        now = 1000
+        let finished = runs.selectableAttributed(veil: veil)
+        let restored = finished.attribute(.foregroundColor, at: 1, effectiveRange: nil) as! UIColor
+        XCTAssertGreaterThan(restored.cgColor.alpha, 0.9)
+    }
+
     func testInlineStylesLinksAndHardBreaksKeepTheirTextAndRanges() {
         let runs = [
             InlineRun(text: "👋 ", style: .plain),

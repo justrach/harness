@@ -6,15 +6,17 @@ import UIKit
 struct SelectableText: UIViewRepresentable {
     let text: NSAttributedString
     var wraps = true
+    var lineHeight: CGFloat = MD.lineHeight
     @Environment(\.openURL) private var openURL
 
     func makeUIView(context: Context) -> UITextView {
         let storage = NSTextStorage()
         let layout = InlineCodeLayoutManager()
+        layout.extraLineHeight = lineHeight
         let container = NSTextContainer(size: .zero)
         storage.addLayoutManager(layout)
         layout.addTextContainer(container)
-        let view = UITextView(frame: .zero, textContainer: container)
+        let view = OutputTextView(frame: .zero, textContainer: container)
         view.isEditable = false
         view.isSelectable = true
         view.isScrollEnabled = false
@@ -31,6 +33,11 @@ struct SelectableText: UIViewRepresentable {
         view.tintColor = UIColor(Theme.accent)
         // Links keep their explicit monochrome foreground and underline.
         view.linkTextAttributes = [:]
+        if let layout = view.layoutManager as? InlineCodeLayoutManager, layout.extraLineHeight != lineHeight {
+            layout.extraLineHeight = lineHeight
+            layout.invalidateLayout(forCharacterRange: NSRange(location: 0, length: view.textStorage.length),
+                                    actualCharacterRange: nil)
+        }
         Self.update(text, in: view)
     }
 
@@ -38,12 +45,24 @@ struct SelectableText: UIViewRepresentable {
     /// selection. Avoid assigning even equal strings: UIKit resets its edit UI.
     static func update(_ text: NSAttributedString, in view: UITextView) {
         guard !view.attributedText.isEqual(to: text) else { return }
-        let selection = view.selectedRange
-        let previous = view.text ?? ""
+        let selection = retainedSelection(view.selectedRange, from: view.text ?? "", to: text.string)
         view.attributedText = text
-        if text.string.hasPrefix(previous), NSMaxRange(selection) <= text.length {
-            view.selectedRange = selection
-        }
+        view.selectedRange = selection
+    }
+
+    /// TextKit offsets are UTF-16, whereas String.hasPrefix compares canonical
+    /// Characters. Only literal appends can reuse offsets, and appending a
+    /// combining mark/ZWJ must not leave a selection inside the new grapheme.
+    static func retainedSelection(_ selection: NSRange, from previous: String, to text: String) -> NSRange {
+        let count = previous.utf16.count
+        let cleared = NSRange(location: 0, length: 0)
+        guard selection.location >= 0, selection.length >= 0,
+              selection.location <= count, selection.length <= count - selection.location,
+              previous.utf16.elementsEqual(text.utf16.prefix(previous.utf16.count)),
+              let range = Range(selection, in: text),
+              range.lowerBound == text.endIndex || text.indices.contains(range.lowerBound),
+              range.upperBound == text.endIndex || text.indices.contains(range.upperBound) else { return cleared }
+        return selection
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
@@ -69,9 +88,34 @@ struct SelectableText: UIViewRepresentable {
     }
 }
 
+private final class OutputTextView: UITextView {
+    override func resignFirstResponder() -> Bool {
+        let wasFirstResponder = isFirstResponder
+        let resigned = super.resignFirstResponder()
+        // UIKit retains an invisible range on blur. A later long-press inside
+        // it tries to manipulate that inactive selection instead of selecting
+        // a new word, so no Copy menu appears while the composer owns focus.
+        if wasFirstResponder && resigned { selectedRange = NSRange(location: 0, length: 0) }
+        return resigned
+    }
+}
+
 /// Preserve the rounded inline-code wash without changing glyph geometry.
 /// Native selection backgrounds still use UIKit's unmodified drawing path.
 private final class InlineCodeLayoutManager: NSLayoutManager {
+    var extraLineHeight: CGFloat = MD.lineHeight
+
+    // TextKit otherwise uses its unstyled default font for the final empty
+    // line, even when preceding code lines have scaled paragraph metrics.
+    override func setExtraLineFragmentRect(_ fragmentRect: CGRect, usedRect: CGRect,
+                                          textContainer: NSTextContainer) {
+        var fragment = fragmentRect
+        var used = usedRect
+        fragment.size.height = max(fragment.height, extraLineHeight)
+        used.size.height = max(used.height, extraLineHeight)
+        super.setExtraLineFragmentRect(fragment, usedRect: used, textContainer: textContainer)
+    }
+
     override func fillBackgroundRectArray(_ rectArray: UnsafePointer<CGRect>, count rectCount: Int,
                                          forCharacterRange charRange: NSRange, color: UIColor) {
         guard let storage = textStorage, charRange.location < storage.length,
@@ -95,11 +139,13 @@ struct SelectableMarkdownText: View {
     var weight: UIFont.Weight = .regular
     var lineHeight: CGFloat = MD.lineHeight
     var veil: RowVeil? = nil
+    var alignment: NSTextAlignment = .natural
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
 
     var body: some View {
         SelectableText(text: runs.selectableAttributed(size: size * scale, weight: weight,
-                                                       lineHeight: lineHeight * scale, veil: veil))
+                                                       lineHeight: lineHeight * scale, veil: veil,
+                                                       alignment: alignment), lineHeight: lineHeight * scale)
     }
 }
 
@@ -108,10 +154,12 @@ extension [InlineRun] {
     /// and soft wraps without copying markdown syntax. Ranges are UTF-16 for
     /// TextKit; veil offsets remain Swift Character offsets.
     func selectableAttributed(size: CGFloat = MD.textSize, weight: UIFont.Weight = .regular,
-                              lineHeight: CGFloat = MD.lineHeight, veil: RowVeil? = nil) -> NSAttributedString {
+                              lineHeight: CGFloat = MD.lineHeight, veil: RowVeil? = nil,
+                              alignment: NSTextAlignment = .natural) -> NSAttributedString {
         let result = NSMutableAttributedString(string: "")
         let paragraph = NSMutableParagraphStyle()
         paragraph.minimumLineHeight = lineHeight
+        paragraph.alignment = alignment
         for run in self {
             var font = run.style.code ? Theme.monoUI(size - 1.5)
                 : Theme.sansUI(size, weight: run.style.bold ? .semibold : weight)
