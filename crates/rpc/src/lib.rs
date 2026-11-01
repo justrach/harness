@@ -48,6 +48,11 @@ pub mod methods {
     /// window; `null` is graff's own default (80%).
     pub const GET_GRAFF_COMPACT_AT: &str = "GetGraffCompactAt";
     pub const SET_GRAFF_COMPACT_AT: &str = "SetGraffCompactAt";
+    /// Keep the device awake while its agents work. Replies
+    /// `{ enabled, supported }`; `supported: false` where the engine cannot
+    /// hold a sleep assertion (clients hide the setting there).
+    pub const GET_KEEP_AWAKE: &str = "GetKeepAwake";
+    pub const SET_KEEP_AWAKE: &str = "SetKeepAwake";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     /// The device's default autonomy (`read-only` / `workspace` /
     /// `full-access`), stamped onto every run's sandbox and auto-approve.

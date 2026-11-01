@@ -30,6 +30,7 @@ pub mod external_history;
 mod graff_logins;
 mod http_error;
 pub mod instance_lock;
+pub mod keep_awake;
 pub mod local_import;
 pub mod mcp_servers;
 mod model_catalogs;
@@ -172,6 +173,9 @@ pub struct EngineCore {
     updater: std::sync::Mutex<Option<harness_update::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Holds the Mac awake while agents work (see [`keep_awake`]); owned so
+    /// shutdown releases the assertion.
+    keep_awake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -373,6 +377,7 @@ impl EngineCore {
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
+            keep_awake: std::sync::Mutex::new(None),
             _instance_lock: lock,
         })
     }
@@ -431,6 +436,19 @@ impl EngineCore {
             .updater_wake
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// Start holding the machine awake while agents work, when the setting
+    /// says so.
+    fn start_keep_awake(&self) {
+        let task = keep_awake::spawn(
+            self.sessions.watch_sessions(),
+            self.registry.watch_keep_awake(),
+        );
+        *self
+            .keep_awake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 
     pub fn set_updater(&self, updater: harness_update::Updater) {
@@ -569,6 +587,15 @@ impl EngineCore {
         if let Some(wake) = wake {
             wake.abort();
             let _ = wake.await;
+        }
+        let keep_awake = self
+            .keep_awake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(keep_awake) = keep_awake {
+            keep_awake.abort();
+            let _ = keep_awake.await;
         }
         let updater = self
             .updater
@@ -887,6 +914,7 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
+        core.start_keep_awake();
         // Installed desktop bundles and managed servers use a public stable
         // release feed, so update checks also run for local-only, signed-out
         // workspaces.

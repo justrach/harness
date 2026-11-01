@@ -117,6 +117,19 @@ struct SetGraffDraftSubagentsParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetKeepAwakeParams {
+    enabled: bool,
+}
+
+/// `GetKeepAwake` / `SetKeepAwake` reply.
+fn keep_awake_reply(registry: &HarnessRegistry) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": registry.keep_awake(),
+        "supported": crate::keep_awake::SUPPORTED,
+    })
+}
+
+#[derive(Debug, Deserialize)]
 struct SetAutonomyParams {
     autonomy: harness_proto::Autonomy,
 }
@@ -1442,6 +1455,8 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::GET_GRAFF_COMPACT_AT
             | methods::SET_GRAFF_COMPACT_AT
+            | methods::GET_KEEP_AWAKE
+            | methods::SET_KEEP_AWAKE
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1989,6 +2004,12 @@ impl RpcService for EngineRpc {
                 let p: SetGraffDraftSubagentsParams = parse_params(params)?;
                 self.registry.set_graff_draft_subagents(p.enabled);
                 RpcReply::value(&self.registry.graff_draft_subagents())
+            }
+            methods::GET_KEEP_AWAKE => RpcReply::value(&keep_awake_reply(&self.registry)),
+            methods::SET_KEEP_AWAKE => {
+                let p: SetKeepAwakeParams = parse_params(params)?;
+                self.registry.set_keep_awake(p.enabled);
+                RpcReply::value(&keep_awake_reply(&self.registry))
             }
             methods::GET_GRAFF_COMPACT_AT => RpcReply::value(&self.registry.graff_compact_at()),
             methods::SET_GRAFF_COMPACT_AT => {
