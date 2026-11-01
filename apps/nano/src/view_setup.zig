@@ -530,7 +530,7 @@ fn effortPane(c: *ui.Context, a: *App, k: theme.Colors, s: *Setup) void {
             var t = ui.div(c).row().px(12).py(6).rounded(7);
             t = if (on) t.bg(k.card).border(k.border).borderW(1) else t.hover(k.ink(0.05));
             defer t.end();
-            kit.ellipsisText(c, m.label, set.st(c, 12.5, .{ .weight = if (on) .medium else null, .color = if (on) k.text else k.muted }), 140);
+            kit.ellipsisText(c, m.label, set.st(c, 12.5, .{ .weight = if (on) .medium else .regular, .color = if (on) k.text else k.muted }), 140);
             if (t.clicked() and !on) {
                 s.model = i;
                 s.level = null;
@@ -592,7 +592,7 @@ fn autonomyPane(c: *ui.Context, k: theme.Colors, s: *Setup) void {
             var t = ui.div(c).row().grow().w(0).py(8).rounded(7).justifyCenter();
             t = if (on) t.bg(k.card).border(k.border).borderW(1) else t.hover(k.ink(0.05));
             defer t.end();
-            ui.text(c, x.label(), set.st(c, 12.5, .{ .weight = if (on) .medium else null, .color = if (on) k.text else k.muted }));
+            ui.text(c, x.label(), set.st(c, 12.5, .{ .weight = if (on) .medium else .regular, .color = if (on) k.text else k.muted }));
             if (t.clicked()) s.autonomy = x;
         }
     }
