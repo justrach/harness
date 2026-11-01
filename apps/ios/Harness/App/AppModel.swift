@@ -960,6 +960,21 @@ final class AppModel {
         return workspace
     }
 
+    /// Demo mode's made-up localhost page (a link's "Open on this phone" offline).
+    @ObservationIgnored private lazy var demoLocalhostPages = DemoLocalhostPages()
+
+    /// Where a localhost page view sends its calls: the computer's engine over
+    /// its relay, or demo mode's made-up page. Debug builds launched with
+    /// `-simulator-engine <port>` talk to that engine on this Mac directly.
+    func localhostPageHost() throws -> any LocalhostPageHost {
+        #if DEBUG
+        if let localSimulatorEngine { return localSimulatorEngine }
+        #endif
+        if demo != nil { return demoLocalhostPages }
+        guard let workspace else { throw RelayError.notConnected }
+        return workspace
+    }
+
     /// Computers that can run iOS Simulators (Macs), online ones first.
     var simulatorMacs: [DeviceRow] {
         SimulatorHosts.macs(devices, online: deviceOnline)
