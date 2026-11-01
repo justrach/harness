@@ -414,11 +414,15 @@ fn treeRow(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     defer body.end();
     const detail_key = c.print("detail/{s}/{s}", .{ e.id, p.id });
     const has_output = p.output.len > 0 or p.output_ref.len > 0;
+    // A diff wins over output, as the more structured record of the same
+    // action, then the per-file stats a thinned document keeps
+    // (`tool_detail`).
+    const has_detail = has_output or p.diff_new != null or p.stats.len > 0;
     const base = ui.div(c).row().gap(8).itemsCenter().pr(4).rounded(4);
-    const head = if (!linked and has_output) kit.pressFeedback(base.control().hover(k.wash(0.04))) else base;
+    const head = if (!linked and has_detail) kit.pressFeedback(base.control().hover(k.wash(0.04))) else base;
     {
         defer head.end();
-        if (!linked and has_output and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, false);
+        if (!linked and has_detail and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, false);
         const chip = if (p.kind == .reasoning) "Thought process" else p.chip;
         const active = !p.is_error and (if (p.agent) p.subagent_status == .running else e.status == .streaming and !p.resolved);
         kit.activityText(c, k, chip, kit.style(c, 12, 18, .{ .weight = if (toolIcon(p) == .bot) .medium else .regular, .color = if (p.is_error) k.danger else k.muted }), active);
@@ -431,7 +435,9 @@ fn treeRow(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     if (p.kind == .reasoning) {
         @import("view_markdown.zig").withLinks(c, k, p.text.items, a, parent);
     }
-    if (!linked and has_output and a.view.groupOpen(detail_key, false)) {
+    if (!linked and has_detail and a.view.groupOpen(detail_key, false)) {
+        if (p.diff_new) |new| return editDiff(c, k, p, new);
+        if (p.stats.len > 0) return statRows(c, k, p.stats);
         const output = ui.div(c).column().wFull().p(8).rounded(6).bg(k.wash(0.04));
         defer output.end();
         const blob = a.tool_blobs.get(p.output_ref);
@@ -444,6 +450,40 @@ fn treeRow(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
             ui.text(c, if (loading) "Loading full output…" else if (blob != null and blob.?.status == .failed) "Retry full output" else "Show full output", .{ .size = 12, .color = k.muted });
             if (!loading and action.clicked()) a.fetchToolBlob(p.output_ref);
         }
+    }
+}
+
+/// An opened edit: its hunks as the Changes pane draws them, numbers,
+/// markers and syntax colors (`ToolDetail::Diff`).
+fn editDiff(c: *ui.Context, k: theme.Colors, p: *const tr.Part, new: []const u8) void {
+    const f = @import("tool_diff.zig").file(c.alloc(), p.path, p.diff_old, new) catch return;
+    if (f.hunks.len == 0) return;
+    ui.key(c, c.print("edit-diff-{s}", .{p.id}));
+    const box = ui.div(c).column().wFull().py(4).rounded(6).bg(k.wash(0.04)).clip();
+    defer box.end();
+    @import("view_diffs.zig").body(c, k, &f);
+}
+
+/// A thinned edit's files, one row each: its icon, path and counts
+/// (`ToolDetail::Stats`).
+fn statRows(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
+    const box = ui.div(c).column().wFull().px(8).py(6).rounded(6).bg(k.wash(0.04));
+    defer box.end();
+    const mono: ui.TextStyle = .{ .size = 12, .mono = true, .color = k.faint };
+    for (stats) |s| {
+        const r = ui.div(c).row().wFull().h(18).gap(8).itemsCenter();
+        defer r.end();
+        file_icons.icon(c, s.path, false, k.dark, 14);
+        {
+            const path = ui.div(c).row().grow().w(0).clip();
+            defer path.end();
+            ui.text(c, s.path, mono);
+        }
+        var st = mono;
+        st.color = k.success;
+        ui.text(c, c.print("+{d}", .{s.additions}), st);
+        st.color = k.danger;
+        ui.text(c, c.print("−{d}", .{s.deletions}), st);
     }
 }
 

@@ -238,6 +238,75 @@ test "agent tabs cycle both ways while an existing chat stays locked to its own 
     try testing.expect(h.a.picker == .none);
 }
 
+test "agent tabs that overflow the card scroll, and the viewed one is always in view" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    const agents = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"graff","name":"graff","enabled":true},
+        \\ {"id":"claude-code","name":"Claude Code","enabled":true},
+        \\ {"id":"cursor","name":"Cursor","enabled":true},
+        \\ {"id":"devin","name":"Devin","enabled":true},
+        \\ {"id":"opencode","name":"OpenCode","enabled":true},
+        \\ {"id":"codex","name":"Codex","enabled":true}]
+    , .{});
+    defer agents.deinit();
+    try h.a.harnesses.replace(agents.value);
+    h.a.picker = .none;
+    h.t.settle(1);
+    h.a.togglePicker();
+    h.t.settle(1);
+    const card = cardRect(&h) orelse return error.MissingCard;
+    // Codex is past the card's edge until something brings it in.
+    const far = inPicker(&h, "Codex") orelse return error.MissingTab;
+    try testing.expect(far.x >= card.x + card.w);
+    // Selecting it from the keyboard scrolls it fully into view.
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab, .ctrl = true, .shift = true });
+    h.t.settle(1);
+    try testing.expectEqualStrings("codex", h.a.new_harness);
+    h.snap("picker-tabs-overflow");
+    const codex = inPicker(&h, "Codex") orelse return error.MissingTab;
+    try testing.expect(codex.x >= card.x and codex.x + codex.w <= card.x + card.w);
+    // Opening again on Codex starts with it in view.
+    h.a.picker = .none;
+    h.t.settle(1);
+    h.a.view.model_picker.tab_offset = 0;
+    h.a.togglePicker();
+    h.t.settle(1);
+    const again = inPicker(&h, "Codex") orelse return error.MissingTab;
+    try testing.expect(again.x + again.w <= card.x + card.w);
+    // Wrapping forward to graff scrolls back to the start.
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.tab, .ctrl = true });
+    h.t.settle(1);
+    try testing.expectEqualStrings("graff", h.a.new_harness);
+    const first = inPicker(&h, "graff") orelse return error.MissingTab;
+    try testing.expect(first.x >= card.x);
+    // The wheel over the row pans it both ways; the chat behind stays put.
+    const row = (inPicker(&h, "graff") orelse return error.MissingTab).y + 4;
+    const mid = card.x + card.w / 2;
+    h.t.moveTo(mid, row);
+    h.t.scroll(mid, row, 400);
+    h.t.settle(1);
+    try testing.expectEqual(@as(f32, 0), h.a.view.model_picker.tab_offset);
+    h.t.scroll(mid, row, -400);
+    h.t.settle(1);
+    const scrolled = inPicker(&h, "Codex") orelse return error.MissingTab;
+    try testing.expect(scrolled.x >= card.x and scrolled.x + scrolled.w <= card.x + card.w);
+    try testing.expect(inPicker(&h, "Starred").?.x + 44 < card.x);
+    // A trackpad swipes it sideways (the wheel's x), back to the start.
+    h.t.ctx.input.scroll = .{ .x = 400 };
+    h.t.frame();
+    h.t.settle(1);
+    try testing.expectEqual(@as(f32, 0), h.a.view.model_picker.tab_offset);
+}
+
+/// The picker card's columns: 356 wide from the chip's leading edge.
+fn cardRect(h: *Harness) ?ui.Rect {
+    const chip = h.a.view.chip_anchor orelse return null;
+    const x = std.math.clamp(chip.x, 8, 900 - 356 - 8);
+    return .{ .x = x, .y = 0, .w = 356, .h = 750 };
+}
+
 test "dismissal fades for 100ms without taking composer focus or leaving idle frames" {
     var h: Harness = undefined;
     try h.init(true);

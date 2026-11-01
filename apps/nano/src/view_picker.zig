@@ -624,7 +624,8 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
 fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {
     const p = &a.view.model_picker;
     ui.key(c, "model-picker-tabs");
-    const viewport = ui.div(c).row().wFull().h(39).clip();
+    // It takes the wheel itself: the chat scrolling behind the card mustn't.
+    const viewport = ui.div(c).row().wFull().h(39).clip().wheel();
     defer viewport.end();
     const current = a.target().harness;
     var total: f32 = 8 + tabWidth(c, "Starred", 15) + 2;

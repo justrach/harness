@@ -1782,6 +1782,67 @@ test "a finished turn's edits show as a changes card over the composer; it opens
     try testing.expect(h.a.panels.host_open);
     try testing.expect(h.a.panels.activeTab().?.kind == .diffs);
     try testing.expect(h.t.hasText("Showing"));
+    // The working tree's diff ends on GPUI's review footer: Undo asks
+    // first, Keep changes closes the pane.
+    var d: @import("app_panels.zig").Diff = .{ .arena = .init(testing.allocator), .additions = 1, .deletions = 1 };
+    d.files = try @import("diff.zig").parse(d.arena.allocator(),
+        \\diff --git a/src/parser.rs b/src/parser.rs
+        \\--- a/src/parser.rs
+        \\+++ b/src/parser.rs
+        \\@@ -1,2 +1,2 @@
+        \\ fn parse() {
+        \\-    old();
+        \\+    new();
+        \\
+    );
+    if (h.a.panels.diff) |*old| old.arena.deinit();
+    h.a.panels.diff = d;
+    h.a.panels.diff_loading = false;
+    h.t.settle(1);
+    h.snap("changes-review-footer");
+    try testing.expect(h.t.containsText("new();"));
+    try testing.expect(h.t.hasText("Undo reverts every uncommitted file."));
+    try h.t.clickText("Undo all changes");
+    h.t.settle(1);
+    try testing.expect(h.a.panels.discard_confirm);
+    try testing.expect(h.t.hasText("Discard working tree changes?"));
+    try h.t.clickText("Cancel");
+    h.t.settle(1);
+    try testing.expect(!h.a.panels.discard_confirm);
+    try h.t.clickText("Keep changes");
+    h.t.settle(1);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expect(h.t.hasText("Review"));
+}
+
+test "an opened edit step shows its code as a diff, and a thinned one its files" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Tidy it"}]},
+        \\ {"id":"r","role":"assistant","parts":[
+        \\  {"id":"e1","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"src/lexer.rs"},"diff":{"path":"src/lexer.rs","oldText":"fn lex() {\n    old_token();\n}\n","newText":"fn lex() {\n    new_token();\n}\n"}},
+        \\  {"id":"e2","kind":"tool","resolved":true,"call":{"kind":"editFile","path":"src/parser.rs"},"diffStats":[{"path":"src/parser.rs","additions":3,"deletions":1}]},
+        \\  {"id":"d","kind":"text","text":"Done."}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.a.settings.set(.transcript_compact_mode, false);
+    // The run of steps open, the steps themselves closed: no code yet.
+    h.a.view.toggleGroup(h.a.gpa, "r/e1", false);
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("lexer.rs"));
+    try testing.expect(!h.t.containsText("new_token();"));
+    try h.t.clickText("lexer.rs");
+    h.t.settle(1);
+    h.snap("edit-step-diff");
+    try testing.expect(h.t.hasText("@@ -1,3 +1,3 @@"));
+    try testing.expect(h.t.containsText("old_token();"));
+    try testing.expect(h.t.containsText("new_token();"));
+    try h.t.clickText("parser.rs");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("src/parser.rs"));
 }
 
 test "the context ring sits at the footer's right; resting on it opens the card of what fills the context" {

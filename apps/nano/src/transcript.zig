@@ -61,6 +61,9 @@ pub const Compaction = struct {
     }
 };
 
+/// One file of an edit's `diffStats`.
+pub const Stat = struct { path: []const u8, additions: u64, deletions: u64 };
+
 /// The compaction chip's tool name (`COMPACTION_TOOL_NAME`).
 pub const compaction_tool = "Compact context";
 
@@ -92,6 +95,12 @@ pub const Part = struct {
     additions: u64 = 0,
     deletions: u64 = 0,
     stat_paths: []u8 = &.{},
+    /// Each named file's counts, its path in `stat_paths`.
+    stats: []Stat = &.{},
+    /// The edit's inline `diff`: the file before (none for a new one) and
+    /// after, which an opened step draws as hunks (`ToolDetail::Diff`).
+    diff_old: ?[]u8 = null,
+    diff_new: ?[]u8 = null,
     /// A compaction chip (`ToolCall::is_compaction`) and its record.
     compaction: ?Compaction = null,
     /// A tool has finished, or an input request was answered.
@@ -113,6 +122,9 @@ pub const Part = struct {
         gpa.free(p.subagent_ref);
         gpa.free(p.subagent_title);
         gpa.free(p.stat_paths);
+        gpa.free(p.stats);
+        if (p.diff_old) |s| gpa.free(s);
+        if (p.diff_new) |s| gpa.free(s);
         p.text.deinit(gpa);
         if (p.arena) |a| {
             a.deinit();
@@ -339,20 +351,34 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
 }
 
 /// `diff_stats` when the fold kept them, else the inline `diff` an older
-/// document carries (`turn_work::latest_turn_changes`).
+/// document carries (`turn_work::latest_turn_changes`). The inline diff's
+/// text is kept either way: an opened step shows it.
 fn diffStats(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
+    if (o.get("diff")) |d| if (d == .object) if (string(d.object.get("newText"))) |new| {
+        p.diff_new = try gpa.dupe(u8, new);
+        if (string(d.object.get("oldText"))) |old| p.diff_old = try gpa.dupe(u8, old);
+    };
     if (o.get("diffStats")) |v| if (v == .array) {
         var paths: std.ArrayList(u8) = .empty;
         errdefer paths.deinit(gpa);
+        var counts: std.ArrayList(Stat) = .empty;
+        errdefer counts.deinit(gpa);
         for (v.array.items) |s| if (s == .object) {
-            p.additions += uint(s.object.get("additions")) orelse 0;
-            p.deletions += uint(s.object.get("deletions")) orelse 0;
+            const add = uint(s.object.get("additions")) orelse 0;
+            const del = uint(s.object.get("deletions")) orelse 0;
+            p.additions += add;
+            p.deletions += del;
             if (string(s.object.get("path"))) |path| {
                 try paths.appendSlice(gpa, path);
                 try paths.append(gpa, '\n');
+                try counts.append(gpa, .{ .path = &.{}, .additions = add, .deletions = del });
             }
         };
         p.stat_paths = try paths.toOwnedSlice(gpa);
+        p.stats = try counts.toOwnedSlice(gpa);
+        // Their paths, now that the buffer holding them has settled.
+        var it = std.mem.splitScalar(u8, p.stat_paths, '\n');
+        for (p.stats) |*s| s.path = it.next() orelse "";
         return;
     };
     const d = o.get("diff") orelse return;
