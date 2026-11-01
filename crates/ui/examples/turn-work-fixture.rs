@@ -25,6 +25,41 @@ fn capture(
     })?
 }
 
+fn click(window: gpui::AnyWindowHandle, cx: &mut AsyncApp, x: f32, y: f32) -> anyhow::Result<()> {
+    window.update(cx, |_, w, cx| {
+        w.draw(cx).clear();
+        let position = gpui::point(px(x), px(y));
+        w.dispatch_event(
+            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }),
+            cx,
+        );
+        w.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        w.dispatch_event(
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+            }),
+            cx,
+        );
+    })?;
+    Ok(())
+}
+
 fn port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -99,7 +134,9 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(repo.join("src/lexer.rs"), "pub fn lex(input: &str) -> Vec<&str> {\n    input.split_whitespace().collect()\n}\n")?;
     std::fs::write(repo.join("src/parser.rs"), "pub fn parse(input: &str) -> usize {\n    if input.is_empty() {\n        return 0;\n    }\n    crate::lexer::lex(input).len()\n}\n")?;
     std::fs::write(repo.join("src/empty_input.rs"), "#[test]\nfn empty_input_parses_to_zero() {\n    assert_eq!(crate::parser::parse(\"\"), 0);\n}\n")?;
-    let repo_path = repo.to_string_lossy().to_string();
+    // Canonical (macOS temp dirs sit behind /var -> /private/var), so the
+    // chat's cwd matches the checkout the engine's diff watch reports.
+    let repo_path = std::fs::canonicalize(&repo)?.to_string_lossy().to_string();
     core.workspace.create_chat(
         "work-chat",
         None,
@@ -205,13 +242,15 @@ fn main() -> anyhow::Result<()> {
                         gpui::point(px(20.), px(40.)),
                         size(px(1200.), px(760.)),
                     ))),
+                    // Never take key focus: keystrokes on the Mac must not
+                    // land in the capture window.
+                    focus: false,
                     ..Default::default()
                 },
                 |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx)),
             )
             .unwrap();
         state.update(cx, |_, cx| cx.notify());
-        cx.activate(true);
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 state.update(cx, |state, cx| state.select_chat(Some("work-chat".into()), cx));
@@ -239,11 +278,11 @@ fn main() -> anyhow::Result<()> {
                 pause(cx, 1500).await;
                 let open = window.update(cx, |shell, _, cx| shell.fixture_right_pane_open(cx))?;
                 if !open {
-                    window.update(cx, |_, window, cx| {
-                        window.dispatch_action(Box::new(shell::ToggleChanges), cx)
-                    })?;
-                    pause(cx, 1500).await;
+                    // Click the card's Review, as a user would.
+                    click(window.into(), cx, 726., 643.)?;
                 }
+                // The working-tree diff comes from the engine's git watch.
+                pause(cx, 6000).await;
                 capture(window.into(), cx, &output, "03-review-footer")?;
                 Ok(())
             }

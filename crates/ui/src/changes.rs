@@ -1698,8 +1698,7 @@ pub struct Changes {
 
 /// The review footer's words. Undo discards the whole working tree (the
 /// engine has no per-turn revert), so the label says "all".
-pub(crate) const REVIEW_FOOTER_NOTE: &str =
-    "Changes are on disk. Undo all reverts every uncommitted change here.";
+pub(crate) const REVIEW_FOOTER_NOTE: &str = "Undo reverts every uncommitted file.";
 pub(crate) const REVIEW_UNDO_LABEL: &str = "Undo all changes";
 
 /// What the working-tree trash button asks the shell to confirm and send.
@@ -5125,7 +5124,7 @@ mod tests {
     #[test]
     fn review_undo_says_it_reverts_everything_uncommitted() {
         assert!(REVIEW_UNDO_LABEL.contains("all"));
-        assert!(REVIEW_FOOTER_NOTE.contains("every uncommitted change"));
+        assert!(REVIEW_FOOTER_NOTE.contains("every uncommitted file"));
         assert!(!REVIEW_FOOTER_NOTE.contains('\u{2014}') && !REVIEW_UNDO_LABEL.contains('\u{2014}'));
     }
 
