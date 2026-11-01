@@ -59,6 +59,8 @@ struct ThemeVariant: Decodable, Identifiable, Equatable {
 
     struct Accent: Decodable, Equatable {
         let primary, strong, wash, on, selection, activity: HexColor
+        /// The accent family's light, mid and deep tones (the desktop's `GlyphPalette`), top row first.
+        let glyph: [HexColor]?
     }
 }
 
@@ -66,6 +68,10 @@ struct ThemeVariant: Decodable, Identifiable, Equatable {
 /// the Rust `Color` serializes to.
 struct HexColor: Decodable, Equatable {
     let red, green, blue, alpha: Double
+
+    init(red: Double, green: Double, blue: Double, alpha: Double = 1) {
+        (self.red, self.green, self.blue, self.alpha) = (red, green, blue, alpha)
+    }
 
     var color: Color {
         Color(.sRGB, red: red, green: green, blue: blue, opacity: alpha)

@@ -2,12 +2,12 @@ import XCTest
 
 @MainActor
 final class SessionRenameUITests: XCTestCase {
-    private func launch(_ chatId: String, split: String = "off") -> XCUIApplication {
+    private func launch(_ chatId: String) -> XCUIApplication {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["-demo", "-sethomefilter", "", "-route", "chat:\(chatId)",
-                               "-phoneSplit", split, "-rollout.stackedSplitDrag", "off"]
+                               "-phoneSplit", "off"]
         app.launch()
         return app
     }
@@ -42,18 +42,6 @@ final class SessionRenameUITests: XCTestCase {
         replaceTitle(alert.textFields.firstMatch, with: "Release plan")
         alert.buttons["Save"].tap()
         expectation(for: NSPredicate(format: "label CONTAINS %@", "Release plan"), evaluatedWith: header(app))
-        waitForExpectations(timeout: 5)
-    }
-
-    func testSplitHeaderCanRename() {
-        let app = launch("chat-veil", split: "stacked")
-        XCTAssertTrue(header(app).waitForExistence(timeout: 10))
-        header(app).tap()
-        let alert = app.alerts["Rename session"]
-        XCTAssertTrue(alert.waitForExistence(timeout: 5))
-        replaceTitle(alert.textFields.firstMatch, with: "Renamed active session")
-        alert.buttons["Save"].tap()
-        expectation(for: NSPredicate(format: "label CONTAINS %@", "Renamed active session"), evaluatedWith: header(app))
         waitForExpectations(timeout: 5)
     }
 

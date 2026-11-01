@@ -153,6 +153,8 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
     private static let fallbackEstimate: CGFloat = 140
     /// Above this diff size a batch update costs more than a plain reload.
     private static let maxBatchChanges = 400
+    /// Cells UIKit asked for past the end of `rows`; tests read it.
+    var staleCellRequests = 0
 
     init(scroll: ScrollState) {
         follow = scroll
@@ -287,6 +289,13 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
         runwayID = input.runwayID
         expansionHeight = input.expansionHeight
         bottomSpacing = input.bottomSpacing
+        // `performBatchUpdates` first lays out anything pending, asking for
+        // cells by the old count; with `rows` already shorter that trapped.
+        if window != nil, bounds.width > 0, previousIDs != nextIDs, !appending {
+            updating = true
+            layoutIfNeeded()
+            updating = false
+        }
         let anchor = visibleAnchor()
         rows = input.rows
         perfFrames.setStreaming(rows.contains {
@@ -589,6 +598,14 @@ final class TranscriptTableView: UITableView, UITableViewDataSource, UITableView
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = dequeueReusableCell(withIdentifier: "message", for: indexPath)
+        // `update` lays out before replacing rows, so this shouldn't happen;
+        // a blank cell beats a crash if UIKit still asks for a stale row.
+        guard indexPath.row < rows.count else {
+            staleCellRequests += 1
+            cell.accessibilityIdentifier = nil
+            cell.contentConfiguration = nil
+            return cell
+        }
         let row = rows[indexPath.row]
         cell.accessibilityIdentifier = row.id
         cell.selectionStyle = .none

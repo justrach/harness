@@ -548,6 +548,7 @@ fn map_model_items(items: &Value) -> Vec<Model> {
                 options,
                 maker: None,
                 billing: None,
+                context: None,
             })
         })
         .collect()

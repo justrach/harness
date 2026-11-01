@@ -347,9 +347,9 @@ impl Shell {
         // draft and established chat tabs — this row budgets one button slot
         // so the title never sits under it or shifts after the first prompt.
         let sidebar_now = self.sidebar_now();
-        // The update control, when shown, takes the next slot after it.
+        // The cloud and update controls, when shown, take the next slots.
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx)
-            + self.titlebar_update_slot(cx);
+            + self.titlebar_extra_slots(cx);
 
         // Same glide as the old strip: content starts at the inset card's
         // left edge while the sidebar is open, and slides toward the control

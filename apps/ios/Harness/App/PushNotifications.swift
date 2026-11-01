@@ -32,7 +32,6 @@ final class PushNotifications: NSObject, UNUserNotificationCenterDelegate {
 
     private let defaults = UserDefaults.standard
     private static let enabledKey = "notifications.enabled"
-    private static let askedKey = "notifications.asked"
 
     // MARK: Choices
 
@@ -79,14 +78,6 @@ final class PushNotifications: NSObject, UNUserNotificationCenterDelegate {
                 UIApplication.shared.registerForRemoteNotifications()
             }
         }
-    }
-
-    /// The first time a session is started from this phone: the moment the
-    /// ask makes sense ("tell me when it's done").
-    func askAfterFirstSession() {
-        guard model?.demo == nil, enabled, !defaults.bool(forKey: Self.askedKey) else { return }
-        defaults.set(true, forKey: Self.askedKey)
-        Task { _ = await self.requestPermission() }
     }
 
     /// Ask the system (once; later it's the Settings app's call).

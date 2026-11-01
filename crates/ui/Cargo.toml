@@ -77,6 +77,10 @@ name = "browse-link-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "notifications-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "error-cards-fixture"
 required-features = ["appshots-fixture"]
 
@@ -90,6 +94,10 @@ required-features = ["appshots-fixture"]
 
 [[example]]
 name = "build-wait-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "transcript-selection-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -125,6 +133,10 @@ name = "markdown-math-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "inline-code-link-fixture"
+required-features = ["browser-fixture"]
+
+[[example]]
 name = "composer-completion-fade-fixture"
 required-features = ["appshots-fixture"]
 
@@ -138,6 +150,10 @@ required-features = ["appshots-fixture"]
 
 [[example]]
 name = "onboarding-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "turn-work-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]

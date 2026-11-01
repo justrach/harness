@@ -1,15 +1,23 @@
 // Settings → Crash reports: what iOS reported about Harness crashing,
-// hanging or overusing the CPU or disk (CrashReports). Nothing leaves the
-// iPhone unless it's shared from here.
+// hanging or overusing the CPU or disk (CrashReports). Each is sent to Harness
+// once while "Send to Harness" is on, and can be shared from here.
 
 import SwiftUI
 
 struct CrashReportsView: View {
     @State private var reports: [CrashReports.Report] = []
     @State private var confirmDelete = false
+    @AppStorage(CrashReports.sendKey) private var send = true
 
     var body: some View {
         List {
+            Section {
+                Toggle("Send to Harness", isOn: $send)
+                    .accessibilityIdentifier("settings-send-crash-reports")
+            } footer: {
+                Text("On by default. Each report goes to Harness once, linked to your account, so crashes can be fixed without you sharing them. Turn this off to keep reports on this iPhone.")
+            }
+            .harnessListRow()
             if reports.isEmpty {
                 Section {
                     Text("No reports yet.")
@@ -61,10 +69,11 @@ struct CrashReportsView: View {
             }
         }
         .task { reports = CrashReports.shared.reports() }
+        .onChange(of: send) { _, on in if on { CrashReports.shared.uploadPending() } }
     }
 
     private var footer: String {
-        "iOS reports a crash, a hang or heavy CPU or disk use to Harness on a later launch, usually the next one. Reports stay on this iPhone; tap one to share it. They hold code addresses, the build, the device model and the iOS version, never chat content."
+        "iOS reports a crash, a hang or heavy CPU or disk use to Harness on a later launch, usually the next one. Tap one to share it. They hold code addresses, the build, the device model and the iOS version, never chat content."
     }
 
     private func detail(_ report: CrashReports.Report) -> String {

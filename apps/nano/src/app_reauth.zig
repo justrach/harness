@@ -79,6 +79,21 @@ pub fn signInForChat(a: *App, chat_id: []const u8) void {
     @import("view_settings_accounts.zig").signIn(a, if (local) null else host, harnessOf(chat.harness));
 }
 
+/// `update_key_for_chat`: an error card's "Update key" (the provider
+/// rejected the API key; the sign-in is fine). The chat host's Accounts,
+/// with no sign-in started.
+pub fn updateKeyForChat(a: *App, chat_id: []const u8) void {
+    const chat = owned(a, chat_id) orelse {
+        a.setNotice(host_unavailable);
+        return a.redraw();
+    };
+    const host = chat.device_id.?;
+    const local = if (a.device_id) |d| std.mem.eql(u8, d, host) else false;
+    @import("view_settings.zig").open(a);
+    a.settings.setSection(.agents);
+    @import("view_settings_accounts.zig").updateKey(a, if (local) null else host);
+}
+
 /// `on_reauth_action`: a step on a reconnect card.
 pub fn action(a: *App, chat_id: []const u8, row_id: []const u8, provider: rr.Provider, act: rr.Action) void {
     defer a.redraw();

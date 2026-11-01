@@ -2399,6 +2399,18 @@ fn viewed_image_rows(entry: &SessionMessageEntry) -> Vec<Row> {
         .collect()
 }
 
+/// Paths of the files attached to the person's messages in `rows`.
+fn sent_attachment_paths(rows: &[Row]) -> HashSet<String> {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::User { attachments, .. } => Some(attachments.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|att| att.path.clone())
+        .collect()
+}
+
 /// The raster types both gpui and the engine's read-back support.
 fn viewed_image_mime(path: &str) -> Option<&'static str> {
     use gpui::ImageFormat;
@@ -4066,6 +4078,10 @@ pub struct Transcript {
     /// Focused while the lightbox is open so Escape reaches it.
     attachment_preview_focus: gpui::FocusHandle,
     attachment_preview_return_focus: Option<gpui::FocusHandle>,
+    /// Paths of the files the person attached to their messages. An agent
+    /// reading one of them is looking at what the person sent, which already
+    /// shows on their message, so it isn't repeated under the reply.
+    sent_attachment_paths: HashSet<String>,
     /// Mermaid diagrams in replies, rendered off the main thread and cached
     /// per (source, theme palette).
     diagrams: crate::markdown::diagram::DiagramCache,
@@ -4113,6 +4129,10 @@ pub enum TranscriptEvent {
     /// The shell routes it by the chat's own agent and host, never by the
     /// error text.
     SignIn { chat_id: String },
+    /// An error card's "Update key": the provider rejected the API key this
+    /// chat's agent used (its sign-in is fine). Routed like [`Self::SignIn`]
+    /// by the chat's host, to Accounts, without starting a sign-in.
+    UpdateKey { chat_id: String },
     /// A spawn chip's "Open subagent" affordance: open the subagent's
     /// transcript as a right-pane tab. `chat_id` is the doc the chip lives
     /// in (the frozen blob is keyed `{chat_id}/{doc_id}`); `frozen` means
@@ -4386,6 +4406,7 @@ impl Transcript {
             attachment_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
+            sent_attachment_paths: HashSet::new(),
             diagrams: Default::default(),
             diagram_sources_shown: Rc::default(),
             diagram_zoom: None,
@@ -5915,6 +5936,7 @@ impl Transcript {
         match diff {
             None => {
                 self.rows = new_rows;
+                self.refresh_sent_attachment_paths();
                 self.refresh_protected_attachments(cx);
                 self.reconcile_own_turn_prompt();
                 // Replay readiness is independent of row content: an empty
@@ -5967,6 +5989,7 @@ impl Transcript {
                 });
             }
         }
+        self.refresh_sent_attachment_paths();
         self.refresh_protected_attachments(cx);
         self.reconcile_own_turn_prompt();
         self.restore_pending_viewport(replay);
@@ -6385,6 +6408,10 @@ impl Transcript {
     /// rebuilt on every row sync so a chat switch swaps the set. Without it,
     /// budget pressure evicted thumbnails still on screen (the list caches
     /// rendered rows, so a visible image's LRU tick goes stale).
+    fn refresh_sent_attachment_paths(&mut self) {
+        self.sent_attachment_paths = sent_attachment_paths(&self.rows);
+    }
+
     fn refresh_protected_attachments(&self, cx: &Context<Self>) {
         // The protected set is GLOBAL and replaced wholesale — an override
         // instance writing it would clobber the primary transcript's keys.
@@ -7164,6 +7191,9 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
+        if viewed && self.sent_attachment_paths.contains(path) {
+            return div().into_any_element();
+        }
         let devices = self.generated_attachment_device_ids(owner, cx);
         let state = self.attachment_state(&devices, path, Some(mime_type), cx);
         let theme = Theme::of(cx).clone();
@@ -8497,18 +8527,18 @@ impl Transcript {
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, *viewed, cx),
             RowKind::ErrorChip { message } => {
                 let problem = harness_proto::run_errors::provider_problem(message);
-                let sign_in = self
-                    .chat_id
-                    .clone()
-                    .filter(|_| problem.is_some())
-                    .map(|chat_id| {
-                        cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            cx.emit(TranscriptEvent::SignIn {
-                                chat_id: chat_id.clone(),
-                            });
-                        })
-                    });
+                let sign_in = self.chat_id.clone().zip(problem).map(|(chat_id, problem)| {
+                    cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        let chat_id = chat_id.clone();
+                        cx.emit(match problem {
+                            harness_proto::run_errors::ProviderProblem::KeyRejected => {
+                                TranscriptEvent::UpdateKey { chat_id }
+                            }
+                            _ => TranscriptEvent::SignIn { chat_id },
+                        });
+                    })
+                });
                 error_chip(&row.id, message.clone(), problem, sign_in, &theme)
             }
             RowKind::ReauthRequired { message, provider } => {
@@ -9830,9 +9860,9 @@ fn plan_usage_limit_card(
 /// the human message below). Unlike the web port, the message WRAPS instead
 /// of truncating: startup-crash errors carry the agent's exit status and
 /// stderr, and a one-line ellipsis was exactly what made the upstream adapter
-/// failure undiagnosable from the screenshot. A refusal that signing in fixes (signed out, a usage limit)
-/// says so in the label, and with a chat to route it carries a "Log in"
-/// button under the message that starts that agent's sign-in.
+/// failure undiagnosable from the screenshot. A refusal the provider account fixes (signed out, a usage
+/// limit, a rejected API key) says so in the label, and with a chat to route it carries its button
+/// under the message: "Log in" starts that agent's sign-in, "Update key" opens Accounts.
 fn error_chip(
     row_id: &SharedString,
     message: SharedString,
@@ -15749,6 +15779,80 @@ mod tests {
             let ids: HashSet<_> = rows.iter().map(|row| row.id.clone()).collect();
             assert_eq!(ids.len(), rows.len(), "row ids stay unique");
         }
+    }
+
+    #[gpui::test]
+    fn images_the_person_sent_are_not_repeated_under_the_reply(cx: &mut gpui::TestAppContext) {
+        use crate::attachments::{AttachmentKey, AttachmentSnapshot, attachment_snapshot_for};
+        let root = if cfg!(windows) { "C:/work" } else { "/work" };
+        let sent = format!("{root}/uploads/ab12-sent-by-person.png");
+        let shot = format!("{root}/shots/checked-by-agent.png");
+        let mut user = assistant("u1", MessageStatus::Complete, vec![]);
+        user.role = MessageRole::User;
+        user.status = None;
+        user.parts = vec![text_part(
+            "t0",
+            &crate::attachments::with_attachments("what is this?", std::slice::from_ref(&sent)),
+        )];
+        let reply = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                read_part("r1", &sent, false, true),
+                read_part("r2", &shot, false, true),
+                text_part("t1", "It's a dialog."),
+            ],
+        );
+        let rows: Vec<Row> = [user, reply]
+            .iter()
+            .flat_map(|entry| rows_for_entry(entry, false, false, &mut parse))
+            .collect();
+        assert_eq!(sent_attachment_paths(&rows), HashSet::from([sent.clone()]));
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state, cx));
+            transcript.update(cx, |this, cx| {
+                this.rows = rows;
+                this.refresh_sent_attachment_paths();
+                for row in this.rows.clone() {
+                    if let RowKind::GeneratedImage {
+                        owner,
+                        path,
+                        name,
+                        mime_type,
+                        viewed,
+                    } = &row.kind
+                    {
+                        this.render_generated_image(
+                            &row.id, owner, path, name, mime_type, *viewed, cx,
+                        );
+                    }
+                }
+                // With no engine a read-back fails at once; the image the
+                // person sent is never fetched for the reply at all.
+                let devices = this.generated_attachment_device_ids("dev", cx);
+                assert!(!devices.is_empty());
+                let failed = |path: &str| {
+                    devices.iter().any(|dev| {
+                        matches!(
+                            attachment_snapshot_for(&AttachmentKey::new(
+                                dev,
+                                path,
+                                Some("image/png")
+                            )),
+                            AttachmentSnapshot::Error { .. }
+                        )
+                    })
+                };
+                assert!(failed(&shot));
+                assert!(!failed(&sent));
+            });
+        });
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";

@@ -8,7 +8,7 @@ final class SessionPagerUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         XCUIDevice.shared.orientation = .portrait
-        app.launchArguments = ["-demo", "-sethomefilter", ""]
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-homeGroupBy", "none"]
         app.launch()
     }
 

@@ -80,13 +80,14 @@ pub(crate) const QUEUE_COMPOSER_OVERLAP: f32 = 18.0;
 const NEW_THREAD_SELECTOR_ROW_HEIGHT: f32 = 20.0;
 /// The new-session heading ("New session in <project>") floats this far
 /// above the destination chips, in a slot this tall.
-const NEW_THREAD_HEADING_HEIGHT: f32 = 52.0;
+const NEW_THREAD_HEADING_HEIGHT: f32 = 60.0;
 const NEW_THREAD_HEADING_GAP: f32 = 14.0;
 /// Starter chips ("Build something new", "Research a topic", …) sit in a
 /// slot this far below the empty new-session composer. Tall enough for two
 /// wrapped rows in a narrow pane.
-const STARTER_ROW_HEIGHT: f32 = 62.0;
-const STARTER_ROW_GAP: f32 = 4.0;
+const STARTER_ROW_HEIGHT: f32 =
+    2.0 * crate::starters::TILE_HEIGHT + crate::starters::TILE_GAP;
+const STARTER_ROW_GAP: f32 = 12.0;
 // Accommodate the 24px usage indicator and PR badge without overflowing the
 // row's equal 8px top/bottom gutters.
 const SESSION_FOOTER_HEIGHT: f32 = 24.0;
@@ -6010,7 +6011,9 @@ impl Composer {
                     .iter()
                     .map(|image| attachments::stage_clipboard_image(image.clone()))
                     .collect();
-                this.add_staged(staged, cx);
+                if this.add_staged(staged, cx) {
+                    crate::sound::play_attach();
+                }
             }
             ComposerInputEvent::PastedPaths(paths) => this.add_paths(paths.clone(), cx),
             ComposerInputEvent::PastedText { range, revision } => {
@@ -6400,7 +6403,9 @@ impl Composer {
                 *slot = staged;
                 cx.notify();
             }
-            None => self.add_staged(vec![staged], cx),
+            None => {
+                self.add_staged(vec![staged], cx);
+            }
         }
         let focus = self.input.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
@@ -6416,8 +6421,9 @@ impl Composer {
         self.add_staged(vec![annotated.into_staged()], cx);
     }
 
-    fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) {
-        self.add_staged_for(self.current_key.clone(), staged, cx);
+    /// Whether anything was staged.
+    fn add_staged(&mut self, staged: Vec<StagedAttachment>, cx: &mut Context<Self>) -> bool {
+        self.add_staged_for(self.current_key.clone(), staged, cx)
     }
 
     fn add_staged_for(
@@ -6425,16 +6431,17 @@ impl Composer {
         key: String,
         staged: Vec<StagedAttachment>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.queue_edit_finishing {
-            return;
+            return false;
         }
         if staged.is_empty() {
-            return;
+            return false;
         }
         self.attachments.entry(key).or_default().extend(staged);
         self.focus_pending = true;
         cx.notify();
+        true
     }
 
     /// Stage files (picker / drop / pasted paths). Images get thumbnails;
@@ -6479,7 +6486,10 @@ impl Composer {
                 }
             }
         }
-        self.add_staged_for(key, staged, cx);
+        // Pasted, dropped and picked files land with a small cue.
+        if self.add_staged_for(key, staged, cx) {
+            crate::sound::play_attach();
+        }
     }
 
     /// Add a file-tree or file-tab drop through the existing file-mention
@@ -7688,14 +7698,23 @@ impl Composer {
         Some(
             div()
                 .flex()
-                .flex_row()
-                .flex_wrap()
-                .justify_center()
-                .gap(px(6.0))
-                .children(crate::starters::available(has_project).map(|starter| {
-                    crate::starters::chip(starter, theme).on_click(cx.listener(
-                        move |this, _, _, cx| this.apply_starter(starter, cx),
-                    ))
+                .flex_col()
+                .gap(px(crate::starters::TILE_GAP))
+                .children(crate::starters::grid_rows(has_project).into_iter().map(|row| {
+                    let lone = row.len() == 1;
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(crate::starters::TILE_GAP))
+                        .children(row.into_iter().map(|starter| {
+                            crate::starters::tile(starter, theme)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.apply_starter(starter, cx)
+                                }))
+                                .into_any_element()
+                        }))
+                        // A lone last tile keeps its half width.
+                        .when(lone, |row| row.child(div().flex_1()))
                 }))
                 .into_any_element(),
         )
@@ -7718,20 +7737,33 @@ impl Composer {
                 crate::chat_mode::HEADING_EYEBROW,
                 crate::chat_mode::HEADING_TITLE.to_string(),
             ),
-            Some(name) => ("New session in", name),
-            None => ("New session in your home folder", "No project".to_string()),
+            Some(name) => ("Working in", name),
+            None => ("Working in your home folder", "No project".to_string()),
+        };
+        let name = self
+            .state
+            .read(cx)
+            .auth_user()
+            .and_then(|user| user.name.clone());
+        let greeting = if chat_mode {
+            crate::chat_mode::HEADING_TITLE.to_string()
+        } else {
+            crate::starters::greeting(name.as_deref())
         };
         let id = "new-thread-heading";
         div()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(4.0))
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_muted.opacity(0.7))
-                    .child(SharedString::from(eyebrow)),
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(24.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from(greeting)),
             )
             .child(
                 div()
@@ -7740,11 +7772,11 @@ impl Composer {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(4.0))
                     .cursor_pointer()
-                    .text_size(crate::typography::ui_rems(22.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(motion::hover_blend(id, theme.text.opacity(0.9), theme.text))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(motion::hover_blend(id, theme.text_muted, theme.text))
+                    .child(div().flex_none().child(SharedString::from(eyebrow)))
                     .when(!chat_mode, |el| {
                         el.on_hover(motion::hover_listener(id))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -7754,11 +7786,19 @@ impl Composer {
                             }))
                     })
                     .when(chat_mode, |el| el.cursor_default())
-                    .child(div().min_w_0().truncate().child(SharedString::from(title)))
+                    .when(!chat_mode, |el| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(SharedString::from(title)),
+                        )
+                    })
                     .when(!chat_mode, |el| {
                         el.child(
                             crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                                .size(px(16.0))
+                                .size(px(12.0))
                                 .flex_none()
                                 .text_color(theme.text_muted.opacity(0.6)),
                         )
@@ -10107,7 +10147,12 @@ impl Composer {
     /// border-white/[0.08] bg-white/[0.03] shadow-xl`), uppercase header +
     /// "1/3" counter chip, option rows with number kbd chips, a free-text
     /// override over a hairline, and Back / Next-Submit footer.
-    fn render_wizard(&mut self, max_height: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_wizard(
+        &mut self,
+        max_height: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = Theme::of(cx).clone();
         let Some(wizard) = self.wizard.clone() else {
             return gpui::Empty.into_any_element();
@@ -10284,15 +10329,23 @@ impl Composer {
                             }),
                     )
                     .child(
+                        // Agents write questions in Markdown (bold, code spans, lists), like their replies.
                         div()
                             .w_full()
                             .min_w_0()
                             .mt(px(6.0))
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(SharedString::from(question.question.clone())),
+                            .child(crate::markdown::render::render_tree(
+                                &question_markdown(&question.question),
+                                &crate::markdown::render::RenderOptions::settled(
+                                    "composer-question".into(),
+                                ),
+                                &theme,
+                                window,
+                                &|_| None,
+                            )),
                     )
                     .when(question.multi_select, |el| {
                         el.child(
@@ -10989,7 +11042,7 @@ impl Render for Composer {
                 let width = (viewport.width - px(16.0))
                     .min(px(pane_width.max(QUESTION_POPOVER_MIN_WIDTH)))
                     .min(px(COMPOSER_MAX_WIDTH));
-                let panel = self.render_wizard(max_height - 36.0, cx);
+                let panel = self.render_wizard(max_height - 36.0, window, cx);
                 return container.child(
                     gpui::deferred(
                         gpui::anchored()
@@ -11066,7 +11119,7 @@ impl Render for Composer {
                 .max(QUESTION_INLINE_FLOOR)
                 .min(available - Theme::SPACE_LG)
                 .max(120.0);
-            let wizard = self.render_wizard(cap, cx);
+            let wizard = self.render_wizard(cap, window, cx);
             return container.child(motion::fade_quick(
                 "composer-wizard",
                 div().min_h_0().flex().flex_col().child(wizard),
@@ -11959,6 +12012,12 @@ fn dictation_unavailable_message(
     }
 }
 
+/// An agent's question, parsed as the Markdown agents write it in (bold, code spans, lists), like their
+/// replies. Shown as plain text it read `**What happens now**` with its asterisks and backticks.
+fn question_markdown(question: &str) -> crate::markdown::BlockTree {
+    crate::markdown::parse_full(question)
+}
+
 #[cfg(test)]
 #[path = "composer/fade_tests.rs"]
 mod fade_tests;
@@ -11974,6 +12033,51 @@ mod question_recovery_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_questions_render_their_markdown_not_its_markup() {
+        use crate::markdown::{Block, InlineRun};
+        let tree = question_markdown(
+            "**What happens now** (checked in code):\n\n\
+             - `viewer-image-stage.tsx:72-73` sets `original = active`.\n\
+             - The slide loads the **original**.",
+        );
+        fn runs(block: &Block, out: &mut Vec<InlineRun>) {
+            match block {
+                Block::Paragraph { runs: r } => out.extend(r.iter().cloned()),
+                Block::List { items, .. } => {
+                    for item in items {
+                        for child in item {
+                            runs(child, out);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        for top in &tree.blocks {
+            runs(&top.block, &mut all);
+        }
+        let text: String = all.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            !text.contains('*') && !text.contains('`'),
+            "markup shown as text: {text}"
+        );
+        assert!(
+            all.iter()
+                .any(|run| run.style.bold && run.text == "What happens now")
+        );
+        assert!(
+            all.iter()
+                .any(|run| run.style.code && run.text == "original = active")
+        );
+        assert!(
+            tree.blocks
+                .iter()
+                .any(|top| matches!(top.block, Block::List { .. }))
+        );
+    }
 
     pub(super) fn composer_focus_window(
         cx: &mut gpui::TestAppContext,
@@ -13463,6 +13567,149 @@ mod tests {
             assert!(input.read(cx).focus_handle.is_focused(window));
         })
         .unwrap();
+    }
+
+    /// A pasted, dropped or picked file lands with the attach cue: once per
+    /// attach, never for a file that failed, and not when it's turned off.
+    #[gpui::test]
+    fn attaching_a_file_plays_the_attach_cue_once(cx: &mut gpui::TestAppContext) {
+        let (dir, handle) = composer_focus_window(cx);
+        let image_path = dir.path().join("attachment.png");
+        let png = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1cAAAAASUVORK5CYII=",
+        )
+        .unwrap();
+        std::fs::write(&image_path, png).unwrap();
+        let cues = || crate::sound::ATTACH_CUES.with(|n| n.get());
+        let attach = |cx: &mut gpui::TestAppContext, path: std::path::PathBuf| {
+            handle
+                .update(cx, |composer, _, cx| composer.add_paths(vec![path], cx))
+                .unwrap();
+        };
+        crate::sound::set_attach_sound_enabled(true);
+        let before = cues();
+        attach(cx, image_path.clone());
+        assert_eq!(cues(), before + 1, "a dropped image plays the cue");
+        attach(cx, dir.path().join("missing.png"));
+        assert_eq!(cues(), before + 1, "a failed attach stays quiet");
+        crate::sound::set_attach_sound_enabled(false);
+        attach(cx, image_path);
+        assert_eq!(cues(), before + 1, "turned off in Settings");
+        let staged = handle
+            .read_with(cx, |composer, _| composer.staged().len())
+            .unwrap();
+        assert_eq!(staged, 2);
+    }
+
+    #[cfg(all(feature = "model-picker-preview", feature = "appshots-fixture"))]
+    #[gpui::test]
+    fn the_model_picker_in_the_composer_takes_a_model_and_level(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        let pickers = handle
+            .read_with(cx, |composer, _| composer.pickers.clone())
+            .unwrap();
+        handle
+            .update(cx, |composer, window, cx| {
+                composer.pickers.update(cx, |pickers, cx| {
+                    pickers.fixture_catalog(false, false, false, cx)
+                });
+                composer
+                    .pickers
+                    .update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
+            })
+            .unwrap();
+        let draw = |cx: &mut gpui::TestAppContext| {
+            for _ in 0..2 {
+                cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+                cx.executor().advance_clock(Duration::from_millis(300));
+                cx.run_until_parked();
+            }
+        };
+        let press = |cx: &mut gpui::TestAppContext, from: Point<Pixels>, to: Point<Pixels>| {
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                        position: from,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: from,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                if from != to {
+                    for _ in 0..2 {
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                position: to,
+                                pressed_button: Some(MouseButton::Left),
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.draw(cx).clear();
+                    }
+                }
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: to,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        draw(cx);
+        let row = pickers
+            .read_with(cx, |p, cx| p.fixture_model_position("openai/gpt-5.4", cx))
+            .expect("model row in the open picker");
+        press(cx, row, row);
+        draw(cx);
+        assert_eq!(
+            pickers
+                .read_with(cx, |p, _| p.fixture_pending())
+                .map(|p| p.0),
+            Some("openai/gpt-5.4".to_string()),
+            "clicking a model opens its reasoning step"
+        );
+        let (from, to) = pickers.read_with(cx, |p, cx| {
+            (
+                p.fixture_slider_position(None, cx).unwrap(),
+                p.fixture_slider_position(Some(0.0), cx).unwrap(),
+            )
+        });
+        press(cx, from, to);
+        draw(cx);
+        let reasoning = pickers.read_with(cx, |p, _| p.fixture_pending().unwrap().1);
+        assert_eq!(
+            reasoning,
+            Some(harness_proto::ReasoningLevel::Low),
+            "dragging the thumb to the start picks the lowest level"
+        );
+        let use_model = gpui::VisualTestContext::from_window(handle.into(), cx)
+            .debug_bounds("preview-use-model")
+            .expect("Use model button")
+            .center();
+        press(cx, use_model, use_model);
+        pickers.read_with(cx, |p, cx| {
+            assert_eq!(p.resolved(cx).model.as_deref(), Some("openai/gpt-5.4"));
+            assert_eq!(
+                p.resolved(cx).reasoning,
+                Some(harness_proto::ReasoningLevel::Low)
+            );
+        });
     }
 
     #[gpui::test]

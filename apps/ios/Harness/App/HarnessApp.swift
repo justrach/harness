@@ -13,6 +13,7 @@ struct HarnessApp: App {
 
     init() {
         Perf.shared.startWatching()
+        PhoneSplit.migrateStored()
         let model = AppModel()
         _model = State(initialValue: model)
         // A Watch message can launch the app with no window to restore from.
@@ -84,6 +85,16 @@ struct RootView: View {
                                 await model.untilSessionsChange()
                             }
                         }
+                    }
+                    // First-run setup after a fresh sign-in (Settings replays it).
+                    .fullScreenCover(isPresented: Binding(
+                        get: { model.setupPresented },
+                        set: { model.setupPresented = $0 }
+                    )) {
+                        OnboardingView { model.setupPresented = false }
+                            .environment(model)
+                            .harnessAppearance()
+                            .tint(Theme.text)
                     }
             }
         }

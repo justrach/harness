@@ -39,6 +39,8 @@ fn main() -> anyhow::Result<()> {
     let dark = has("--dark");
     let large = has("--large");
     let narrow = has("--narrow");
+    // The selected model lists no levels of its own; its agent has a ladder.
+    let agent_ladder = has("--agent-ladder");
     let selected = args
         .iter()
         .find_map(|a| a.strip_prefix("--model=").map(str::to_owned));
@@ -114,8 +116,12 @@ fn main() -> anyhow::Result<()> {
                                 pickers::Pickers::model_picker_fixture(state, legacy, large, cx)
                             });
                             if let Some(id) = selected {
-                                picker
-                                    .update(cx, |picker, cx| picker.fixture_preview_model(&id, cx));
+                                picker.update(cx, |picker, cx| {
+                                    if agent_ladder {
+                                        picker.fixture_agent_ladder_only(&id, cx);
+                                    }
+                                    picker.fixture_preview_model(&id, cx)
+                                });
                             }
                             Fixture { picker }
                         })

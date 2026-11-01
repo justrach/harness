@@ -1,6 +1,7 @@
 //! What a failed run's error means for the person reading it, as the GPUI
 //! app reads it (crates/proto/src/run_errors.rs): the agent's provider needs
-//! a sign-in, its usage limit was reached, or something else. Only plain
+//! a sign-in, its usage limit was reached, the API key it fell back to was
+//! rejected, or something else. Only plain
 //! error text is labelled here; a provider-typed failure keeps its own
 //! reconnect card (reauth_recovery.zig), and no sign-in route is ever taken
 //! from the message: "Log in" routes by the chat's own agent. The cases both
@@ -13,18 +14,25 @@ pub const ProviderProblem = enum {
     signed_out,
     /// The account's usage or rate limit was hit (another account helps).
     limit_reached,
+    /// The provider rejected an API key (graff's own, or the one it fell back
+    /// to after a plan ran out). The sign-in is fine; the key needs replacing.
+    key_rejected,
 
     /// The error card's label.
     pub fn label(p: ProviderProblem) []const u8 {
         return switch (p) {
             .signed_out => "Signed out",
             .limit_reached => "Limit reached",
+            .key_rejected => "API key rejected",
         };
     }
 
     /// The button that fixes it.
-    pub fn actionLabel(_: ProviderProblem) []const u8 {
-        return "Log in";
+    pub fn actionLabel(p: ProviderProblem) []const u8 {
+        return switch (p) {
+            .signed_out, .limit_reached => "Log in",
+            .key_rejected => "Update key",
+        };
     }
 
     /// The vector's name for it.
@@ -32,8 +40,18 @@ pub const ProviderProblem = enum {
         return switch (p) {
             .signed_out => "signedOut",
             .limit_reached => "limitReached",
+            .key_rejected => "keyRejected",
         };
     }
+};
+
+/// `KEY_REJECTED`: graff's own words for a rejected API key, checked first
+/// (before `not_the_provider` too). graff's older generic "sign in again or
+/// check the API key" can't say which credential failed and stays signed out.
+const key_rejected = [_][]const u8{
+    "api key was rejected",
+    "fallback api key",
+    "sign-in is not affected",
 };
 
 const signed_out = [_][]const u8{
@@ -88,6 +106,7 @@ const not_the_provider = [_][]const u8{ "credit", "github", "graphql:", "harness
 pub fn providerProblem(message: []const u8) ?ProviderProblem {
     var buf: [4096]u8 = undefined;
     const text = fold(&buf, message);
+    for (key_rejected) |n| if (std.mem.indexOf(u8, text, n) != null) return .key_rejected;
     for (not_the_provider) |n| if (std.mem.indexOf(u8, text, n) != null) return null;
     for (signed_out) |n| if (std.mem.indexOf(u8, text, n) != null) return .signed_out;
     for (limit_reached) |n| if (std.mem.indexOf(u8, text, n) != null) return .limit_reached;
@@ -157,6 +176,8 @@ test "labels name the problem and the fix" {
     try testing.expectEqualStrings("Limit reached", ProviderProblem.limit_reached.label());
     try testing.expectEqualStrings("Log in", ProviderProblem.signed_out.actionLabel());
     try testing.expectEqualStrings("Log in", ProviderProblem.limit_reached.actionLabel());
+    try testing.expectEqualStrings("API key rejected", ProviderProblem.key_rejected.label());
+    try testing.expectEqualStrings("Update key", ProviderProblem.key_rejected.actionLabel());
 }
 
 // The shared vector, read from the repository at test time (never copied),
@@ -171,7 +192,7 @@ test "run errors: the shared parity vector" {
     const cases = v.object.get("cases").?.array.items;
     try testing.expect(cases.len > 0);
     const labels = v.object.get("labels").?.object;
-    const action = v.object.get("actionLabel").?.string;
+    const actions = v.object.get("actionLabels").?.object;
     for (cases) |c| {
         const message = c.object.get("message").?.string;
         const expect: ?[]const u8 = switch (c.object.get("expect").?) {
@@ -186,7 +207,7 @@ test "run errors: the shared parity vector" {
                 return err;
             };
             try testing.expectEqualStrings(labels.get(e).?.string, got.?.label());
-            try testing.expectEqualStrings(action, got.?.actionLabel());
+            try testing.expectEqualStrings(actions.get(e).?.string, got.?.actionLabel());
         } else {
             testing.expect(got == null) catch |err| {
                 std.debug.print("{s}: want null, got {?s}\n", .{ message, got_s });

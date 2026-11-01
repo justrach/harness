@@ -563,9 +563,9 @@ pub fn noticeChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: [
     return chip;
 }
 
-/// `error_chip`: the message wraps; a refusal that signing in fixes says so
-/// in the label, and with a chat to route it carries "Log in" under the
-/// message (`sign_in_for_chat`).
+/// `error_chip`: the message wraps; a refusal the provider account fixes says
+/// so in the label, and with a chat to route it carries its button under the
+/// message: "Log in" (`sign_in_for_chat`) or "Update key" (`update_key_for_chat`).
 fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, message: []const u8) void {
     const run_errors = @import("run_errors.zig");
     // The ChatGPT plan's own limit has its plan-usage card in the GPUI app,
@@ -583,7 +583,10 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
     const b = ui.div(c).row().px(10).py(5).rounded(7).bg(k.solid);
     defer b.end();
     ui.text(c, p.actionLabel(), rows_st(c, 12, .{ .weight = .medium, .color = k.on_solid }));
-    if (b.clicked()) @import("app_reauth.zig").signInForChat(a, id);
+    if (b.clicked()) switch (p) {
+        .key_rejected => @import("app_reauth.zig").updateKeyForChat(a, id),
+        else => @import("app_reauth.zig").signInForChat(a, id),
+    };
 }
 
 fn attachment(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8) void {

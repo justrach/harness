@@ -43,6 +43,32 @@ enum FoldSplit: Equatable {
     }
 }
 
+/// What a session shown above the fold in laptop pose needs from Home. The system bar there shares its row
+/// with the status bar cluster, so a bar-hosted title ran out of room and slid under the back arrow; the
+/// session draws its own header strip below the status bar instead, with its own back button.
+struct FoldPaneHeader {
+    /// Bring the session list over the upper half. Set while the keyboard covers the list on the lower half.
+    var showList: (() -> Void)?
+}
+
+extension EnvironmentValues {
+    /// Set on a session above the fold in laptop pose; nil everywhere else.
+    @Entry var foldPaneHeader: FoldPaneHeader? = nil
+    /// Set above the fold in laptop pose: the composer reports keyboard focus, so Home knows the keyboard
+    /// covers the list on the lower half.
+    @Entry var foldComposerFocus: ((Bool) -> Void)? = nil
+}
+
+/// Where the session list's search field goes. In laptop pose the floating field covered a row of the
+/// half-height list, so it moves into the bar like the phone split's. Book pose keeps it floating: the list
+/// column is full height, and a field in the column's bar sat over the list's title.
+enum SessionSearchPlacement {
+    static func inBar(phoneSplit: Bool, fold: FoldSplit) -> Bool {
+        if case .stacked = fold { return true }
+        return phoneSplit
+    }
+}
+
 /// Whether Home puts the session list beside the open session.
 enum HomeColumns {
     /// Regular width shows the list beside the session (iPad, a Max in landscape), except on iPhone Duo's inner

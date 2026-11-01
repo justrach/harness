@@ -1,7 +1,8 @@
 // Crash and hang reports from iOS (MetricKit). iOS hands the app a report on
 // a later launch (usually the next one) for each crash, hang, CPU or disk-write
 // overuse, and slow launch it saw. They're kept on this iPhone, newest 50, and
-// leave it only when someone shares one from Settings → Crash reports. The
+// each is sent once to the Harness edge (POST /diagnostics/crash-reports) while
+// signed in, unless "Send to Harness" is off in Settings → Crash reports. The
 // stacks hold code addresses only; `scripts/symbolicate-metrickit.py` turns
 // them into function names with the build's dSYMs (kept by testflight.yml).
 
@@ -47,6 +48,105 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber, @unchecked Sendab
 
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
         save(payloads.map { $0.jsonRepresentation() })
+        uploadPending()
+    }
+
+    // MARK: Sending reports to Harness
+
+    /// Settings → Crash reports → "Send to Harness". On unless turned off.
+    static let sendKey = "crashReports.send"
+    /// One upload: the edge takes at most 10 reports and 1 MiB per request.
+    static let batchCount = 10
+    static let batchBytes = 900_000
+
+    var sending: Bool { UserDefaults.standard.object(forKey: Self.sendKey) as? Bool ?? true }
+
+    private let lock = NSLock()
+    private var config: AppConfig?
+    private var uploading = false
+
+    /// The signed-in edge to send reports to (nil once signed out); sends what's waiting.
+    func connect(_ config: AppConfig?) {
+        lock.withLock { self.config = config }
+        uploadPending()
+    }
+
+    /// Sends every saved report the edge hasn't taken yet, oldest first. One run at a time; a
+    /// failure leaves the rest for the next launch, sign-in or return to the foreground.
+    func uploadPending(in folder: URL = CrashReports.folder) {
+        guard sending else { return }
+        let signedIn: AppConfig? = lock.withLock {
+            guard !self.uploading, let current = self.config, current.mode == .codegraff else { return nil }
+            self.uploading = true
+            return current
+        }
+        guard let signedIn else { return }
+        Task.detached(priority: .utility) {
+            defer { self.lock.withLock { self.uploading = false } }
+            await self.upload(to: signedIn, folder: folder)
+        }
+    }
+
+    private func upload(to config: AppConfig, folder: URL) async {
+        var sent = Self.sentNames(in: folder)
+        let waiting: [(id: String, data: Data)] = reports(in: folder).reversed()
+            .filter { !sent.contains($0.id) }
+            .compactMap { report in (try? Data(contentsOf: report.file)).map { (id: report.id, data: $0) } }
+        for batch in Self.batches(waiting) {
+            guard var request = await config.crashReportsRequest() else { return }
+            request.httpBody = Self.body(batch.map(\.data))
+            guard let (_, response) = try? await URLSession.shared.data(for: request) else { return }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // 413: a report the edge will never take; dropping it beats resending it every launch.
+            guard status == 200 || status == 413 else { return }
+            sent.formUnion(batch.map(\.id))
+            Self.markSent(sent, in: folder)
+        }
+    }
+
+    /// Reports in upload batches of at most `batchCount` and about `batchBytes`; a report
+    /// larger than that goes alone (and the edge refuses it).
+    static func batches(_ reports: [(id: String, data: Data)], count: Int = batchCount,
+                        bytes: Int = batchBytes) -> [[(id: String, data: Data)]] {
+        var out: [[(id: String, data: Data)]] = []
+        var current: [(id: String, data: Data)] = []
+        var size = 0
+        for report in reports {
+            if !current.isEmpty && (current.count == count || size + report.data.count > bytes) {
+                out.append(current)
+                current = []
+                size = 0
+            }
+            current.append(report)
+            size += report.data.count + 1
+        }
+        if !current.isEmpty { out.append(current) }
+        return out
+    }
+
+    /// A JSON array of the reports as iOS wrote them.
+    static func body(_ reports: [Data]) -> Data {
+        var body = Data("[".utf8)
+        for (i, report) in reports.enumerated() {
+            if i > 0 { body.append(Data(",".utf8)) }
+            body.append(report)
+        }
+        body.append(Data("]".utf8))
+        return body
+    }
+
+    /// The report files the edge has taken, listed beside them (not `.json`, so not a report).
+    static func sentNames(in folder: URL) -> Set<String> {
+        guard let text = try? String(contentsOf: folder.appendingPathComponent("sent.list"), encoding: .utf8) else { return [] }
+        return Set(text.split(whereSeparator: \.isNewline).map(String.init))
+    }
+
+    /// Records `sent`, keeping only reports still on the iPhone.
+    static func markSent(_ sent: Set<String>, in folder: URL) {
+        let present = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+        let text = sent.intersection(present).sorted().joined(separator: "\n")
+        try? Data(text.utf8).write(to: folder.appendingPathComponent("sent.list"),
+                                   options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     /// Writes each report once (iOS can hand the same one over again), then

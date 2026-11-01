@@ -36,7 +36,9 @@ struct HomeView: View {
     @AppStorage("homeSpaceFilter") private var spaceFilter: String = ""
     // Start with Time each launch; a saved grouping can hide recent sessions
     // inside collapsed projects. Project/device views are opt-in for this visit.
-    @State private var groupByRaw = HomeGroupBy.none.rawValue
+    /// Status by default; `-homeGroupBy none|project|device` picks another at launch.
+    @State private var groupByRaw = UserDefaults.standard.string(forKey: "homeGroupBy")
+        .flatMap(HomeGroupBy.init(rawValue:))?.rawValue ?? HomeGroupBy.status.rawValue
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
     // Not persisted: a filter left on across launches reads as lost sessions.
     @State private var searchText = ""
@@ -60,18 +62,15 @@ struct HomeView: View {
     /// Offer the split once there is room for it and the person is juggling sessions (see SplitSuggestion).
     private func refreshSplitOffer() {
         let context = SplitSuggestion.Context(
-            mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off,
+            mode: PhoneSplit.stored(phoneSplitRaw),
             compactWidth: horizontalSizeClass == .compact,
             size: containerSize,
             largeText: dynamicTypeSize.isAccessibilitySize)
         showSplitOffer = splitSuggestion.shouldOffer(context, now: Date().timeIntervalSince1970)
     }
 
-    /// The split the offer would turn on for this window: Auto when it is wide, Stacked on a phone in portrait.
-    private var offeredSplit: PhoneSplit { SplitSuggestion.offeredMode(for: containerSize) ?? .auto }
-
     private func answerSplitOffer(tryIt: Bool) {
-        if tryIt { phoneSplitRaw = offeredSplit.rawValue }
+        if tryIt { phoneSplitRaw = PhoneSplit.auto.rawValue }
         splitSuggestion.markShown(at: Date().timeIntervalSince1970)
         splitSuggestion.save()
         showSplitOffer = false
@@ -79,7 +78,7 @@ struct HomeView: View {
 
     private var phoneArrangement: PhoneSplit.Arrangement? {
         guard horizontalSizeClass == .compact else { return nil }
-        return PhoneSplit.arrangement(mode: PhoneSplit(rawValue: phoneSplitRaw) ?? .off, in: containerSize)
+        return PhoneSplit.arrangement(mode: PhoneSplit.stored(phoneSplitRaw), in: containerSize)
     }
 
     /// iPad and other wide windows: the session list becomes a sidebar next to
@@ -90,14 +89,97 @@ struct HomeView: View {
     /// the single stack, unless the person turned on the phone split and the
     /// window has room for it.
     private var listBesideSession: Bool {
-        HomeColumns.listBesideSession(
+        // The flat Duo rig lays home out as the inner display lying flat instead (DuoChat.demoFlat).
+        guard !DuoChat.demoFlat else { return false }
+        return HomeColumns.listBesideSession(
             regularWidth: horizontalSizeClass == .regular,
             regularHeight: verticalSizeClass == .regular,
             phone: UIDevice.current.userInterfaceIdiom == .phone,
             fold: fold)
     }
 
+    private var flatDuo: Bool {
+        DuoChat.isFlat(phone: UIDevice.current.userInterfaceIdiom == .phone || DuoChat.demoFlat,
+                       regularWidth: horizontalSizeClass == .regular,
+                       regularHeight: verticalSizeClass == .regular, fold: fold)
+    }
+
+    /// Flat Duo: the session list beside an open session, off until the session's sidebar button asks for it.
+    /// The inner display is about 669pt wide, so a 296pt list left the chat a cramped column; alone, the
+    /// session has the whole display and its back button returns to the list.
+    @AppStorage(DuoChat.flatListKey) private var flatListShown = false
+
     private var splitLayout: Bool { listBesideSession || phoneArrangement != nil }
+
+    /// Wide Duo with a session open, Inspect closed and the list asked for: the session list stands beside it.
+    private var flatSidebar: Bool {
+        guard case .chat(let id) = path.last else { return false }
+        return DuoChat.listBesideSession(flat: flatDuo, listShown: flatListShown, sessionOpen: true,
+                                         inspectOpen: InspectState.of(id).open)
+    }
+
+    /// Remembered once this device shows a fold or its inner display: the session uses the Duo chat.
+    @AppStorage(DuoChat.foldableKey) private var foldableDevice = false
+
+    private func noteFoldable() {
+        guard !foldableDevice else { return }
+        if DuoChat.isFoldableWindow(phone: UIDevice.current.userInterfaceIdiom == .phone,
+                                    regularWidth: horizontalSizeClass == .regular,
+                                    regularHeight: verticalSizeClass == .regular, fold: fold) {
+            foldableDevice = true
+        }
+    }
+
+    // MARK: Laptop pose (iPhone Duo folded with the fold across)
+
+    /// The session's composer has the keyboard, which covers the list on the lower half.
+    @State private var laptopTyping = false
+    /// The list brought over the upper half while the keyboard covers it.
+    @State private var laptopListShown = false
+
+    private var laptopPose: Bool {
+        guard horizontalSizeClass == .regular, case .stacked = fold else { return false }
+        return true
+    }
+
+    /// The header the session above the fold draws (FoldPaneHeader); nil outside laptop pose.
+    private var foldPaneHeader: FoldPaneHeader? {
+        guard laptopPose else { return nil }
+        return FoldPaneHeader(showList: laptopTyping || laptopListShown || laptopLayout != nil ? {
+            withAnimation(Motion.collapse) { laptopListShown.toggle() }
+        } : nil)
+    }
+
+    /// The list over the upper half, above the keyboard. Picking a row closes it.
+    private var laptopListOverlay: some View {
+        NavigationStack { sidebar }
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+            .padding(8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .accessibilityIdentifier("fold-list-overlay")
+    }
+
+    /// Laptop pose with a session open: the session takes both halves (watch above the fold, act below it).
+    private var laptopLayout: DuoLaptopLayout? {
+        guard laptopPose, case .stacked(let top, let gap) = fold, case .chat = path.last else { return nil }
+        // In window coordinates: the session above it reaches up into the status bar's row.
+        return DuoLaptopLayout(top: homeMinY + top, gap: gap)
+    }
+
+    /// Home's top in the window; the fold is measured from it.
+    @State private var homeMinY: CGFloat = 0
+
+    private var searchInBar: Bool {
+        SessionSearchPlacement.inBar(phoneSplit: phoneArrangement != nil, fold: fold)
+    }
+
+    /// Book pose: the list column's glass toolbar sits over the top of the list, so its title starts below it.
+    private var listTopMargin: CGFloat {
+        if case .sideBySide = fold { return 52 }
+        return 2
+    }
 
     // MARK: Split screen (a Max-class iPhone only; see SplitScreen)
 
@@ -107,6 +189,8 @@ struct HomeView: View {
     /// in portrait) `.automatic` hid the list behind the open session; the point of the wide window is the two
     /// side by side. The sidebar button still hides it.
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// Where the list's column ends, in global space: the session's rounded seam (ContentPlane).
+    @State private var listColumnEdge: CGFloat = 0
 
     /// The session header on a Max is drawn in the pane, so the system's sidebar button is gone; this brings
     /// the list in and out.
@@ -150,104 +234,21 @@ struct HomeView: View {
                                    toggleList: two ? nil : { toggleList() })
     }
 
-    // MARK: Stacked split (the phone split's stacked shape)
+    private var primaryStack: some View { primaryStack(lifted: false) }
 
-    /// The pane below the open session in a stacked split, like the desktop's ⌘D: its path, which starts empty
-    /// (the session list, to pick another session) and holds the session picked there. Nil while the list
-    /// shares the screen instead.
-    @State private var stackedSecond: [Route]?
-    /// Which stacked pane's composer has the keyboard; that pane keeps the room above it.
-    @State private var stackedFocus: SplitPanes.Pane?
-
-    private var stackedSplitAvailable: Bool { phoneArrangement?.axis == .stacked }
-
-    /// ⌘D for the stacked split: the session list below the open session, to open another one there.
-    private func openStackedSplit() {
-        stackedSecond = []
-    }
-
-    /// The upper pane's session, which the lower pane's list leaves out.
-    private var stackedPrimaryChat: String? {
-        guard case .chat(let id) = path.first else { return nil }
-        return id
-    }
-
-    /// A new session for the upper pane's project, in the lower pane.
-    private func newStackedSession() {
-        guard let id = stackedPrimaryChat, let chat = model.chat(id: id) else { return }
-        let destination: NewSessionDestination = if let space = chat.spaceId {
-            .project(spaceId: space)
-        } else {
-            .projectless(deviceId: chat.deviceId)
-        }
-        stackedSecond = [.newSession(destination)]
-    }
-
-    /// × on the lower pane: back to one session, with the list above it.
-    private func closeStackedSecondary() {
-        stackedSecond = nil
-        stackedFocus = nil
-    }
-
-    /// × on the upper pane: the lower pane's session takes its place; with only the lower pane's list open,
-    /// both go and the list comes back.
-    private func closeStackedPrimary() {
-        let second = stackedSecond ?? []
-        stackedSecond = nil
-        stackedFocus = nil
-        path = second
-    }
-
-    /// Offered on a session alone in the stacked split's detail; nil everywhere else.
-    private var stackedSplitAction: (() -> Void)? {
-        guard stackedSplitAvailable, stackedSecond == nil, case .chat = path.first else { return nil }
-        return { openStackedSplit() }
-    }
-
-    private var stackedSecondPath: Binding<[Route]> {
-        // Back out of the lower pane's session returns to its list; × closes the pane.
-        Binding(get: { stackedSecond ?? [] }, set: { next in
-            if stackedSecond != nil { stackedSecond = next }
-        })
-    }
-
-    /// Two panes stacked, each its own navigation stack with its own bar and an ×. The lower pane opens on the
-    /// session list (Home's rows); closing either pane leaves one, and the list comes back above it.
-    private var stackedPanes: some View {
-        VStack(spacing: 0) {
-            primaryStack
-                .frame(maxHeight: stackedFocus == .secondary ? Self.stackedPeek : .infinity)
-                .environment(\.stackedComposerFocus) { stackedFocus = $0 ? .primary : (stackedFocus == .primary ? nil : stackedFocus) }
-            Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(height: 0.5)
-            NavigationStack(path: stackedSecondPath) {
-                StackedSessionPicker(excluding: stackedPrimaryChat,
-                                     pick: { stackedSecond = [.chat($0)] },
-                                     newSession: stackedPrimaryChat == nil ? nil : { newStackedSession() },
-                                     close: { closeStackedSecondary() })
-                    .navigationDestination(for: Route.self) { route in
-                        destination(route, in: stackedSecondPath)
-                            .environment(\.stackedClose) { closeStackedSecondary() }
-                    }
-            }
-            .frame(maxHeight: stackedFocus == .primary ? Self.stackedPeek : .infinity)
-            .environment(\.stackedComposerFocus) { stackedFocus = $0 ? .secondary : (stackedFocus == .secondary ? nil : stackedFocus) }
-        }
-        .animation(Motion.collapse, value: stackedFocus)
-    }
-
-    /// What the other stacked pane keeps while one is typing: its bar and the last rows.
-    private static let stackedPeek: CGFloat = 150
-
-    private var primaryStack: some View {
+    /// `lifted`: the session sits beside the list, on the lifted page (ContentPlane).
+    private func primaryStack(lifted: Bool) -> some View {
         NavigationStack(path: $path) {
             SplitDetailPlaceholder()
+                .environment(\.liftedPlane, lifted)
                 // On each destination, not on the stack: a value set outside the stack did not reach the
                 // pushed session, so its header never saw the split controls.
                 .navigationDestination(for: Route.self) { route in
                     destination(route)
+                        .environment(\.liftedPlane, lifted)
                         .environment(\.splitScreen, controls(for: .primary))
-                        .environment(\.stackedSplit, stackedSplitAction)
-                        .environment(\.stackedClose, stackedSecond == nil ? nil : { closeStackedPrimary() })
+                        .environment(\.foldPaneHeader, foldPaneHeader)
+                        .environment(\.duoLaptop, laptopLayout)
                 }
         }
     }
@@ -274,55 +275,128 @@ struct HomeView: View {
             } else if horizontalSizeClass == .regular, case .stacked(let top, let gap) = fold {
                 // iPhone Duo folded like a laptop: nothing may cross the fold, so the open session takes the
                 // upper half (its composer, and the keyboard, land on the lower half) and the list the lower.
+                // The keyboard covers the lower half while the session types; the list keeps its layout under
+                // it (no squeeze to nothing) and can be brought over the upper half from the session header.
                 VStack(spacing: 0) {
-                    primaryStack.frame(height: top)
-                    Color.clear.frame(height: gap)
-                    NavigationStack { sidebar }
+                    primaryStack
+                        // The keyboard sits below the fold; it must not squeeze the session above it.
+                        .ignoresSafeArea(.keyboard)
+                        // An open session takes both halves (DuoLaptop); the list comes in from its header.
+                        .frame(height: laptopLayout == nil ? top : nil)
+                        .frame(maxHeight: laptopLayout == nil ? nil : .infinity)
+                        .overlay(alignment: .top) {
+                            if laptopListShown { laptopListOverlay.frame(maxHeight: top) }
+                        }
+                        .environment(\.foldComposerFocus) { focused in
+                            laptopTyping = focused
+                        }
+                    if laptopLayout == nil {
+                        Color.clear.frame(height: gap)
+                        NavigationStack { sidebar }
+                            .frame(minHeight: 0)
+                    }
                 }
+                // Anchored to the top: the keyboard must not push the upper half down off the fold.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
             } else if listBesideSession {
                 // iPad, iPhone Duo folded like a book and other wide windows: the list beside the session.
                 // On the fold, the list's column ends on the fold line and each side keeps its 20pt margin.
+                // The session's page is lifted, its corners rounding where it meets the list (on the fold
+                // line in book pose; the margin stays inside the page); with the list hidden, the edge is
+                // the screen's and stays square.
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     sidebar
                         .modifier(FoldColumn(fold: fold, side: .leading))
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxX } action: {
+                            listColumnEdge = $0
+                        }
                 } detail: {
-                    primaryStack
+                    primaryStack(lifted: true)
                         .modifier(FoldColumn(fold: fold, side: .trailing))
                 }
                 .navigationSplitViewStyle(.balanced)
-            } else if stackedSplitAvailable, stackedSecond != nil, !path.isEmpty {
-                stackedPanes
+                // The split view drops an overlay on its detail column, so the seam is drawn over the whole
+                // split, across the part right of the list's edge.
+                .overlay {
+                    GeometryReader { proxy in
+                        let x = listColumnEdge - proxy.frame(in: .global).minX
+                        Color.clear
+                            .frame(width: max(0, proxy.size.width - x))
+                            .seam(.leading, chrome: Theme.surface,
+                                  when: columnVisibility != .detailOnly && x > 0 && x < proxy.size.width)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
             } else if let arrangement = phoneArrangement {
-                PhoneSplitContainer(arrangement: arrangement, selection: selectedChatId,
-                                    detailRoute: path.first.map(AnyHashable.init), hasDetail: !path.isEmpty) {
+                PhoneSplitContainer(arrangement: arrangement) {
                     NavigationStack { sidebar }
                 } detail: {
-                    primaryStack
+                    // The session is the lifted page beside the list (PhoneSplitContainer rounds the seam).
+                    primaryStack(lifted: true)
                 }
             } else {
-                NavigationStack(path: $path) {
-                    sidebar
-                        .navigationDestination(for: Route.self) { destination($0) }
+                // One stack in every pose, so folding keeps the session (draft, scroll) in place. Wide (an iPhone
+                // Duo lying flat), the list stands beside an open session until Inspect takes its place.
+                HStack(spacing: 0) {
+                    if flatSidebar {
+                        NavigationStack {
+                            // A switcher beside the chat: new, settings and profile stay on the full list, and in
+                            // a column this narrow the bar's buttons stood in a rail over the rows.
+                            sidebar.toolbar(.hidden, for: .navigationBar)
+                        }
+                            // The narrow column lays the list out as a phone's.
+                            .environment(\.horizontalSizeClass, .compact)
+                            .frame(width: DuoV3.sidebarWidth)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                            .accessibilityIdentifier("wide-sidebar")
+                        Rectangle().fill(Theme.border).frame(width: 1).ignoresSafeArea()
+                    }
+                    NavigationStack(path: $path) {
+                        sidebar
+                            .navigationDestination(for: Route.self) {
+                                // iPhone Duo lying flat: the session beside the list, or chat and Inspect.
+                                destination($0)
+                                .environment(\.duoFlat, flatDuo)
+                                .environment(\.toggleFlatList, flatDuo ? {
+                                    withAnimation(Motion.collapse) { flatListShown.toggle() }
+                                } : nil)
+                            }
+                    }
                 }
+                .animation(Motion.collapse, value: flatSidebar)
             }
         }
+        // Laptop pose: the keyboard lands on the lower half, below the fold. The whole layout ignores it (the
+        // fold is measured on the full window and the session above the fold keeps its height); otherwise the
+        // window's keyboard avoidance squeezes the session into a strip under its header.
+        .ignoresSafeArea(.keyboard, edges: laptopPose ? .all : [])
         .onFoldChange { next in
             // Both columns stay up in book pose: each half of the fold holds one.
             if case .sideBySide = next { columnVisibility = .all }
             withAnimation(Motion.resort) { fold = next }
+            noteFoldable()
         }
         .avoidingOcclusions()
         // The keyboard must not reshape the split under the person typing (see PhoneSplit.layoutSize).
         .onGeometryChange(for: CGSize.self) { $0.size } action: {
             containerSize = PhoneSplit.layoutSize(previous: containerSize, measured: $0)
         }
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { homeMinY = $0 }
         .onChange(of: containerSize) { refreshSplitOffer() }
         .onChange(of: phoneSplitRaw) { refreshSplitOffer() }
-        .onAppear { refreshSplitOffer() }
+        .onAppear {
+            refreshSplitOffer()
+            noteFoldable()
+        }
+        .onChange(of: horizontalSizeClass) { noteFoldable() }
         .environment(\.switchToSession, switchTo)
-        .onChange(of: path) { _, next in
-            // Backing out of the upper stacked pane promotes the lower one into its place.
-            if next.isEmpty, stackedSecond != nil { closeStackedPrimary() }
+        .onChange(of: path) { _, _ in
+            // A row picked from the list over the upper half opens there; the list gets out of the way.
+            if laptopListShown { withAnimation(Motion.collapse) { laptopListShown = false } }
+        }
+        .onChange(of: laptopPose) { _, isLaptop in
+            if !isLaptop { laptopListShown = false; laptopTyping = false }
         }
         .onChange(of: splitLayout) { _, isSplit in
             // Opening or closing a foldable swaps the stack and the split. The
@@ -342,21 +416,16 @@ struct HomeView: View {
         }
     }
 
-    private func destination(_ route: Route) -> some View {
-        destination(route, in: $path)
-    }
-
-    /// `stack`: the navigation path this screen lives in (the lower stacked pane has its own).
     @ViewBuilder
-    private func destination(_ route: Route, in stack: Binding<[Route]>) -> some View {
+    private func destination(_ route: Route) -> some View {
         Group {
             switch route {
-            case .space(let id): SpaceView(spaceId: id, path: stack)
+            case .space(let id): SpaceView(spaceId: id, path: $path)
             // Compact: a pager host, so the open session swipes to its
             // neighbours. The split layout keeps its own sidebar selection.
             case .chat(let id):
                 if splitLayout { SessionView(chatId: id) } else { SessionPagerHost(chatId: id) }
-            case .newSession(let destination): NewSessionView(destination: destination, path: stack)
+            case .newSession(let destination): NewSessionView(destination: destination, path: $path)
             }
         }
         // Tap to the page it opened.
@@ -378,7 +447,7 @@ struct HomeView: View {
             var next = panes
             next.openFromList(id)
             apply(next)
-        } else if splitLayout {
+        } else if splitLayout || flatSidebar {
             path = [route]
         } else {
             path.append(route)
@@ -398,7 +467,7 @@ struct HomeView: View {
 
     /// The session the detail column shows, for the sidebar's selection wash.
     private var selectedChatId: String? {
-        guard splitLayout, case .chat(let id) = path.first else { return nil }
+        guard splitLayout || flatSidebar, case .chat(let id) = path.last else { return nil }
         return id
     }
 
@@ -418,15 +487,17 @@ struct HomeView: View {
                 withAnimation(Motion.collapse) { proxy.scrollTo(id) }
             }
         }
-        // In the phone split the field sits in the pane's own bar: the floating one overlaps the rows of a
-        // short pane.
+        // In the phone split and in laptop pose the field sits in the pane's own bar: the floating one overlaps
+        // the rows of a short pane.
         .searchable(text: $searchText,
-                    placement: phoneArrangement == nil ? .automatic : .navigationBarDrawer(displayMode: .always),
+                    placement: searchInBar ? .navigationBarDrawer(displayMode: .always) : .automatic,
                     prompt: "Search sessions")
         .sessionDeleteConfirmation(pending: $pendingDelete, onDelete: delete)
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 10)
-        .contentMargins(.top, 2, for: .scrollContent)
+        .contentMargins(.top, listTopMargin, for: .scrollContent)
+        // The floating search field: the last row scrolls clear of it instead of ending underneath.
+        .contentMargins(.bottom, searchInBar ? 0 : 64, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .background(Theme.surface.ignoresSafeArea())
@@ -670,7 +741,7 @@ struct HomeView: View {
             }
             .pickerStyle(.inline)
         } label: {
-            HomeControlPill(symbol: grouping.symbol, title: grouping.pillTitle, active: grouping != .none)
+            HomeControlPill(symbol: grouping.symbol, title: grouping.pillTitle, active: grouping != .status)
         }
         .buttonStyle(.plain)
         .fixedSize()
@@ -731,16 +802,15 @@ struct HomeView: View {
         // the phone split: a narrow pane keeps its rows for sessions.
         if phoneArrangement == nil {
             Section {
-                Text("Sessions")
-                    .font(Theme.sans(Theme.titleSize, weight: .semibold, relativeTo: .largeTitle))
-                    .foregroundStyle(Theme.text)
-                    .accessibilityAddTraits(.isHeader)
-                    .accessibilityIdentifier("home-title")
+                HomeStartHeader(hasProject: startSpaceId != nil,
+                                compose: { startNewSession(prompt: nil) },
+                                start: { startNewSession(prompt: $0.prompt) })
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 4, leading: Theme.gutter, bottom: 6, trailing: Theme.gutter))
+                    .listRowInsets(EdgeInsets(top: 4, leading: Theme.gutter, bottom: 10, trailing: Theme.gutter))
                 let pinnedChats = scoped.filter { model.isPinned(chatId: $0.id) }
-                if searchText.isEmpty, !pinnedChats.isEmpty {
+                // Grouped by status, pins already lead the list: no second copy.
+                if searchText.isEmpty, !pinnedChats.isEmpty, grouping != .status {
                     PinnedRow(chats: pinnedChats) { open(.chat($0)) }
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -762,7 +832,7 @@ struct HomeView: View {
         }
         if showSplitOffer {
             Section {
-                SplitOfferBanner(mode: offeredSplit, tryIt: { answerSplitOffer(tryIt: true) },
+                SplitOfferBanner(tryIt: { answerSplitOffer(tryIt: true) },
                                  notNow: { answerSplitOffer(tryIt: false) })
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
@@ -776,7 +846,9 @@ struct HomeView: View {
             let now = NowStrip.active(in: scoped, model: model)
             // Not in the phone split: the list beside the open session already shows what is running or
             // waiting, and the cards would take most of a narrow pane.
-            if searchText.isEmpty, !now.isEmpty, phoneArrangement == nil {
+            // Grouped by status, "Needs you" already lists what waits on you:
+            // the strip would repeat it (less by default, #417).
+            if searchText.isEmpty, !now.isEmpty, phoneArrangement == nil, grouping != .status {
                 Section {
                     NowStrip(chats: now) { open(.chat($0)) }
                         .listRowBackground(Color.clear)
@@ -809,7 +881,8 @@ struct HomeView: View {
             }
         } else {
             let pinned = Set(chats.map(\.id).filter(model.isPinned(chatId:)))
-            ForEach(Perf.measure(PerfSpan.homeGroup) { HomeGrouping.groups(chats, by: grouping, pinned: pinned) }) { group in
+            ForEach(Perf.measure(PerfSpan.homeGroup) { HomeGrouping.groups(chats, by: grouping, pinned: pinned,
+                                                                               indicator: { model.indicator(for: $0) }) }) { group in
                 let collapsed = grouping != .none && collapsedGroups.contains(group.id)
                 Section {
                     if !collapsed {
@@ -829,6 +902,27 @@ struct HomeView: View {
             }
             .motionAnimation(Motion.resort, value: chats.map(\.id))
         }
+    }
+
+    /// Where a session started from Home's composer or a starter lands: the
+    /// chosen project, else the newest session's project, else the first.
+    private var startSpaceId: String? {
+        selectedSpace?.id
+            ?? model.overviewChats.lazy.compactMap(\.spaceId).first
+            ?? model.spaces.first?.id
+    }
+
+    /// Opens a new session, prefilled with a starter's prompt when given.
+    /// With no project yet, the picker asks where it should run.
+    private func startNewSession(prompt: String?) {
+        guard let spaceId = startSpaceId else {
+            showNewSessionPicker = true
+            return
+        }
+        if let prompt {
+            DraftStore.save(prompt, for: DraftStore.newSessionKey(.project(spaceId: spaceId)))
+        }
+        open(.newSession(spaceId: spaceId))
     }
 
     /// Collapsed section ids, persisted (comma-separated).
@@ -918,7 +1012,9 @@ struct ChatRow: View {
         let _ = model.connectivity.pulse
         let indicator = model.indicator(for: chat)
         let sendState = model.sendState(for: chat)
-        let pullRequest = model.changeRequest(for: chat)
+        // Less by default (#417, #614): the PR badge lives in the session's
+        // composer, one tap away, not on every row.
+        let pullRequest = ChatRow.showsCodeDetails ? model.changeRequest(for: chat) : nil
         ZStack(alignment: .bottomTrailing) {
             Button(action: onSelect) {
                 content(indicator: indicator, sendState: sendState,
@@ -937,6 +1033,9 @@ struct ChatRow: View {
     /// The pressed and selected wash. Concentric with the avatar: its 22pt
     /// radius plus the row's 12pt inset, rounded to the list's rhythm.
     static let washRadius: CGFloat = 18
+    /// Branch and pull request on every row. Off: the list reads as names
+    /// and status; the session itself shows both.
+    static let showsCodeDetails = false
     /// Inside the wash: horizontal and vertical padding around the content.
     static let insetH: CGFloat = 8
     static let insetV: CGFloat = 12
@@ -998,9 +1097,12 @@ struct ChatRow: View {
 
                 // Line 3: the branch when the engine stamped one; the Working
                 // spinner rides bottom-right. Always laid out, so every row is
-                // the same height.
+                // the same height. Left out while rows show less: the corner
+                // already says Working.
+                if ChatRow.showsCodeDetails {
                 HStack(spacing: 4) {
-                    if let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
+                    if ChatRow.showsCodeDetails,
+                       let branch = chat.branch?.trimmingCharacters(in: .whitespaces), !branch.isEmpty {
                         LineIconView(.gitBranch, size: 11, color: subline)
                         Text(branch)
                             .font(Theme.sans(Theme.metaSize))
@@ -1016,6 +1118,7 @@ struct ChatRow: View {
                     }
                 }
                 .padding(.trailing, reservesPullRequest ? 46 : 0)
+                }
             }
         }
         .padding(.horizontal, ChatRow.insetH)
@@ -1139,6 +1242,8 @@ func projectLocation(chat: Chat, model: AppModel) -> Text {
 
 /// The split layout's detail column before a session is picked.
 private struct SplitDetailPlaceholder: View {
+    @Environment(\.liftedPlane) private var liftedPlane
+
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "bubble.left.and.text.bubble.right")
@@ -1149,7 +1254,7 @@ private struct SplitDetailPlaceholder: View {
                 .foregroundStyle(Theme.textMuted)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.bg.ignoresSafeArea())
+        .background(Theme.sessionPage(lifted: liftedPlane).ignoresSafeArea())
     }
 }
 

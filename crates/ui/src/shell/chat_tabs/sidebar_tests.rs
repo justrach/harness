@@ -459,7 +459,10 @@ fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppC
         "filter pushed off: {filter:?}"
     );
     assert!(
-        filter.top() <= sidebar_bottom * MAX_SIDEBAR_SHARE + px(40.0),
+        filter.top()
+            <= sidebar_bottom * MAX_SIDEBAR_SHARE
+                + px(40.0)
+                + px(Shell::SIDEBAR_QUICK_ACTIONS_HEIGHT),
         "{filter:?}"
     );
     // The active (last) tab was scrolled into view above the filter.

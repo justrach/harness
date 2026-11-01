@@ -225,6 +225,9 @@ enum LoginFlow {
     Claude {
         verifier: String,
         started_at: Instant,
+        /// Started by graff's Claude Agent sign-in because Claude Code had no
+        /// login: once this one lands, `graff login claude-agent` runs again.
+        then_graff: bool,
     },
     /// A spawned login child polled to completion: `codex login` against a
     /// throwaway `CODEX_HOME`, or the cursor shim's login mode minting into a
@@ -735,6 +738,10 @@ impl AgentAccounts {
     }
 
     fn start_claude_login(&self) -> AgentLoginStart {
+        self.start_claude_login_then(false)
+    }
+
+    fn start_claude_login_then(&self, then_graff: bool) -> AgentLoginStart {
         let login_id = new_id();
         // PKCE: 32 random bytes (two v4 uuids) as the verifier, S256 challenge.
         let raw: Vec<u8> = uuid::Uuid::new_v4()
@@ -757,6 +764,7 @@ impl AgentAccounts {
             LoginFlow::Claude {
                 verifier,
                 started_at: Instant::now(),
+                then_graff,
             },
         );
         AgentLoginStart {
@@ -1364,6 +1372,38 @@ impl AgentAccounts {
                 code: None,
             });
         }
+        if provider == "claude-agent" {
+            // No link to open: graff asks Claude Code (`claude auth status`)
+            // whether it is signed in and records the choice; the login
+            // itself belongs to `claude`. A refusal is graff's `✗` line.
+            while lock(&exit).is_none() {
+                if Instant::now() > deadline {
+                    self.cancel_login(&login_id);
+                    return Err(EngineError::Other(
+                        "Claude Code did not answer in time. Check that `claude` runs on this device."
+                            .into(),
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let text = lock(&output).clone();
+            if !graff_logins::saw_success(&text) {
+                self.cancel_login(&login_id);
+                // No Claude Code login yet: Harness's own Claude Code sign-in
+                // makes one, then graff records the choice (complete_login).
+                if graff_logins::claude_code_signed_out(&text) {
+                    return Ok(self.start_claude_login_then(true));
+                }
+                return Err(EngineError::Other(graff_logins::failure_message(&text)));
+            }
+            // Already done: the first poll reports it.
+            return Ok(AgentLoginStart {
+                login_id,
+                url: String::new(),
+                mode: AgentLoginMode::Browser,
+                code: None,
+            });
+        }
         let url = loop {
             if let Some(url) = graff_logins::scan_login_url(&lock(&output)) {
                 break Some(url);
@@ -1549,8 +1589,12 @@ impl AgentAccounts {
             done?;
             return self.list(false).await;
         }
-        let verifier = match lock(&self.inner.flows).get(login_id) {
-            Some(LoginFlow::Claude { verifier, .. }) => verifier.clone(),
+        let (verifier, then_graff) = match lock(&self.inner.flows).get(login_id) {
+            Some(LoginFlow::Claude {
+                verifier,
+                then_graff,
+                ..
+            }) => (verifier.clone(), *then_graff),
             _ => {
                 return Err(EngineError::Other(
                     "This sign-in attempt expired — start again.".into(),
@@ -1699,11 +1743,44 @@ impl AgentAccounts {
             saved_at: now_ms(),
             created_at: None,
         };
-        let _ops = self.inner.ops.lock().await;
-        self.write_slot(&slot)?;
-        self.adopt_if_live(&slot).await?;
-        lock(&self.inner.flows).remove(login_id);
-        self.list_locked(false).await
+        {
+            let _ops = self.inner.ops.lock().await;
+            self.write_slot(&slot)?;
+            self.adopt_if_live(&slot).await?;
+            lock(&self.inner.flows).remove(login_id);
+            if !then_graff {
+                return self.list_locked(false).await;
+            }
+        }
+        self.record_graff_claude_agent().await?;
+        self.list(false).await
+    }
+
+    /// Claude Code is signed in now: let graff record its Claude Agent choice.
+    async fn record_graff_claude_agent(&self) -> Result<(), EngineError> {
+        let mut command = harness_adapters::graff_login_command("claude-agent", None)
+            .await
+            .map_err(|err| EngineError::Other(format!("Could not run graff: {err}")))?;
+        command
+            .stdin(harness_adapters::process::Stdio::null())
+            .stdout(harness_adapters::process::Stdio::piped())
+            .stderr(harness_adapters::process::Stdio::piped());
+        #[cfg(unix)]
+        command.env("HOME", &self.inner.config.graff_home);
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+            .await
+            .map_err(|_| EngineError::Other("graff did not finish the Claude Agent sign-in.".into()))?
+            .map_err(|err| EngineError::Other(format!("Could not run graff login: {err}")))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if graff_logins::saw_success(&text) {
+            Ok(())
+        } else {
+            Err(EngineError::Other(graff_logins::failure_message(&text)))
+        }
     }
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {

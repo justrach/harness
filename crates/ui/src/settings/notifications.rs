@@ -20,6 +20,7 @@ pub enum NotificationsEvent {
         completion_sound: bool,
         input_sound: bool,
         attention_sound: bool,
+        attach_sound: bool,
         desktop: bool,
         background_only: bool,
         performance_stats: bool,
@@ -32,6 +33,7 @@ pub struct NotificationsPage {
     completion_sound: bool,
     input_sound: bool,
     attention_sound: bool,
+    attach_sound: bool,
     desktop: bool,
     background_only: bool,
     performance_stats: bool,
@@ -45,6 +47,7 @@ enum NotificationPreference {
     CompletionSound,
     InputSound,
     AttentionSound,
+    AttachSound,
     Desktop,
     BackgroundOnly,
     PerformanceStats,
@@ -81,6 +84,7 @@ impl NotificationsPage {
         completion_sound: bool,
         input_sound: bool,
         attention_sound: bool,
+        attach_sound: bool,
         desktop: bool,
         background_only: bool,
         performance_stats: bool,
@@ -92,6 +96,7 @@ impl NotificationsPage {
             completion_sound,
             input_sound,
             attention_sound,
+            attach_sound,
             desktop,
             background_only,
             performance_stats,
@@ -104,6 +109,7 @@ impl NotificationsPage {
             completion_sound: self.completion_sound,
             input_sound: self.input_sound,
             attention_sound: self.attention_sound,
+            attach_sound: self.attach_sound,
             desktop: self.desktop,
             background_only: self.background_only,
             performance_stats: self.performance_stats,
@@ -116,6 +122,7 @@ impl NotificationsPage {
             NotificationPreference::CompletionSound => &mut self.completion_sound,
             NotificationPreference::InputSound => &mut self.input_sound,
             NotificationPreference::AttentionSound => &mut self.attention_sound,
+            NotificationPreference::AttachSound => &mut self.attach_sound,
             NotificationPreference::Desktop => &mut self.desktop,
             NotificationPreference::BackgroundOnly => &mut self.background_only,
             NotificationPreference::PerformanceStats => &mut self.performance_stats,
@@ -150,6 +157,7 @@ impl Render for NotificationsPage {
         let completion_sound = self.completion_sound;
         let input_sound = self.input_sound;
         let attention_sound = self.attention_sound;
+        let attach_sound = self.attach_sound;
         let desktop = self.desktop;
         let background_only = self.background_only;
         let performance_stats = self.performance_stats;
@@ -323,6 +331,37 @@ impl Render for NotificationsPage {
                             )
                         }),
                     ),
+            )
+            .child(
+                widgets::card_row(&theme, false)
+                    .child(widgets::row_tile(&theme, icons::PAPERCLIP))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(widgets::row_title(&theme, "Attaching files"))
+                            .child(widgets::meta_line(
+                                &theme,
+                                vec![div()
+                                    .child(SharedString::from(
+                                        "Play a soft sound when you paste, drop or pick a file or image.",
+                                    ))
+                                    .into_any_element()],
+                            )),
+                    )
+                    .child(interactive_switch(
+                        toggle(
+                            "notifications-attach-sound-toggle",
+                            "Attaching files sound",
+                            attach_sound,
+                            true,
+                        ),
+                        accent,
+                        NotificationPreference::AttachSound,
+                        cx,
+                    )),
             )
             .child(
                 widgets::card_row(&theme, false)

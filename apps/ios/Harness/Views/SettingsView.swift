@@ -9,6 +9,11 @@ struct SettingsView: View {
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
     /// Opens straight onto Crash reports (the `-sheet crashreports` rig).
     @State private var showCrashReports: Bool
+    /// The first-run setup, opened again from Agents.
+    @State private var replaySetup = false
+    /// Screenshot rig: `-demo -open-autonomy` opens on Agents > Autonomy.
+    @State private var showAutonomy = ProcessInfo.processInfo.arguments.contains("-demo")
+        && ProcessInfo.processInfo.arguments.contains("-open-autonomy")
 
     init(openCrashReports: Bool = false) {
         _showCrashReports = State(initialValue: openCrashReports)
@@ -60,11 +65,20 @@ struct SettingsView: View {
 
                 Section("Agents") {
                     NavigationLink {
+                        AutonomyView()
+                    } label: {
+                        Text("Autonomy")
+                    }
+                    .accessibilityIdentifier("settings-autonomy")
+                    NavigationLink {
                         CompactionView()
                     } label: {
                         Text("Graff compaction")
                     }
                     .accessibilityIdentifier("settings-compaction")
+                    Button("Replay setup") { replaySetup = true }
+                        .foregroundStyle(Theme.text)
+                        .accessibilityIdentifier("settings-replay-setup")
                 }
                 .harnessListRow()
 
@@ -103,7 +117,9 @@ struct SettingsView: View {
                 // Shown on every device: the choice applies whenever the window is narrow (a phone, iPhone Duo's
                 // outer display, a narrow iPad window). Wide windows always show the list beside the session.
                 Section {
-                    Picker("Split view", selection: $phoneSplitRaw) {
+                    // Through `stored`, so a value saved before Stacked was removed shows as Auto, not blank.
+                    Picker("Split view", selection: Binding(get: { PhoneSplit.stored(phoneSplitRaw).rawValue },
+                                                            set: { phoneSplitRaw = $0 })) {
                         ForEach(PhoneSplit.allCases) { mode in
                             Text(mode.label).tag(mode.rawValue)
                         }
@@ -112,7 +128,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Layout")
                 } footer: {
-                    Text("For narrow windows, such as a phone or iPhone Duo's outer display. Shows the session list and the open session together when there is room. Auto does it side by side whenever the window is wide enough, such as in landscape. Side by side and Stacked pick a shape. Off keeps the single screen. Wide windows always show the list beside the session.")
+                    Text("For narrow windows, such as a phone or iPhone Duo's outer display. Shows the session list beside the open session when the window is wide enough, such as in landscape. Off keeps the single screen. Wide windows always show the list beside the session.")
                 }
                 .harnessListRow()
 
@@ -149,6 +165,13 @@ struct SettingsView: View {
             .harnessGroupedList()
             .navigationTitle("Settings")
             .navigationDestination(isPresented: $showCrashReports) { CrashReportsView() }
+            .navigationDestination(isPresented: $showAutonomy) { AutonomyView() }
+            .fullScreenCover(isPresented: $replaySetup) {
+                OnboardingView { replaySetup = false }
+                    .environment(model)
+                    .harnessAppearance()
+                    .tint(Theme.text)
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

@@ -498,10 +498,15 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return false;
         }
+        // Compare what dispatch would actually run: the live runtime was
+        // baked from a request carrying the device's autonomy, not the
+        // sandbox the sender stamped.
+        let mut request = request.clone();
+        self.inner.registry.autonomy().apply(&mut request);
         lock(&self.inner.runs).get(chat_id).is_some_and(|h| {
             !(h.steerable
                 && h.runtime_config
-                    .can_route(harness_id, request, h.steers_attachments))
+                    .can_route(harness_id, &request, h.steers_attachments))
         })
     }
 
