@@ -1270,6 +1270,7 @@ impl Pickers {
             ],
             options: Vec::new(),
             billing: Some("api".into()),
+            context: Some(200_000),
         };
         let mut models: Vec<Model> = samples
             .iter()
