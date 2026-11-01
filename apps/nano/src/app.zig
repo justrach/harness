@@ -79,6 +79,8 @@ pub const View = struct {
     space_anchor: ?nanoui.ui.Rect = null,
     chip_anchor: ?nanoui.ui.Rect = null,
     model_picker: @import("model_picker.zig").State = .{},
+    /// The context ring's hover card (view_context.zig).
+    context: @import("view_context.zig").State = .{},
     composer_anchor: ?nanoui.ui.Rect = null,
     /// A press in a peer, including its message/control descendants.
     pane_press: ?struct { tab: usize, pane: usize } = null,

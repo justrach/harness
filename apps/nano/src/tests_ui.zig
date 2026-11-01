@@ -1783,3 +1783,47 @@ test "a finished turn's edits show as a changes card over the composer; it opens
     try testing.expect(h.a.panels.activeTab().?.kind == .diffs);
     try testing.expect(h.t.hasText("Showing"));
 }
+
+test "the context ring sits at the footer's right; resting on it opens the card of what fills the context" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try testing.expect(!h.t.hasText("23%"));
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Read the parser"}]},
+        \\ {"id":"r","role":"assistant","parts":[
+        \\  {"id":"f","kind":"tool","resolved":true,"call":{"kind":"readFile","path":"src/parser.rs"},"outputBytes":36000},
+        \\  {"id":"x","kind":"tool","resolved":true,"call":{"kind":"exec","command":"cargo test"},"outputBytes":8000},
+        \\  {"id":"d","kind":"text","text":"Done."}]}],
+        \\ "contextUsage":{"tokens":46200,"window":200000,"savings":{"handleBytes":96000,"compactedTokens":0,"cacheReadTokens":9000}}}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    const pct = h.t.findText("23%") orelse return error.NoRing;
+    const pill = h.a.view.composer_anchor.?;
+    try testing.expect(pct.x > pill.x + pill.w / 2 and pct.y > pill.y + pill.h);
+    try testing.expect(!h.t.hasText("Context"));
+    h.t.moveTo(pct.x + 2, pct.y + 4);
+    h.t.frame();
+    h.t.advance(0.3);
+    try testing.expect(!h.t.hasText("Context"));
+    h.t.advance(0.3);
+    h.snap("context-card");
+    for ([_][]const u8{ "Context", "reading", "46k", "of 200k", "Files", "9.0k", "Commands", "2.0k", "System & other", "153k free of 200k", "24k", "saved by graff", "46,200 / 200,000 tokens", "153,800 tokens remaining" }) |t|
+        if (!h.t.hasText(t)) {
+            std.debug.print("missing {s}\n", .{t});
+            return error.MissingText;
+        };
+    // It stays while the pointer crosses into it, and goes half a second
+    // after the pointer leaves both.
+    const card = h.a.view.context.card orelse return error.NoCard;
+    h.t.moveTo(card.x + card.w / 2, card.y + card.h / 2);
+    h.t.advance(0.7);
+    try testing.expect(h.t.hasText("saved by graff"));
+    h.t.moveTo(20, 400);
+    h.t.advance(0.2);
+    try testing.expect(h.t.hasText("saved by graff"));
+    h.t.advance(0.4);
+    try testing.expect(!h.t.hasText("saved by graff"));
+}

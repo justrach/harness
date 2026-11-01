@@ -28,6 +28,42 @@ pub const Question = struct {
     prefill: ?[]const u8 = null,
 };
 
+/// What graff kept out of the context (`ContextSavings`), from the last
+/// frame that said.
+pub const Savings = struct {
+    /// Tool-result bytes kept in files instead of the conversation.
+    handle_bytes: u64 = 0,
+    /// Estimated context tokens freed by compaction.
+    compacted_tokens: u64 = 0,
+    /// Input tokens the provider served from its prompt cache.
+    cache_read_tokens: u64 = 0,
+
+    pub fn handleTokens(s: Savings) u64 {
+        return s.handle_bytes / 4;
+    }
+
+    /// Tokens that never had to sit in the model's context.
+    pub fn keptOut(s: Savings) u64 {
+        return s.handleTokens() +| s.compacted_tokens;
+    }
+};
+
+/// A "Compact context" chip's record (`CompactionMeta`): each count null
+/// when the agent didn't say. `opaque_item` for a provider's sealed item.
+pub const Compaction = struct {
+    opaque_item: bool = false,
+    tokens_before: ?u64 = null,
+    tokens_after: ?u64 = null,
+    item_tokens: ?u64 = null,
+
+    pub fn freed(m: Compaction) ?u64 {
+        return (m.tokens_before orelse return null) -| (m.tokens_after orelse return null);
+    }
+};
+
+/// The compaction chip's tool name (`COMPACTION_TOOL_NAME`).
+pub const compaction_tool = "Compact context";
+
 pub const Part = struct {
     id: []u8,
     kind: PartKind,
@@ -56,6 +92,8 @@ pub const Part = struct {
     additions: u64 = 0,
     deletions: u64 = 0,
     stat_paths: []u8 = &.{},
+    /// A compaction chip (`ToolCall::is_compaction`) and its record.
+    compaction: ?Compaction = null,
     /// A tool has finished, or an input request was answered.
     resolved: bool = false,
     is_error: bool = false,
@@ -107,6 +145,7 @@ pub const Transcript = struct {
     /// The context window used, from the last frame that said.
     tokens: ?u64 = null,
     window: ?u64 = null,
+    savings: ?Savings = null,
 
     pub fn deinit(t: *Transcript) void {
         t.clear();
@@ -119,6 +158,7 @@ pub const Transcript = struct {
         t.complete = false;
         t.tokens = null;
         t.window = null;
+        t.savings = null;
     }
 
     /// Applies one `TranscriptUpdate`, retaining the last verified state on
@@ -133,6 +173,14 @@ pub const Transcript = struct {
         if (o.get("contextUsage")) |u| if (u == .object) {
             t.tokens = uint(u.object.get("tokens"));
             t.window = uint(u.object.get("window"));
+            t.savings = null;
+            if (u.object.get("savings")) |s| if (s == .object) {
+                t.savings = .{
+                    .handle_bytes = uint(s.object.get("handleBytes")) orelse 0,
+                    .compacted_tokens = uint(s.object.get("compactedTokens")) orelse 0,
+                    .cache_read_tokens = uint(s.object.get("cacheReadTokens")) orelse 0,
+                };
+            };
         };
     }
 
@@ -347,6 +395,16 @@ fn toolCall(gpa: Allocator, p: *Part, call: ?json.Value) !void {
     if (c != .object) return;
     const o = c.object;
     p.tool = std.meta.stringToEnum(ToolKind, string(o.get("kind")) orelse "") orelse .unknown;
+    if (p.tool == .unknown and std.mem.eql(u8, string(o.get("name")) orelse "", compaction_tool)) {
+        var m: Compaction = .{};
+        if (o.get("input")) |i| if (i == .object) {
+            m.opaque_item = std.mem.eql(u8, string(i.object.get("kind")) orelse "", "opaque");
+            m.tokens_before = uint(i.object.get("tokensBefore"));
+            m.tokens_after = uint(i.object.get("tokensAfter"));
+            m.item_tokens = uint(i.object.get("itemTokens"));
+        };
+        p.compaction = m;
+    }
     p.agent = @import("agent_link.zig").isAgent(o);
     p.subagent_title = (try @import("agent_link.zig").title(gpa, o)) orelse &.{};
     // Keep read paths too: file badges need the identity, not just chip text.

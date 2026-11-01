@@ -51,56 +51,73 @@ const Harness = struct {
     }
 };
 
-test "model picker uses Harness tabs, search and a separate reasoning footer" {
+test "the picker: agent tabs, a search, and the models in a section per route" {
     for ([_]bool{ false, true }) |dark| {
         var h: Harness = undefined;
         try h.init(dark);
         defer h.deinit();
         h.snap(if (dark) "picker-dark" else "picker-light");
-        try testing.expect(h.t.hasText("Starred"));
-        try testing.expect(h.t.hasText("graff"));
-        try testing.expect(h.t.hasText("Claude Code"));
-        try testing.expect(h.t.hasText("Codex"));
-        try testing.expect(!h.t.hasText("Agent"));
-        try testing.expect(h.t.hasText("Reasoning"));
-        try testing.expect(h.t.hasText("Synthetic Plan"));
-        const footer = h.t.findText("Reasoning") orelse return error.MissingReasoning;
-        const model = h.t.findText("Synthetic Plan") orelse return error.MissingModel;
-        try testing.expect(footer.y > model.y);
+        for ([_][]const u8{ "Starred", "graff", "Claude Code", "Codex", "OpenAI", "ChatGPT plan", "Anthropic", "Synthetic Plan" }) |t|
+            try testing.expect(h.t.hasText(t));
+        // No reasoning tray on the list: reasoning is the model's page.
+        try testing.expect(!h.t.hasText("Reasoning"));
+        const openai = h.t.findText("OpenAI") orelse return error.MissingSection;
+        const fast = inPicker(&h, "Synthetic Fast") orelse return error.MissingModel;
+        const plan_head = h.t.findText("ChatGPT plan") orelse return error.MissingSection;
+        try testing.expect(openai.y < fast.y and fast.y < plan_head.y);
         const tab = h.t.findText("Starred") orelse return error.MissingTabs;
         const chip = h.a.view.chip_anchor orelse return error.MissingChip;
         try testing.expect(tab.y >= chip.y + chip.h);
     }
 }
 
-test "model picker search and reasoning footer use GPUI's rendered text metrics" {
+test "model picker search uses GPUI's rendered text metrics" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
-    const footer = h.t.findText("Reasoning") orelse return error.MissingFooter;
-    var found: u3 = 0;
+    var found = false;
     for (h.t.ctx.nodes.items) |node| switch (node.content) {
-        .text => |text| {
-            if (std.mem.startsWith(u8, text.str, "Search models")) {
-                try testing.expectEqual(@as(f32, 14), text.style.size);
-                try testing.expectEqual(ui.Weight.medium, text.style.weight);
-                found |= 1;
-            } else if (std.mem.eql(u8, text.str, "Reasoning")) {
-                try testing.expectEqual(@as(f32, 13), text.style.size);
-                try testing.expectEqual(ui.Weight.medium, text.style.weight);
-                found |= 2;
-            } else if (std.mem.eql(u8, text.str, "High") and node.rect.y >= footer.y) {
-                try testing.expectEqual(@as(f32, 13), text.style.size);
-                try testing.expectEqual(ui.Weight.medium, text.style.weight);
-                found |= 4;
-            }
+        .text => |text| if (std.mem.startsWith(u8, text.str, "Search models")) {
+            try testing.expectEqual(@as(f32, 14), text.style.size);
+            try testing.expectEqual(ui.Weight.medium, text.style.weight);
+            found = true;
         },
         else => {},
     };
-    try testing.expectEqual(@as(u3, 7), found);
+    try testing.expect(found);
 }
 
-test "model search is scoped, stars do not select, and Return picks the starred model" {
+/// `label` in the picker, not the composer chip's (which names the model
+/// too): the picker opens under the chip on a new chat.
+fn inPicker(h: *Harness, label: []const u8) ?ui.Rect {
+    const chip = h.a.view.chip_anchor orelse return null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |t| if (std.mem.eql(u8, t.str, label) and n.rect.y > chip.y + chip.h) return n.rect,
+        else => {},
+    };
+    return null;
+}
+
+/// The star at the right end of `label`'s row.
+fn star(h: *Harness, label: []const u8) !ui.Rect {
+    const row = inPicker(h, label) orelse return error.MissingModel;
+    var best: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .image, .icon => if (n.rect.y < row.y + row.h and n.rect.y + n.rect.h > row.y and (best == null or n.rect.x > best.?.x)) {
+            best = n.rect;
+        },
+        else => {},
+    };
+    return best orelse error.MissingStar;
+}
+
+fn clickRow(h: *Harness, label: []const u8) !void {
+    const r = inPicker(h, label) orelse return error.MissingModel;
+    h.t.click(r.x + 4, r.y + r.h / 2);
+    h.t.settle(1);
+}
+
+test "model search is scoped, stars do not select, and Return opens then uses the starred model" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
@@ -111,10 +128,8 @@ test "model search is scoped, stars do not select, and Return picks the starred 
     var rows = try @import("model_picker.zig").rows(&h.a, arena.allocator());
     try testing.expectEqual(@as(usize, 1), rows.len);
     try testing.expectEqualStrings("chatgpt-new/synthetic-plan", rows[0].model.id);
-    try testing.expect(h.t.containsText("Synthetic Plan"));
-    const plan = h.t.findText("Synthetic Plan") orelse return error.MissingPlan;
-    const footer = h.t.findText("Reasoning") orelse return error.MissingFooter;
-    h.t.click(footer.x + @import("view_picker.zig").menu_width - 37, plan.y + plan.h / 2);
+    const s = try star(&h, "Synthetic Plan");
+    h.t.click(s.x + s.w / 2, s.y + s.h / 2);
     h.t.settle(1);
     try testing.expect(h.a.view.model_picker.favorite("graff", "chatgpt-new/synthetic-plan"));
     try testing.expect(h.a.new_model == null);
@@ -124,6 +139,11 @@ test "model search is scoped, stars do not select, and Return picks the starred 
     try testing.expect(h.a.view.model_picker.starred);
     rows = try @import("model_picker.zig").rows(&h.a, arena.allocator());
     try testing.expectEqual(@as(usize, 1), rows.len);
+    // Return opens the model's page; Return there uses it.
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.enter });
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Use model"));
+    try testing.expect(h.a.new_model == null);
     _ = h.t.shortcut(.{ .key = ui.Shortcut.enter });
     h.t.settle(1);
     try testing.expectEqualStrings("chatgpt-new/synthetic-plan", h.a.new_model.?);
@@ -131,17 +151,60 @@ test "model search is scoped, stars do not select, and Return picks the starred 
     try testing.expectEqual(h.a.view.composer_id, h.t.ctx.focus);
 }
 
-test "the pinned reasoning footer opens its own choices and applies them" {
+test "a row under the pointer shows a detail card of what the catalog says, and only that" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
-    try h.t.clickText("Reasoning");
+    const fast = inPicker(&h, "Synthetic Fast") orelse return error.MissingModel;
+    h.t.moveTo(fast.x + 4, fast.y + 4);
+    h.t.frame();
+    try testing.expect(!h.t.hasText("via OpenAI"));
+    h.t.advance(0.25);
+    h.snap("picker-detail");
+    for ([_][]const u8{ "via OpenAI", "Reasoning", "Low – High", "Billing", "Credits", "128k context" }) |t|
+        try testing.expect(h.t.hasText(t));
+    // Nothing the catalog didn't say: no context window listed for it.
+    try testing.expect(!h.t.hasText("Context"));
+    const card = h.a.view.model_picker.detail_rect orelse return error.MissingCard;
+    try testing.expect(card.x >= fast.x + fast.w);
+    // Escape takes the card first, then the picker.
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
     h.t.settle(1);
-    try testing.expect(h.t.containsText("Low"));
-    try h.t.clickText("Low");
-    h.t.settle(1);
-    try testing.expectEqualStrings("low", h.a.new_reasoning.?);
+    try testing.expect(h.a.view.model_picker.detail == null);
+    try testing.expect(h.a.picker != .none);
+}
+
+test "a model's page: its reasoning on a slider, the keys and a drag move it, Use model applies both" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try clickRow(&h, "Synthetic Fast");
+    h.snap("picker-page");
+    for ([_][]const u8{ "Models", "via OpenAI", "Reasoning", "Faster", "Deeper", "Use model" }) |t|
+        try testing.expect(h.t.hasText(t));
     try testing.expect(h.a.new_model == null);
+    // Escape goes back to the list; the model again, then ← to Low.
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.escape });
+    h.t.settle(1);
+    try testing.expect(!h.t.hasText("Use model"));
+    try testing.expect(h.a.picker != .none);
+    try clickRow(&h, "Synthetic Fast");
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.left });
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Low"));
+    // A press at the track's right end picks the deepest level.
+    const track = h.a.view.model_picker.track orelse return error.MissingTrack;
+    h.t.moveTo(track.x + track.w - 1, track.y + track.h / 2);
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.ctx.pointerUp();
+    h.t.frame();
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("High"));
+    try h.t.clickText("Use model");
+    h.t.settle(1);
+    try testing.expectEqualStrings("openai/synthetic-fast", h.a.new_model.?);
+    try testing.expectEqualStrings("high", h.a.new_reasoning.?);
     try testing.expect(h.a.picker == .none);
 }
 
@@ -241,7 +304,7 @@ test "a late model catalog never overwrites the agent tab selected after it" {
     try testing.expectEqualStrings("graff/slow", a.view.model_picker.catalogs.get("graff").?.models.items[0].id);
 }
 
-test "large model catalogs only build visible rows and keep the footer pinned" {
+test "large model catalogs only build the rows in view" {
     var h: Harness = undefined;
     try h.init(false);
     defer h.deinit();
@@ -260,12 +323,10 @@ test "large model catalogs only build visible rows and keep the footer pinned" {
     h.t.settle(1);
     const large_nodes = h.t.ctx.stats.nodes;
     try testing.expect(large_nodes <= small_nodes * 2);
-    const footer = h.t.findText("Reasoning") orelse return error.MissingFooter;
-    h.t.scroll(footer.x + 30, footer.y - 50, -100000);
+    const first = inPicker(&h, "Synthetic model 0") orelse return error.MissingRow;
+    h.t.scroll(first.x + 30, first.y, -100000);
     h.t.settle(1);
     try testing.expect(h.t.containsText("Synthetic model 1999"));
     try testing.expect(h.t.ctx.stats.nodes <= small_nodes * 2);
-    const after = h.t.findText("Reasoning") orelse return error.MissingFooter;
-    try testing.expectApproxEqAbs(footer.y, after.y, 0.01);
     std.log.info("model picker: 3 models {d} nodes; 2000 models {d} nodes", .{ small_nodes, large_nodes });
 }

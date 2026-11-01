@@ -101,4 +101,6 @@ test {
     _ = @import("theme.zig");
     _ = @import("view_newchat.zig");
     _ = @import("turn_work.zig");
+    _ = @import("context_window.zig");
+    _ = @import("view_context.zig");
 }

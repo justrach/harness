@@ -181,7 +181,12 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     if (str(scene, "selectedSpace") orelse first(scene, "spaces", "id")) |sp| a.space = try gpa.dupe(u8, sp);
     if (str(scene, "selectedChat")) |id| {
         a.openChat(id, null);
-        if (scene.get("transcript")) |v| a.transcript.apply(reset(arena, v) orelse return error.OutOfMemory) catch {};
+        if (scene.get("transcript")) |v| {
+            var frame = (reset(arena, v) orelse return error.OutOfMemory);
+            // The chat's context meter rides its transcript frame.
+            if (scene.get("contextUsage")) |u| try frame.object.put(arena, "contextUsage", u);
+            a.transcript.apply(frame) catch {};
+        }
     }
 
     var t: ui.Tester = undefined;

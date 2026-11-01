@@ -55,13 +55,19 @@ pub fn checkoutOf(chat: workspace.Chat, space: workspace.Space) Checkout {
     return if (std.mem.eql(u8, cwd, space.path)) .local else .worktree;
 }
 
-/// The footer's row, `w` wide: `px(10)`, the model chip, then the open
-/// chat's workspace labels when its project has git.
+/// The footer's row, `w` wide: `px(10)`, the model chip, the open chat's
+/// workspace labels when its project has git, and at the right end the
+/// context ring (`composer-footer`).
 pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const row = ui.div(c).row().w(w).h(height).px(10).gap(4).itemsCenter().clip();
     defer row.end();
     @import("view_composer.zig").chip(c, a, k);
-    session(c, a, k);
+    {
+        const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
+        defer slot.end();
+        session(c, a, k);
+    }
+    @import("view_context.zig").indicator(c, a, k);
 }
 
 fn session(c: *ui.Context, a: *App, k: theme.Colors) void {

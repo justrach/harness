@@ -37,6 +37,9 @@ struct Scene {
     selected_space: Option<String>,
     #[serde(default)]
     transcript: Vec<harness_doc::SessionMessageEntry>,
+    /// The open chat's context meter, as its transcript frame reports it.
+    #[serde(default)]
+    context_usage: Option<harness_proto::ContextUsage>,
     /// A run of interactions: after each, the frame is written as
     /// `<name>-<NN>.png` and the step's cost noted in `<name>.steps.json`.
     #[serde(default)]
@@ -280,6 +283,9 @@ fn main() -> anyhow::Result<()> {
                             cx,
                         )
                         .ok();
+                    if let Some(usage) = scene.context_usage {
+                        state.context_usage = Some(usage);
+                    }
                 }
                 state.apply_sessions(sessions);
                 // The scene's cloud sandboxes also reach the shell (the

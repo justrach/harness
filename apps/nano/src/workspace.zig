@@ -151,6 +151,8 @@ pub const Model = struct {
     /// Its levels; a chat without one picked shows `rules.defaultReasoning`.
     reasoning_default: ?[]const u8 = null,
     levels: []const []const u8 = &.{},
+    /// Its context window in tokens, when the catalog says (`Model::context`).
+    context: ?u64 = null,
 };
 
 pub const Spaces = List(Space, parseSpace);
@@ -272,6 +274,7 @@ fn parseModel(a: Allocator, o: json.ObjectMap) ?Model {
         .billing = str(a, o, "billing"),
         .reasoning_default = rules.defaultReasoning(levels),
         .levels = levels,
+        .context = if (o.get("context")) |v| (if (v == .integer and v.integer > 0) @as(u64, @intCast(v.integer)) else null) else null,
     };
 }
 

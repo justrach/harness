@@ -151,6 +151,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_menus.zig").menus(c, a, popup);
     @import("view_sidebar_menus.zig").menus(c, a, popup);
     @import("view_picker.zig").popover(c, a, popup);
+    @import("view_context.zig").overlay(c, a, popup);
     @import("view_drag.zig").overlay(c, a, popup);
     @import("view_chat_menu.zig").overlays(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
