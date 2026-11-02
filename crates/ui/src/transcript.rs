@@ -11619,7 +11619,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             let state = cx.new(|_| AppState::new());
             let primary = cx.new(|cx| Transcript::new(state.clone(), cx));
             let peer = cx.new(|cx| Transcript::for_doc(state.clone(), "peer".into(), true, cx));
@@ -11683,7 +11683,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             let state = cx.new(|_| AppState::new());
             let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
             transcript.update(cx, |transcript, cx| {
@@ -11746,7 +11746,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
@@ -11907,7 +11907,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
@@ -12031,7 +12031,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
@@ -12179,7 +12179,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let incremental = cx.new(|cx| Transcript::new(state.clone(), cx));
@@ -12282,7 +12282,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
@@ -12353,7 +12353,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             let state = cx.new(|_| AppState::new());
             let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
             transcript.update(cx, |this, _| this.retain_for_route_exit());
@@ -13877,7 +13877,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let (host, cx) =
@@ -13987,7 +13987,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let (host, cx) = cx.add_window_view(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
@@ -14082,7 +14082,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         let (host, cx) = cx.add_window_view(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
@@ -14173,7 +14173,7 @@ mod tests {
         let (left_state, right_state) = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             (cx.new(|_| AppState::new()), cx.new(|_| AppState::new()))
         });
         let (split, cx) = cx.add_window_view(|_, cx| {
@@ -14307,7 +14307,7 @@ mod tests {
         let (left_state, right_state) = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             (cx.new(|_| AppState::new()), cx.new(|_| AppState::new()))
         });
         let (split, cx) = cx.add_window_view(|_, cx| {
@@ -14401,7 +14401,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             let state = cx.new(|_| {
                 let mut state = AppState::new();
                 state.local_device_id = Some("reply-owner".into());
@@ -14525,7 +14525,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         let state = cx.new(|_| AppState::new());
         let transcript = cx.new(|cx| Transcript::new(state, cx));
@@ -14593,7 +14593,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         let state = cx.new(|_| AppState::new());
         let transcript = cx.new(|cx| Transcript::new(state, cx));
@@ -14669,7 +14669,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             let state = cx.new(|_| AppState::new());
             let transcript = cx.new(|cx| Transcript::new(state, cx));
             let entries: Vec<SessionMessageEntry> =
@@ -15958,7 +15958,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             let state = cx.new(|_| AppState::new());
             let transcript = cx.new(|cx| Transcript::new(state, cx));
             transcript.update(cx, |this, cx| {
@@ -18749,7 +18749,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         let opened: Rc<RefCell<Vec<render::LinkActivation>>> = Rc::default();
         let recorded = opened.clone();

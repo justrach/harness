@@ -415,7 +415,7 @@ mod tests {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             crate::motion::set_reduced_motion(cx, reduced);
             cx.new(|_| crate::state::AppState::new())
         });
@@ -540,7 +540,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             crate::motion::set_reduced_motion(cx, true);
             let state = cx.new(|_| crate::state::AppState::new());
             state.update(cx, |state, _| {

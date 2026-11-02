@@ -25,7 +25,7 @@ fn composer_with_history(
             Default::default(),
             cx,
         );
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
     });
     let state = cx.new(|_| AppState::new());
     state.update(cx, |state, _| {

@@ -37,7 +37,7 @@ fn assert_pane_cards(cx: &mut gpui::TestAppContext, width: f32, count: usize, ta
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         SidebarPaneCards(cx.new(|cx| {

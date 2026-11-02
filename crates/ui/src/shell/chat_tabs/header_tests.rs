@@ -36,7 +36,7 @@ fn setup<'a>(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), path, cx);
+        settings::init(settings::UiSettings::expanded(), path, cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         let shell = cx.new(|cx| {

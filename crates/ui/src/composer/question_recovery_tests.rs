@@ -29,7 +29,7 @@ fn fixture(cx: &mut gpui::TestAppContext) -> (tempfile::TempDir, gpui::WindowHan
             Default::default(),
             cx,
         );
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         crate::motion::set_reduced_motion(cx, true);
     });
     let handle = cx.add_window(|_, cx| {

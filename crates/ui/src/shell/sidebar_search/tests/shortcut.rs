@@ -21,7 +21,7 @@ fn shortcut_fixture(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     // Mount the real shell so both its registered binding and action listener
     // are exercised, including focus handoff as the sidebar mounts.

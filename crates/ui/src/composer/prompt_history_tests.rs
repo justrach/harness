@@ -67,7 +67,7 @@ fn prompt_history_skips_agent_rows_and_restores_drafts(cx: &mut gpui::TestAppCon
             Default::default(),
             cx,
         );
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
     });
     let state = cx.new(|_| AppState::new());
     state.update(cx, |state, _| {

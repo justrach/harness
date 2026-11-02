@@ -108,7 +108,7 @@ fn with_panes(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         crate::motion::set_reduced_motion(cx, true);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {

@@ -108,7 +108,7 @@ fn open_chat(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), &data_dir, cx);
+        settings::init(settings::UiSettings::expanded(), &data_dir, cx);
         // Route and dock tweens run on the wall clock, not the test clock: a
         // slow machine could still be animating (redrawing everything) when
         // the measurement starts.

@@ -16,7 +16,7 @@ fn collapsed_prompt_does_not_capture_reply_selection(cx: &mut gpui::TestAppConte
     let state = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         cx.new(|_| AppState::new())
     });
     let (host, cx) =
@@ -134,7 +134,7 @@ fn whitespace_selection_anchors_at_line_boundaries_in_its_pane(cx: &mut gpui::Te
     let (left_state, right_state) = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         (cx.new(|_| AppState::new()), cx.new(|_| AppState::new()))
     });
     let (split, cx) = cx.add_window_view(|_, cx| {

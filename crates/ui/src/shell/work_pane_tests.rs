@@ -35,7 +35,7 @@ fn running_turn(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         crate::motion::set_reduced_motion(cx, true);
     });
     let data_dir = dir.path().to_path_buf();

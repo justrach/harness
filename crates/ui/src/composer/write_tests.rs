@@ -40,7 +40,7 @@ fn host(
             Default::default(),
             cx,
         );
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         crate::motion::set_reduced_motion(cx, true);
         // Enter sends in the composer; the page must still take it as a newline.
         crate::composer::init(cx, ComposerSendBehavior::Enter);

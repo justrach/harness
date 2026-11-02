@@ -76,7 +76,7 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         ToolbarHost(cx.new(|cx| {
@@ -330,7 +330,7 @@ fn assert_plus_opens_tab(cx: &mut gpui::TestAppContext, collapsed: bool, split: 
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         ToolbarHost(cx.new(|cx| {
@@ -455,7 +455,7 @@ fn graff_notice_card_shows_dismisses_and_resurfaces(cx: &mut gpui::TestAppContex
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (shell, cx) = cx.add_window_view(|_, cx| {
         let state = cx.new(|_| AppState::new());
@@ -570,7 +570,7 @@ fn titlebar_arrows_walk_open_tabs_not_route_history(cx: &mut gpui::TestAppContex
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         ToolbarHost(cx.new(|cx| {
@@ -690,7 +690,7 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (shell, cx) = cx.add_window_view(|_, cx| {
         let state = cx.new(|_| AppState::new());

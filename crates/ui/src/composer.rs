@@ -12392,7 +12392,7 @@ mod tests {
                 Default::default(),
                 cx,
             );
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         dir
     }
@@ -14462,7 +14462,7 @@ mod tests {
                 Default::default(),
                 cx,
             );
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
@@ -14595,7 +14595,7 @@ mod tests {
                 Default::default(),
                 cx,
             );
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         let state = cx.new(|_| AppState::new());
         state.update(cx, |state, _| {
@@ -16459,7 +16459,7 @@ mod tests {
         let _runtime = runtime.enter();
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            crate::settings::init(crate::settings::UiSettings::default(), directory.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), directory.path(), cx);
         });
         let (out, mut requests) = tokio::sync::mpsc::channel(64);
         let (replies, inbound) = tokio::sync::mpsc::channel(64);

@@ -14,7 +14,7 @@ fn setup(cx: &mut TestAppContext, dir: &std::path::Path) -> WindowHandle<Shell> 
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir, cx);
+        settings::init(settings::UiSettings::expanded(), dir, cx);
     });
     cx.add_window(|_, cx| {
         let state = cx.new(|_| AppState::new());
@@ -207,7 +207,7 @@ fn a_sidebar_drop_still_splits_after_a_mid_drag_chats_frame(cx: &mut TestAppCont
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let named = |id: &str| Chat {
         id: id.into(),

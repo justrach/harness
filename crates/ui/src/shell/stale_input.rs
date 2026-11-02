@@ -151,7 +151,7 @@ mod tests {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());

@@ -24,7 +24,7 @@ fn sidebar_shell<'a>(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let data_dir = dir.path().to_path_buf();
     let (shell, cx) = cx.add_window_view(|_, cx| {

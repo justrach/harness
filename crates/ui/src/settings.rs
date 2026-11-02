@@ -445,6 +445,18 @@ pub fn code_fences_generation(cx: &App) -> u64 {
 /// accordion, leaving only the reply text. Transcripts poll this during
 /// render and rebuild their row split on a flip — cheap by design (a bool
 /// field read, not a `current()` clone).
+impl UiSettings {
+    /// The defaults with the transcript expanded, for tests of expanded rows: compact mode is
+    /// on by default, and folds a turn's steps away.
+    #[doc(hidden)]
+    pub fn expanded() -> Self {
+        Self {
+            transcript_compact_mode: false,
+            ..Self::default()
+        }
+    }
+}
+
 pub fn transcript_compact_mode(cx: &App) -> bool {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.transcript_compact_mode)

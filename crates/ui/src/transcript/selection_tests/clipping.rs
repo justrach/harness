@@ -42,7 +42,7 @@ fn with_transcript(
     let state = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         cx.new(|_| AppState::new())
     });
     let (host, cx) =
@@ -450,7 +450,7 @@ fn collapsed_prompt_selection_survives_other_cached_pane_repaints(cx: &mut gpui:
     let (left_state, right_state) = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         (cx.new(|_| AppState::new()), cx.new(|_| AppState::new()))
     });
     let (split, cx) = cx.add_window_view(|_, cx| {

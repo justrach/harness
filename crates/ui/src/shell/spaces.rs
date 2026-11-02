@@ -6862,7 +6862,7 @@ mod project_flow_tests {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), data.path(), cx);
+            settings::init(settings::UiSettings::expanded(), data.path(), cx);
             settings::update(SavePolicy::Immediate, cx, |settings| {
                 settings
                     .project_folders_by_device
@@ -7075,7 +7075,7 @@ mod project_flow_tests {
                 Default::default(),
                 cx,
             );
-            crate::settings::init(crate::settings::UiSettings::default(), data.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), data.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| {

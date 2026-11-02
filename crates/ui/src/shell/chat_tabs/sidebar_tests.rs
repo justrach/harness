@@ -49,7 +49,7 @@ fn assert_sidebar_click(cx: &mut gpui::TestAppContext, split: bool, parked_pane:
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         SidebarRows(cx.new(|cx| {
@@ -230,7 +230,7 @@ fn assert_active_question_reselection(cx: &mut gpui::TestAppContext, tabs: bool,
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|window, cx| {
         window.resize(gpui::size(px(1000.0), px(600.0)));
@@ -420,7 +420,7 @@ fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppC
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         ChatSidebar(cx.new(|cx| {

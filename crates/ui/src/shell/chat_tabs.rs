@@ -1216,7 +1216,7 @@ mod tests {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), path, cx);
+            settings::init(settings::UiSettings::expanded(), path, cx);
         });
     }
 

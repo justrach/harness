@@ -143,7 +143,7 @@ fn fixture_with_conversation(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
+        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         let shell = cx.new(|cx| {

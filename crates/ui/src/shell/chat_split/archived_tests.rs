@@ -15,7 +15,7 @@ fn setup(cx: &mut TestAppContext, dir: &std::path::Path) -> WindowHandle<Shell> 
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::default(), dir, cx);
+        settings::init(settings::UiSettings::expanded(), dir, cx);
     });
     cx.add_window(|_, cx| {
         let state = cx.new(|_| AppState::new());

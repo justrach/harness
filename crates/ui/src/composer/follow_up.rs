@@ -426,7 +426,7 @@ mod tests {
         let _guard = runtime.enter();
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            crate::settings::init(crate::settings::UiSettings::default(), directory.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), directory.path(), cx);
             crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
                 settings.follow_up_behavior = FollowUpBehavior::Steer;
             });
@@ -463,7 +463,7 @@ mod tests {
         let _guard = runtime.enter();
         let directory = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            crate::settings::init(crate::settings::UiSettings::default(), directory.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), directory.path(), cx);
             crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
                 settings.follow_up_behavior = FollowUpBehavior::Queue;
                 settings.composer_send_behavior = crate::settings::ComposerSendBehavior::Enter;

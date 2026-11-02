@@ -12,7 +12,7 @@ fn build_wait_replaces_thinking_and_clears_on_resume(cx: &mut gpui::TestAppConte
     let state = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         cx.new(|_| AppState::new())
     });
     let now = chrono::Utc::now();
@@ -73,7 +73,7 @@ fn build_wait_is_scoped_to_live_chat_panes_not_parent_or_frozen_docs(
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         let state = cx.new(|_| AppState::new());
         let primary = cx.new(|cx| Transcript::new(state.clone(), cx));
         let peer = cx.new(|cx| Transcript::for_doc(state.clone(), "peer".into(), true, cx));

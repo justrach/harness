@@ -15503,7 +15503,7 @@ mod exit_regressions {
     fn only_a_cold_start_shows_the_setup_splash(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -15553,7 +15553,7 @@ mod exit_regressions {
     fn settings_search_opens_the_matching_section_and_clears(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -15633,7 +15633,7 @@ mod exit_regressions {
     fn mouse_side_buttons_walk_the_route_history(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -15698,7 +15698,7 @@ mod exit_regressions {
     fn shell_saves_keep_motion_settings_chosen_in_appearance(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -15750,7 +15750,7 @@ mod exit_regressions {
     ) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -15822,7 +15822,7 @@ mod exit_regressions {
     fn pane_geometry_uses_one_animation_time_per_frame(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -15936,7 +15936,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16061,7 +16061,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16120,7 +16120,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16205,7 +16205,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16281,7 +16281,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16380,7 +16380,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16452,7 +16452,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16533,7 +16533,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16614,7 +16614,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16745,7 +16745,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let (host, cx) = cx.add_window_view(|window, cx| {
             let shell = cx.new(|cx| {
@@ -16814,7 +16814,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -16895,7 +16895,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -17008,7 +17008,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -17134,7 +17134,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -17298,7 +17298,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -17415,7 +17415,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -17563,7 +17563,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -17856,7 +17856,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -18102,7 +18102,7 @@ mod exit_regressions {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(settings::UiSettings::expanded(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());

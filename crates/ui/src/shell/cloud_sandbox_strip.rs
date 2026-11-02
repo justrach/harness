@@ -439,7 +439,7 @@ mod tests {
                 Default::default(),
                 cx,
             );
-            settings::init(settings::UiSettings::default(), dir, cx);
+            settings::init(settings::UiSettings::expanded(), dir, cx);
         });
         let state = cx.new(|_| AppState::new());
         let shell_state = state.clone();

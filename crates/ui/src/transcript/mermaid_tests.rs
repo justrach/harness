@@ -58,7 +58,7 @@ impl Fixture {
         let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             cx.new(|_| AppState::new())
         });
         state.update(cx, |state, cx| state.select_chat(Some("chat".into()), cx));

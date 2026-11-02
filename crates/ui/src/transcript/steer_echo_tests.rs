@@ -51,7 +51,7 @@ fn steer_echo_sits_after_tool_and_confirms_once_before_continuation(cx: &mut gpu
     let state = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         cx.new(|_| AppState::new())
     });
     let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
@@ -140,7 +140,7 @@ fn ordinary_transcript_without_echo_does_not_invent_a_pending_user_row(
     let state = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         cx.new(|_| AppState::new())
     });
     let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));

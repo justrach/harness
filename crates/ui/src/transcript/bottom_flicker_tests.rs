@@ -81,7 +81,7 @@ fn run(cx: &mut gpui::TestAppContext, s: Scenario) -> Result<(), String> {
     let state = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         cx.new(|_| AppState::new())
     });
     let window = cx.add_window(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));

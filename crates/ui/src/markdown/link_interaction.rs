@@ -826,7 +826,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         let activations = Rc::new(Cell::new(0));
         let window = cx.open_window(gpui::size(px(400.), px(240.)), |_, _| BottomLink {
@@ -953,7 +953,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         });
         let seen = Rc::new(RefCell::new(Vec::new()));
         let (view, cx) = cx.add_window_view(|_, _| MenuLink {
@@ -1300,7 +1300,7 @@ mod rendered_tests {
         let dir = tempfile::tempdir().unwrap();
         test_application().run(move |cx| {
             cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
             // Keep the headless event loop alive between scenario windows.
             cx.open_window(Default::default(), |_, cx| cx.new(|_| gpui::Empty))
                 .unwrap();

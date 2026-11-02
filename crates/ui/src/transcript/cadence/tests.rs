@@ -74,7 +74,7 @@ fn with_panes(
     let state = cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
-        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
         motion::set_reduced_motion(cx, true);
         cx.new(|_| {
             let mut state = AppState::new();
