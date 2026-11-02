@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 @MainActor
@@ -34,6 +35,9 @@ final class TextSelectionUITests: XCTestCase {
         let copy = menu("Copy")
         XCTAssertTrue(copy.waitForExistence(timeout: 5), "Long-press must show the native Copy menu")
         capture("output-selection")
+        // A failed Copy must paste a synthetic sentinel, never pre-existing
+        // simulator clipboard content. Keep unexpected clipboard text out of logs.
+        UIPasteboard.general.string = "Synthetic clipboard sentinel"
         copy.tap()
         let composer = app.descendants(matching: .any)["composer-input"].firstMatch
         composer.tap()
@@ -49,7 +53,7 @@ final class TextSelectionUITests: XCTestCase {
         capture("output-before-selection")
         output.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 22, dy: 13))
             .press(forDuration: 1.2)
-        XCTAssertEqual(copyAndPaste(), "Select")
+        XCTAssertTrue(copyAndPaste() == "Select", "Copy must contain only the selected word")
     }
 
     func testDraggingToTheEndCopiesOnlyTheOutputParagraph() {
@@ -59,9 +63,9 @@ final class TextSelectionUITests: XCTestCase {
             .withOffset(CGVector(dx: output.frame.width - 2, dy: output.frame.height + 60))
         start.press(forDuration: 1.2, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.5)
         capture("output-whole-paragraph")
-        XCTAssertEqual(copyAndPaste(),
-                       "Select this word and drag across multiple lines to copy only the highlighted passage. The rest of this response stays unselected.",
-                       "A full-range selection must include the final word, but not surrounding transcript UI")
+        XCTAssertTrue(copyAndPaste() ==
+                      "Select this word and drag across multiple lines to copy only the highlighted passage. The rest of this response stays unselected.",
+                      "A full-range selection must include the final word, but not surrounding transcript UI")
     }
 
     func testDismissingRangeSelectionAllowsReselectingASingleWord() {
@@ -87,7 +91,7 @@ final class TextSelectionUITests: XCTestCase {
         output.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 22, dy: 13))
             .press(forDuration: 1.2)
         capture("output-after-reselection")
-        XCTAssertEqual(copyAndPaste(), "Select", "Reselecting must replace the previous multi-line range")
+        XCTAssertTrue(copyAndPaste() == "Select", "Reselecting must replace the previous multi-line range")
     }
 
     func testLongPressDragCopiesMultipleWordsAcrossLines() {
@@ -98,8 +102,8 @@ final class TextSelectionUITests: XCTestCase {
         let end = output.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 180, dy: 95))
         start.press(forDuration: 1.2, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.5)
         let copied = copyAndPaste()
-        XCTAssertTrue(copied.hasPrefix("Select this word"), "Copied: \(copied)")
-        XCTAssertTrue(copied.contains("multiple lines"), "Drag must extend selection past the first line: \(copied)")
+        XCTAssertTrue(copied.hasPrefix("Select this word"), "Copy must start at the selected word")
+        XCTAssertTrue(copied.contains("multiple lines"), "Drag must extend selection past the first line")
         XCTAssertFalse(copied.contains("stays unselected"), "Copy must not copy the whole message")
     }
 }

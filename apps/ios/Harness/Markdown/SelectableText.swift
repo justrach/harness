@@ -33,21 +33,18 @@ struct SelectableText: UIViewRepresentable {
         view.tintColor = UIColor(Theme.accent)
         // Links keep their explicit monochrome foreground and underline.
         view.linkTextAttributes = [:]
-        if let layout = view.layoutManager as? InlineCodeLayoutManager, layout.extraLineHeight != lineHeight {
-            layout.extraLineHeight = lineHeight
-            layout.invalidateLayout(forCharacterRange: NSRange(location: 0, length: view.textStorage.length),
-                                    actualCharacterRange: nil)
-        }
-        Self.update(text, in: view)
+        context.coordinator.update(text, lineHeight: lineHeight, in: view)
     }
 
     /// Paint-only veil/highlight updates and streamed appends must not clear a
     /// selection. Avoid assigning even equal strings: UIKit resets its edit UI.
-    static func update(_ text: NSAttributedString, in view: UITextView) {
-        guard !view.attributedText.isEqual(to: text) else { return }
+    @discardableResult
+    static func update(_ text: NSAttributedString, in view: UITextView) -> Bool {
+        guard !view.attributedText.isEqual(to: text) else { return false }
         let selection = retainedSelection(view.selectedRange, from: view.text ?? "", to: text.string)
         view.attributedText = text
         view.selectedRange = selection
+        return true
     }
 
     /// TextKit offsets are UTF-16, whereas String.hasPrefix compares canonical
@@ -66,19 +63,56 @@ struct SelectableText: UIViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
-        let natural = text.boundingRect(with: CGSize(width: CGFloat.greatestFiniteMagnitude,
-                                                     height: CGFloat.greatestFiniteMagnitude),
-                                        options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-        let width = wraps ? (proposal.width ?? ceil(natural.width)) : ceil(natural.width)
-        let size = uiView.sizeThatFits(CGSize(width: max(1, width), height: .greatestFiniteMagnitude))
-        return CGSize(width: max(1, width), height: ceil(size.height))
+        context.coordinator.sizeThatFits(proposal, text: text, wraps: wraps, view: uiView)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(openURL: openURL) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var openURL: OpenURLAction
+        private var naturalWidth: CGFloat?
+        private var measurements: [CGFloat: CGSize] = [:]
         init(openURL: OpenURLAction) { self.openURL = openURL }
+
+        func update(_ text: NSAttributedString, lineHeight: CGFloat, in view: UITextView) {
+            var metricsChanged = false
+            if let layout = view.layoutManager as? InlineCodeLayoutManager, layout.extraLineHeight != lineHeight {
+                layout.extraLineHeight = lineHeight
+                layout.invalidateLayout(forCharacterRange: NSRange(location: 0, length: view.textStorage.length),
+                                        actualCharacterRange: nil)
+                metricsChanged = true
+            }
+            if SelectableText.update(text, in: view) || metricsChanged {
+                naturalWidth = nil
+                measurements.removeAll(keepingCapacity: true)
+            }
+        }
+
+        func sizeThatFits(_ proposal: ProposedViewSize, text: NSAttributedString,
+                          wraps: Bool, view: UITextView) -> CGSize {
+            let proposedWidth: CGFloat
+            if wraps, let width = proposal.width {
+                proposedWidth = width
+            } else {
+                if naturalWidth == nil {
+                    naturalWidth = ceil(text.boundingRect(
+                        with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+                        options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).width)
+                }
+                proposedWidth = naturalWidth!
+            }
+            let width = max(1, proposedWidth)
+            if let size = measurements[width] { return size }
+            // UITextView.sizeThatFits temporarily changes its live text container,
+            // invalidating TextKit layout. Nested SwiftUI stacks ask for the same
+            // widths many times per frame; never repeat that work for a proposal.
+            let fitted = view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+            let size = CGSize(width: width, height: ceil(fitted.height))
+            // Bound resize/animation proposals without retaining transcript text.
+            if measurements.count == 16 { measurements.removeAll(keepingCapacity: true) }
+            measurements[width] = size
+            return size
+        }
 
         func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem,
                       defaultAction: UIAction) -> UIAction? {

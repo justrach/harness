@@ -20,6 +20,98 @@ final class TextSelectionTests: XCTestCase {
         return (window, host)
     }
 
+    func testRepeatedLayoutProposalsReuseNativeMeasurement() {
+        let view = CountingSizingTextView()
+        view.isScrollEnabled = false
+        let text = [InlineRun(text: String(repeating: "Synthetic output with several words. ", count: 80),
+                              style: .plain)].selectableAttributed()
+        SelectableText.update(text, in: view)
+        let coordinator = SelectableText.Coordinator(openURL: OpenURLAction { _ in .handled })
+        let proposal = ProposedViewSize(width: 320, height: nil)
+        let expected = coordinator.sizeThatFits(proposal, text: text, wraps: true, view: view)
+        let calls = view.measurements
+        let start = CACurrentMediaTime()
+        for _ in 0..<200 {
+            XCTAssertEqual(coordinator.sizeThatFits(proposal, text: text, wraps: true, view: view), expected)
+        }
+        let cachedTime = CACurrentMediaTime() - start
+        XCTAssertEqual(view.measurements, calls, "Identical SwiftUI proposals must not invalidate live TextKit layout")
+
+        let uncachedStart = CACurrentMediaTime()
+        for _ in 0..<200 {
+            _ = view.sizeThatFits(CGSize(width: 320, height: CGFloat.greatestFiniteMagnitude))
+        }
+        let uncachedTime = CACurrentMediaTime() - uncachedStart
+        XCTAssertGreaterThan(uncachedTime, cachedTime * 5,
+                             "Repeated proposals should be at least 5× cheaper than native layout")
+    }
+
+    func testMeasurementCacheTracksWidthTextFontAndNaturalSize() {
+        let view = CountingSizingTextView()
+        view.isScrollEnabled = false
+        let coordinator = SelectableText.Coordinator(openURL: OpenURLAction { _ in .handled })
+        let source = "Synthetic output wraps onto several lines at a narrow width."
+        let text = [InlineRun(text: source, style: .plain)].selectableAttributed()
+        coordinator.update(text, lineHeight: MD.lineHeight, in: view)
+        let wide = coordinator.sizeThatFits(ProposedViewSize(width: 320, height: nil), text: text, wraps: true, view: view)
+        let narrow = coordinator.sizeThatFits(ProposedViewSize(width: 80, height: nil), text: text, wraps: true, view: view)
+        XCTAssertGreaterThan(narrow.height, wide.height)
+        let natural = coordinator.sizeThatFits(.unspecified, text: text, wraps: true, view: view)
+        XCTAssertGreaterThan(natural.width, wide.width)
+        let calls = view.measurements
+        XCTAssertEqual(coordinator.sizeThatFits(ProposedViewSize(width: 320, height: 1),
+                                                text: text, wraps: true, view: view), wide)
+        XCTAssertEqual(coordinator.sizeThatFits(ProposedViewSize(width: 80, height: nil),
+                                                text: text, wraps: false, view: view), natural)
+        coordinator.update(text, lineHeight: MD.lineHeight, in: view)
+        _ = coordinator.sizeThatFits(.unspecified, text: text, wraps: true, view: view)
+        XCTAssertEqual(view.measurements, calls, "Equal content and height-only proposals reuse cached sizes")
+
+        for changed in [[InlineRun(text: source + source, style: .plain)].selectableAttributed(),
+                        [InlineRun(text: source, style: .plain)].selectableAttributed(size: 40, lineHeight: 60)] {
+            coordinator.update(changed, lineHeight: MD.lineHeight, in: view)
+            let updated = coordinator.sizeThatFits(ProposedViewSize(width: 320, height: nil),
+                                                   text: changed, wraps: true, view: view)
+            XCTAssertGreaterThan(updated.height, wide.height, "Text and font updates must discard old heights")
+            XCTAssertGreaterThan(coordinator.sizeThatFits(.unspecified, text: changed, wraps: true, view: view).width,
+                                 natural.width, "Natural width must also be invalidated")
+        }
+        coordinator.update(NSAttributedString(string: ""), lineHeight: MD.lineHeight, in: view)
+        let empty = coordinator.sizeThatFits(.unspecified, text: NSAttributedString(string: ""), wraps: true, view: view)
+        XCTAssertEqual(empty.width, 1)
+        XCTAssertEqual(empty.height, ceil(view.sizeThatFits(CGSize(width: 1, height: CGFloat.greatestFiniteMagnitude)).height))
+    }
+
+    func testMeasurementCacheIsBoundedDuringContinuousResizing() {
+        let view = CountingSizingTextView()
+        let text = NSAttributedString(string: "Synthetic resize output")
+        SelectableText.update(text, in: view)
+        let coordinator = SelectableText.Coordinator(openURL: OpenURLAction { _ in .handled })
+        for width in 100...120 {
+            _ = coordinator.sizeThatFits(ProposedViewSize(width: CGFloat(width), height: nil),
+                                         text: text, wraps: true, view: view)
+        }
+        let calls = view.measurements
+        _ = coordinator.sizeThatFits(ProposedViewSize(width: 120, height: nil), text: text, wraps: true, view: view)
+        XCTAssertEqual(view.measurements, calls)
+        _ = coordinator.sizeThatFits(ProposedViewSize(width: 100, height: nil), text: text, wraps: true, view: view)
+        XCTAssertEqual(view.measurements, calls + 1, "Old resize proposals must be evicted")
+    }
+
+    func testLineMetricChangesInvalidateMountedMeasurementCache() async throws {
+        let text = [InlineRun(text: "", style: .plain)].selectableAttributed()
+        let (window, host) = await mount(SelectableText(text: text, lineHeight: 24).fixedSize(horizontal: false, vertical: true))
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let view = try XCTUnwrap(textViews(in: host.view).first)
+        let before = view.bounds.height
+        host.rootView = SelectableText(text: text, lineHeight: 72).fixedSize(horizontal: false, vertical: true)
+        try? await Task.sleep(for: .milliseconds(200))
+        window.layoutIfNeeded()
+        XCTAssertTrue(textViews(in: host.view).first === view)
+        XCTAssertEqual(view.bounds.height - before, 48, accuracy: 1,
+                       "The final empty line changes size even when attributed text stays equal")
+    }
+
     func testEveryMarkdownTextBlockSupportsNativeRangeSelection() async throws {
         let runs = [InlineRun(text: "Select words 👩🏽‍💻 and café\non another line", style: .plain)]
         let blocks: [MDBlock] = [
@@ -303,6 +395,15 @@ final class TextSelectionTests: XCTestCase {
         let codeRange = (text.string as NSString).range(of: "let café")
         XCTAssertNotNil(text.attribute(.backgroundColor, at: codeRange.location, effectiveRange: nil))
         XCTAssertNotNil(text.attribute(.font, at: codeRange.location, effectiveRange: nil))
+    }
+}
+
+private final class CountingSizingTextView: UITextView {
+    var measurements = 0
+
+    override func sizeThatFits(_ size: CGSize) -> CGSize {
+        measurements += 1
+        return super.sizeThatFits(size)
     }
 }
 
