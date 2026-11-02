@@ -7,7 +7,9 @@
 //! in free functions with unit tests; rendering is an `impl Transcript`
 //! extension since the rail shares the transcript's rows and `ListState`.
 
-use gpui::{AnyElement, Context, EntityId, ListOffset, SharedString, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, EntityId, ListOffset, ListState, SharedString, div, prelude::*, px,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -436,25 +438,40 @@ impl GlideTimeline {
     }
 }
 
-/// An in-flight [`Transcript::scroll_to_row`] glide.
+/// An in-flight [`Transcript::scroll_to_row_at`] glide.
 #[derive(Debug, Clone)]
 pub(crate) struct RowGlide {
     pub(crate) target: usize,
+    /// How far below the viewport top `target`'s top lands, in px.
+    inset: f32,
     pub(crate) started: Instant,
     pub(crate) total: Duration,
     timeline: GlideTimeline,
     /// Row-height estimate for unmeasured territory.
     height_ema: Option<f32>,
+    /// Landed: display frames [`settle_anchor`] still polls for a layout.
+    /// `None` while the glide is moving.
+    settling: Option<usize>,
 }
 
 impl RowGlide {
-    fn new(target: usize) -> Self {
+    fn new(target: usize, inset: f32) -> Self {
         Self {
             target,
+            inset,
             started: Instant::now(),
             total: motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale()),
             timeline: GlideTimeline::new(),
             height_ema: None,
+            settling: None,
+        }
+    }
+
+    /// Already at `target` (reduced motion jumped there): only settles.
+    fn landed(target: usize, inset: f32) -> Self {
+        Self {
+            settling: Some(SETTLE_FRAMES),
+            ..Self::new(target, inset)
         }
     }
 
@@ -466,6 +483,46 @@ impl RowGlide {
         (self.started.elapsed().as_secs_f32() / self.total.as_secs_f32()).min(1.0)
     }
 }
+
+/// End a glide with `target`'s top `inset` px below the viewport top. A
+/// laid-out target lands by pixels, so the rows above it stay painted; a
+/// negative `offset_in_item` anchor would leave them blank until the next
+/// scroll. Unmeasured, it anchors the row and the caller settles it.
+fn land_at(list: &ListState, target: usize, inset: f32) {
+    match list.bounds_for_item(target).filter(|_| inset != 0.0) {
+        Some(bounds) => {
+            list.scroll_by(bounds.top() - list.viewport_bounds().top() - px(inset));
+        }
+        None => list.scroll_to(ListOffset {
+            item_ix: target,
+            offset_in_item: px(-inset),
+        }),
+    }
+}
+
+/// After [`land_at`] anchored `target` below the viewport top (a negative
+/// offset in it), wait for the layout that measures the rows above, then
+/// express the same position from the row above, so those rows paint.
+/// Returns `false` while that layout hasn't happened yet; the caller polls
+/// again on the next display frame (up to [`SETTLE_FRAMES`] times).
+fn settle_anchor(list: &ListState, target: usize, cx: &mut Context<Transcript>) -> bool {
+    let top = list.logical_scroll_top();
+    if top.item_ix != target || top.offset_in_item >= px(0.0) {
+        return true;
+    }
+    // Laid out at this anchor: the leading overdraw measured the rows above
+    // it.
+    if list.bounds_for_item(target).is_none() {
+        return false;
+    }
+    list.scroll_by(px(-1.0));
+    list.scroll_by(px(1.0));
+    cx.notify();
+    true
+}
+
+/// Frames [`settle_anchor`] waits for a layout.
+const SETTLE_FRAMES: usize = 12;
 
 /// `HARNESS_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
 /// the smoothness measurement knob (same family as `HARNESS_FRAME_STATS`).
@@ -498,16 +555,28 @@ impl Transcript {
     ///   measurement correcting the estimate just re-enters the timeline;
     /// - once the target row is measured the glide is pixel-exact.
     pub fn scroll_to_row(&mut self, target: usize, cx: &mut Context<Self>) {
+        self.scroll_to_row_at(target, 0.0, cx);
+    }
+
+    /// [`Self::scroll_to_row`], landing `target`'s top `inset` px below the
+    /// viewport top (an agent's chip revealed below the titlebar, not under
+    /// it). A measured target above the viewport glides pixel-exact, since
+    /// the item-space approach aims at the row's top, not above it.
+    pub fn scroll_to_row_at(&mut self, target: usize, inset: f32, cx: &mut Context<Self>) {
         self.begin_scroll_navigation();
         if motion::reduced_motion(cx) {
             self.list_state().scroll_to(ListOffset {
                 item_ix: target,
-                offset_in_item: px(0.0),
+                offset_in_item: px(-inset),
             });
+            if inset != 0.0 {
+                // Render schedules the settling on the next display frame.
+                self.row_glide = Some(RowGlide::landed(target, inset));
+            }
             cx.notify();
             return;
         }
-        self.row_glide = Some(RowGlide::new(target));
+        self.row_glide = Some(RowGlide::new(target, inset));
         // Render schedules the first step on the next display frame.
         cx.notify();
     }
@@ -515,18 +584,32 @@ impl Transcript {
     /// One frame of the [`Self::scroll_to_row`] glide. Runs from
     /// `window.on_next_frame`, so the glide moves on every display frame
     /// (120 Hz on ProMotion, 240 Hz on a 240 Hz monitor) rather than on a
-    /// 16 ms timer that held each position for several frames.
+    /// 16 ms timer that held each position for several frames. Once landed,
+    /// the following frames [`settle_anchor`] an inset landing.
     pub(crate) fn step_row_glide(&mut self, cx: &mut Context<Self>) {
         let Some(mut glide) = self.row_glide.take() else {
             return;
         };
-        let raw = glide.progress();
-        let eased = motion::SCROLL_GLIDE.curve.eval(raw);
-        let frac = glide.timeline.step(eased);
-        let trace = scroll_trace_enabled();
-        let done = self.apply_row_glide_step(&mut glide, raw, eased, frac, trace, cx);
-        if !done {
+        let polls_left = match glide.settling {
+            Some(left) => left,
+            None => {
+                let raw = glide.progress();
+                let eased = motion::SCROLL_GLIDE.curve.eval(raw);
+                let frac = glide.timeline.step(eased);
+                let trace = scroll_trace_enabled();
+                if !self.apply_row_glide_step(&mut glide, raw, eased, frac, trace, cx) {
+                    self.row_glide = Some(glide);
+                    return;
+                }
+                SETTLE_FRAMES
+            }
+        };
+        let list = self.list_state().clone();
+        if !settle_anchor(&list, glide.target, cx) && polls_left > 1 {
+            glide.settling = Some(polls_left - 1);
             self.row_glide = Some(glide);
+            // Draw the frame whose layout measures the rows above.
+            cx.notify();
         }
     }
 
@@ -542,10 +625,7 @@ impl Transcript {
     ) -> bool {
         let list = self.list_state().clone();
         if raw >= 1.0 {
-            list.scroll_to(ListOffset {
-                item_ix: glide.target,
-                offset_in_item: px(0.0),
-            });
+            land_at(&list, glide.target, glide.inset);
             cx.notify();
             return true;
         }
@@ -602,7 +682,9 @@ impl Transcript {
             );
         }
 
-        if glide.target < top.item_ix {
+        if glide.target < top.item_ix
+            && (glide.inset == 0.0 || list.bounds_for_item(glide.target).is_none())
+        {
             // Above the viewport (unmeasured): progressive
             // item-space anchoring within the eased timeline.
             let next = here - frac * (here - glide.target as f32);
@@ -640,7 +722,7 @@ impl Transcript {
         match list.bounds_for_item(glide.target) {
             Some(bounds) => {
                 // Measured: pixel-exact step along the timeline.
-                let delta = f32::from(bounds.top() - list.viewport_bounds().top());
+                let delta = f32::from(bounds.top() - list.viewport_bounds().top()) - glide.inset;
                 list.scroll_by(px(frac * delta));
             }
             None => {

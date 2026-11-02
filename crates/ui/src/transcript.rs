@@ -54,6 +54,7 @@ use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
 use harness_syntax::LanguageId as Lang;
 
+mod agent_reveal;
 mod cadence;
 
 #[cfg(test)]
@@ -4039,11 +4040,16 @@ pub struct Transcript {
     spring_kick: bool,
     /// One `on_next_frame` callback in flight at most.
     spring_scheduled: bool,
-    /// A rail click's glide to a row ([`Self::scroll_to_row`]), stepped once
-    /// per display frame.
+    /// A glide to a row (a rail click, or the agents card revealing an
+    /// agent: [`Self::scroll_to_row_at`]), stepped once per display frame.
     pub(crate) row_glide: Option<crate::rail::RowGlide>,
     /// One row-glide `on_next_frame` callback in flight at most.
     row_glide_scheduled: bool,
+    /// The agent chip the agents card just revealed, ringed for a moment
+    /// ([`agent_reveal`]).
+    agent_flash: Option<agent_reveal::AgentFlash>,
+    /// Ends the flash (and refreshes the jump pill once the glide lands).
+    agent_flash_task: Option<Task<()>>,
     /// Last pointer sample while markdown selection owns a left-button drag.
     selection_drag_position: Option<Point<Pixels>>,
     /// One-shot timer rescheduled only while the pointer remains in an edge
@@ -4396,6 +4402,8 @@ impl Transcript {
             spring_scheduled: false,
             row_glide: None,
             row_glide_scheduled: false,
+            agent_flash: None,
+            agent_flash_task: None,
             selection_drag_position: None,
             selection_scroll_task: None,
             rail_enabled,
@@ -9364,6 +9372,14 @@ impl Transcript {
                 .into_any_element();
         }
 
+        // The agent chip the agents card just revealed, and its ring's
+        // strength ([`agent_reveal`]).
+        let flash = self
+            .agent_flash_now(reduce_motion)
+            .filter(|(part_id, _)| tools.iter().any(|tool| tool.part_id == *part_id));
+        if flash.is_some() && !reduce_motion {
+            motion::pulse_lease(cx.entity_id(), cx);
+        }
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
@@ -9393,6 +9409,11 @@ impl Transcript {
                                 | SubagentStatus::Disconnected
                         )
                     );
+                    // The agent the agents card just revealed gets a ring.
+                    let ring = flash
+                        .as_ref()
+                        .filter(|(part_id, _)| *part_id == tool.part_id)
+                        .map(|(_, alpha)| (*alpha, theme.accent));
                     return link_chip(
                         tool,
                         SharedString::from(format!("{row_id}#s{ix}")),
@@ -9405,6 +9426,7 @@ impl Transcript {
                             });
                         }),
                         collapses,
+                        ring,
                         theme,
                         cx.entity_id(),
                         cx,
@@ -9424,6 +9446,7 @@ impl Transcript {
                             }
                         },
                         collapses,
+                        None,
                         theme,
                         cx.entity_id(),
                         cx,
@@ -10939,6 +10962,8 @@ fn link_chip(
     id: SharedString,
     on_open: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
     rail: bool,
+    // The reveal ring's strength and color ([`agent_reveal::flash_ring`]).
+    ring: Option<(f32, gpui::Hsla)>,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
@@ -10985,7 +11010,11 @@ fn link_chip(
                     theme,
                     view,
                     cx,
-                )),
+                ))
+                .when_some(ring, |card, (alpha, color)| {
+                    card.relative()
+                        .child(agent_reveal::flash_ring(alpha, color))
+                }),
         )
         .into_any_element()
 }
