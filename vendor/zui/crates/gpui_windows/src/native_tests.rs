@@ -459,7 +459,9 @@ fn interactive_frame_lifecycle() {
                     .update(cx, |_, window, _| chain(window, callbacks, 60))
                     .unwrap();
             }
-            pause(cx, 3000).await;
+            // An inactive window runs at most 30 frames a second, which a 64 Hz display rounds
+            // down to about 21: 60 callbacks take about 3 s there.
+            pause(cx, 5000).await;
             assert_eq!(callbacks.load(Ordering::SeqCst), 120);
             second
                 .update(cx, |_, window, _| window.remove_window())

@@ -99,6 +99,20 @@ jobs:
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Frame scheduling tests
         run: cargo test --release --locked -p gpui_windows --lib --test frame_schedule frame_schedule
+      - name: Native frame lifecycle tests
+        run: |
+          # Real windows, mouse input and DXGI presents on the runner's desktop, one case per
+          # process, with DirectComposition on and off.
+          $failed = 0
+          foreach ($case in @('paint_race', 'input_restore')) {
+            foreach ($dcomp in @('1', '0')) {
+              $env:GPUI_NATIVE_CASE = $case
+              $env:GPUI_NATIVE_DCOMP = $dcomp
+              cargo test --release --locked -p gpui_windows --lib native_tests::interactive_frame_lifecycle -- --ignored --exact --nocapture --test-threads=1
+              if ($LASTEXITCODE -ne 0) { $failed++ }
+            }
+          }
+          if ($failed -ne 0) { throw "$failed native frame lifecycle case(s) failed" }
       - name: Application and updater tests
         run: cargo test --release --locked -p harness -p harness-update -p harness-observe
       - name: GUI subsystem and redirected CLI output

@@ -29,9 +29,9 @@ mod windows_benchmark {
         time::{Duration, Instant},
     };
     use windows::Win32::{
-        Foundation::{FILETIME, HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo},
-        System::Threading::{GetCurrentProcess, GetCurrentThreadId, GetProcessTimes},
+        System::Threading::{GetCurrentProcess, GetCurrentThreadId},
         UI::WindowsAndMessaging::{
             CallNextHookEx, MSG, PM_REMOVE, SetWindowsHookExW, WH_GETMESSAGE, WM_PAINT,
         },
@@ -40,6 +40,13 @@ mod windows_benchmark {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn QueryProcessCycleTime(process: *mut std::ffi::c_void, cycles: *mut u64) -> i32;
+        fn GetProcessTimes(
+            process: *mut std::ffi::c_void,
+            created: *mut u64,
+            exited: *mut u64,
+            kernel: *mut u64,
+            user: *mut u64,
+        ) -> i32;
     }
 
     static PAINTS: AtomicU64 = AtomicU64::new(0);
@@ -54,26 +61,18 @@ mod windows_benchmark {
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 
-    fn filetime(time: FILETIME) -> u64 {
-        ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64
-    }
-
     /// Process CPU time in 100 ns units, and process CPU cycles.
     fn counters() -> (u64, u64) {
-        let (mut created, mut exited, mut kernel, mut user) = Default::default();
-        let mut cycles = 0;
+        let (mut created, mut exited, mut kernel, mut user, mut cycles) = (0, 0, 0, 0, 0);
         unsafe {
-            GetProcessTimes(
-                GetCurrentProcess(),
-                &mut created,
-                &mut exited,
-                &mut kernel,
-                &mut user,
-            )
-            .unwrap();
-            assert_ne!(QueryProcessCycleTime(GetCurrentProcess().0, &mut cycles), 0);
+            let process = GetCurrentProcess().0;
+            assert_ne!(
+                GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user),
+                0
+            );
+            assert_ne!(QueryProcessCycleTime(process, &mut cycles), 0);
         }
-        (filetime(kernel) + filetime(user), cycles)
+        (kernel + user, cycles)
     }
 
     fn refresh_hz() -> f64 {
@@ -242,7 +241,9 @@ mod windows_benchmark {
                             .update(cx, |_, window, _| chain(window, completed, 60))
                             .unwrap();
                     }
-                    cx.background_executor().timer(Duration::from_secs(3)).await;
+                    // An inactive window runs at most 30 frames a second, which a 64 Hz
+                    // display rounds down to about 21: 60 callbacks take about 3 s there.
+                    cx.background_executor().timer(Duration::from_secs(5)).await;
                     callbacks = completed.load(Ordering::Relaxed);
                     second
                         .update(cx, |_, window, _| window.remove_window())
