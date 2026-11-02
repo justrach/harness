@@ -1890,3 +1890,55 @@ test "the context ring sits at the footer's right; resting on it opens the card 
     h.t.advance(0.4);
     try testing.expect(!h.t.hasText("saved by graff"));
 }
+
+test "answering a question keeps its text alive through the frame that drew it" {
+    // Submit and Cancel run mid-build, after the question and its options
+    // were handed to the frame; layout and paint read them next.
+    for ([_][]const u8{ "Cancel question", "Submit" }) |button| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"reset":[{"id":"ask","role":"assistant","status":"complete","parts":[{"kind":"input","id":"r1","requestId":"r1","resolved":false,
+            \\  "questions":[{"id":"q1","header":"Approach","question":"A synthetic question that wraps","options":["First option","Second option"],"multiSelect":true}]}]}]}
+        , .{});
+        defer parsed.deinit();
+        try h.a.transcript.apply(parsed.value);
+        h.t.settle(1);
+        if (std.mem.eql(u8, button, "Submit")) try h.t.clickText("First option");
+        h.t.settle(1);
+        const r = h.t.findText(button) orelse return error.TextNotFound;
+        h.t.moveTo(r.x + r.w / 2, r.y + r.h / 2);
+        h.t.ctx.input.click_count = 1;
+        h.t.ctx.pointerDown();
+        h.t.frame();
+        h.t.ctx.pointerUp();
+        h.t.frame();
+        try testing.expect(h.a.wizard == null);
+        // Debug fills freed memory with 0xaa; four in a row is never UTF-8.
+        for (h.t.ctx.nodes.items) |n| switch (n.content) {
+            .text => |tx| try testing.expect(std.mem.indexOf(u8, tx.str, "\xaa\xaa\xaa\xaa") == null),
+            else => {},
+        };
+        h.t.settle(1);
+        try testing.expect(!h.t.hasText("Cancel question"));
+    }
+}
+
+test "an agent's question shows its Markdown, not its markup" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"ask","role":"assistant","status":"complete","parts":[{"kind":"input","id":"r1","requestId":"r1","resolved":false,
+        \\  "questions":[{"id":"q1","header":"Plan","question":"**What happens now** (checked in code):\n\n- `stage.tsx:72` sets `original = active`.\n- The slide loads the **original**.","options":["Go"]}]}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    // The panel's paragraphs, without their markup (the transcript's chip
+    // keeps the question's first line as written, as GPUI's does).
+    try testing.expect(h.t.hasText("What happens now (checked in code):"));
+    try testing.expect(h.t.hasText("stage.tsx:72 sets original = active."));
+    try testing.expect(h.t.hasText("The slide loads the original."));
+}

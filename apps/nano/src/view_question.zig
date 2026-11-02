@@ -15,6 +15,15 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const q = wz.question();
     const typed_empty = std.mem.trim(u8, a.composer.text(), " \n\t").len == 0;
     keys(c, a, q.options.len, typed_empty);
+    // Submit and Cancel close the wizard `wz` and `q` point into, so a
+    // button's action waits until the panel is drawn.
+    var act: enum { none, advance, back, dismiss } = .none;
+    defer switch (act) {
+        .none => {},
+        .advance => a.wizardAdvance(),
+        .back => a.wizardBack(),
+        .dismiss => a.wizardDismiss(),
+    };
     const box = kit.shadowLg(ui.div(c).column().w(w).bg(k.composer).border(k.border).borderW(1).rounded(26));
     defer box.end();
     {
@@ -33,7 +42,9 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         {
             const qt = ui.div(c).column().wFull().pt(6);
             defer qt.end();
-            ui.text(c, q.question, kit.style(c, 15, 20, .{ .wrap = true, .weight = .medium, .color = k.text }));
+            // Agents write questions in Markdown (bold, code spans, lists),
+            // as their replies (composer.rs `question_markdown`).
+            @import("view_markdown.zig").markdown(c, k, q.question);
         }
         if (q.multi_select) {
             const hint = ui.div(c).row().pt(4);
@@ -74,14 +85,14 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             .multiline = true,
             .max_lines = 8,
         });
-        if (r.submitted) a.wizardAdvance();
+        if (r.submitted) act = .advance;
     }
     const foot = ui.div(c).row().wFull().px(16).pb(16).pt(4).itemsCenter();
     defer foot.end();
-    if (button(c, k, "Cancel question", false, true)) a.wizardDismiss();
+    if (button(c, k, "Cancel question", false, true)) act = .dismiss;
     ui.spacer(c);
-    if (wz.page > 0 and button(c, k, "Back", false, true)) a.wizardBack();
-    if (button(c, k, if (wz.last()) "Submit" else "Next", true, wz.canAdvance() or !typed_empty)) a.wizardAdvance();
+    if (wz.page > 0 and button(c, k, "Back", false, true)) act = .back;
+    if (button(c, k, if (wz.last()) "Submit" else "Next", true, wz.canAdvance() or !typed_empty)) act = .advance;
 }
 
 /// 1–9 pick while the answer box is empty; Escape steps back a page.

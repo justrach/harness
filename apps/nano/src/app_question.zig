@@ -29,6 +29,8 @@ pub fn pendingInput(a: *const App) ?*const tr.Part {
 
 /// Opens or closes the wizard as questions come and go; each frame.
 pub fn syncWizard(a: *App) void {
+    // Ticks run before a pass draws anything, so no node points into it now.
+    freeRetired(a);
     const pending = pendingInput(a);
     if (a.wizard) |*w| {
         if (pending != null and std.mem.eql(u8, pending.?.request_id, w.request_id)) return;
@@ -42,8 +44,12 @@ pub fn syncWizard(a: *App) void {
     a.wizard = w;
 }
 
+/// Submit and Cancel run while the panel is being drawn, after its
+/// question and options went into the frame: the wizard waits for the next
+/// tick to be freed (`retired_wizard`).
 fn closeWizard(a: *App) void {
-    if (a.wizard) |*w| w.deinit();
+    freeRetired(a);
+    a.retired_wizard = a.wizard;
     a.wizard = null;
     a.composer.set(a.draft_stash.items);
     a.draft_stash.clearRetainingCapacity();
@@ -123,8 +129,14 @@ fn markAnswered(a: *App, request_id: []const u8) void {
     a.answered = a.gpa.dupe(u8, request_id) catch null;
 }
 
+fn freeRetired(a: *App) void {
+    if (a.retired_wizard) |*w| w.deinit();
+    a.retired_wizard = null;
+}
+
 pub fn deinit(a: *App) void {
     if (a.wizard) |*w| w.deinit();
+    freeRetired(a);
     if (a.answered) |s| a.gpa.free(s);
     a.draft_stash.deinit(a.gpa);
 }

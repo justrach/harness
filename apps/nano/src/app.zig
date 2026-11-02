@@ -290,6 +290,10 @@ pub const App = struct {
     /// The agent's pending question being answered, the draft set aside
     /// meanwhile, and the request just answered from here.
     wizard: ?@import("wizard.zig").Wizard = null,
+    /// A wizard closed while a frame was drawing it: that frame's text
+    /// still points into it until layout and paint are done, so it is
+    /// freed at the next tick.
+    retired_wizard: ?@import("wizard.zig").Wizard = null,
     draft_stash: std.ArrayList(u8) = .empty,
     answered: ?[]u8 = null,
     /// The open chat's queue, what the engine can do with it, and a row
