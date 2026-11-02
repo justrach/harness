@@ -1933,7 +1933,7 @@ pub struct Shell {
     /// The selection the split last saw, to tell outside picks from its own.
     chat_split_selected: Option<String>,
     /// Only a gesture begun in a peer pane may activate it on release.
-    chat_pane_press: Option<(usize, gpui::MouseButton)>,
+    chat_pane_press: Option<chat_split::ChatPanePress>,
     /// Unfocused panes' chats last seen unarchived. Only archiving one of
     /// those closes its pane; an archived session opened to read keeps its
     /// pane when focus moves away (#489).

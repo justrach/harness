@@ -1,5 +1,7 @@
 use super::*;
 
+mod lifecycle;
+
 // Distinct message IDs keep the global selection registry and test bounds
 // faithful to real sessions, even when every pane displays identical text.
 fn entry_for(view: &Entity<Transcript>, text: &str) -> SessionMessageEntry {
@@ -112,6 +114,196 @@ fn assert_focus(shell: &Entity<Shell>, ix: usize, cx: &mut gpui::VisualTestConte
 fn clear_selection(view: &Entity<Transcript>, row: &str) {
     selection::end_active_drag();
     selection::clear_if_owner(&key(view, row));
+}
+
+#[gpui::test]
+fn production_split_cross_pane_multiclick_drags_keep_the_source_active(
+    cx: &mut gpui::TestAppContext,
+) {
+    let _selection = selection::test_state_lock();
+    cx.update(|cx| cx.set_global(ProductionSplitLayout(true)));
+    for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+        for source in 0..3 {
+            for target in (0..3).filter(|&ix| ix != source) {
+                for count in [1, 2, 3] {
+                    with_layout(
+                        cx,
+                        axis,
+                        3,
+                        source,
+                        "Unicode café 👩‍💻 selectable response text.",
+                        |shell, cx| {
+                            let origin = pane_view(&shell, source, cx);
+                            let destination = pane_view(&shell, target, cx);
+                            let start = text_point(&origin, "reply#text.0:0")
+                                + gpui::point(px(60.0), px(0.0));
+                            let end = text_point(&destination, "reply#text.0:0");
+                            cx.simulate_event(MouseDownEvent {
+                                button: MouseButton::Left,
+                                position: start,
+                                click_count: count,
+                                ..Default::default()
+                            });
+                            cx.simulate_mouse_move(
+                                start + gpui::point(px(90.0), px(0.0)),
+                                Some(MouseButton::Left),
+                                Default::default(),
+                            );
+                            // Repeated redraws exercise the real cached peer outlet
+                            // and divider geometry while the gesture is held.
+                            for _ in 0..3 {
+                                draw(cx);
+                            }
+                            cx.simulate_mouse_move(
+                                end,
+                                Some(MouseButton::Left),
+                                Default::default(),
+                            );
+                            let selected = selection::selected_text()
+                                .expect("source selection survives crossing");
+                            cx.simulate_event(MouseUpEvent {
+                                button: MouseButton::Left,
+                                position: end,
+                                click_count: count,
+                                ..Default::default()
+                            });
+                            assert_focus(&shell, source, cx);
+                            assert_eq!(selection::selected_text(), Some(selected));
+                            assert_eq!(
+                                pane_view(&shell, source, cx).entity_id(),
+                                origin.entity_id()
+                            );
+                            assert_eq!(
+                                pane_view(&shell, target, cx).entity_id(),
+                                destination.entity_id()
+                            );
+                            clear_selection(&origin, "reply#text.0:0");
+                        },
+                    );
+                }
+            }
+        }
+    }
+    cx.update(|cx| cx.set_global(ProductionSplitLayout(false)));
+}
+
+#[gpui::test]
+fn pane_press_is_consumed_by_releases_outside_its_origin(cx: &mut gpui::TestAppContext) {
+    let _selection = selection::test_state_lock();
+    for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            for outside_window in [false, true] {
+                with_layout(cx, axis, 2, 1, "Selectable response text.", |shell, cx| {
+                    let peer = pane_view(&shell, 0, cx);
+                    let start = text_point(&peer, "reply#text.0:0");
+                    let end = if outside_window {
+                        gpui::point(px(-20.0), px(-20.0))
+                    } else {
+                        text_point(&pane_view(&shell, 1, cx), "reply#text.0:0")
+                    };
+                    cx.simulate_mouse_down(start, button, Default::default());
+                    cx.simulate_mouse_up(end, button, Default::default());
+                    assert_focus(&shell, 1, cx);
+                    // The earlier release ended this gesture. A later release
+                    // with no new pane press must not revive its old claim.
+                    cx.simulate_mouse_up(start, button, Default::default());
+                    assert_focus(&shell, 1, cx);
+                    clear_selection(&peer, "reply#text.0:0");
+                    cx.simulate_click(start, Default::default());
+                    assert_focus(&shell, 0, cx);
+                    clear_selection(&peer, "reply#text.0:0");
+                });
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn pane_press_does_not_activate_a_replacement_session(cx: &mut gpui::TestAppContext) {
+    let _selection = selection::test_state_lock();
+    for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            with_layout(cx, axis, 3, 1, "Selectable response text.", |shell, cx| {
+                let peer = pane_view(&shell, 0, cx);
+                let start = text_point(&peer, "reply#text.0:0");
+                cx.simulate_mouse_down(start, button, Default::default());
+                // Navigation replaces the session in the same pane while the
+                // button is held. The release must not click the new session.
+                shell.update(cx, |shell, cx| {
+                    let split = shell.chat_split.as_mut().unwrap();
+                    split.panes.swap(0, 2);
+                    shell.sync_chat_panes(cx);
+                    cx.notify();
+                });
+                draw(cx);
+                cx.simulate_mouse_up(start, button, Default::default());
+                assert_focus(&shell, 1, cx);
+                clear_selection(&peer, "reply#text.0:0");
+                cx.simulate_click(start, Default::default());
+                draw(cx);
+                shell.read_with(cx, |shell, cx| {
+                    assert_eq!(shell.chat_split.as_ref().unwrap().focus, 0);
+                    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("third"));
+                });
+                clear_selection(&pane_view(&shell, 0, cx), "reply#text.0:0");
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn pane_press_does_not_survive_tab_or_layout_changes(cx: &mut gpui::TestAppContext) {
+    let _selection = selection::test_state_lock();
+    for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+        for change in ["tab", "zoom", "close-other-pane"] {
+            with_layout(cx, axis, 3, 1, "Selectable response text.", |shell, cx| {
+                let peer = pane_view(&shell, 0, cx);
+                let start = text_point(&peer, "reply#text.0:0");
+                cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+                shell.update(cx, |shell, cx| {
+                    match change {
+                        // Tab slots can be reused, so identity matters even
+                        // when the numeric slot and selected session match.
+                        "tab" => shell.chat_tab_id = uuid::Uuid::new_v4(),
+                        "zoom" => shell.toggle_chat_pane_zoom(cx),
+                        "close-other-pane" => {
+                            let split = shell.chat_split.as_mut().unwrap();
+                            split.panes.pop();
+                            split.projects.pop();
+                            split.drafts.pop();
+                            split.vanished.pop();
+                            split.shares.pop();
+                            split.equalize();
+                        }
+                        _ => unreachable!(),
+                    }
+                    shell.sync_chat_panes(cx);
+                    cx.notify();
+                });
+                draw(cx);
+                cx.simulate_mouse_up(start, MouseButton::Left, Default::default());
+                assert_focus(&shell, 1, cx);
+                clear_selection(&peer, "reply#text.0:0");
+            });
+        }
+    }
+}
+
+#[gpui::test]
+fn pane_press_does_not_override_keyboard_focus_changes(cx: &mut gpui::TestAppContext) {
+    let _selection = selection::test_state_lock();
+    for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
+        with_layout(cx, axis, 3, 1, "Selectable response text.", |shell, cx| {
+            let peer = pane_view(&shell, 0, cx);
+            let start = text_point(&peer, "reply#text.0:0");
+            cx.simulate_mouse_down(start, MouseButton::Left, Default::default());
+            shell.update(cx, |shell, cx| assert!(shell.select_chat_pane(2, cx)));
+            draw(cx);
+            cx.simulate_mouse_up(start, MouseButton::Left, Default::default());
+            assert_focus(&shell, 2, cx);
+            clear_selection(&peer, "reply#text.0:0");
+        });
+    }
 }
 
 #[gpui::test]
