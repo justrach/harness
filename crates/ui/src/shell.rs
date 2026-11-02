@@ -2080,6 +2080,8 @@ pub struct Shell {
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
+    /// Restarted whenever closing a running session shows its temporary warning.
+    close_archive_notice_task: Option<Task<()>>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
     /// UpdateStatus stream says WHETHER one exists; this says how far the
     /// download/stage of it has come in this process.
@@ -2579,6 +2581,7 @@ impl Shell {
             attention_sound_gate: Default::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
+            close_archive_notice_task: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
             auto_download_failed: None,

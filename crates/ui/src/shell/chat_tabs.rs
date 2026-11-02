@@ -788,7 +788,17 @@ impl Shell {
                     harness_proto::SessionStatus::Working | harness_proto::SessionStatus::AwaitingInput)
             });
         if running {
-            self.sidebar_notice = Some("Still running — closed without archiving".into());
+            let notice: SharedString = "Still running — closed without archiving".into();
+            self.sidebar_notice = Some(notice.clone());
+            self.close_archive_notice_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                let _ = this.update(cx, |shell, cx| {
+                    if shell.sidebar_notice.as_ref() == Some(&notice) {
+                        shell.sidebar_notice = None;
+                        cx.notify();
+                    }
+                });
+            }));
             cx.notify();
             return CloseArchive::Running;
         }
@@ -1216,6 +1226,104 @@ mod tests {
             "id": id, "deviceId": "local", "archived": false, "createdAt": chrono::Utc::now(),
         }))
         .unwrap()
+    }
+
+    #[gpui::test]
+    fn close_archive_running_notice_expires_without_clearing_newer_notices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = archive_test_window(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                settings::set_archive_sessions_on_close(true, cx);
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["keep", "closing"].map(archive_test_chat).into();
+                    state.selected_chat = Some("keep".into());
+                    state.sessions.push(harness_proto::Session {
+                        chat_id: "closing".into(),
+                        device_id: "local".into(),
+                        status: harness_proto::SessionStatus::Working,
+                        started_at: None,
+                        updated_at: chrono::Utc::now(),
+                        last_completed_turn: None,
+                        last_completed_peer_only: false,
+                    });
+                });
+            })
+            .unwrap();
+        let show_notice = |cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |shell, window, cx| {
+                    assert_eq!(
+                        shell.archive_closed_session("closing".into(), window, cx),
+                        CloseArchive::Running
+                    );
+                    assert_eq!(
+                        shell.sidebar_notice.as_deref(),
+                        Some("Still running — closed without archiving")
+                    );
+                })
+                .unwrap();
+            cx.run_until_parked();
+        };
+        show_notice(cx);
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_some()))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(
+                    shell.sidebar_notice.is_none(),
+                    "warning expires after five seconds"
+                );
+                assert!(!shell.state.read(cx).chats[1].archived);
+                assert_eq!(
+                    shell.state.read(cx).sessions[0].status,
+                    harness_proto::SessionStatus::Working,
+                    "dismissing the warning must not stop the session"
+                );
+            })
+            .unwrap();
+
+        // Repeating the same warning starts a fresh five-second interval.
+        show_notice(cx);
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        show_notice(cx);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_some()))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_none()))
+            .unwrap();
+
+        // An unrelated error replacing the warning must remain visible.
+        show_notice(cx);
+        window
+            .update(cx, |shell, _, _| {
+                shell.sidebar_notice = Some("Archive request failed".into());
+            })
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.sidebar_notice.as_deref(),
+                    Some("Archive request failed")
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]
