@@ -376,8 +376,8 @@ pub const App = struct {
 
     pub fn deinit(a: *App) void {
         @import("app_surface.zig").deinit(a);
+        // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
-        @import("engine_start.zig").stop();
         a.attachments.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);
         var blobs = a.tool_blobs.valueIterator();

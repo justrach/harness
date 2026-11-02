@@ -3,11 +3,12 @@
 //! `HARNESS_IPC_PORT` and `HARNESS_DATA_DIR`), its output in Harness's logs
 //! folder (`harness-nano-engine.log`).
 //!
-//! Only that engine is ever stopped from here, when the app quits: SIGTERM,
-//! which drains it as launchd's stop does. An engine something else started
-//! (Harness.app's, a daemon, a terminal's) is never touched. Harness.app
-//! attaches to a running engine and never stops it, so if it attached to
-//! this one meanwhile it loses it at quit.
+//! No engine is ever stopped from here, the one started here included: it
+//! is the machine's engine from then on. Harness.app and every other chat
+//! attach to whatever engine answers on the port, so stopping this one at
+//! quit stopped all of their runs too, and Harness.app restarted. It runs
+//! in its own process group, so a signal meant for this app's group
+//! doesn't reach it either.
 //!
 //! `HARNESS_NANO_NO_ENGINE_START` keeps the old behaviour: wait for one.
 const std = @import("std");
@@ -49,10 +50,6 @@ pub const max_failed = 3;
 pub const retry_ms = 10_000;
 /// How often it looks while there's no engine.
 const tick_ms = 2_000;
-
-/// The engine started from here, for the exit hook.
-var started: std.atomic.Value(std.c.pid_t) = .init(0);
-var hooked = false;
 
 /// What to do on a tick, from what's known (a pure rule, so a test can
 /// drive it).
@@ -169,8 +166,6 @@ fn tick(a: *App) void {
                 s.failed += 1;
                 return;
             };
-            started.store(s.pid.?, .release);
-            if (!hooked) hooked = atexit(onExit) == 0;
             setStatus(a, .starting);
         },
     }
@@ -182,7 +177,6 @@ fn reap(s: *State) void {
     const pid = s.pid orelse return;
     if (std.c.waitpid(pid, null, std.c.W.NOHANG) == 0) return;
     s.pid = null;
-    _ = started.cmpxchgStrong(pid, 0, .acq_rel, .acquire);
     if (!s.answered) s.failed += 1;
 }
 
@@ -204,6 +198,8 @@ fn spawn(a: *App, path: []const u8) !std.c.pid_t {
         .stdin = .ignore,
         .stdout = out,
         .stderr = out,
+        // A group of its own: it outlives this app and its signals.
+        .pgid = 0,
     });
     return child.id orelse error.NoPid;
 }
@@ -230,23 +226,6 @@ pub fn waiting(a: *const App) []const u8 {
     const s = &a.engine_start;
     if (s.status == .idle or s.message_len == 0) return "Waiting for the engine…";
     return s.message[0..s.message_len];
-}
-
-/// Stops the engine started from here, if it still runs. Safe to call
-/// more than once, and from the exit hook.
-pub fn stop() void {
-    const pid = started.swap(0, .acq_rel);
-    if (pid == 0) return;
-    // Still a child of ours and still running: 0 from a no-hang wait.
-    if (std.c.waitpid(pid, null, std.c.W.NOHANG) != 0) return;
-    _ = std.c.kill(pid, .TERM);
-}
-
-extern "c" fn atexit(f: *const fn () callconv(.c) void) c_int;
-
-/// AppKit quits with exit(): no defer runs, its handlers do.
-fn onExit() callconv(.c) void {
-    stop();
 }
 
 fn nowMs(io: std.Io) i64 {
@@ -299,6 +278,8 @@ test "harness is looked for in the override, the app, ~/Applications, then PATH"
     for (want, got) |w, g| try testing.expectEqualStrings(w, g);
 }
 
+extern "c" fn getpgid(pid: std.c.pid_t) std.c.pid_t;
+
 /// Polls for `path` (up to 5 s) and returns its contents, trimmed.
 fn waitForFile(path: []const u8) ![]u8 {
     var tries: usize = 0;
@@ -312,14 +293,14 @@ fn waitForFile(path: []const u8) ![]u8 {
     return error.Timeout;
 }
 
-test "starts `harness headless` with this app's environment, then stops that one" {
+test "starts `harness headless` with this app's environment, and quitting leaves it running for everyone else" {
     var name_buf: [128]u8 = undefined;
     const script = try std.fmt.bufPrint(&name_buf, "/tmp/nano-engine-start-{d}.sh", .{std.c.getpid()});
     var path_buf: [160]u8 = undefined;
     const args_path = try std.fmt.bufPrint(&path_buf, "{s}.args", .{script});
     var term_buf: [160]u8 = undefined;
     const term_path = try std.fmt.bufPrint(&term_buf, "{s}.term", .{script});
-    // A stand-in for `harness`: says how it was started, and that SIGTERM
+    // A stand-in for `harness`: says how it was started, and whether SIGTERM
     // stopped it.
     try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = script, .data =
         \\#!/bin/sh
@@ -339,7 +320,8 @@ test "starts `harness headless` with this app's environment, then stops that one
     try env.put("PATH", "/usr/bin:/bin");
     try env.put("HARNESS_IPC_PORT", "27991");
     var a: App = .init(testing.allocator, testing.io, 1);
-    defer a.deinit();
+    var app_alive = true;
+    defer if (app_alive) a.deinit();
     a.env = &env;
 
     tick(&a);
@@ -353,13 +335,17 @@ test "starts `harness headless` with this app's environment, then stops that one
     tick(&a);
     try testing.expectEqual(pid, a.engine_start.pid.?);
 
-    stop();
-    const term = try waitForFile(term_path);
-    defer testing.allocator.free(term);
-    try testing.expectEqualStrings("stopped\n", term);
-    var status: c_int = 0;
-    try testing.expectEqual(pid, std.c.waitpid(pid, &status, 0));
-    a.engine_start.pid = null;
+    // Out of this app's process group.
+    try testing.expectEqual(pid, getpgid(pid));
+    // The app quits: Harness.app and other chats may be on this engine now.
+    a.deinit();
+    app_alive = false;
+    std.Io.sleep(testing.io, .fromMilliseconds(300), .awake) catch {};
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(testing.io, term_path, .{}));
+    try testing.expectEqual(@as(c_int, 0), std.c.waitpid(pid, null, std.c.W.NOHANG));
+    // The test's own cleanup.
+    _ = std.c.kill(pid, .KILL);
+    _ = std.c.waitpid(pid, null, 0);
 }
 
 test "a start that never answers counts as failed, and three in a row give up" {
