@@ -220,24 +220,33 @@ mod tests {
         let window = Arc::new(FrameRequest::new(wake.clone()));
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
+        // The real worker waits for the next vsync between waking and taking requests.
+        let (vsync_tx, vsync_rx) = mpsc::channel::<()>();
         let worker = {
             let (wake, window, stop) = (wake.clone(), window.clone(), stop.clone());
             thread::spawn(move || {
                 while wake.wait(&stop, true) {
+                    if vsync_rx.recv().is_err() {
+                        break;
+                    }
                     tx.send(window.take()).unwrap();
                 }
             })
         };
         // Nothing asked: no frame.
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
-        // Many requests before the worker runs are one frame.
+        // Many requests before the next vsync are one frame.
         for _ in 0..240 {
             window.request();
         }
+        vsync_tx.send(()).unwrap();
         assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        // Nothing asked since: the worker sleeps rather than waiting on another vsync.
+        assert!(!wake.is_pending());
         assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
         stop.store(true, Ordering::Release);
         wake.request();
+        drop(vsync_tx);
         worker.join().unwrap();
     }
 
