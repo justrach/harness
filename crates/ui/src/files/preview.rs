@@ -500,20 +500,7 @@ pub(super) struct FileEditorTooltip {
 
 impl Render for FileEditorTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let card = div()
-            .max_w(px(360.0))
-            .px(px(9.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .font_family(theme.font_sans.clone())
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
-            .child(self.text.clone());
-        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+        crate::popover::tooltip_label(Theme::of(cx), self.text.clone())
     }
 }
 
@@ -626,6 +613,13 @@ impl FilesSurface {
         for path in self.preview.trim_document_cache(&protected_paths) {
             tracing::debug!(path = %path, "evicted inactive workspace document");
         }
+    }
+
+    pub(super) fn window_review_comment_flush_pending(&self) -> bool {
+        self.preview
+            .documents
+            .values()
+            .any(|document| document.review_comment_flush_pending)
     }
 
     fn require_review_comment_flush(&mut self, path: &str, cx: &mut Context<Self>) {
@@ -2658,7 +2652,7 @@ impl FilesSurface {
                         .cursor_pointer()
                         .role(gpui::Role::Button)
                         .aria_label(format!("Open comment on line {}", row.line))
-                        .hover(|style| style.bg(crate::theme::wash(0.08)))
+                        .hover(|style| style.bg(theme.element_hover))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_editor_comment(id.clone(), cx)
                         }))

@@ -147,6 +147,7 @@ fn model(
         options,
         maker: None,
         billing: None,
+        context: None,
     }
 }
 
@@ -199,6 +200,7 @@ fn models_with_settings(path: &std::path::Path) -> Vec<Model> {
                 options: vec![chrome()],
                 maker: None,
                 billing: None,
+                context: None,
             });
         }
     }
@@ -307,6 +309,7 @@ pub(super) fn with_discovered_models(
             options: vec![chrome()],
             maker: None,
             billing: None,
+            context: None,
         });
     }
     if !valid {

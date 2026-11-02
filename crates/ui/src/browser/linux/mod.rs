@@ -243,6 +243,16 @@ impl NativePage {
         self.worker
             .send(self.id, json!({"cmd":"load-html","html":html}))
     }
+    /// The helper page is independent of the host window. Only transient
+    /// pointer/menu state belongs to the previous window.
+    pub fn move_to_window(&mut self) {
+        self.pressed.set(None);
+        self.preedit.clear();
+        if self.menu.take().is_some() {
+            self.command(json!({"cmd":"dismiss-menu"}));
+        }
+        self.geometry = None;
+    }
     pub fn load(&self, url: &str) -> Result<(), String> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))
     }

@@ -532,6 +532,24 @@ impl ThemeRegistry {
         builtin_registry()
     }
 
+    /// Desktop-only palette choices. Shared/mobile consumers keep [`Self::builtin`].
+    pub fn desktop_builtin() -> &'static Self {
+        builtins::desktop_registry()
+    }
+
+    /// Desktop built-ins plus the same installed custom families, unchanged.
+    pub fn desktop_active() -> Self {
+        let mut registry = Self::desktop_builtin().clone();
+        registry.families.extend(
+            custom_families()
+                .read()
+                .expect("custom theme registry lock was poisoned")
+                .iter()
+                .cloned(),
+        );
+        registry
+    }
+
     /// Built-ins plus the currently installed custom families.
     pub fn active() -> Self {
         let mut families = Self::builtin().families.clone();
@@ -847,6 +865,76 @@ mod tests {
             .filter(|issue| issue.severity == ValidationSeverity::Error)
             .collect();
         assert!(errors.is_empty(), "{errors:#?}");
+    }
+
+    #[test]
+    fn desktop_catalog_changes_only_codegraff_and_keeps_mobile_export_unchanged() {
+        let mobile_before = builtin_catalog_json().unwrap();
+        let shared = ThemeRegistry::builtin();
+        let desktop = ThemeRegistry::desktop_builtin();
+        assert_eq!(builtin_catalog_json().unwrap(), mobile_before);
+        assert_eq!(shared.families.len(), 19);
+        assert_eq!(desktop.families.len(), 21);
+        assert!(shared.variant("harp-light").is_none());
+        assert!(shared.variant("warm-harp-dark").is_none());
+        for family in &shared.families {
+            if family.id != "codegraff" {
+                assert_eq!(
+                    desktop.families.iter().find(|entry| entry.id == family.id),
+                    Some(family)
+                );
+            }
+        }
+        for (id, warm_id) in [
+            ("codegraff-light", "warm-harp-light"),
+            ("codegraff-dark", "warm-harp-dark"),
+        ] {
+            let original = shared.variant(id).unwrap();
+            let mapped = desktop.variant(id).unwrap();
+            let warm = desktop.variant(warm_id).unwrap();
+            assert_eq!(mapped.id, original.id);
+            assert_eq!(mapped.family_id, original.family_id);
+            assert_eq!(mapped.name, original.name);
+            assert_eq!(mapped.colors, warm.colors);
+            assert_eq!(mapped.accent, warm.accent);
+            assert_eq!(mapped.syntax, warm.syntax);
+            assert_eq!(mapped.terminal, warm.terminal);
+            assert_eq!(
+                mapped.recommended_surface_treatment,
+                warm.recommended_surface_treatment
+            );
+            assert_ne!(mapped.colors, original.colors);
+        }
+    }
+
+    #[test]
+    fn desktop_variants_validate_and_keep_legacy_selection_ids() {
+        use sha2::{Digest, Sha256};
+
+        let desktop = ThemeRegistry::desktop_builtin();
+        let errors: Vec<_> = desktop
+            .validate()
+            .into_iter()
+            .filter(|issue| issue.severity == ValidationSeverity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:#?}");
+        for id in [
+            "codegraff-light",
+            "codegraff-dark",
+            "harp-light",
+            "harp-dark",
+            "warm-harp-light",
+            "warm-harp-dark",
+        ] {
+            let variant = desktop.variant(id).unwrap();
+            let mut unhashed = variant.clone();
+            unhashed.source.asset_hash.clear();
+            let bytes = serde_json::to_vec(&unhashed).unwrap();
+            assert_eq!(
+                variant.source.asset_hash,
+                format!("sha256:{:x}", Sha256::digest(bytes))
+            );
+        }
     }
 
     #[test]

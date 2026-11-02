@@ -99,16 +99,17 @@ fn split_inherits_active_session_project_not_global_picker(cx: &mut TestAppConte
             assert!(!state.no_project);
             assert_eq!(state.chats.len(), 1);
             assert_eq!(state.chats[0].space_id.as_deref(), Some("active"));
-            assert_eq!(
-                shell.chat_split.as_ref().unwrap().panes[0].as_deref(),
-                Some("original")
-            );
-            shell.focus_chat_pane(0, window, cx);
+            let panels = &shell.panel_layout(cx).unwrap().panels;
+            assert_eq!(panels.len(), 2);
+            let source = (panels[0].id, panels[0].selected().unwrap().clone());
+            let sibling = (panels[1].id, panels[1].selected().unwrap().clone());
+            assert_eq!(source.1, crate::shell::workspace_panels::PanelTab::Chat("original".into()));
+            shell.focus_workspace_tab(source.0, source.1, window, cx);
             assert_eq!(
                 shell.state.read(cx).selected_chat.as_deref(),
                 Some("original")
             );
-            shell.focus_chat_pane(1, window, cx);
+            shell.focus_workspace_tab(sibling.0, sibling.1, window, cx);
             assert_eq!(
                 shell.state.read(cx).selected_space.as_deref(),
                 Some("active")
@@ -212,7 +213,7 @@ fn a_sidebar_drop_still_splits_after_a_mid_drag_chats_frame(cx: &mut TestAppCont
     let named = |id: &str| Chat {
         id: id.into(),
         title: Some(id.into()),
-        ..chat(None)
+        ..chat(Some("active"))
     };
     let (host, cx) = cx.add_window_view(|_, cx| {
         Host(cx.new(|cx| {
@@ -233,6 +234,7 @@ fn a_sidebar_drop_still_splits_after_a_mid_drag_chats_frame(cx: &mut TestAppCont
             shell.state.update(cx, |state, cx| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
+                state.apply_spaces(vec![space("active")]);
                 state.chats = vec![named("open"), named("dragged")];
                 state.select_chat(Some("open".into()), cx);
             });

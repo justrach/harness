@@ -142,13 +142,13 @@ fn stale_saved_peer_cannot_duplicate_the_focused_archived_session(cx: &mut gpui:
                 shell.state.read(cx).selected_chat.as_deref(),
                 Some("current")
             );
-            let split = shell.chat_split.as_ref().unwrap();
-            assert_eq!(split.focus, 1);
-            assert!(
-                split.panes[0].is_none(),
-                "the saved focus identity wins over a stale peer reference"
+            shell.sync_panel_workspace(cx);
+            let displayed = workspace_chat_ids(shell, cx);
+            assert_eq!(
+                displayed,
+                vec!["current".to_owned()],
+                "migration must display the focused conversation only once"
             );
-            assert!(!shell.peer_chat_views.contains_key("current"));
             assert!(shell.state.read(cx).selected_chat_row().unwrap().archived);
         })
         .unwrap();
@@ -177,16 +177,11 @@ fn duplicate_saved_peers_restore_at_most_one_view_each(cx: &mut gpui::TestAppCon
                 complete_initial_sync(window, cx);
                 window
                     .update(cx, |shell, _, cx| {
-                        let state = shell.state.read(cx);
-                        assert_eq!(state.selected_chat.as_deref(), selected);
-                        let split = shell.chat_split.as_ref().unwrap();
-                        assert_eq!(split.focus, focus);
-                        assert_eq!(split.panes.len(), 4);
-                        let views: Vec<_> = split
-                            .peer_chats()
-                            .chain(state.selected_chat.as_deref())
-                            .collect();
-                        let unique: std::collections::HashSet<_> = views.iter().copied().collect();
+                        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), selected);
+                        shell.sync_panel_workspace(cx);
+                        let views = workspace_chat_ids(shell, cx);
+                        let unique: std::collections::HashSet<_> =
+                            views.iter().map(String::as_str).collect();
                         assert_eq!(
                             views.len(),
                             unique.len(),
@@ -195,7 +190,7 @@ fn duplicate_saved_peers_restore_at_most_one_view_each(cx: &mut gpui::TestAppCon
                         // Repair must retain other live references, not erase the layout.
                         assert!(unique.contains("peer"));
                         assert_eq!(unique.contains("target"), focus != 2);
-                        assert!(state.chats.iter().all(|chat| chat.archived));
+                        assert!(shell.state.read(cx).chats.iter().all(|chat| chat.archived));
                     })
                     .unwrap();
             }
@@ -204,40 +199,34 @@ fn duplicate_saved_peers_restore_at_most_one_view_each(cx: &mut gpui::TestAppCon
 }
 
 #[gpui::test]
-fn deletion_and_archive_state_remain_stable_across_repeated_disk_restarts(
-    cx: &mut gpui::TestAppContext,
-) {
+fn unavailable_and_archived_chats_survive_repeated_disk_restarts(cx: &mut gpui::TestAppContext) {
     let mut saved = saved_reference();
     for _ in 0..3 {
         let (dir, window) = cold_start(cx, saved);
-        // The formerly focused archived conversation was deleted remotely.
+        // A remote device's absent row is not a confirmed deletion.
         window
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, _| {
-                    state.chats.retain(|chat| chat.id != "current")
+                    state.chats.retain(|chat| chat.id != "current");
                 });
             })
             .unwrap();
         complete_initial_sync(window, cx);
-        window
-            .update(cx, |shell, window, cx| {
-                assert!(shell.state.read(cx).selected_chat.is_none());
+        saved = window
+            .update(cx, |shell, _, cx| {
                 assert_eq!(
-                    shell.chat_split.as_ref().unwrap().panes[0].as_deref(),
-                    Some("peer")
+                    shell.state.read(cx).selected_chat.as_deref(),
+                    Some("current")
                 );
-                shell.focus_chat_pane(0, window, cx);
-                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
-                assert!(shell.state.read(cx).selected_chat_row().unwrap().archived);
-                shell.focus_chat_pane(1, window, cx);
-                shell.state.update(cx, |_, cx| cx.notify());
+                shell.sync_panel_workspace(cx);
+                let mut chats = workspace_chat_ids(shell, cx);
+                chats.sort();
+                assert_eq!(chats, vec!["current".to_owned(), "peer".to_owned()]);
+                assert!(shell.state.read(cx).chat_row("peer").unwrap().archived);
+                shell.persist_chat_tabs(cx);
+                shell.settings.clone()
             })
             .unwrap();
-        cx.run_until_parked();
-        saved = window
-            .update(cx, |shell, _, _| shell.settings.clone())
-            .unwrap();
-        assert!(saved.last_chat_id.is_none());
         saved.save(dir.path()).unwrap();
         saved = settings::UiSettings::load(dir.path());
     }
@@ -245,6 +234,17 @@ fn deletion_and_archive_state_remain_stable_across_repeated_disk_restarts(
 
 #[gpui::test]
 fn early_startup_choice_replaces_stale_layout_on_disk(cx: &mut gpui::TestAppContext) {
+    fn persisted_workspace_layouts(
+        shell: &Shell,
+        cx: &App,
+    ) -> std::collections::BTreeMap<String, Option<settings::SavedWorkspacePanels>> {
+        shell
+            .chat_tabs
+            .iter()
+            .map(|tab| (tab.id.clone(), shell.saved_workspace_panels(&tab.id, cx)))
+            .collect()
+    }
+
     for choice in 0..4 {
         let (dir, window) = cold_start(cx, saved_reference());
         window
@@ -265,19 +265,54 @@ fn early_startup_choice_replaces_stale_layout_on_disk(cx: &mut gpui::TestAppCont
                 );
                 let selected = shell.state.read(cx).selected_chat.clone();
                 assert_eq!(shell.settings.last_chat_id, selected);
-                (shell.settings.clone(), selected, layout)
+                shell.sync_panel_workspace(cx);
+                shell.persist_chat_tabs(cx);
+                // The navigation fixture can retain a runtime layout under its
+                // old project key. Only actual workspace identities are saved.
+                let panels = persisted_workspace_layouts(shell, cx);
+                let saved_panels: std::collections::BTreeMap<_, _> = shell
+                    .settings
+                    .chat_tabs
+                    .iter()
+                    .map(|tab| (tab.id.clone(), tab.panel_layout.clone()))
+                    .collect();
+                assert!(!saved_panels.contains_key("a"));
+                assert_eq!(panels.len(), shell.chat_tabs.len());
+                assert_eq!(saved_panels.len(), shell.settings.chat_tabs.len());
+                assert_eq!(
+                    panels, saved_panels,
+                    "the saved settings must contain each complete workspace layout"
+                );
+                (shell.settings.clone(), selected, panels)
             })
             .unwrap();
         saved.save(dir.path()).unwrap();
+        // A restart has only the restored window. Keeping the source alive
+        // across a new SettingsStore mixes two independent fixture profiles.
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
         let (_restart_dir, restarted) = cold_start(cx, settings::UiSettings::load(dir.path()));
         complete_initial_sync(restarted, cx);
         restarted
             .update(cx, |shell, _, cx| {
                 assert_eq!(shell.state.read(cx).selected_chat, selected);
-                assert_eq!(shell.chat_split.as_ref().map(ChatSplit::to_saved), layout);
+                shell.sync_panel_workspace(cx);
+                let restored = persisted_workspace_layouts(shell, cx);
+                assert_eq!(restored.len(), shell.chat_tabs.len());
+                assert_eq!(shell.chat_tabs.len(), saved.chat_tabs.len());
+                assert_eq!(
+                    restored, layout,
+                    "the user's new workspace must survive the next restart"
+                );
                 assert!(shell.state.read(cx).chats.iter().all(|chat| chat.archived));
             })
             .unwrap();
+        restarted
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
     }
 }
 

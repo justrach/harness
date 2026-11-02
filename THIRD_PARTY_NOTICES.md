@@ -75,6 +75,14 @@ license retained as `LICENSE.mlx`). The oMLX favicon comes from `jundot/omlx`
 
 ## Bundled theme palette adaptations
 
+The desktop Harp adaptations reference the native sidebar surfaces from
+[dominikmartn/harp at bad92b3](https://github.com/dominikmartn/harp/blob/bad92b3fee6224941c9de92eaa3968a53e61ae6b/app/src/workspace/view/vertical_tabs.rs#L8983-L9107),
+declared as AGPL-3.0-only in their embedded provenance. Warm Harp's warm palette
+is authored in Harness, with the Harp layout reference retained in its source
+metadata. The desktop Codegraff variants use that warm palette while retaining
+their Codegraff identities. This adaptation does not replace the shared mobile
+catalog.
+
 Harness includes manually curated palette adaptations derived from the projects
 below. The source repository and exact audited revision are also embedded in
 each resolved theme variant. These projects are not affiliated with or endorsed
@@ -204,3 +212,11 @@ Copyright 2025 The Google Sans Code Project Authors. Both are licensed under the
 SIL Open Font License 1.1; the notices are retained in
 [`third_party/licenses/Geist-OFL.txt`](third_party/licenses/Geist-OFL.txt) and
 [`third_party/licenses/GoogleSansCode-OFL.txt`](third_party/licenses/GoogleSansCode-OFL.txt).
+
+## Session emoji metadata — emoji-datasource 16.0.0
+
+Session emoji names, aliases, categories and Unicode sequences are derived from
+[emoji-datasource](https://github.com/iamcal/emoji-data/tree/v16.0.0),
+Copyright (c) 2013 Cal Henderson, under the MIT License.
+The complete license is in `crates/ui/assets/session-emoji/LICENSE`; source URLs
+and hashes are in the adjacent `SOURCE.json`. No emoji artwork is bundled.

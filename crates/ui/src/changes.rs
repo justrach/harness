@@ -825,8 +825,18 @@ pub fn line_anchor(line: &DiffLine) -> Option<(CommentSide, u32)> {
 // Resolution + states (pure)
 // ---------------------------------------------------------------------------
 
-/// The diff shown for a chat: `checkout_id` match first, then device+cwd,
-/// then cwd alone (§1.11).
+/// A bound review never resolves to another device or checkout.
+fn resolve_review_diff<'a>(diffs: &'a [CheckoutDiff], chat: &Chat) -> Option<&'a CheckoutDiff> {
+    diffs.iter().find(|diff| {
+        diff.device_id == chat.device_id
+            && match chat.checkout_id.as_deref() {
+                Some(checkout) => diff.checkout_id == checkout,
+                None => chat.cwd.as_deref() == Some(diff.cwd.as_str()),
+            }
+    })
+}
+
+/// The ordinary Diff tab resolves checkout ID, then device+cwd, then cwd alone.
 pub fn resolve_diff<'a>(diffs: &'a [CheckoutDiff], chat: &Chat) -> Option<&'a CheckoutDiff> {
     if let Some(checkout_id) = chat.checkout_id.as_deref()
         && let Some(diff) = diffs.iter().find(|d| d.checkout_id == checkout_id)
@@ -1660,6 +1670,8 @@ pub struct Changes {
     list: ListState,
     /// What the pane diffs against (toolbar dropdown).
     scope: DiffScope,
+    /// A review stays with the chat that opened it, even when another panel gains focus.
+    review_chat_id: Option<String>,
     /// Unified or side-by-side (toolbar toggle, persisted per user).
     mode: DiffMode,
     /// Wrap long source lines instead of exposing the horizontal code plane.
@@ -1710,6 +1722,8 @@ pub struct DiscardWorkingTreeRequest {
 pub enum ChangesEvent {
     /// A History row was clicked — open this commit as its own diff tab.
     OpenCommit(GitHistoryCommit),
+    /// Close this review tab; never changes files or ends the chat.
+    DoneReview(gpui::AnyWindowHandle),
     /// The working-tree trash button was clicked. The shell owns the global
     /// confirmation dialog and only then dispatches the destructive RPC.
     DiscardWorkingTree(DiscardWorkingTreeRequest),
@@ -1721,22 +1735,25 @@ struct DiffHeaderTooltip(&'static str);
 
 impl Render for DiffHeaderTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text)
-            .child(self.0)
+        crate::popover::tooltip_label(Theme::of(cx), self.0)
     }
 }
 
 impl Changes {
+    /// Move the existing diff/history view, preserving its watches and viewport.
+    pub(crate) fn rebind_window_state(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        self._observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        self.state = state.clone();
+        if let Some(history) = &self.history {
+            history.update(cx, |history, cx| history.rebind_window_state(state, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn window_state(&self) -> Entity<AppState> {
+        self.state.clone()
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         let settings = crate::settings::current(cx);
@@ -1761,6 +1778,7 @@ impl Changes {
             // fast wheel flicks from outrunning measurement.
             list: ListState::new(0, ListAlignment::Top, px(1024.0)),
             scope: DiffScope::default(),
+            review_chat_id: None,
             base_ref: None,
             branches: Vec::new(),
             branches_for: None,
@@ -1811,6 +1829,60 @@ impl Changes {
         self.scope == DiffScope::History
     }
 
+    pub(crate) fn can_review_working_tree(&self, chat_id: &str, cx: &App) -> bool {
+        !matches!(self.scope, DiffScope::Commit | DiffScope::History)
+            && (!self.has_pending_review_draft(cx) || self.comment_context_key(cx) == chat_id)
+    }
+
+    pub(crate) fn context_chat_id(&self, cx: &App) -> Option<String> {
+        self.review_chat_id
+            .clone()
+            .or_else(|| self.state.read(cx).selected_chat.clone())
+    }
+
+    pub(crate) fn review_working_tree(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.review_chat_id = Some(chat_id);
+        self.set_scope(DiffScope::WorkingTree, cx);
+        self.sync(cx);
+        cx.notify();
+    }
+
+    fn context_chat(&self, cx: &App) -> Option<Chat> {
+        let state = self.state.read(cx);
+        match self.review_chat_id.as_deref() {
+            Some(id) => state.chat_row(id).cloned(),
+            None => state.selected_chat_row().cloned(),
+        }
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub(crate) fn fixture_review_diff(&mut self, diff: CheckoutDiff, cx: &mut Context<Self>) {
+        self.watch_task = None;
+        self.started = true;
+        self.watch_target = self.desired_target(cx);
+        self.diffs = vec![diff];
+        self.error = None;
+        self.sync(cx);
+    }
+
+    /// Exercise the production comment editor against the synthetic review patch.
+    #[cfg(feature = "appshots-fixture")]
+    pub(crate) fn fixture_review_comment(
+        &mut self,
+        stage: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if stage {
+            self.commit_draft(cx);
+        } else {
+            self.open_draft("src/greeting.rs".into(), CommentSide::New, 2, window, cx);
+            self.draft.as_ref().unwrap().input.update(cx, |input, cx| {
+                input.set_text("Could we keep this greeting a little shorter?", cx);
+            });
+        }
+    }
+
     /// The surface-tab title (contextual, user request): the pinned commit's
     /// subject (short sha for subject-less commits), else the scope's label.
     pub fn tab_title(&self) -> gpui::SharedString {
@@ -1820,6 +1892,9 @@ impl Changes {
                 return subject.to_string().into();
             }
             return commit.sha.chars().take(7).collect::<String>().into();
+        }
+        if self.review_chat_id.is_some() && self.scope == DiffScope::WorkingTree {
+            return "Review changes".into();
         }
         gpui::SharedString::from(self.scope.label())
     }
@@ -1831,7 +1906,7 @@ impl Changes {
     /// and the pane sits on "Preparing diff…" forever (user report).
     fn desired_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let device = state.selected_chat_row()?.device_id.clone();
+        let device = self.context_chat(cx)?.device_id;
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -1923,9 +1998,12 @@ impl Changes {
     }
 
     fn resolved(&self, cx: &App) -> Option<CheckoutDiff> {
-        let state = self.state.read(cx);
-        let chat = state.selected_chat_row()?;
-        resolve_diff(&self.diffs, chat).cloned()
+        let chat = self.context_chat(cx)?;
+        if self.review_chat_id.is_some() {
+            resolve_review_diff(&self.diffs, &chat).cloned()
+        } else {
+            resolve_diff(&self.diffs, &chat).cloned()
+        }
     }
 
     /// The checkout root the scoped RPCs address: the watch-resolved diff's
@@ -1934,7 +2012,7 @@ impl Changes {
         if let Some(diff) = self.resolved(cx) {
             return Some(diff.cwd);
         }
-        self.state.read(cx).selected_chat_row()?.cwd.clone()
+        self.context_chat(cx)?.cwd
     }
 
     /// The diff the pane currently displays: the watch stream for the working
@@ -1947,7 +2025,7 @@ impl Changes {
         }
     }
 
-    fn discard_request(&self, cx: &App) -> Option<DiscardWorkingTreeRequest> {
+    pub(crate) fn discard_request(&self, cx: &App) -> Option<DiscardWorkingTreeRequest> {
         if self.scope != DiffScope::WorkingTree {
             return None;
         }
@@ -1955,7 +2033,7 @@ impl Changes {
         if diff.truncated || (diff.files.is_empty() && diff.patch.trim().is_empty()) {
             return None;
         }
-        let chat = self.state.read(cx).selected_chat_row()?;
+        let chat = self.context_chat(cx)?;
         Some(DiscardWorkingTreeRequest {
             chat_id: chat.id.clone(),
             checkout_id: diff.checkout_id,
@@ -1963,6 +2041,64 @@ impl Changes {
             target_device_id: self.desired_target(cx),
             file_count: diff.files.len(),
         })
+    }
+
+    fn review_footer(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        self.review_chat_id.as_ref()?;
+        let request = self.discard_request(cx);
+        let pending_note = self.has_pending_review_draft(cx);
+        Some(div()
+            .id("changes-review-footer")
+            .flex_none().px(px(12.0)).py(px(10.0))
+            .border_t_1().border_color(theme.border).bg(theme.surface_raised)
+            .flex().flex_col().gap(px(8.0))
+            .when(cfg!(target_os = "macos"), |footer| {
+                footer.flex_row().flex_wrap().items_center().gap(px(10.0)).bg(theme.bg).rounded_b(px(9.0))
+            })
+            .child(div().text_size(px(11.0)).text_color(theme.text_muted)
+                .when(cfg!(target_os = "macos"), |label| label.flex_1().min_w(px(180.0)))
+                .child(if pending_note {
+                    "Save or cancel your note before finishing this review."
+                } else if self.scope == DiffScope::WorkingTree {
+                    "All uncommitted changes, including your edits."
+                } else {
+                    "Reviewing a different scope. Return to Working tree to discard all changes."
+                }))
+            .child(div().flex().flex_wrap().items_center().justify_end().gap(px(6.0))
+                .when(cfg!(target_os = "macos"), |actions| actions.max_w_full().flex_shrink(0.0))
+                .when(self.scope == DiffScope::WorkingTree, |row| row.child(
+                    popover::btn_ghost(theme, "Discard all uncommitted changes…", "review-discard")
+                        .id("review-discard").role(gpui::Role::Button)
+                        .aria_label("Discard all uncommitted changes").text_color(theme.danger)
+                        .when(request.is_none(), |button| button.opacity(0.35))
+                        .when_some(request, |button, request| {
+                            let keyboard_request = request.clone();
+                            button.tab_index(0).focus_visible(|style| style.border_1().border_color(theme.accent))
+                                .on_key_down(cx.listener(move |_, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation(); cx.emit(ChangesEvent::DiscardWorkingTree(keyboard_request.clone()));
+                                    }
+                                }))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(ChangesEvent::DiscardWorkingTree(request.clone()));
+                                }))
+                        })
+                ))
+                .child(popover::btn_primary(theme, "Done reviewing")
+                    .id("review-done").role(gpui::Role::Button).aria_label("Done reviewing")
+                    .when(pending_note, |button| button.opacity(0.35))
+                    .when(!pending_note, |button| button.tab_index(0)
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
+                        .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation(); cx.emit(ChangesEvent::DoneReview(window.window_handle()));
+                            }
+                        }))
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            cx.emit(ChangesEvent::DoneReview(window.window_handle()));
+                        }))))
+            )
+            .into_any_element())
     }
 
     /// Scope discriminant folded into the parse key, so a scope or base
@@ -2029,9 +2165,7 @@ impl Changes {
                             .is_some_and(|base| changes.branches.contains(base));
                         if !keep {
                             let current = changes
-                                .state
-                                .read(cx)
-                                .selected_chat_row()
+                                .context_chat(cx)
                                 .and_then(|chat| chat.branch.clone());
                             changes.base_ref =
                                 default_base_ref(&changes.branches, current.as_deref());
@@ -2062,12 +2196,7 @@ impl Changes {
             self.scoped_task = None;
             return;
         }
-        let Some(chat_id) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone())
-        else {
+        let Some(chat_id) = self.context_chat(cx).map(|chat| chat.id.clone()) else {
             return;
         };
         let Some(cwd) = self.scoped_cwd(cx) else {
@@ -2692,11 +2821,40 @@ impl Changes {
         cx.notify();
     }
 
+    /// An unfinished note is in-memory user input and must block automatic restart.
+    pub(crate) fn has_pending_review_draft(&self, cx: &App) -> bool {
+        self.draft
+            .as_ref()
+            .is_some_and(|draft| !draft.input.read(cx).text().trim().is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_review_draft(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_draft("synthetic.rs".into(), CommentSide::New, 1, window, cx);
+        self.draft
+            .as_ref()
+            .unwrap()
+            .input
+            .clone()
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    fn comment_context_key(&self, cx: &App) -> String {
+        self.review_chat_id
+            .clone()
+            .unwrap_or_else(|| self.state.read(cx).composer_key())
+    }
+
     /// Cloned because rendering borrows `self` mutably a moment later.
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
         let state = self.state.read(cx);
         state
-            .review_comments(&state.composer_key())
+            .review_comments(&self.comment_context_key(cx))
             .iter()
             .filter(|comment| {
                 self.draft
@@ -2726,11 +2884,10 @@ impl Changes {
             .clone()
     }
 
-    /// A draft belongs to the checkout it was opened over. Chat navigation
-    /// swaps both the diff under it and the composer it would stage onto, so
-    /// the half-written note is dropped rather than following the user across.
+    /// A draft belongs to the review's chat. Ordinary unbound Diff tabs follow
+    /// selection, but a bound review keeps its draft when another chat is focused.
     fn discard_stale_draft(&mut self, cx: &mut Context<Self>) {
-        let key = self.state.read(cx).composer_key();
+        let key = self.comment_context_key(cx);
         if self.draft.as_ref().is_some_and(|draft| draft.key != key) {
             self.draft = None;
             self.sync_comment_rows(cx);
@@ -2846,7 +3003,7 @@ impl Changes {
             _ => {}
         });
         let handle = input.read(cx).focus_handle(cx);
-        let key = self.state.read(cx).composer_key();
+        let key = self.comment_context_key(cx);
         let old_path = self.old_path_of(&path);
         self.draft = Some(CommentDraft {
             editing_id: None,
@@ -2866,7 +3023,7 @@ impl Changes {
     fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(comment) = state
-            .review_comments(&state.composer_key())
+            .review_comments(&self.comment_context_key(cx))
             .iter()
             .find(|comment| comment.id == id && !comment.is_file())
             .cloned()
@@ -2924,8 +3081,8 @@ impl Changes {
     }
 
     fn remove_comment(&mut self, id: &str, cx: &mut Context<Self>) {
+        let key = self.comment_context_key(cx);
         self.state.update(cx, |state, cx| {
-            let key = state.composer_key();
             state.remove_review_comment(&key, id);
             cx.notify();
         });
@@ -3101,11 +3258,7 @@ impl Changes {
         let active = self.active_diff(cx);
         let engine = self.state.read(cx).engine().cloned();
         let target = self.desired_target(cx);
-        let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone());
+        let chat_id = self.context_chat(cx).map(|chat| chat.id.clone());
         let mode = self.scope.mode().to_string();
         let base_ref = self.base_ref.clone();
         let commit_sha = (self.scope == DiffScope::Commit)
@@ -3662,6 +3815,72 @@ impl Changes {
         )
     }
 
+    /// Workspace diffs sit on the same content plane as browser controls.
+    /// The surrounding panel already owns the outer outline and corner shape.
+    pub(crate) fn workspace_toolbar(theme: &Theme) -> gpui::Div {
+        if cfg!(target_os = "macos") {
+            div()
+                .h(px(40.0))
+                .w_full()
+                .flex_none()
+                .px(px(crate::surface_chrome::EDGE_INSET))
+                .flex()
+                .items_center()
+                .gap(px(crate::surface_chrome::CONTROL_GAP))
+                .bg(theme.bg)
+                .rounded_t(px(9.0))
+                .border_b_1()
+                .border_color(theme.border)
+        } else {
+            crate::surface_chrome::toolbar(theme)
+        }
+    }
+
+    fn compact_review_header(&self) -> bool {
+        cfg!(target_os = "macos") && self.review_chat_id.is_some()
+    }
+
+    /// A review needs one control row, rather than a toolbar followed by a
+    /// second scope summary. Counts remain visible alongside the scope; a
+    /// partial snapshot still gets the full warning row below.
+    fn render_review_summary(&self, theme: &Theme) -> Option<AnyElement> {
+        if !self.compact_review_header() {
+            return None;
+        }
+        let parsed = self.parsed.as_ref()?;
+        let files = if parsed.file_count == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", parsed.file_count)
+        };
+        Some(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .pl(px(8.0))
+                .text_size(px(11.0))
+                .child(div().flex_none().text_color(theme.text_muted).child(files))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(theme.font_mono.clone())
+                        .text_color(add_color(theme))
+                        .child(format!("+{}", parsed.additions)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(theme.font_mono.clone())
+                        .text_color(del_color(theme))
+                        .child(format!("−{}", parsed.deletions)),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// A small hover-washed icon button for the pane header. The header lives
     /// inside the titlebar drag strip, so the button occludes and swallows the
     /// mouse-down (same discipline as the shell's `header_icon_button`).
@@ -3729,10 +3948,14 @@ impl Changes {
             self.mode.is_split(),
             theme,
         )
+        .role(gpui::Role::Button)
+        .aria_label("Side-by-side diff")
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_mode(cx);
         }))
+        .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Side-by-side diff")).into())
+        .tooltip_show_delay(Duration::from_millis(350))
         .into_any_element()
     }
 
@@ -3743,6 +3966,8 @@ impl Changes {
             self.wrap_lines,
             theme,
         )
+        .role(gpui::Role::Button)
+        .aria_label("Wrap long lines")
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_wrap(cx);
@@ -3798,6 +4023,13 @@ impl Changes {
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
+                        .role(gpui::Role::Button)
+                        .aria_label("Collapse or expand all files")
+                        .tooltip(|_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Collapse or expand all files"))
+                                .into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(350))
                         .on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_collapse_all(cx);
@@ -3807,9 +4039,7 @@ impl Changes {
         }
         let scope = self.scope;
         let history_branch = (scope == DiffScope::History).then(|| {
-            self.state
-                .read(cx)
-                .selected_chat_row()
+            self.context_chat(cx)
                 .and_then(|chat| chat.branch.clone())
                 .unwrap_or_else(|| "HEAD".to_string())
         });
@@ -3833,7 +4063,11 @@ impl Changes {
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
-                crate::theme::wash(0.05),
+                crate::theme::wash(if self.compact_review_header() {
+                    0.0
+                } else {
+                    0.05
+                }),
                 crate::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("changes-scope-trigger"))
@@ -3941,13 +4175,21 @@ impl Changes {
                 .flex()
                 .items_center()
                 .gap(px(crate::surface_chrome::CONTROL_GAP))
-                .when(scope == DiffScope::WorkingTree, |element| {
-                    element.child(discard_button)
-                })
+                .when(
+                    scope == DiffScope::WorkingTree && self.review_chat_id.is_none(),
+                    |element| element.child(discard_button),
+                )
                 .child(self.split_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
+                        .role(gpui::Role::Button)
+                        .aria_label("Collapse or expand all files")
+                        .tooltip(|_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Collapse or expand all files"))
+                                .into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(350))
                         .on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_collapse_all(cx);
@@ -3977,7 +4219,12 @@ impl Changes {
             })
             .children(self.render_ref_selector(&theme, cx))
             .when(scope != DiffScope::History, |element| {
-                element.child(div().flex_1())
+                element.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .children(self.render_review_summary(&theme)),
+                )
             })
             .child(trailing)
             .into_any_element()
@@ -4019,9 +4266,7 @@ impl Changes {
             return None;
         }
         let branch = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .context_chat(cx)
             .and_then(|chat| chat.branch.clone())
             .unwrap_or_else(|| "HEAD".to_string());
         let base = self.base_ref.clone().unwrap_or_else(|| "…".to_string());
@@ -4216,6 +4461,9 @@ impl Changes {
 
     fn render_header_strip(&self, theme: &Theme) -> Option<AnyElement> {
         let parsed = self.parsed.as_ref()?;
+        if self.compact_review_header() && !parsed.truncated {
+            return None;
+        }
         Some(
             div()
                 .flex_none()
@@ -4912,7 +5160,7 @@ impl Render for Changes {
         let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let no_chat = self.context_chat(cx).is_none();
         let phase = if no_chat {
             DiffPhase::Clean
         } else {
@@ -5058,6 +5306,7 @@ impl Render for Changes {
                 )
             })
             .child(content)
+            .children(self.review_footer(&theme, cx))
             .into_any_element()
     }
 }
@@ -5131,6 +5380,85 @@ mod tests {
                     changes.commit_draft(cx);
                     assert!(changes.state.read(cx).review_comments("").is_empty());
                 }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn review_comments_and_draft_stay_with_origin_after_chat_focus_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.selected_chat = Some("origin".into());
+                state
+            });
+            Changes::new(state, cx)
+        });
+        window
+            .update(cx, |changes, window, cx| {
+                changes.review_working_tree("origin".into(), cx);
+                let other_note =
+                    ReviewComment::new("other.rs", CommentSide::New, 1, "Other chat note");
+                changes.state.update(cx, |state, _| {
+                    state.add_review_comment("other", other_note.clone())
+                });
+                changes.open_draft("source.rs".into(), CommentSide::New, 2, window, cx);
+                changes
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .clone()
+                    .update(cx, |input, cx| {
+                        input.set_text("Keep this with the original review", cx)
+                    });
+                changes
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("other".into()));
+                changes.discard_stale_draft(cx);
+                assert!(changes.has_pending_review_draft(cx));
+                assert!(changes.can_review_working_tree("origin", cx));
+                assert!(
+                    !changes.can_review_working_tree("other", cx),
+                    "another chat must open a new tab instead of discarding this note"
+                );
+                assert!(
+                    changes.draft.is_some(),
+                    "focusing another chat must retain this review's draft"
+                );
+                changes.commit_draft(cx);
+                assert!(!changes.has_pending_review_draft(cx));
+                assert!(changes.state.read(cx).has_review_comments());
+                let comment = changes.staged_comments(cx).pop().unwrap();
+                assert_eq!(comment.body, "Keep this with the original review");
+                assert_eq!(changes.state.read(cx).review_comments("origin").len(), 1);
+                changes.edit_comment(&comment.id, window, cx);
+                changes
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .clone()
+                    .update(cx, |input, cx| {
+                        input.set_text("Revised on the original chat", cx)
+                    });
+                changes.commit_draft(cx);
+                assert_eq!(
+                    changes.state.read(cx).review_comments("origin")[0].body,
+                    "Revised on the original chat"
+                );
+                changes.remove_comment(&comment.id, cx);
+                assert!(changes.state.read(cx).review_comments("origin").is_empty());
+                assert_eq!(
+                    changes.state.read(cx).review_comments("other"),
+                    &[other_note]
+                );
             })
             .unwrap();
     }
@@ -5993,6 +6321,57 @@ rename to new_name.rs
     }
 
     #[test]
+    fn review_diff_never_falls_back_to_another_device_or_checkout() {
+        let diffs = vec![
+            diff("co-1", "other-device", "/repo", "x"),
+            diff("co-2", "local", "/repo", "y"),
+        ];
+        assert!(resolve_review_diff(&diffs, &chat(Some("co-1"), "local", Some("/repo"))).is_none());
+        assert_eq!(
+            resolve_review_diff(&diffs, &chat(None, "local", Some("/repo")))
+                .unwrap()
+                .checkout_id,
+            "co-2"
+        );
+    }
+
+    #[gpui::test]
+    fn review_scope_is_explicit_and_discard_stays_bound_to_origin(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                let mut origin = chat(Some("review-checkout"), "origin-device", Some("/repo"));
+                origin.id = "origin".into();
+                let mut other = chat(Some("other-checkout"), "other-device", Some("/elsewhere"));
+                other.id = "other".into();
+                state.chats = vec![origin, other];
+                state.selected_chat = Some("origin".into());
+                state
+            });
+            let changes = cx.new(|cx| Changes::new(state.clone(), cx));
+            changes.update(cx, |changes, cx| {
+                changes.scope = DiffScope::LatestTurn;
+                changes.review_working_tree("origin".into(), cx);
+                assert_eq!(changes.scope, DiffScope::WorkingTree);
+                changes.diffs = vec![diff("review-checkout", "origin-device", "/repo", "patch")];
+                state.update(cx, |state, _| state.selected_chat = Some("other".into()));
+                assert_eq!(changes.context_chat(cx).unwrap().id, "origin");
+                let request = changes.discard_request(cx).unwrap();
+                assert_eq!(request.chat_id, "origin");
+                assert_eq!(request.checkout_id, "review-checkout");
+                assert_eq!(request.target_device_id.as_deref(), Some("origin-device"));
+                changes.diffs[0].truncated = true;
+                assert!(changes.discard_request(cx).is_none());
+                changes.diffs[0].truncated = false;
+                changes.scope = DiffScope::LatestTurn;
+                assert!(changes.discard_request(cx).is_none());
+            });
+        });
+    }
+
+    #[test]
     fn diff_resolution_prefers_checkout_id_then_cwd() {
         let diffs = vec![
             diff("co-1", "dev-a", "/repo/one", "x"),
@@ -6434,3 +6813,6 @@ rename to new_name.rs
         assert!(full_highlights(&file, Lang::Rust, &response).is_none());
     }
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("menu_review/changes.rs");

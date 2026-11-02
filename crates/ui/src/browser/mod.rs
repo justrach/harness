@@ -12,37 +12,75 @@ pub use macos::clear_browsing_data;
 mod document;
 pub mod model;
 pub mod saved_view;
+mod search;
+mod search_suggestions;
 mod view;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window,
+    AnyWindowHandle, App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    Subscription, Window,
 };
 use model::{PageState, Presentation};
+
+// Match the inside of the workspace panel's one-pixel outline.
+const BROWSER_SURFACE_RADIUS: f32 = 9.0;
+const BROWSER_ADDRESS_TEXT_SIZE: f32 = 13.0;
+const BROWSER_ADDRESS_LINE_HEIGHT: f32 = 20.0;
 gpui::actions!(
     browser,
     [Reload, FocusAddress, NewTab, CloseTab, Back, Forward]
 );
 
-pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
+fn shortcut_available(
+    keymap: &crate::settings::KeymapConfig,
+    combo: &str,
+    own: Option<crate::settings::ShortcutId>,
+) -> bool {
     use crate::settings::{ShortcutId, platform_combo};
     // Existing customized app chords win. In particular old settings may
     // already assign mod-shift-r to the right pane.
-    let available = |combo: &str, own: Option<ShortcutId>| {
-        !combo.is_empty()
-            && !ShortcutId::ALL.iter().any(|id| {
-                Some(*id) != own
-                    // The default new-chat key remains contextual: in a browser,
-                    // Cmd+T opens a browser tab. Custom app chords still win.
-                    && !(*id == ShortcutId::NewSession
-                        && keymap.get(*id) == id.default_combo())
-                    && gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
-                        == gpui::Keystroke::parse(&platform_combo(combo)).ok()
-            })
-    };
+    !combo.is_empty()
+        && gpui::Keystroke::parse(&platform_combo(combo)).is_ok()
+        && !ShortcutId::ALL.iter().any(|id| {
+            Some(*id) != own
+                // The default new-chat key remains contextual: in a browser,
+                // Cmd+T opens a browser tab. Custom app chords still win.
+                && !(*id == ShortcutId::NewSession
+                    && keymap.get(*id) == id.default_combo())
+                && gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
+                    == gpui::Keystroke::parse(&platform_combo(combo)).ok()
+        })
+}
+
+#[derive(Clone, Copy)]
+enum NavigationShortcut {
+    Back,
+    Forward,
+    Reload,
+}
+
+impl NavigationShortcut {
+    /// Use the same availability rules for the hover hint and key registration.
+    fn combo(self, keymap: &crate::settings::KeymapConfig) -> Option<&str> {
+        use crate::settings::ShortcutId;
+        let (combo, own) = match self {
+            Self::Back => ("mod-[", None),
+            Self::Forward => ("mod-]", None),
+            Self::Reload => (
+                keymap.get(ShortcutId::BrowserReload),
+                Some(ShortcutId::BrowserReload),
+            ),
+        };
+        shortcut_available(keymap, combo, own).then_some(combo)
+    }
+}
+
+pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
+    use crate::settings::platform_combo;
     macro_rules! bind {
         ($combo:literal, $action:ident) => {
-            if available($combo, None) {
+            if shortcut_available(keymap, $combo, None) {
                 cx.bind_keys([gpui::KeyBinding::new(
                     &platform_combo($combo),
                     $action,
@@ -54,18 +92,20 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     bind!("mod-l", FocusAddress);
     bind!("mod-t", NewTab);
     bind!("mod-w", CloseTab);
-    bind!("mod-[", Back);
-    bind!("mod-]", Forward);
-    let reload = keymap.get(ShortcutId::BrowserReload);
-    if available(reload, Some(ShortcutId::BrowserReload))
-        && gpui::Keystroke::parse(&platform_combo(reload)).is_ok()
-    {
-        cx.bind_keys([gpui::KeyBinding::new(
-            &platform_combo(reload),
-            Reload,
-            Some("Browser"),
-        )]);
+    macro_rules! bind_navigation {
+        ($action:ident) => {
+            if let Some(combo) = NavigationShortcut::$action.combo(keymap) {
+                cx.bind_keys([gpui::KeyBinding::new(
+                    &platform_combo(combo),
+                    $action,
+                    Some("Browser"),
+                )]);
+            }
+        };
     }
+    bind_navigation!(Back);
+    bind_navigation!(Forward);
+    bind_navigation!(Reload);
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +130,8 @@ pub struct BrowserSurface {
     focus: FocusHandle,
     pub page: PageState,
     pub favicon: Option<std::sync::Arc<gpui::Image>>,
+    forward_reveal: crate::motion::HoverFades,
+    search: search::SearchSuggestions,
     address_edited: bool,
     validation: Option<String>,
     remote: bool,
@@ -107,12 +149,17 @@ pub struct BrowserSurface {
     previews_task: Option<gpui::Task<()>>,
     #[cfg(feature = "browser-fixture")]
     fixture_preview_open: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
+    #[cfg(feature = "browser-fixture")]
+    fixture_forward_control:
+        std::rc::Rc<std::cell::Cell<(f32, Option<gpui::Bounds<gpui::Pixels>>)>>,
     presentation: Presentation,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
     #[cfg(target_os = "macos")]
     right_occlusion: gpui::Pixels,
     _input_sub: Subscription,
+    _address_focus_subs: [Subscription; 2],
+    owning_window: std::rc::Rc<std::cell::Cell<AnyWindowHandle>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     native: Option<native::NativePage>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -140,8 +187,8 @@ impl BrowserSurface {
         cx: &mut Context<Self>,
     ) -> Self {
         let address = cx.new(|cx| {
-            ComposerInput::with_context("Website or localhost:3000", "PaletteSearch", cx)
-                .with_text_metrics(11.0, 16.0)
+            ComposerInput::with_context("Search or enter address", "PaletteSearch", cx)
+                .with_text_metrics(BROWSER_ADDRESS_TEXT_SIZE, BROWSER_ADDRESS_LINE_HEIGHT)
                 .with_single_line()
                 .with_accessibility_role(gpui::Role::TextInput)
         });
@@ -150,22 +197,32 @@ impl BrowserSurface {
                 this.address_edited =
                     this.address.read(cx).text() != this.page.url.as_deref().unwrap_or_default();
                 this.validation = None;
+                this.update_search_suggestions(cx);
                 cx.notify();
+            } else if matches!(event, ComposerInputEvent::CursorMoved)
+                && this.search.composing
+                && !this.address.read(cx).has_marked_text()
+            {
+                this.update_search_suggestions(cx);
             }
         });
+        let address_focus_subs = Self::observe_address_focus(&address, window, cx);
+        let owning_window = std::rc::Rc::new(std::cell::Cell::new(window.window_handle()));
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let (native_tx, mut events) = tokio::sync::mpsc::channel(64);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let native_task = cx.spawn_in(window, async move |this, cx| {
+        let event_window = owning_window.clone();
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let native_task = cx.spawn(async move |this, cx| {
             while let Some(event) = events.recv().await {
-                if this
-                    .update_in(cx, |this, window, cx| {
-                        this.on_native_event(event, window, cx)
-                    })
-                    .is_err()
-                {
+                if this.upgrade().is_none() {
                     break;
                 }
+                // Resolve the current window for every event. A transferred
+                // page outlives its original window, including pending loads.
+                let _ = event_window.get().update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| this.on_native_event(event, window, cx))
+                });
             }
         });
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -177,6 +234,11 @@ impl BrowserSurface {
             focus: cx.focus_handle(),
             page: PageState::default(),
             favicon: None,
+            forward_reveal: crate::motion::HoverFades::with_spec(crate::motion::MotionSpec::new(
+                180,
+                crate::motion::EASE_OUT_QUINT,
+            )),
+            search: Default::default(),
             address_edited: false,
             validation: None,
             remote,
@@ -189,12 +251,16 @@ impl BrowserSurface {
             previews_task: None,
             #[cfg(feature = "browser-fixture")]
             fixture_preview_open: Default::default(),
+            #[cfg(feature = "browser-fixture")]
+            fixture_forward_control: Default::default(),
             presentation: Presentation::Hidden,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
             #[cfg(target_os = "macos")]
             right_occlusion: gpui::px(0.0),
             _input_sub: input_sub,
+            _address_focus_subs: address_focus_subs,
+            owning_window,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             native: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -206,6 +272,114 @@ impl BrowserSurface {
             #[cfg(target_os = "macos")]
             favicon_generation: 0,
         }
+    }
+
+    fn observe_address_focus(
+        address: &Entity<ComposerInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> [Subscription; 2] {
+        let focus = address.focus_handle(cx);
+        [
+            cx.on_focus(&focus, window, |this, _, cx| {
+                this.search.focused = true;
+                this.update_search_suggestions(cx);
+                cx.notify();
+            }),
+            cx.on_blur(&focus, window, |this, _, cx| {
+                this.search.focused = false;
+                this.dismiss_search_suggestions(cx);
+            }),
+        ]
+    }
+
+    /// Move the live page and its chrome to another app window. The same
+    /// native page retains history, form values, scroll position and scripts.
+    pub fn move_to_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.owning_window.get() == window.window_handle() {
+            return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(native) = &self.native {
+            native.move_to_window(window)?;
+        }
+        self.owning_window.set(window.window_handle());
+        self._address_focus_subs = Self::observe_address_focus(&self.address, window, cx);
+        self.search.focused = false;
+        self.dismiss_search_suggestions(cx);
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &mut self.native {
+            native.move_to_window();
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    /// Explicit drag cancellation may return the keyboard to the same live
+    /// page. Normal modal and address focus paths never call this method.
+    pub fn restore_page_focus_after_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if self
+            .native
+            .as_ref()
+            .is_some_and(|native| native.restore_page_focus_after_drag())
+        {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (window, cx);
+    }
+
+    pub fn prepare_window_drag(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(native) = &self.native {
+            native.prepare_window_drag();
+        }
+    }
+
+    pub fn discard_page_focus_after_drag(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(native) = &self.native {
+            native.discard_page_focus_after_drag();
+        }
+    }
+
+    /// Capture the actual page for a drag preview without creating another
+    /// browser or navigating. The image can outlive either host window.
+    pub fn snapshot(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<Option<std::sync::Arc<gpui::RenderImage>>> {
+        #[cfg(target_os = "macos")]
+        if let Some(native) = &self.native {
+            let capture = native.snapshot();
+            return cx.background_executor().spawn(async move {
+                let bytes = capture.await.ok().flatten()?;
+                let mut image =
+                    image::load_from_memory_with_format(&bytes, image::ImageFormat::Tiff)
+                        .ok()?
+                        .thumbnail(1200, 1200)
+                        .into_rgba8();
+                // GPUI's atlas consumes BGRA pixels, including RenderImage.
+                for pixel in image.pixels_mut() {
+                    pixel.0.swap(0, 2);
+                }
+                Some(std::sync::Arc::new(gpui::RenderImage::new([
+                    image::Frame::new(image),
+                ])))
+            });
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.native {
+            return gpui::Task::ready(native.image.clone());
+        }
+        let _ = cx;
+        gpui::Task::ready(None)
     }
 
     pub fn title(&self) -> gpui::SharedString {
@@ -240,6 +414,7 @@ impl BrowserSurface {
         }
         window.focus(&self.address.focus_handle(cx), cx);
         window.dispatch_action(Box::new(crate::composer::SelectAll), cx);
+        cx.notify();
     }
 
     /// Reserve the overlapping part of the shell divider for GPUI hit testing.
@@ -265,6 +440,9 @@ impl BrowserSurface {
             return;
         }
         self.presentation = presentation;
+        if presentation != Presentation::Live {
+            self.dismiss_search_suggestions(cx);
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = &mut self.native {
             native.present(presentation);
@@ -279,6 +457,10 @@ impl BrowserSurface {
     #[cfg(feature = "browser-fixture")]
     pub fn fixture_preview_open_position(&self) -> Option<gpui::Point<gpui::Pixels>> {
         self.fixture_preview_open.get()
+    }
+    #[cfg(feature = "browser-fixture")]
+    pub fn fixture_forward_control(&self) -> (f32, Option<gpui::Bounds<gpui::Pixels>>) {
+        self.fixture_forward_control.get()
     }
 
     /// The daemon resolves the session's current cwd for every update, so a
@@ -341,6 +523,7 @@ impl BrowserSurface {
     }
 
     pub fn navigate(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_search_suggestions(cx);
         if self.preview_request.is_some() || self.view.is_some() {
             return;
         }
@@ -411,15 +594,18 @@ impl BrowserSurface {
         self.page.error = None;
         #[cfg(target_os = "macos")]
         {
-            let kind = self.view.as_ref().map(|view| view.kind).unwrap_or(harness_proto::ToolViewKind::Html);
-            let result = native::NativePage::new_view(window, kind, self.native_tx.clone()).and_then(
-                |mut native| {
+            let kind = self
+                .view
+                .as_ref()
+                .map(|view| view.kind)
+                .unwrap_or(harness_proto::ToolViewKind::Html);
+            let result = native::NativePage::new_view(window, kind, self.native_tx.clone())
+                .and_then(|mut native| {
                     native.present(self.presentation);
                     let loaded = native.load(&url);
                     self.native = Some(native);
                     loaded
-                },
-            );
+                });
             self.page.loading = result.is_ok();
             if let Err(error) = result {
                 self.page.error = Some(format!("Could not open this view: {error}"));
@@ -442,7 +628,7 @@ impl BrowserSurface {
         client: crate::files::client::WorkspaceFilesClient,
         request: crate::markdown::content_reference::HtmlPreview,
         path: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.document_task = None;
@@ -487,9 +673,10 @@ impl BrowserSurface {
                 .ok_or_else(|| "This file is not a UTF-8 HTML document.".to_owned())?;
             document::HtmlDocument::new(&request, &text)
         });
-        self.document_task = Some(cx.spawn_in(window, async move |this, cx| {
+        let document_window = self.owning_window.clone();
+        self.document_task = Some(cx.spawn(async move |this, cx| {
             let result = read.await.map_err(|error| error.to_string()).and_then(|result| result);
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = document_window.get().update(cx, |_, window, cx| this.update(cx, |this, cx| {
                 let result: Result<(), String> = result.and_then(|document| {
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     {
@@ -510,7 +697,7 @@ impl BrowserSurface {
                 this.page.error = result.err();
                 cx.emit(BrowserEvent::Changed);
                 cx.notify();
-            });
+            }));
         }));
         cx.emit(BrowserEvent::Changed);
         cx.notify();
@@ -520,8 +707,13 @@ impl BrowserSurface {
         if self.view.is_some() || self.preview_request.is_some() {
             return;
         }
-        let url = self.address.read(cx).text().to_owned();
-        self.navigate(&url, window, cx);
+        match model::address_or_search(self.address.read(cx).text()) {
+            Ok(url) => self.navigate(&url, window, cx),
+            Err(message) => {
+                self.validation = Some(message.into());
+                cx.notify();
+            }
+        }
     }
 
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -546,7 +738,22 @@ impl BrowserSurface {
         cx.notify();
     }
 
-    fn open_external(&self, cx: &mut Context<Self>) {
+    pub(crate) fn external_action_label(&self) -> Option<&'static str> {
+        if self.preview_request.is_some() {
+            Some("Open source file")
+        } else if self
+            .page
+            .url
+            .as_deref()
+            .is_some_and(model::allowed_navigation)
+        {
+            Some("Open in default browser")
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn open_external(&self, cx: &mut Context<Self>) {
         if let Some((_, request, _)) = &self.preview_request {
             cx.emit(BrowserEvent::OpenSource(
                 crate::markdown::content_reference::file_destination(&request.path),
@@ -803,6 +1010,10 @@ impl BrowserSurface {
         self.native.as_ref().unwrap().fixture_origin()
     }
     #[cfg(target_os = "macos")]
+    pub fn fixture_native_identity(&self) -> Option<usize> {
+        self.native.as_ref().map(|native| native.fixture_identity())
+    }
+    #[cfg(target_os = "macos")]
     pub fn fixture_overlay_visible(&self) -> bool {
         self.native.as_ref().unwrap().fixture_overlay_visible()
     }
@@ -817,6 +1028,13 @@ impl BrowserSurface {
     #[cfg(target_os = "macos")]
     pub fn fixture_focused(&self) -> bool {
         self.native.as_ref().unwrap().fixture_focused()
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_focus_state(&self) -> serde_json::Value {
+        self.native
+            .as_ref()
+            .map(|native| native.fixture_focus_state())
+            .unwrap_or_default()
     }
     #[cfg(target_os = "macos")]
     pub fn fixture_overlay_at(&self, x: f64, y: f64) -> bool {
@@ -859,6 +1077,20 @@ impl BrowserSurface {
     pub fn fixture_geometry(&self) -> (f32, f32, f32) {
         self.native.as_ref().unwrap().fixture_geometry()
     }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_inspector(&self, action: &str) -> bool {
+        self.native.as_ref().unwrap().fixture_inspector(action)
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_inspector_geometry(&self) -> serde_json::Value {
+        self.native.as_ref().unwrap().fixture_inspector_geometry()
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_set_user_agent(&self, user_agent: Option<&str>) {
+        if let Some(native) = &self.native {
+            native.fixture_set_user_agent(user_agent);
+        }
+    }
     pub fn fixture_eval(&self, script: &str) {
         #[cfg(target_os = "macos")]
         if let Some(native) = &self.native {
@@ -876,6 +1108,146 @@ impl BrowserSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn browser_transfer_rebinds_address_focus_after_source_window_closes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{ParentElement, Render, Styled, div};
+
+        struct BrowserHost(Option<Entity<BrowserSurface>>);
+        impl Render for BrowserHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+                div().size_full().children(self.0.clone())
+            }
+        }
+        fn draw(window: gpui::AnyWindowHandle, cx: &mut gpui::TestAppContext) {
+            cx.update_window(window, |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            cx.run_until_parked();
+        }
+
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::composer::init(cx, Default::default());
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let source = cx.add_window(|window, cx| {
+            BrowserHost(Some(cx.new(|cx| {
+                BrowserSurface::new(BrowserContext::default(), false, window, cx)
+            })))
+        });
+        let browser = source
+            .update(cx, |host, window, cx| {
+                window.activate_window();
+                let browser = host.0.as_ref().unwrap().clone();
+                browser.update(cx, |browser, cx| {
+                    browser.page.url = Some("https://example.com/preserved".into());
+                    browser
+                        .address
+                        .update(cx, |input, cx| input.set_text("an unfinished search", cx));
+                    browser.focus_address(window, cx);
+                });
+                browser
+            })
+            .unwrap();
+        draw(source.into(), cx);
+        browser.read_with(cx, |browser, _| assert!(browser.search.focused));
+        let destination = cx.add_window(|_, _| BrowserHost(None));
+        draw(destination.into(), cx);
+        destination
+            .update(cx, |host, window, cx| {
+                window.activate_window();
+                browser.update(cx, |browser, cx| {
+                    browser.move_to_window(window, cx).unwrap();
+                    browser.focus_address(window, cx);
+                });
+                host.0 = Some(browser.clone());
+                cx.notify();
+            })
+            .unwrap();
+        source
+            .update(cx, |host, _, cx| {
+                host.0 = None;
+                cx.notify();
+            })
+            .unwrap();
+        draw(destination.into(), cx);
+        browser.read_with(cx, |browser, cx| {
+            assert!(browser.search.focused);
+            assert_eq!(browser.address.read(cx).text(), "an unfinished search");
+            assert_eq!(
+                browser.page.url.as_deref(),
+                Some("https://example.com/preserved")
+            );
+        });
+        source
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        draw(destination.into(), cx);
+        browser.read_with(cx, |browser, _| assert!(browser.search.focused));
+        destination
+            .update(cx, |_, window, _| window.blur())
+            .unwrap();
+        draw(destination.into(), cx);
+        browser.read_with(cx, |browser, _| assert!(!browser.search.focused));
+        destination
+            .update(cx, |_, window, cx| {
+                browser.update(cx, |browser, cx| browser.focus_address(window, cx));
+            })
+            .unwrap();
+        draw(destination.into(), cx);
+        browser.read_with(cx, |browser, _| assert!(browser.search.focused));
+    }
+
+    #[gpui::test]
+    fn navigation_shortcut_hints_match_registered_keys(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut config = crate::settings::KeymapConfig::default();
+            let scenarios = [
+                ("mod-shift-r", "mod-b", "mod-r", [true, true, true]),
+                ("mod-alt-r", "mod-b", "mod-r", [true, true, true]),
+                ("mod-alt-r", "mod-[", "mod-]", [false, false, true]),
+                ("mod-alt-r", "mod-alt-r", "mod-r", [true, true, false]),
+                ("", "mod-b", "mod-r", [true, true, false]),
+                ("bogus-r", "mod-b", "mod-r", [true, true, false]),
+            ];
+            for (reload, sidebar, changes, expected) in scenarios {
+                config.browser_reload = reload.into();
+                config.toggle_sidebar = sidebar.into();
+                config.toggle_changes = changes.into();
+                cx.clear_key_bindings();
+                bind_keys(cx, &config);
+                let actions: [(NavigationShortcut, &dyn gpui::Action); 3] = [
+                    (NavigationShortcut::Back, &Back),
+                    (NavigationShortcut::Forward, &Forward),
+                    (NavigationShortcut::Reload, &Reload),
+                ];
+                for ((shortcut, action), expected) in actions.into_iter().zip(expected) {
+                    let advertised = shortcut.combo(&config);
+                    assert_eq!(advertised.is_some(), expected);
+                    let keymap = cx.key_bindings();
+                    let keymap = keymap.borrow();
+                    let bindings = keymap.bindings_for_action(action).collect::<Vec<_>>();
+                    assert_eq!(bindings.len(), usize::from(expected));
+                    if let Some(combo) = advertised {
+                        assert_eq!(bindings[0].keystrokes().len(), 1);
+                        assert_eq!(
+                            bindings[0].keystrokes()[0].unparse(),
+                            gpui::Keystroke::parse(&crate::settings::platform_combo(combo))
+                                .unwrap()
+                                .unparse(),
+                        );
+                    }
+                }
+                assert_eq!(
+                    NavigationShortcut::Reload.combo(&config),
+                    expected[2].then_some(reload),
+                );
+            }
+        });
+    }
+
     #[gpui::test]
     fn address_enter_rejects_unsupported_schemes_and_escape_restores_url(
         cx: &mut gpui::TestAppContext,

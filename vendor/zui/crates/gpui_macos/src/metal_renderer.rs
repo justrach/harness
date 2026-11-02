@@ -11,7 +11,7 @@ use gpui::{
     MonochromeSprite, PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad,
     ScaledPixels, Scene, Shadow, Size, Surface, Underline, point, size,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test-support", feature = "scene-capture"))]
 use image::RgbaImage;
 
 use core_foundation::base::TCFType;
@@ -638,6 +638,7 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        let drawable_requested_at = std::time::Instant::now();
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
@@ -647,6 +648,7 @@ impl MetalRenderer {
             );
             return;
         };
+        let drawable_wait = drawable_requested_at.elapsed();
 
         loop {
             let mut instance_buffer = self
@@ -671,11 +673,17 @@ impl MetalRenderer {
                         if let Some(instance_buffer) = instance_buffer.take() {
                             instance_buffer_pool.lock().release(instance_buffer);
                         }
-                        if gpu_stats::enabled() {
+                        if gpu_stats::enabled() || crate::frame_stats::enabled() {
                             let (start, end): (f64, f64) = unsafe {
-                                (msg_send![buffer, GPUStartTime], msg_send![buffer, GPUEndTime])
+                                (
+                                    msg_send![buffer, GPUStartTime],
+                                    msg_send![buffer, GPUEndTime],
+                                )
                             };
-                            gpu_stats::record(end - start, blur_count, device_bytes);
+                            crate::frame_stats::gpu_time(end - start);
+                            if gpu_stats::enabled() {
+                                gpu_stats::record(end - start, blur_count, device_bytes);
+                            }
                         }
                     });
                     let block = block.copy();
@@ -689,6 +697,7 @@ impl MetalRenderer {
                         command_buffer.present_drawable(drawable);
                         command_buffer.commit();
                     }
+                    crate::frame_stats::present(drawable_wait, self.presents_with_transaction);
                     return;
                 }
                 Err(err) => {
@@ -812,11 +821,27 @@ impl MetalRenderer {
         }
     }
 
+    /// Capture the current app scene through a separate readable texture.
+    /// The presented layer remains framebuffer-only in production.
+    #[cfg(feature = "scene-capture")]
+    pub fn capture_scene(&mut self, scene: &Scene) -> Result<RgbaImage> {
+        let layer = self
+            .layer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("scene capture requires a layer-backed renderer"))?;
+        let viewport = layer.drawable_size();
+        let viewport = size(
+            DevicePixels(viewport.width.ceil() as i32),
+            DevicePixels(viewport.height.ceil() as i32),
+        );
+        self.render_scene_to_image(scene, viewport)
+    }
+
     /// Renders a scene to an image without requiring a window or CAMetalLayer.
     ///
     /// This is the primary method for headless rendering. It creates an offscreen
     /// texture, renders the scene to it, and returns the pixel data as an RGBA image.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "scene-capture"))]
     pub fn render_scene_to_image(
         &mut self,
         scene: &Scene,

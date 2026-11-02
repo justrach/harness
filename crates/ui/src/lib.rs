@@ -85,6 +85,7 @@ mod transcript_paint_check;
 pub mod typography;
 pub mod visuals;
 mod workspace_links;
+pub mod write_markdown;
 
 use std::path::PathBuf;
 
@@ -149,6 +150,33 @@ struct ReopenState {
 }
 
 impl gpui::Global for ReopenState {}
+
+#[derive(Default)]
+struct WorkspaceWindows {
+    ids: std::collections::HashMap<gpui::WindowId, String>,
+    quitting: bool,
+}
+
+impl gpui::Global for WorkspaceWindows {}
+
+fn init_workspace_windows(cx: &mut App) {
+    if cx.has_global::<WorkspaceWindows>() {
+        return;
+    }
+    cx.set_global(WorkspaceWindows::default());
+    cx.on_window_closed(|cx, window| {
+        let windows = cx.global_mut::<WorkspaceWindows>();
+        let id = windows.ids.remove(&window);
+        if !windows.quitting
+            && let Some(id) = id
+        {
+            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings.remove_workspace_window(&id);
+            });
+        }
+    })
+    .detach();
+}
 
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
@@ -224,7 +252,12 @@ pub fn run_app(config: UiConfig) {
         appshots::set_enabled(ui_settings.appshots_enabled);
         terminal::panel::init(cx);
         app_menus::init(cx);
-        cx.register_url_scheme("harness").detach();
+        // An isolated local preview must never replace the installed app's link handler.
+        if !(cfg!(debug_assertions)
+            && std::env::var("HARNESS_RECONCILIATION_PREVIEW").as_deref() == Ok("1"))
+        {
+            cx.register_url_scheme("harness").detach();
+        }
 
         let state = cx.new(|_| state::AppState::new());
         perf_stats::start(data_dir.clone(), state.clone(), cx);
@@ -232,7 +265,7 @@ pub fn run_app(config: UiConfig) {
         let url_state = state.clone();
         cx.spawn(async move |cx| {
             while let Some(url) = url_rx.next().await {
-                url_state.update(cx, |state, cx| state.open_deep_link(&url, cx));
+                let _ = cx.update(|cx| open_workspace_deep_link(&url, &url_state, cx));
             }
         })
         .detach();
@@ -263,6 +296,17 @@ pub fn run_app(config: UiConfig) {
         // doc snapshots before the process exits (remote engines outlive us).
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
+            if cx.has_global::<WorkspaceWindows>() {
+                cx.global_mut::<WorkspaceWindows>().quitting = true;
+            }
+            for handle in cx.windows() {
+                if let Some(handle) = handle.downcast::<shell::Shell>() {
+                    let _ = handle.update(cx, |shell, window, cx| {
+                        shell.save_window_record(cx);
+                        save_workspace_window_geometry(shell.window_id(), window, cx);
+                    });
+                }
+            }
             settings::flush(cx);
             let shutdown =
                 quit_state.read(cx).engine().cloned().map(|handle| {
@@ -286,7 +330,17 @@ pub fn run_app(config: UiConfig) {
         let relaunch = shell::take_relaunch_marker(&config.boot().data_dir);
         let relaunched_in_background = relaunch.as_ref().is_some_and(|marker| marker.background);
         cx.set_global(shell::UpdateRelaunched(relaunch));
-        open_main_window(state, config.boot(), cx);
+        let records = settings::current(cx).restorable_workspace_windows();
+        for error in restore_startup_windows(records, |record, primary| {
+            let window_state = if primary {
+                state.clone()
+            } else {
+                cx.new(|cx| state::AppState::for_window(&state, cx))
+            };
+            open_workspace_window(window_state, config.boot(), record, cx).map(|_| ())
+        }) {
+            tracing::error!(%error, "could not open startup workspace window");
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         start_appshot_service(config.boot().data_dir, cx);
         // Native menu bar — macOS gets the standard app menu (About/Services/
@@ -303,6 +357,32 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
+/// Try each saved window once, retaining failed records in settings. If none
+/// opens, start an independent blank window instead of retrying a failed record.
+fn restore_startup_windows<E>(
+    records: Vec<settings::SavedWorkspaceWindow>,
+    mut open: impl FnMut(settings::SavedWorkspaceWindow, bool) -> Result<(), E>,
+) -> Vec<E> {
+    let mut opened = 0;
+    let mut errors = Vec::new();
+    for record in records {
+        match open(record, opened == 0) {
+            Ok(()) => opened += 1,
+            Err(error) => errors.push(error),
+        }
+    }
+    if opened == 0 {
+        let fresh = settings::SavedWorkspaceWindow {
+            id: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
+        };
+        if let Err(error) = open(fresh, true) {
+            errors.push(error);
+        }
+    }
+    errors
+}
+
 /// A clicked banner: bring Harness forward on that chat through the sidebar's
 /// own path (chat route + composer focus), reopening the main window first if
 /// ⌘W closed it.
@@ -314,11 +394,7 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
         let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
         open_main_window(state, boot, cx);
     }
-    let shell = cx
-        .windows()
-        .into_iter()
-        .find_map(|window| window.downcast::<shell::Shell>());
-    match shell {
+    match frontmost_workspace_window(cx) {
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
                 window.activate_window();
@@ -329,9 +405,37 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
     }
 }
 
-fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::DisplayId>) {
+fn frontmost_workspace_window(cx: &App) -> Option<gpui::WindowHandle<shell::Shell>> {
+    cx.window_stack()
+        .unwrap_or_else(|| cx.windows())
+        .into_iter()
+        .find_map(|window| window.downcast::<shell::Shell>())
+}
+
+fn open_workspace_deep_link(url: &str, state: &gpui::Entity<state::AppState>, cx: &mut App) {
+    cx.activate(true);
+    if frontmost_workspace_window(cx).is_none()
+        && let Some(reopen) = cx.try_global::<ReopenState>()
+    {
+        let (state, boot) = (reopen.state.clone(), reopen.boot.clone());
+        open_main_window(state, boot, cx);
+    }
+    if let Some(window) = frontmost_workspace_window(cx) {
+        let _ = window.update(cx, |shell, window, cx| {
+            window.activate_window();
+            shell.open_window_deep_link(url, cx);
+        });
+    } else {
+        state.update(cx, |state, cx| state.open_deep_link(url, cx));
+    }
+}
+
+fn restored_workspace_window_bounds(
+    saved: Option<settings::WindowGeometry>,
+    cx: &App,
+) -> (Bounds<gpui::Pixels>, Option<gpui::DisplayId>) {
     let fallback = (Bounds::centered(None, size(px(1320.), px(880.)), cx), None);
-    let Some(saved) = settings::current(cx).window_geometry else {
+    let Some(saved) = saved else {
         return fallback;
     };
     let displays = cx.displays();
@@ -358,7 +462,7 @@ fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::
         })
 }
 
-fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
+fn save_workspace_window_geometry(id: &str, window: &gpui::Window, cx: &mut App) {
     if window.is_fullscreen() {
         return;
     }
@@ -371,16 +475,144 @@ fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
     geometry.display_uuid = window.display(cx).and_then(|display| display.uuid().ok());
     if geometry.is_valid() {
         settings::update(settings::SavePolicy::Debounced, cx, |settings| {
-            settings.window_geometry = Some(geometry);
+            if let Some(record) = settings
+                .workspace_windows
+                .as_mut()
+                .and_then(|windows| windows.iter_mut().find(|window| window.id == id))
+            {
+                record.geometry = Some(geometry);
+            }
         });
     }
 }
 
-fn observe_main_window_geometry<T: 'static>(window: &mut gpui::Window, cx: &gpui::Context<T>) {
-    cx.observe_window_bounds(window, |_, window, cx| {
-        save_main_window_geometry(window, cx);
+fn observe_workspace_window_geometry<T: 'static>(
+    id: String,
+    window: &mut gpui::Window,
+    cx: &gpui::Context<T>,
+) {
+    cx.observe_window_bounds(window, move |_, window, cx| {
+        save_workspace_window_geometry(&id, window, cx);
     })
     .detach();
+}
+
+/// Resolve a release position into the target display's coordinate space.
+/// AppKit's display bounds are local to each screen, so adding the source
+/// window origin alone would place a cross-display drop on the wrong screen.
+pub(crate) fn workspace_window_geometry_at(
+    pointer: gpui::Point<gpui::Pixels>,
+    anchor: gpui::Point<gpui::Pixels>,
+    source: &gpui::Window,
+    cx: &App,
+) -> Option<settings::WindowGeometry> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        use objc2::{MainThreadOnly, msg_send};
+        use objc2_app_kit::{NSScreen, NSView};
+        use objc2_foundation::{NSPoint, ns_string};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let handle = HasWindowHandle::window_handle(source).ok()?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return None;
+        };
+        let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+        let native_window = view.window()?;
+        let global = native_window.convertPointToScreen(NSPoint::new(
+            f64::from(f32::from(pointer.x)),
+            f64::from(f32::from(source.viewport_size().height - pointer.y)),
+        ));
+        let screen = NSScreen::screens(view.mtm())
+            .iter()
+            .find(|screen| {
+                let frame = screen.frame();
+                global.x >= frame.origin.x
+                    && global.y >= frame.origin.y
+                    && global.x < frame.origin.x + frame.size.width
+                    && global.y < frame.origin.y + frame.size.height
+            })
+            .or_else(|| native_window.screen())?;
+        let frame = screen.frame();
+        let description: *mut objc2::runtime::AnyObject =
+            unsafe { msg_send![&*screen, deviceDescription] };
+        let number: *mut objc2::runtime::AnyObject =
+            unsafe { msg_send![description, objectForKey: ns_string!("NSScreenNumber")] };
+        if number.is_null() {
+            return None;
+        }
+        let number: u32 = unsafe { msg_send![number, unsignedIntValue] };
+        let display = cx
+            .displays()
+            .into_iter()
+            .find(|display| display.id() == gpui::DisplayId::new(u64::from(number)))?;
+        let mut visible = settings::WindowGeometry::from_bounds(display.visible_bounds());
+        visible.display_uuid = display.uuid().ok();
+        let bounds = source.bounds();
+        Some(
+            settings::WindowGeometry {
+                display_uuid: visible.display_uuid,
+                x: (global.x - frame.origin.x) as f32 - f32::from(anchor.x),
+                y: (frame.origin.y + frame.size.height - global.y) as f32 - f32::from(anchor.y),
+                width: bounds.size.width.into(),
+                height: bounds.size.height.into(),
+            }
+            .fit(visible),
+        )
+    }
+    #[cfg(any(not(target_os = "macos"), test))]
+    {
+        let global = source.bounds().origin + pointer;
+        let display = cx
+            .displays()
+            .into_iter()
+            .find(|display| display.bounds().contains(&global))
+            .or_else(|| source.display(cx))?;
+        let mut visible = settings::WindowGeometry::from_bounds(display.visible_bounds());
+        visible.display_uuid = display.uuid().ok();
+        let bounds = source.bounds();
+        Some(
+            settings::WindowGeometry {
+                display_uuid: visible.display_uuid,
+                x: f32::from(global.x) - f32::from(anchor.x),
+                y: f32::from(global.y) - f32::from(anchor.y),
+                width: bounds.size.width.into(),
+                height: bounds.size.height.into(),
+            }
+            .fit(visible),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn align_main_window_traffic_lights(window: &gpui::Window) {
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    let Some(button) = view
+        .window()
+        .and_then(|window| window.standardWindowButton(NSWindowButton::CloseButton))
+    else {
+        return;
+    };
+    // The drawn circle and its native frame have different sizes on some
+    // AppKit versions. Center the live frame in Harness's header control lane.
+    let height = button.frame().size.height as f32;
+    let lane = theme::Theme::TITLEBAR_HEIGHT + theme::Theme::TITLEBAR_TOP_PAD;
+    window.set_traffic_light_position(gpui::point(px(14.), px((lane - height) / 2.)));
+}
+
+#[cfg(all(target_os = "macos", feature = "browser-fixture"))]
+#[doc(hidden)]
+pub fn fixture_align_main_window_traffic_lights(window: &gpui::Window) {
+    align_main_window_traffic_lights(window);
 }
 
 fn open_main_window(
@@ -388,7 +620,40 @@ fn open_main_window(
     boot: EngineBootConfig,
     cx: &mut App,
 ) -> gpui::WindowHandle<shell::Shell> {
-    let (bounds, display_id) = restored_main_window_bounds(cx);
+    let record = settings::current(cx)
+        .restorable_workspace_windows()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| settings::SavedWorkspaceWindow {
+            id: uuid::Uuid::new_v4().to_string(),
+            ..Default::default()
+        });
+    open_workspace_window(state, boot, record, cx).expect("failed to open window")
+}
+
+/// Prepare an independently navigable native window around an already shared
+/// engine connection. The caller adopts live tab resources after this succeeds.
+pub(crate) fn open_workspace_window(
+    state: gpui::Entity<state::AppState>,
+    boot: EngineBootConfig,
+    record: settings::SavedWorkspaceWindow,
+    cx: &mut App,
+) -> Result<gpui::WindowHandle<shell::Shell>, String> {
+    init_workspace_windows(cx);
+    if record.id.trim().is_empty() {
+        return Err("The destination window identity is missing.".into());
+    }
+    if cx
+        .global::<WorkspaceWindows>()
+        .ids
+        .values()
+        .any(|id| id == &record.id)
+    {
+        return Err("That workspace window is already open.".into());
+    }
+    let (bounds, display_id) = restored_workspace_window_bounds(record.geometry, cx);
+    let window_id = record.id.clone();
+    let initial_record = record.clone();
     let handle = cx
         .open_window(
             WindowOptions {
@@ -412,8 +677,8 @@ fn open_main_window(
                 titlebar: Some(TitlebarOptions {
                     title: cfg!(target_os = "windows").then(|| "Harness".into()),
                     appears_transparent: true,
-                    // Native lights are 14px tall: top 14 → center 21, matching
-                    // the 38px titlebar row with 4px top-only content padding.
+                    // Calibrated to the live AppKit button frame below, once
+                    // the native window exists; widget sizes vary by system.
                     traffic_light_position: Some(gpui::point(px(14.), px(14.))),
                 }),
                 // Our own titlebar strip drags the window (WindowControlArea::
@@ -444,24 +709,34 @@ fn open_main_window(
                 ..Default::default()
             },
             move |window, cx| {
+                #[cfg(all(target_os = "macos", not(test)))]
+                align_main_window_traffic_lights(window);
                 window.set_rem_size(px(typography::font_size(cx).pixels()));
                 // React to the user flipping macOS between light and dark. Detached:
                 // the subscription lives as long as the window does, and the window
                 // owns nothing that would drop it early.
                 appearance::observe_window(window, cx).detach();
                 window.on_next_frame(|_, _| perf_stats::first_window_frame());
+                let id = record.id.clone();
                 let shell = cx.new(|cx| {
-                    observe_main_window_geometry(window, cx);
-                    shell::Shell::new(state, boot, cx)
+                    observe_workspace_window_geometry(id.clone(), window, cx);
+                    shell::Shell::new_for_window(state, boot, record, cx)
                 });
-                save_main_window_geometry(window, cx);
+                settings::update(settings::SavePolicy::Debounced, cx, |settings| {
+                    if !settings.workspace_windows.as_ref().is_some_and(|windows| {
+                        windows.iter().any(|window| window.id == initial_record.id)
+                    }) {
+                        settings.upsert_workspace_window(initial_record);
+                    }
+                });
+                save_workspace_window_geometry(&id, window, cx);
                 let weak_shell = shell.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
                     let should_close = weak_shell
                         .update(cx, |shell, cx| shell.prepare_window_close(cx))
                         .unwrap_or(true);
                     if should_close {
-                        save_main_window_geometry(window, cx);
+                        save_workspace_window_geometry(&id, window, cx);
                         settings::flush(cx);
                     }
                     should_close
@@ -469,12 +744,15 @@ fn open_main_window(
                 shell
             },
         )
-        .expect("failed to open window");
+        .map_err(|error| format!("Could not create a Harness window: {error}"))?;
+    cx.global_mut::<WorkspaceWindows>()
+        .ids
+        .insert(handle.window_id(), window_id);
     // Belt and braces: assert the blur once the window actually exists. The
     // `WindowOptions` value is applied during creation, before the view is
     // attached; re-pushing it here means a window is never left opaque.
     appearance::reapply_window_background(cx);
-    handle
+    Ok(handle)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -617,5 +895,101 @@ fn deliver_appshot(
     });
     if captured {
         appshots::foreground_after_capture();
+    }
+}
+
+#[cfg(feature = "appshots-fixture")]
+pub mod menu_review;
+
+#[cfg(test)]
+mod startup_window_tests {
+    use super::*;
+
+    fn record(id: &str) -> settings::SavedWorkspaceWindow {
+        settings::SavedWorkspaceWindow {
+            id: id.into(),
+            last_chat_id: Some(format!("{id}-chat")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn startup_restore_opens_fresh_window_after_all_saved_windows_fail() {
+        let failed = vec![record("left"), record("right")];
+        let mut settings = settings::UiSettings::default();
+        settings.workspace_windows = Some(failed.clone());
+        let mut attempts = Vec::new();
+        let errors = restore_startup_windows(
+            settings.restorable_workspace_windows(),
+            |record, primary| {
+                attempts.push((record.id.clone(), primary));
+                if failed.iter().any(|saved| saved.id == record.id) {
+                    return Err(record.id);
+                }
+                assert!(uuid::Uuid::parse_str(&record.id).is_ok());
+                assert!(record.geometry.is_none());
+                assert!(record.chat_tabs.is_empty() && record.last_chat_id.is_none());
+                settings.upsert_workspace_window(record);
+                Ok(())
+            },
+        );
+        assert_eq!(errors, ["left", "right"]);
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(
+            &attempts[..2],
+            &[("left".into(), true), ("right".into(), true)]
+        );
+        assert!(
+            attempts[2].1,
+            "the fresh window owns the original runtime view"
+        );
+        let saved = settings.restorable_workspace_windows();
+        assert_eq!(
+            &saved[..2],
+            failed.as_slice(),
+            "failed records remain recoverable"
+        );
+        assert_eq!(saved.len(), 3);
+    }
+
+    #[test]
+    fn startup_restore_keeps_partial_success_without_an_extra_blank_window() {
+        let mut attempts = Vec::new();
+        let errors = restore_startup_windows(
+            vec![record("failed"), record("first"), record("second")],
+            |record, primary| {
+                attempts.push((record.id.clone(), primary));
+                if record.id == "failed" {
+                    Err("unavailable")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(errors, ["unavailable"]);
+        assert_eq!(
+            attempts,
+            [
+                ("failed".into(), true),
+                ("first".into(), true),
+                ("second".into(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_restore_tries_an_empty_window_once_when_no_records_exist() {
+        let mut attempts = 0;
+        let errors = restore_startup_windows(Vec::new(), |record, primary| {
+            attempts += 1;
+            assert!(primary && record.geometry.is_none());
+            assert!(uuid::Uuid::parse_str(&record.id).is_ok());
+            Err("native window unavailable")
+        });
+        assert_eq!(
+            attempts, 1,
+            "a native failure must not cause an unbounded retry"
+        );
+        assert_eq!(errors, ["native window unavailable"]);
     }
 }

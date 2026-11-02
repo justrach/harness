@@ -11,3 +11,8 @@ replayed while bounds repeat), the per-size native font in
 `crates/gpui/src/scene.rs` are adapted from the Apache-2.0 GPUI fork
 https://github.com/longbridge/gpui-fast at 8eed010 (bounds tree), a9a9533
 (fonts) and ceb4795 (sprites).
+
+`crates/gpui/src/path_cache.rs` (tessellated path shapes kept from one build
+to the next, at most 2048 shapes and 16 MiB a thread) and its hook in
+`PathBuilder::build` (`crates/gpui/src/path_builder.rs`) are adapted from the
+same fork at f0572b0 (`crates/gpui/src/fast/path_cache.rs` and its tests).

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-use harness_proto::{Model, ReasoningLevel};
+use harness_proto::{Model, ReasoningLevel, context_label};
 use serde_json::{Value, json};
 
 use super::{AcpHarness, initialize_params, reasoning_from_value, request_draining};
@@ -290,10 +290,7 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
                 reasoning_levels.push(level);
             }
         }
-        let description = match row.get("context").and_then(Value::as_u64) {
-            Some(context) => format!("{provider} · {}k context", context / 1000),
-            None => provider.to_owned(),
-        };
+        let context = row.get("context").and_then(Value::as_u64);
         let text = |key: &str| {
             row.get(key)
                 .and_then(Value::as_str)
@@ -303,11 +300,12 @@ fn models_from_acp(catalog: &Value) -> Result<Vec<Model>, HarnessError> {
         let model = Model {
             id: format!("{provider}/{name}"),
             label: name.to_owned(),
-            description: Some(description),
+            description: Some(describe(provider, context)),
             reasoning_levels,
             options: Vec::new(),
             maker: text("maker"),
             billing: text("cost"),
+            context,
         };
         if current.is_some_and(|c| {
             c.get("provider").and_then(Value::as_str) == Some(provider)
@@ -445,6 +443,14 @@ fn parse_provider_row(line: &str) -> Option<(String, Vec<String>)> {
         .map(str::to_string)
         .collect();
     Some((provider, models))
+}
+
+/// A graff row's picker tagline: `codex · 272k context`, `anthropic · 1M context`.
+fn describe(provider: &str, context: Option<u64>) -> String {
+    match context {
+        Some(context) => format!("{provider} · {} context", context_label(context)),
+        None => provider.to_owned(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -587,14 +593,12 @@ fn models_from_seats(
             Model {
                 id,
                 label: seat.name.clone(),
-                description: Some(match seat.context {
-                    Some(context) => format!("{} · {}k context", seat.provider, context / 1000),
-                    None => seat.provider.clone(),
-                }),
+                description: Some(describe(&seat.provider, seat.context)),
                 reasoning_levels: Vec::new(),
                 options: Vec::new(),
                 maker: None,
                 billing: None,
+                context: seat.context,
             }
         })
         .collect()
@@ -647,14 +651,12 @@ fn models_from_schema(
         .map(|(_, _, provider, name, context)| Model {
             id: name.to_string(),
             label: name.to_string(),
-            description: Some(match context {
-                Some(context) => format!("{provider} · {}k context", context / 1000),
-                None => provider.to_string(),
-            }),
+            description: Some(describe(provider, context)),
             reasoning_levels: Vec::new(),
             options: Vec::new(),
             maker: None,
             billing: None,
+            context,
         })
         .collect()
 }
@@ -717,9 +719,11 @@ mod tests {
         let models = models_from_schema(&schema, &providers, default.as_deref(), &advertised);
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["claude-sonnet-5", "gpt-5.6-sol"]);
+        assert_eq!(models[0].context, Some(1_000_000));
+        assert_eq!(models[1].context, Some(1_050_000));
         assert_eq!(
             models[1].description.as_deref(),
-            Some("codex · 1050k context")
+            Some("codex · 1.05M context")
         );
     }
 
@@ -751,7 +755,7 @@ mod tests {
                 .unwrap()
                 .description
                 .as_deref(),
-            Some("codegraff · 1050k context")
+            Some("codegraff · 1.05M context")
         );
     }
 
@@ -903,6 +907,45 @@ openrouter:\n\
                 (Some("credits"), None),
                 (None, None)
             ]
+        );
+    }
+
+    #[test]
+    fn acp_catalog_keeps_each_rows_context() {
+        let catalog = json!({"models": [
+            {"provider": "claude-agent", "name": "claude-opus-5-5", "authenticated": true,
+             "context": 1000000},
+            {"provider": "codex", "name": "gpt-6-sol", "authenticated": true,
+             "context": 272000},
+            {"provider": "lmstudio", "name": "local", "authenticated": true}
+        ]});
+        let models = models_from_acp(&catalog).unwrap();
+        let rows: Vec<_> = models
+            .iter()
+            .map(|m| (m.context, m.description.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some(1_000_000), Some("claude-agent · 1M context")),
+                (Some(272_000), Some("codex · 272k context")),
+                (None, Some("lmstudio"))
+            ]
+        );
+    }
+
+    #[test]
+    fn listing_seats_carry_context() {
+        let seats = vec![Seat {
+            provider: "codegraff".into(),
+            name: "gpt-6-sol".into(),
+            context: Some(1_050_000),
+        }];
+        let models = models_from_seats(&seats, &["codegraff".into()], None, &[]);
+        assert_eq!(models[0].context, Some(1_050_000));
+        assert_eq!(
+            models[0].description.as_deref(),
+            Some("codegraff · 1.05M context")
         );
     }
 }

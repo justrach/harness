@@ -1,5 +1,22 @@
 use super::*;
-use crate::shell::chat_tabs::navigation_tests::fixture;
+// These compatibility tests seed the complete project catalogue directly.
+// Startup now waits for both catalogues, not just the conversations frame.
+fn fixture(
+    cx: &mut gpui::TestAppContext,
+    split: bool,
+    parked: Option<bool>,
+) -> (tempfile::TempDir, gpui::WindowHandle<Shell>) {
+    let result = crate::shell::chat_tabs::navigation_tests::fixture(cx, split, parked);
+    result
+        .1
+        .update(cx, |shell, _, cx| {
+            shell
+                .state
+                .update(cx, |state, _| state.spaces_synced = true);
+        })
+        .unwrap();
+    result
+}
 
 mod navigation_edges;
 mod parked_lifecycle;
@@ -22,8 +39,9 @@ fn archived_session_survives_split_focus_and_tab_switching(cx: &mut gpui::TestAp
                     .unwrap()
                     .archived = true;
             });
-            // Cmd+D parks the archived conversation in the original pane.
-            shell.split_chat(SplitAxis::Horizontal, window, cx);
+            // Exercise the retained legacy split migration path explicitly. Cmd+D
+            // now creates a workspace panel, which has separate coverage.
+            shell.split_chat_opening(SplitAxis::Horizontal, None, window, cx);
             shell.chat_split_on_state_changed(cx);
             assert_eq!(
                 shell.chat_split.as_ref().unwrap().panes[0].as_deref(),
@@ -49,7 +67,7 @@ fn archived_session_survives_split_focus_and_tab_switching(cx: &mut gpui::TestAp
             }
 
             // Parking and reloading the whole tab must retain the peer too.
-            shell.new_chat_tab(None, window, cx);
+            shell.new_chat_tab(Some("target".into()), window, cx);
             shell.switch_chat_tab(0, window, cx);
             shell.chat_split_on_state_changed(cx);
             assert_eq!(
@@ -122,7 +140,7 @@ fn deleted_session_still_clears_its_split_pane(cx: &mut gpui::TestAppContext) {
     let (_dir, window) = fixture(cx, false, None);
     window
         .update(cx, |shell, window, cx| {
-            shell.split_chat(SplitAxis::Horizontal, window, cx);
+            shell.split_chat_opening(SplitAxis::Horizontal, None, window, cx);
             shell.state.update(cx, |state, _| {
                 state.chats.retain(|chat| chat.id != "current");
             });
@@ -138,4 +156,20 @@ fn deleted_session_still_clears_its_split_pane(cx: &mut gpui::TestAppContext) {
             assert!(!shell.peer_chat_views.contains_key("current"));
         })
         .unwrap();
+}
+
+// Assert the rendered workspace's placement rather than superseded legacy
+// bookkeeping that remains available for backwards-compatible settings.
+fn workspace_chat_ids(shell: &Shell, cx: &App) -> Vec<String> {
+    shell
+        .panel_layout(cx)
+        .unwrap()
+        .panels
+        .iter()
+        .flat_map(|panel| &panel.tabs)
+        .filter_map(|tab| match tab {
+            crate::shell::workspace_panels::PanelTab::Chat(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
 }

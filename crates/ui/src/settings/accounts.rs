@@ -225,6 +225,66 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
         .unwrap_or("graff")
 }
 
+const CLAUDE_AGENT_ID: &str = "claude-agent";
+
+/// (provider id — `None` for the shared Codex login —, name, status, signed in).
+type GraffEntry<'a> = (Option<&'a str>, &'a str, String, bool);
+
+fn graff_provider_status(provider: &GraffLoginProvider) -> String {
+    match (provider.signed_in, &provider.account) {
+        (true, Some(account)) if provider.id == CLAUDE_AGENT_ID => {
+            format!("Signed in as {account} · your Claude plan")
+        }
+        (true, None) if provider.id == CLAUDE_AGENT_ID => {
+            "Uses your Claude Code login · your Claude plan".into()
+        }
+        (false, _) if provider.id == CLAUDE_AGENT_ID => {
+            "Use your Claude plan through Claude Code".into()
+        }
+        (true, Some(account)) => format!("Signed in as {account}"),
+        (true, None) => "Signed in on this device".into(),
+        (false, _) => "Not signed in".into(),
+    }
+}
+
+/// The Accounts list leads with Claude Agent, then preserves the engine's
+/// order. ChatGPT has its own section; legacy Codex stays after the first
+/// remaining provider. This only changes display order, never the listing.
+fn graff_provider_entries<'a>(
+    providers: &'a [GraffLoginProvider],
+    codex: GraffEntry<'a>,
+) -> Vec<GraffEntry<'a>> {
+    let (claude_agent, rest): (Vec<_>, Vec<_>) = providers
+        .iter()
+        .filter(|provider| provider.id != "chatgpt-new")
+        .partition(|provider| provider.id == CLAUDE_AGENT_ID);
+    let entry = |provider: &'a GraffLoginProvider| -> GraffEntry<'a> {
+        (
+            Some(provider.id.as_str()),
+            provider.name.as_str(),
+            graff_provider_status(provider),
+            provider.signed_in,
+        )
+    };
+    let mut entries: Vec<GraffEntry<'a>> = rest.into_iter().map(entry).collect();
+    entries.insert(entries.len().min(1), codex);
+    claude_agent.into_iter().map(entry).chain(entries).collect()
+}
+
+/// Reuse the same provider marks as the model picker. A future, unknown
+/// provider keeps its initial instead of borrowing another provider's logo.
+fn graff_provider_icon(provider: Option<&str>) -> Option<&'static str> {
+    use crate::icons;
+    match provider {
+        Some("claude-agent" | "anthropic") => Some(icons::CLAUDE_MARK),
+        Some("chatgpt-new") | None => Some(icons::OPENAI_MARK),
+        Some("xai") => Some(icons::GROK_MARK),
+        Some("kimi") => Some(icons::MAKER_KIMI),
+        Some("zai") => Some(icons::MAKER_ZAI),
+        _ => None,
+    }
+}
+
 /// What "Update key" shows: graff keeps API keys on the computer it runs on
 /// (its keychain, a `<PROVIDER>_API_KEY` variable, or the key the metered
 /// Console sign-in minted), and the error names which one it used.
@@ -368,9 +428,18 @@ fn scene_login_start() -> Option<AgentLoginStart> {
     serde_json::from_value(fixture.get("loginStart")?.clone()).ok()
 }
 
+/// A sidebar navigation request owns its own one-shot scroll and focus. A
+/// newer request cannot be replaced by a callback queued for another computer.
+struct CloudComputerTarget {
+    id: String,
+    pending_scroll: std::rc::Rc<std::cell::Cell<bool>>,
+    focus: gpui::FocusHandle,
+}
+
 pub struct AccountsPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
+    cloud_computer_target: Option<CloudComputerTarget>,
     /// Which device's logins are shown; `None` = this device (no passthrough).
     /// Retargeted by the page-header device switcher (harness parity: the
     /// accounts RPCs are relay-forwardable, CLI logins are per-device).
@@ -445,6 +514,7 @@ impl AccountsPage {
         let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
+            cloud_computer_target: None,
             target_device: None,
             relay_capture: None,
             relay_capture_task: None,
@@ -489,6 +559,89 @@ impl AccountsPage {
         // "Usage unavailable" is reserved for a probe that genuinely failed.
         page.load(force_usage_for(LoadTrigger::Mount), cx);
         page
+    }
+
+    /// Navigate to the exact account-owned computer, without starting it or
+    /// changing the selected chat/device. Its existing Settings actions stay put.
+    pub(crate) fn reveal_cloud_computer(
+        &mut self,
+        sandbox_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = cx.focus_handle().tab_stop(true);
+        window.focus(&focus, cx);
+        self.cloud_computer_target = Some(CloudComputerTarget {
+            id: sandbox_id.to_owned(),
+            pending_scroll: std::rc::Rc::new(std::cell::Cell::new(true)),
+            focus,
+        });
+        // A previously armed deletion must not carry into a fresh navigation.
+        self.sandbox_confirm_delete = None;
+        cx.notify();
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub(crate) fn fixture_revealed_cloud_computer(&self) -> Option<&str> {
+        self.cloud_computer_target
+            .as_ref()
+            .map(|target| target.id.as_str())
+    }
+
+    /// Measure the real row, including all preceding asynchronous sections.
+    /// Scroll on the next frame rather than mutating layout during prepaint.
+    fn cloud_target_anchor(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let target = self.cloud_computer_target.as_ref()?;
+        let request = target.pending_scroll.clone();
+        let focus = target.focus.clone();
+        let scroll = self.scroll.scroll.clone();
+        let page = cx.weak_entity();
+        Some(
+            gpui::canvas(
+                move |bounds, window, _| {
+                    if !request.replace(false) {
+                        return;
+                    }
+                    let offset = gpui::point(
+                        scroll.offset().x,
+                        (scroll.offset().y + scroll.bounds().top() + px(48.0) - bounds.top())
+                            .min(px(0.0)),
+                    );
+                    let request = request.clone();
+                    let focus = focus.clone();
+                    let scroll = scroll.clone();
+                    let page = page.clone();
+                    window.on_next_frame(move |window, cx| {
+                        let _ = page.update(cx, |page, cx| {
+                            if page.cloud_computer_target.as_ref().is_some_and(|target| {
+                                std::rc::Rc::ptr_eq(&target.pending_scroll, &request)
+                            }) {
+                                scroll.set_offset(offset);
+                                window.focus(&focus, cx);
+                                cx.notify();
+                            }
+                        });
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+            .into_any_element(),
+        )
+    }
+
+    fn cloud_target_unavailable(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let target = self.cloud_computer_target.as_ref()?;
+        Some(
+            widgets::warning_strip(theme, "This computer is no longer in the current account’s list. Refresh Accounts to check again.")
+                .id("cloud-computer-target-unavailable")
+                .debug_selector(|| "cloud-computer-target-unavailable".into())
+                .relative()
+                .track_focus(&target.focus)
+                .children(self.cloud_target_anchor(cx))
+                .into_any_element(),
+        )
     }
 
     /// Retarget the page at another device's logins: every accounts RPC is
@@ -596,7 +749,7 @@ impl AccountsPage {
                 } else {
                     gpui::transparent_black()
                 })
-                .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
+                .when(!open, |el| el.hover(|s| s.bg(theme.element_hover)))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _, _, _| this.device_menu.note_trigger_press()),
@@ -1011,12 +1164,22 @@ impl AccountsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let list = self.state.read(cx).cloud_sandboxes()?.clone();
-        if !list.enabled {
-            return None;
-        }
+        let Some(list) = self
+            .state
+            .read(cx)
+            .cloud_sandboxes()
+            .cloned()
+            .filter(|list| list.enabled)
+        else {
+            return self.cloud_target_unavailable(theme, cx);
+        };
+        let target_missing = self
+            .cloud_computer_target
+            .as_ref()
+            .is_some_and(|target| !list.sandboxes.iter().any(|sandbox| sandbox.id == target.id));
         let now = Utc::now();
         let rows = list.sandboxes.iter().enumerate().map(|(ix, sandbox)| {
+            let target = self.cloud_computer_target.as_ref().filter(|target| target.id == sandbox.id);
             let busy = self
                 .sandbox_busy
                 .as_ref()
@@ -1113,6 +1276,17 @@ impl AccountsPage {
             };
             div()
                 .id(("codegraff-sandbox", ix))
+                .debug_selector({
+                    let id = sandbox.id.clone();
+                    move || format!("codegraff-sandbox-{id}")
+                })
+                .relative()
+                .when_some(target, |row, target| {
+                    row.bg(theme.accent_wash)
+                        .track_focus(&target.focus)
+                        .aria_label(format!("Cloud computer: {}", sandbox_title(sandbox)))
+                        .children(self.cloud_target_anchor(cx))
+                })
                 .px(px(20.0))
                 .py(px(10.0))
                 .flex()
@@ -1130,7 +1304,7 @@ impl AccountsPage {
                         .child(
                             div()
                                 .mt(px(2.0))
-                                .truncate()
+                                .when(target.is_none(), |text| text.truncate())
                                 .text_size(crate::typography::ui_rems(11.5))
                                 .text_color(theme.text_muted)
                                 .child(sandbox_detail(sandbox, now)),
@@ -1260,6 +1434,9 @@ impl AccountsPage {
                 .child(
                     widgets::section_card(theme)
                         .mt(px(8.0))
+                        .when(target_missing, |card| {
+                            card.children(self.cloud_target_unavailable(theme, cx))
+                        })
                         .children(rows)
                         .child(create)
                         .child(
@@ -1467,11 +1644,9 @@ impl AccountsPage {
     ) {
         self.set_target_device(target, cx);
         self.key_notice = None;
-        if let Some(harness) = harness.filter(|harness| {
-            PROVIDERS
-                .iter()
-                .any(|(provider, _, _)| provider == harness)
-        }) {
+        if let Some(harness) =
+            harness.filter(|harness| PROVIDERS.iter().any(|(provider, _, _)| provider == harness))
+        {
             self.start_login(harness, cx);
         }
         cx.notify();
@@ -2021,7 +2196,7 @@ impl AccountsPage {
                         .text_color(theme.text_muted)
                         .cursor_pointer()
                         .when(is_busy, |el| el.opacity(0.5))
-                        .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                        .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.account_action(methods::FORGET_AGENT_ACCOUNT, &forget_account, cx);
                         }))
@@ -2326,22 +2501,8 @@ impl AccountsPage {
                     .snapshot
                     .ready()
                     .is_some_and(|snapshot| openai_login(snapshot).0);
-                // (provider id — `None` for the shared Codex login —, name,
-                // status line, signed in)
-                let mut entries: Vec<(Option<&str>, &str, String, bool)> = providers
-                    .iter()
-                    .filter(|p| p.id != "chatgpt-new")
-                    .map(|p| {
-                        let status = match (p.signed_in, &p.account) {
-                            (true, Some(account)) => format!("Signed in as {account}"),
-                            (true, None) => "Signed in on this device".to_string(),
-                            (false, _) => "Not signed in".to_string(),
-                        };
-                        (Some(p.id.as_str()), p.name.as_str(), status, p.signed_in)
-                    })
-                    .collect();
-                entries.insert(
-                    entries.len().min(1),
+                let entries = graff_provider_entries(
+                    providers,
                     (None, "ChatGPT (old Codex)", openai, openai_signed_in),
                 );
                 div()
@@ -2373,12 +2534,20 @@ impl AccountsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let initial: SharedString = name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
+        let avatar: AnyElement = match graff_provider_icon(provider) {
+            Some(mark) => crate::icons::icon(mark)
+                .size(px(18.0))
+                .text_color(theme.text_muted)
+                .into_any_element(),
+            None => div()
+                .child(SharedString::from(
+                    name.chars()
+                        .next()
+                        .map(|c| c.to_uppercase().to_string())
+                        .unwrap_or_else(|| "?".into()),
+                ))
+                .into_any_element(),
+        };
         let busy = provider.is_some() && self.busy_graff.as_deref() == provider;
         let actions = provider.map(str::to_string).map(|id| {
             let sign_out_id = id.clone();
@@ -2397,7 +2566,7 @@ impl AccountsPage {
                             .text_color(theme.text_muted)
                             .cursor_pointer()
                             .when(busy, |el| el.opacity(0.5))
-                            .hover(|s| s.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                            .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.sign_out_graff(sign_out_id.clone(), cx);
                             }))
@@ -2452,7 +2621,7 @@ impl AccountsPage {
                     .text_size(crate::typography::ui_rems(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
-                    .child(initial),
+                    .child(avatar),
             )
             .child(
                 div()
@@ -2764,9 +2933,9 @@ impl AccountsPage {
                             .id("login-copy-url")
                             .flex_none()
                             .py(px(3.0))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.copy_login_url(copy_url.clone(), cx)
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.copy_login_url(copy_url.clone(), cx),
+                            )),
                         ),
                 )
         };
@@ -3450,6 +3619,222 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
 
+    #[gpui::test]
+    fn cloud_computer_settings_reveals_exact_row_without_reordering(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let ids: Vec<String> = (0..20).map(|ix| format!("computer-{ix}")).collect();
+        state.update(cx, |state, cx| {
+            state.apply_cloud_sandboxes(
+                Some(crate::codegraff_sandboxes::CodegraffSandboxes {
+                    enabled: true,
+                    sandboxes: ids
+                        .iter()
+                        .map(|id| crate::codegraff_sandboxes::CodegraffSandbox {
+                            id: id.clone(),
+                            name: Some(id.clone()),
+                            provider: "fleet".into(),
+                            state: "paused".into(),
+                            harness: true,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }),
+                cx,
+            )
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| AccountsPage::new(state.clone(), cx));
+        cx.simulate_resize(gpui::size(px(980.0), px(700.0)));
+        page.update_in(cx, |page, window, cx| {
+            page.reveal_cloud_computer("computer-17", window, cx)
+        });
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+                // The test platform has no native frame loop. Deliver the
+                // callback that applies the row's measured scroll and focus.
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+        let target = cx
+            .debug_bounds("codegraff-sandbox-computer-17")
+            .expect("the chosen computer is rendered");
+        page.read_with(cx, |page, cx| {
+            assert_eq!(
+                page.cloud_computer_target.as_ref().unwrap().id,
+                "computer-17"
+            );
+            assert!(page.scroll.scroll.offset().y < px(0.0));
+            let viewport = page.scroll.scroll.bounds();
+            assert!(
+                target.top() >= viewport.top() && target.bottom() <= viewport.bottom(),
+                "target row is fully visible: {target:?} in {viewport:?}"
+            );
+            assert_eq!(
+                page.state
+                    .read(cx)
+                    .cloud_sandboxes()
+                    .unwrap()
+                    .sandboxes
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<Vec<_>>(),
+                ids
+            );
+            assert!(page.sandbox_busy.is_none());
+        });
+        // Two requests before paint must land on the newer exact ID, never the
+        // previous computer or whichever row happens to have the same index.
+        page.update_in(cx, |page, window, cx| {
+            page.reveal_cloud_computer("computer-12", window, cx);
+            page.reveal_cloud_computer("computer-3", window, cx);
+        });
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+                // The test platform has no native frame loop. Deliver the
+                // callback that applies the row's measured scroll and focus.
+                window.simulate_next_frame(cx);
+            });
+            cx.run_until_parked();
+        }
+        let target = cx.debug_bounds("codegraff-sandbox-computer-3").unwrap();
+        page.read_with(cx, |page, _| {
+            let viewport = page.scroll.scroll.bounds();
+            assert!(target.top() >= viewport.top() && target.bottom() <= viewport.bottom());
+        });
+    }
+
+    fn graff_row(id: &str, signed_in: bool, account: Option<&str>) -> GraffLoginProvider {
+        GraffLoginProvider {
+            id: id.into(),
+            name: id.into(),
+            signed_in,
+            account: account.map(Into::into),
+            plan_usage: None,
+        }
+    }
+
+    #[test]
+    fn graff_provider_order_leads_with_claude_without_reordering_other_logins() {
+        let providers: Vec<_> = GRAFF_LOGIN_PROVIDERS
+            .iter()
+            .map(|(id, _)| graff_row(id, false, None))
+            .collect();
+        let entries = graff_provider_entries(
+            &providers,
+            (None, "ChatGPT (old Codex)", "legacy".into(), false),
+        );
+        let ids: Vec<_> = entries.iter().map(|entry| entry.0).collect();
+        assert_eq!(
+            ids,
+            [
+                Some("claude-agent"),
+                Some("xai"),
+                None,
+                Some("kimi"),
+                Some("zai"),
+                Some("anthropic"),
+            ]
+        );
+        // Filtering/reordering the display must not mutate the engine's rows.
+        assert_eq!(
+            providers
+                .iter()
+                .map(|provider| provider.id.as_str())
+                .collect::<Vec<_>>(),
+            GRAFF_LOGIN_PROVIDERS
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>()
+        );
+
+        // An unavailable Claude Agent is not invented, and an unfamiliar
+        // provider keeps its relative position rather than disappearing.
+        let providers = [
+            graff_row("future", false, None),
+            graff_row("kimi", true, None),
+        ];
+        let entries = graff_provider_entries(&providers, (None, "Codex", "legacy".into(), false));
+        assert_eq!(
+            entries.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+            [Some("future"), None, Some("kimi")]
+        );
+        assert_eq!(
+            graff_provider_entries(&[], (None, "Codex", "legacy".into(), false)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn graff_provider_status_explains_claude_plan_without_changing_other_statuses() {
+        assert_eq!(
+            graff_provider_status(&graff_row("claude-agent", false, None)),
+            "Use your Claude plan through Claude Code"
+        );
+        assert_eq!(
+            graff_provider_status(&graff_row("claude-agent", true, None)),
+            "Uses your Claude Code login · your Claude plan"
+        );
+        assert_eq!(
+            graff_provider_status(&graff_row(
+                "claude-agent",
+                true,
+                Some("sample@example.test")
+            )),
+            "Signed in as sample@example.test · your Claude plan"
+        );
+        assert_eq!(
+            graff_provider_status(&graff_row("xai", true, None)),
+            "Signed in on this device"
+        );
+        assert_eq!(
+            graff_provider_status(&graff_row("kimi", false, None)),
+            "Not signed in"
+        );
+        assert_eq!(
+            graff_provider_status(&graff_row("anthropic", true, Some("sample@example.test"))),
+            "Signed in as sample@example.test"
+        );
+    }
+
+    #[test]
+    fn graff_provider_icons_cover_current_logins_and_legacy_codex() {
+        use crate::icons;
+        for (id, _) in GRAFF_LOGIN_PROVIDERS {
+            assert!(
+                graff_provider_icon(Some(id)).is_some(),
+                "missing brand mark for {id}"
+            );
+        }
+        assert_eq!(
+            graff_provider_icon(Some("claude-agent")),
+            Some(icons::CLAUDE_MARK)
+        );
+        assert_eq!(
+            graff_provider_icon(Some("anthropic")),
+            Some(icons::CLAUDE_MARK)
+        );
+        assert_eq!(
+            graff_provider_icon(Some("chatgpt-new")),
+            Some(icons::OPENAI_MARK)
+        );
+        assert_eq!(graff_provider_icon(None), Some(icons::OPENAI_MARK));
+        assert_eq!(graff_provider_icon(Some("xai")), Some(icons::GROK_MARK));
+        assert_eq!(graff_provider_icon(Some("kimi")), Some(icons::MAKER_KIMI));
+        assert_eq!(graff_provider_icon(Some("zai")), Some(icons::MAKER_ZAI));
+        assert_eq!(graff_provider_icon(Some("future-provider")), None);
+    }
+
     #[test]
     fn chatgpt_row_is_ready_only_with_plan_usage() {
         let row = |signed_in, plan_usage, account: Option<&str>| GraffLoginProvider {
@@ -3701,3 +4086,9 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("../menu_review/accounts.rs");
+
+#[cfg(feature = "appshots-fixture")]
+mod provider_fixture;

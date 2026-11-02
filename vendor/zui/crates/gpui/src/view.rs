@@ -1,7 +1,8 @@
 use crate::{
-    AnyElement, AnyEntity, AnyWeakEntity, App, Bounds, ContentMask, Context, Element, ElementId,
-    Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, PaintIndex,
-    Pixels, PrepaintStateIndex, Render, RenderOnce, Style, StyleRefinement, TextStyle, WeakEntity,
+    AnyElement, AnyEntity, AnyWeakEntity, App, Bounds, ContentMask, Context, DefiniteLength,
+    Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, Length, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
+    StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
 use anyhow::Result;
@@ -232,6 +233,21 @@ impl<T: Render> Entity<T> {
     pub fn cached(self, style: StyleRefinement) -> ViewElement<Entity<T>> {
         ViewElement::new(self).cached(style)
     }
+
+    /// Like [`Entity::cached`], for a view whose height follows its content
+    /// (a text box that grows as it is typed into). A frame that renders the
+    /// view lays it out from its content inside `style`, like an uncached
+    /// child; a frame that reuses it keeps the size it measured then.
+    ///
+    /// `style` must give the view a definite width: the reused height is only
+    /// valid for the width it was measured at. Without one, or when `style`
+    /// changes, the view renders again.
+    #[track_caller]
+    pub fn cached_measured(self, style: StyleRefinement) -> ViewElement<Entity<T>> {
+        let mut element = ViewElement::new(self).cached(style);
+        element.measured = true;
+        element
+    }
 }
 
 /// The element type for [`View`] implementations. Wraps a `View` and hooks it
@@ -241,6 +257,8 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
+    /// Cached, but sized from its content (see [`Entity::cached_measured`]).
+    measured: bool,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
 }
@@ -253,6 +271,7 @@ impl<V: View> ViewElement<V> {
         ViewElement {
             entity_id,
             cached_style: None,
+            measured: false,
             view: Some(view),
             #[cfg(debug_assertions)]
             source: core::panic::Location::caller(),
@@ -289,14 +308,31 @@ struct ViewElementState {
     accessed_entities: FxHashSet<EntityId>,
 }
 
+/// A measured view's style and the size its content was laid out at.
+#[derive(Default)]
+struct MeasuredViewSize(Option<(StyleRefinement, Size<Pixels>)>);
+
+/// Whether a reused measured view's size still holds: only for a fixed width.
+fn has_definite_width(style: &StyleRefinement) -> bool {
+    matches!(
+        style.size.width,
+        Some(Length::Definite(DefiniteLength::Absolute(_)))
+    )
+}
+
 struct ViewElementCacheKey {
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
 }
 
+/// What [`ViewElement::request_layout`] hands to prepaint: the element when
+/// it was rendered during layout, and, for a measured view rendered there,
+/// the entities that render read.
+type ViewLayoutState = (Option<AnyElement>, Option<FxHashSet<EntityId>>);
+
 impl<V: View> Element for ViewElement<V> {
-    type RequestLayoutState = Option<AnyElement>;
+    type RequestLayoutState = ViewLayoutState;
     type PrepaintState = Option<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
@@ -313,7 +349,7 @@ impl<V: View> Element for ViewElement<V> {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
@@ -323,11 +359,55 @@ impl<V: View> Element for ViewElement<V> {
             window.with_rendered_view(entity_id, |window| {
                 let caching_disabled = window.is_inspector_picking(cx);
                 match self.cached_style.as_ref() {
+                    Some(style) if !caching_disabled && self.measured => {
+                        let mut root_style = Style::default();
+                        root_style.refine(style);
+                        let measured = window.with_element_state::<MeasuredViewSize, _>(
+                            id.unwrap(),
+                            |state, _| {
+                                let state = state.unwrap_or_default();
+                                let size = state
+                                    .0
+                                    .as_ref()
+                                    .filter(|(measured_style, _)| measured_style == style)
+                                    .map(|(_, size)| *size);
+                                (size, state)
+                            },
+                        );
+                        let notified = window.take_notified_while_drawing(entity_id);
+                        let reused = measured.filter(|_| {
+                            has_definite_width(style)
+                                && !notified
+                                && !window.dirty_views.contains(&entity_id)
+                                && !window.refreshing
+                        });
+                        if let Some(size) = reused {
+                            root_style.size = size.map(Into::into);
+                            let layout_id = window.request_layout(root_style, None, cx);
+                            return (layout_id, (None, None));
+                        }
+                        // Render now and lay the content out inside `style`;
+                        // prepaint records the result for later frames.
+                        let refreshing = mem::replace(&mut window.refreshing, true);
+                        let ((layout_id, element), accessed) = cx.detect_accessed_entities(|cx| {
+                            let mut element = self
+                                .view
+                                .take()
+                                .unwrap()
+                                .render(window, cx)
+                                .into_any_element();
+                            let child = element.request_layout(window, cx);
+                            let layout_id = window.request_layout(root_style, [child], cx);
+                            (layout_id, element)
+                        });
+                        window.refreshing = refreshing;
+                        (layout_id, (Some(element), Some(accessed)))
+                    }
                     Some(style) if !caching_disabled => {
                         let mut root_style = Style::default();
                         root_style.refine(style);
                         let layout_id = window.request_layout(root_style, None, cx);
-                        (layout_id, None)
+                        (layout_id, (None, None))
                     }
                     _ => {
                         let mut element = self
@@ -337,7 +417,7 @@ impl<V: View> Element for ViewElement<V> {
                             .render(window, cx)
                             .into_any_element();
                         let layout_id = element.request_layout(window, cx);
-                        (layout_id, Some(element))
+                        (layout_id, (Some(element), None))
                     }
                 }
             })
@@ -353,7 +433,7 @@ impl<V: View> Element for ViewElement<V> {
                         .render(window, cx)
                         .into_any_element();
                     let layout_id = element.request_layout(window, cx);
-                    (layout_id, Some(element))
+                    (layout_id, (Some(element), None))
                 },
             )
         }
@@ -364,7 +444,7 @@ impl<V: View> Element for ViewElement<V> {
         global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        element: &mut Self::RequestLayoutState,
+        (element, measured_render): &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
@@ -372,11 +452,52 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path.
             window.set_view_id(entity_id);
             window.with_rendered_view(entity_id, |window| {
+                if let Some(accessed) = measured_render.take() {
+                    // A measured view rendered during layout: prepaint it and
+                    // keep the result for the frames that reuse it.
+                    let mut element = element.take().unwrap();
+                    let style = self.cached_style.clone().unwrap_or_default();
+                    window.with_element_state::<MeasuredViewSize, _>(global_id.unwrap(), |_, _| {
+                        ((), MeasuredViewSize(Some((style, bounds.size))))
+                    });
+                    return window.with_element_state::<ViewElementState, _>(
+                        global_id.unwrap(),
+                        |_, window| {
+                            let content_mask = window.content_mask();
+                            let text_style = window.text_style();
+                            let refreshing = mem::replace(&mut window.refreshing, true);
+                            let prepaint_start = window.prepaint_index();
+                            let (_, mut accessed_entities) =
+                                cx.detect_accessed_entities(|cx| element.prepaint(window, cx));
+                            let prepaint_end = window.prepaint_index();
+                            window.refreshing = refreshing;
+                            accessed_entities.extend(accessed);
+                            (
+                                Some(element),
+                                ViewElementState {
+                                    accessed_entities,
+                                    prepaint_range: prepaint_start..prepaint_end,
+                                    paint_range: PaintIndex::default()..PaintIndex::default(),
+                                    cache_key: ViewElementCacheKey {
+                                        bounds,
+                                        content_mask,
+                                        text_style,
+                                    },
+                                },
+                            )
+                        },
+                    );
+                }
                 if let Some(mut element) = element.take() {
                     element.prepaint(window, cx);
                     return Some(element);
                 }
 
+                // A parent's render may have notified this view earlier in
+                // this same frame (handing it a new size or state); render it
+                // now rather than show last frame's content. A measured view
+                // took that notification during layout.
+                let notified = !self.measured && window.take_notified_while_drawing(entity_id);
                 window.with_element_state::<ViewElementState, _>(
                     global_id.unwrap(),
                     |element_state, window| {
@@ -387,6 +508,7 @@ impl<V: View> Element for ViewElement<V> {
                             && element_state.cache_key.bounds == bounds
                             && element_state.cache_key.content_mask == content_mask
                             && element_state.cache_key.text_style == text_style
+                            && !notified
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
                         {
@@ -503,5 +625,130 @@ pub struct EmptyView;
 impl Render for EmptyView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        self as gpui, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _,
+        Pixels, Render, StyleRefinement, Styled as _, Window, canvas, div, px,
+    };
+    use std::{cell::Cell, rc::Rc};
+
+    /// A view as tall as its lines, counting its renders.
+    struct Lines {
+        lines: usize,
+        renders: Rc<Cell<usize>>,
+    }
+
+    impl Render for Lines {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
+            div()
+                .flex()
+                .flex_col()
+                .children((0..self.lines).map(|_| div().h(px(10.))))
+        }
+    }
+
+    /// Hosts `Lines` as a measured cached view and records the height it
+    /// was given. `hand_over` is set in `Lines` during this view's render.
+    struct Host {
+        lines: Entity<Lines>,
+        hand_over: Option<usize>,
+        height: Rc<Cell<f32>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if let Some(lines) = self.hand_over.take() {
+                self.lines.update(cx, |view, cx| {
+                    view.lines = lines;
+                    cx.notify();
+                });
+            }
+            let height = self.height.clone();
+            div().size_full().child(
+                div()
+                    .relative()
+                    .w(px(100.))
+                    .child(
+                        self.lines
+                            .clone()
+                            .cached_measured(StyleRefinement::default().w(px(100.))),
+                    )
+                    .child(
+                        canvas(
+                            move |bounds: Bounds<Pixels>, _, _| {
+                                height.set(f32::from(bounds.size.height))
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
+            )
+        }
+    }
+
+    fn host(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        Entity<Host>,
+        Rc<Cell<usize>>,
+        Rc<Cell<f32>>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let renders = Rc::new(Cell::new(0));
+        let height = Rc::new(Cell::new(0.0));
+        let (host, cx) = cx.add_window_view({
+            let (renders, height) = (renders.clone(), height.clone());
+            move |_, cx| Host {
+                lines: cx.new(|_| Lines { lines: 3, renders }),
+                hand_over: None,
+                height,
+            }
+        });
+        cx.run_until_parked();
+        (host, renders, height, cx)
+    }
+
+    #[gpui::test]
+    fn a_measured_view_keeps_its_height_while_reused(cx: &mut gpui::TestAppContext) {
+        let (host, renders, height, cx) = host(cx);
+        assert_eq!((renders.get(), height.get()), (1, 30.0));
+        host.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            (renders.get(), height.get()),
+            (1, 30.0),
+            "the parent redrew; the cached view kept its render and measured height"
+        );
+    }
+
+    #[gpui::test]
+    fn a_notified_measured_view_is_laid_out_from_its_content(cx: &mut gpui::TestAppContext) {
+        let (host, renders, height, cx) = host(cx);
+        let lines = host.read_with(cx, |host, _| host.lines.clone());
+        lines.update(cx, |view, cx| {
+            view.lines = 5;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!((renders.get(), height.get()), (2, 50.0));
+    }
+
+    /// A parent handing a cached child new state in its render sees it drawn
+    /// in that frame, not the next one (which nothing may ever request).
+    #[gpui::test]
+    fn a_view_notified_by_its_parents_render_redraws_in_that_frame(cx: &mut gpui::TestAppContext) {
+        let (host, renders, height, cx) = host(cx);
+        host.update(cx, |host, cx| {
+            host.hand_over = Some(2);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!((renders.get(), height.get()), (2, 20.0));
     }
 }

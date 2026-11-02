@@ -173,6 +173,71 @@ pub fn sandbox_title(sandbox: &CodegraffSandbox) -> String {
         .to_string()
 }
 
+/// A display label only: routing always keeps the original device ID. Cloud
+/// titles replace registration names only when the gateway reports a unique,
+/// explicit association. Paused/offline computers retain their recognizable name.
+pub fn friendly_device_name(state: &crate::state::AppState, device_id: &str) -> String {
+    if state.local_device_id.as_deref() == Some(device_id) {
+        return if cfg!(target_os = "macos") {
+            "This Mac"
+        } else {
+            "This device"
+        }
+        .into();
+    }
+    let Some(device) = state.devices.iter().find(|device| device.id == device_id) else {
+        return "Unknown device".into();
+    };
+    cloud_device_display_name(device, &state.devices, state.cloud_sandboxes())
+        .unwrap_or_else(|| {
+            let name = device.name.trim();
+            if name.is_empty() {
+                "Unknown device"
+            } else {
+                name
+            }
+        })
+        .to_owned()
+}
+
+fn cloud_device_display_name<'a>(
+    device: &harness_proto::Device,
+    devices: &[harness_proto::Device],
+    list: Option<&'a CodegraffSandboxes>,
+) -> Option<&'a str> {
+    if device.platform != "linux"
+        || device.name.trim().is_empty()
+        || devices.iter().filter(|other| other.id == device.id).count() != 1
+        || devices
+            .iter()
+            .filter(|other| other.platform == "linux" && other.name == device.name)
+            .count()
+            != 1
+    {
+        return None;
+    }
+    let mut matches = list
+        .filter(|list| list.enabled)?
+        .sandboxes
+        .iter()
+        .filter(|sandbox| {
+            sandbox.device_name.as_deref().map(str::trim) == Some(device.name.as_str())
+        });
+    let sandbox = matches.next()?;
+    if matches.next().is_some()
+        || sandbox.provider != "fleet"
+        || !sandbox.harness
+        || is_temporary(sandbox)
+    {
+        return None;
+    }
+    sandbox
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
 /// Only our own (fleet) sandboxes have Harness set up in them: a paused one is started, and a
 /// running one that never got Harness (a create that half-failed) is set up again.
 pub fn can_start(sandbox: &CodegraffSandbox) -> bool {
@@ -288,6 +353,37 @@ pub fn sandbox_detail(sandbox: &CodegraffSandbox, now: DateTime<Utc>) -> String 
         }
     }
     parts.join(" · ")
+}
+
+/// Detail-card copy separates lifecycle from the compact state label. Only reported
+/// pricing and known persistence guarantees are shown; temporary jobs are never devices.
+pub fn computer_lifecycle(sandbox: &CodegraffSandbox, now: DateTime<Utc>) -> String {
+    if is_temporary(sandbox) {
+        return if sandbox.provider == "fleet" {
+            "Temporary task machine, not a Harness computer. Deleted after 30 minutes. Manage it to copy its ID or delete it sooner.".into()
+        } else {
+            "Temporary task machine, not a Harness computer. Stops after 30 idle minutes. Manage it to copy its ID or delete it.".into()
+        };
+    }
+    match sandbox.state.as_str() {
+        "paused" if sandbox.provider == "fleet" => "Memory and files are kept. Billing is paused. Start it when you’re ready to work again.".into(),
+        "starting" => "Your computer is starting. This status updates as it becomes ready.".into(),
+        "stopping" => "Your computer is turning off. Wait for the paused status before assuming billing has stopped.".into(),
+        "running" => {
+            if let Some(problem) = renew_problem(sandbox) {
+                let ending = running_outlook(sandbox,now).unwrap_or_else(|| problem.into());
+                return format!("{ending}. Check your Codegraff credit in Accounts. The computer may pause when its current window ends.");
+            }
+            let outlook=running_outlook(sandbox,now).map(|v|capitalize(&v)).unwrap_or_else(||"Running on your Codegraff account".into());
+            if sandbox.provider == "fleet" {
+                format!("{outlook}. Billed per second while running. Turning it off keeps memory and files.")
+            } else {
+                format!("{outlook}. Billed per second while running.")
+            }
+        }
+        "error" => "The computer reported an error. Open Accounts to inspect or manage it.".into(),
+        _ => "The current state is not available. Open Accounts to refresh and manage this computer.".into(),
+    }
 }
 
 const BILLED: &str = "Billed per second until you turn it off";
@@ -444,6 +540,130 @@ mod tests {
             renew_error: renew_error.map(str::to_owned),
             ..sandbox("running", true, Some(expires))
         }
+    }
+
+    fn named_cloud_device() -> harness_proto::Device {
+        serde_json::from_value(serde_json::json!({
+            "id": "studio-device",
+            "name": "harness-cloud-studio",
+            "platform": "linux"
+        }))
+        .unwrap()
+    }
+
+    fn named_cloud_list() -> CodegraffSandboxes {
+        CodegraffSandboxes {
+            enabled: true,
+            sandboxes: vec![CodegraffSandbox {
+                name: Some("Studio computer".into()),
+                device_name: Some("harness-cloud-studio".into()),
+                ..sandbox("paused", true, None)
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn friendly_device_name_uses_only_an_explicit_unique_cloud_association() {
+        let device = named_cloud_device();
+        let devices = vec![device.clone()];
+        let mut list = named_cloud_list();
+        // A paused computer keeps the same recognizable label.
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&list)),
+            Some("Studio computer")
+        );
+        list.sandboxes[0].state = "running".into();
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&list)),
+            Some("Studio computer")
+        );
+        list.sandboxes[0].device_name = None;
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&list)),
+            None
+        );
+        list.sandboxes[0].device_name = Some("a-different-device".into());
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&list)),
+            None
+        );
+        assert_eq!(cloud_device_display_name(&device, &devices, None), None);
+        let mut non_linux = device;
+        non_linux.platform = "macos".into();
+        assert_eq!(
+            cloud_device_display_name(&non_linux, &[non_linux.clone()], Some(&named_cloud_list())),
+            None
+        );
+    }
+
+    #[test]
+    fn friendly_device_name_rejects_ambiguous_or_unusable_cloud_labels() {
+        let device = named_cloud_device();
+        let devices = vec![device.clone()];
+        let list = named_cloud_list();
+        let mut duplicate_device = device.clone();
+        duplicate_device.id = "other-device".into();
+        assert_eq!(
+            cloud_device_display_name(&device, &[device.clone(), duplicate_device], Some(&list)),
+            None
+        );
+        let mut duplicate_list = list.clone();
+        duplicate_list.sandboxes.push(list.sandboxes[0].clone());
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&duplicate_list)),
+            None
+        );
+        let mut invalid = list.clone();
+        invalid.enabled = false;
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&invalid)),
+            None
+        );
+        invalid = list.clone();
+        invalid.sandboxes[0].name = Some("   ".into());
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&invalid)),
+            None
+        );
+        invalid = list.clone();
+        invalid.sandboxes[0].provider = "daytona".into();
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&invalid)),
+            None
+        );
+        invalid = list.clone();
+        invalid.sandboxes[0].harness = false;
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&invalid)),
+            None
+        );
+        invalid = list;
+        invalid.sandboxes[0].tier = Some("ephemeral".into());
+        assert_eq!(
+            cloud_device_display_name(&device, &devices, Some(&invalid)),
+            None
+        );
+    }
+
+    #[test]
+    fn friendly_device_name_preserves_local_and_unassociated_device_identity() {
+        let mut state = crate::state::AppState::new();
+        state.local_device_id = Some("local".into());
+        state.devices.push(named_cloud_device());
+        assert_eq!(
+            friendly_device_name(&state, "studio-device"),
+            "harness-cloud-studio"
+        );
+        assert_eq!(friendly_device_name(&state, "missing"), "Unknown device");
+        assert_eq!(
+            friendly_device_name(&state, "local"),
+            if cfg!(target_os = "macos") {
+                "This Mac"
+            } else {
+                "This device"
+            }
+        );
     }
 
     #[test]

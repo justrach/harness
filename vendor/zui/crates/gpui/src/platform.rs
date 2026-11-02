@@ -833,6 +833,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     }
     /// Stop idle frame callbacks until frame_requester is called again.
     fn pause_frame_requests(&self) {}
+    /// The shortest interval GPUI draws at while it throttles this window's
+    /// animation (an inactive window, thermal pressure), or `None` for the
+    /// display's full rate. A frame source that can run slower than the
+    /// display uses it to skip callbacks GPUI would only discard. Pausing
+    /// frame requests clears it.
+    fn set_frame_interval_cap(&self, _interval: Option<Duration>) {}
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
@@ -969,6 +975,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, _scene: &Scene) -> Result<RgbaImage> {
         anyhow::bail!("render_to_image not implemented for this platform")
+    }
+
+    /// Read back this app's scene without desktop or native-child capture.
+    #[cfg(feature = "scene-capture")]
+    fn capture_scene(&self, _scene: &Scene) -> Result<image::RgbaImage> {
+        anyhow::bail!("scene capture is not implemented for this platform")
     }
 }
 

@@ -1,8 +1,8 @@
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
-    kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
-    ns_string, renderer,
+    frame_pacing::frame_pacing, kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType,
+    kTISTypeKeyboardInputMode, ns_string, renderer, view_display_link::ViewDisplayLink,
 };
 #[cfg(any(test, feature = "test-support"))]
 use anyhow::Result;
@@ -256,6 +256,10 @@ unsafe fn build_classes() {
                 sel!(displayLayer:),
                 display_layer as extern "C" fn(&Object, Sel, id),
             );
+            decl.add_method(
+                sel!(gpuiDisplayLinkFired:),
+                display_link_fired as extern "C" fn(&Object, Sel, id),
+            );
 
             decl.add_protocol(Protocol::get("NSTextInputClient").unwrap());
             decl.add_method(
@@ -464,6 +468,10 @@ unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const C
             window_did_resize as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
+            sel!(windowDidUpdate:),
+            window_did_update as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
             sel!(windowDidChangeOcclusionState:),
             window_did_change_occlusion_state as extern "C" fn(&Object, Sel, id),
         );
@@ -570,6 +578,34 @@ struct TrafficLightButtons {
     zoom: Retained<Objc2NSButton>,
 }
 
+/// Where a window's frame callbacks come from.
+enum FrameSource {
+    /// macOS 14 and later: the view's `CADisplayLink`, paused while idle.
+    View(ViewDisplayLink),
+    /// Older macOS (or `GPUI_DISPLAY_LINK=cvdisplaylink`): a subscription to
+    /// the display's shared `CVDisplayLink`, stopped while idle.
+    CoreVideo(WindowFrameSource),
+}
+
+impl FrameSource {
+    fn is_running(&self) -> bool {
+        match self {
+            FrameSource::View(link) => link.is_running(),
+            FrameSource::CoreVideo(source) => source.is_running(),
+        }
+    }
+}
+
+/// `GPUI_DISPLAY_LINK=cvdisplaylink` keeps the `CVDisplayLink` frame source
+/// on macOS 14 and later, for comparison and as an escape hatch.
+fn force_core_video_display_link() -> bool {
+    static FORCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCE.get_or_init(|| {
+        std::env::var("GPUI_DISPLAY_LINK")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("cvdisplaylink"))
+    })
+}
+
 struct MacWindowState {
     handle: AnyWindowHandle,
     foreground_executor: ForegroundExecutor,
@@ -580,8 +616,11 @@ struct MacWindowState {
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
-    frame_source: Option<WindowFrameSource>,
+    frame_source: Option<FrameSource>,
     frame_requested: Arc<AtomicBool>,
+    /// GPUI's cap while it throttles this window's animation; see
+    /// `PlatformWindow::set_frame_interval_cap`.
+    frame_interval_cap: Option<Duration>,
     renderer: renderer::Renderer,
     overlay_renderer: Option<renderer::Renderer>,
     overlay_view: Option<NonNull<Object>>,
@@ -661,11 +700,15 @@ impl MacWindowState {
                 };
 
                 let close_frame = buttons.close.frame();
-                let minimize_frame = buttons.minimize.frame();
                 let button_width = Pixels::from(close_frame.size.width);
                 let button_height = Pixels::from(close_frame.size.height);
+                // Keep AppKit's original spacing even if a later layout resets
+                // only one of the live buttons before this repair runs.
+                let original = self.traffic_light_frames.as_ref().unwrap();
                 let button_padding = Pixels::from(
-                    minimize_frame.origin.x - close_frame.origin.x - close_frame.size.width,
+                    original.minimize.origin.x
+                        - original.close.origin.x
+                        - original.close.size.width,
                 );
                 let container_height =
                     button_height + traffic_light_position.y + traffic_light_position.y;
@@ -676,6 +719,30 @@ impl MacWindowState {
 
                 let minimize_x = traffic_light_position.x + button_width + button_padding;
                 let zoom_x = minimize_x + button_width + button_padding;
+
+                let origins = [
+                    (buttons.close.frame().origin, traffic_light_position.x),
+                    (buttons.minimize.frame().origin, minimize_x),
+                    (buttons.zoom.frame().origin, zoom_x),
+                ];
+                let actual_titlebar = titlebar_container.frame();
+                let unchanged = [
+                    actual_titlebar.origin.x - titlebar_frame.origin.x,
+                    actual_titlebar.origin.y - titlebar_frame.origin.y,
+                    actual_titlebar.size.width - titlebar_frame.size.width,
+                    actual_titlebar.size.height - titlebar_frame.size.height,
+                ]
+                .into_iter()
+                .all(|delta| delta.abs() < 0.01)
+                    && origins.into_iter().all(|(origin, x)| {
+                        (origin.x - x.to_f64()).abs() < 0.01
+                            && (origin.y - traffic_light_position.y.to_f64()).abs() < 0.01
+                    });
+                // windowDidUpdate also runs after our own frame changes. Avoid
+                // invalidating AppKit's layout or tracking areas on that path.
+                if unchanged {
+                    return;
+                }
 
                 titlebar_container.setFrame(titlebar_frame);
                 buttons.close.setFrameOrigin(Objc2NSPoint::new(
@@ -758,33 +825,77 @@ impl MacWindowState {
     }
 
     fn start_display_link(&mut self) {
-        self.stop_display_link();
-        unsafe {
-            if !self
-                .native_window
+        if self.closed.load(Ordering::Acquire) {
+            self.stop_display_link();
+            return;
+        }
+        let visible = unsafe {
+            self.native_window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
-            {
-                return;
-            }
-        }
-        let Some(display_id) = display_id_for_screen(unsafe { self.native_window.screen() }) else {
-            // AppKit can temporarily report no screen while displays are being reconfigured.
-            return;
         };
-        let data = self.native_view.as_ptr() as *mut c_void;
-        self.frame_source
-            .get_or_insert_with(|| WindowFrameSource::new(data, step, self.frame_requested.clone()))
-            .start(display_id)
-            .log_err();
+        let screen = unsafe { self.native_window.screen() };
+        // AppKit can temporarily report no screen while displays are being reconfigured.
+        let display_id = display_id_for_screen(screen);
+        if !visible || display_id.is_none() {
+            self.stop_display_link();
+            return;
+        }
+
+        if self.frame_source.is_none() {
+            let view = self.native_view.as_ptr();
+            let view_link = if force_core_video_display_link() {
+                None
+            } else {
+                unsafe { ViewDisplayLink::new(view, sel!(gpuiDisplayLinkFired:)) }
+            };
+            self.frame_source = Some(match view_link {
+                Some(link) => FrameSource::View(link),
+                None => FrameSource::CoreVideo(WindowFrameSource::new(
+                    view as *mut c_void,
+                    step,
+                    self.frame_requested.clone(),
+                )),
+            });
+        }
+
+        match self.frame_source.as_mut() {
+            Some(FrameSource::View(link)) => {
+                // The link follows the view between screens; only the rate to
+                // ask for depends on which one it's on now.
+                let screen_max_fps: NSInteger =
+                    unsafe { msg_send![screen, maximumFramesPerSecond] };
+                if !link.is_running() {
+                    crate::frame_stats::link_start();
+                }
+                link.set_pacing(frame_pacing(
+                    true,
+                    screen_max_fps as i64,
+                    self.frame_interval_cap,
+                ));
+                self.frame_requested.store(true, Ordering::Release);
+            }
+            Some(FrameSource::CoreVideo(source)) => {
+                self.frame_requested.store(false, Ordering::Release);
+                source.stop();
+                if let Some(display_id) = display_id {
+                    source.start(display_id).log_err();
+                }
+            }
+            None => {}
+        }
     }
 
     fn stop_display_link(&mut self) {
         // Also clear the latch before the first source exists: AppKit can
         // temporarily report no screen during sleep or display reconfiguration.
         self.frame_requested.store(false, Ordering::Release);
-        if let Some(frame_source) = self.frame_source.as_mut() {
-            frame_source.stop();
+        match self.frame_source.as_mut() {
+            Some(FrameSource::View(link)) => {
+                link.set_pacing(frame_pacing(false, 0, None));
+            }
+            Some(FrameSource::CoreVideo(source)) => source.stop(),
+            None => {}
         }
     }
 
@@ -997,6 +1108,7 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 frame_source: None,
+                frame_interval_cap: None,
                 frame_requested: Arc::new(AtomicBool::new(true)),
                 renderer: renderer::new_renderer(
                     renderer_context,
@@ -1311,6 +1423,9 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
+        // Logical removal precedes the queued AppKit close. Pending native
+        // callbacks must stop using the GPUI handle during that interval.
+        this.closed.store(true, Ordering::Release);
         this.renderer.destroy();
         if let Some(renderer) = &this.overlay_renderer {
             renderer.destroy();
@@ -1835,7 +1950,7 @@ impl PlatformWindow for MacWindow {
                                 && !state
                                     .frame_source
                                     .as_ref()
-                                    .is_some_and(WindowFrameSource::is_running)
+                                    .is_some_and(FrameSource::is_running)
                             {
                                 state.start_display_link();
                             }
@@ -1849,8 +1964,27 @@ impl PlatformWindow for MacWindow {
     fn pause_frame_requests(&self) {
         let mut state = self.0.lock();
         state.frame_requested.store(false, Ordering::Release);
+        state.frame_interval_cap = None;
         state.stop_display_link();
         state.renderer.trim_idle_resources();
+    }
+
+    fn set_frame_interval_cap(&self, interval: Option<Duration>) {
+        let mut state = self.0.lock();
+        if state.frame_interval_cap == interval {
+            return;
+        }
+        state.frame_interval_cap = interval;
+        // Re-pace a running view link now; a paused one picks the cap up when
+        // it resumes. The CVDisplayLink fallback can't change rate, so GPUI's
+        // own throttle drops the extra ticks there.
+        if state
+            .frame_source
+            .as_ref()
+            .is_some_and(|source| matches!(source, FrameSource::View(_)) && source.is_running())
+        {
+            state.start_display_link();
+        }
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
@@ -2216,6 +2350,11 @@ impl PlatformWindow for MacWindow {
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
+    }
+
+    #[cfg(feature = "scene-capture")]
+    fn capture_scene(&self, scene: &gpui::Scene) -> anyhow::Result<image::RgbaImage> {
+        self.0.lock().renderer.capture_scene(scene)
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
@@ -2820,6 +2959,18 @@ extern "C" fn window_did_resize(this: &Object, _: Sel, _: id) {
     window_state.as_ref().lock().move_traffic_light();
 }
 
+extern "C" fn window_did_update(this: &Object, _: Sel, _: id) {
+    // AppKit can relayout or recreate its standard buttons without a resize,
+    // title, activation, or appearance callback. Repair after that native pass.
+    // It may also update synchronously inside a setter that already owns this
+    // lock; that setter's existing repair covers the reentrant case.
+    let window_state = unsafe { get_window_state(this) };
+    let Some(mut state) = window_state.try_lock() else {
+        return;
+    };
+    state.move_traffic_light();
+}
+
 extern "C" fn window_will_enter_fullscreen(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -2961,6 +3112,9 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
                 callback(Default::default());
 
                 let mut lock = window_state.lock();
+                if lock.closed.load(Ordering::Acquire) {
+                    return;
+                }
                 lock.request_frame_callback = Some(callback);
                 lock.set_presents_with_transaction(false);
                 lock.start_display_link();
@@ -2973,6 +3127,9 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
     executor
         .spawn(async move {
             let mut lock = window_state.as_ref().lock();
+            if lock.closed.load(Ordering::Acquire) {
+                return;
+            }
             if is_active {
                 lock.move_traffic_light();
             }
@@ -3068,6 +3225,9 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
+    if lock.closed.load(Ordering::Acquire) {
+        return;
+    }
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.set_presents_with_transaction(true);
         lock.stop_display_link();
@@ -3075,22 +3235,39 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
         callback(Default::default());
 
         let mut lock = window_state.lock();
+        if lock.closed.load(Ordering::Acquire) {
+            return;
+        }
         lock.request_frame_callback = Some(callback);
         lock.set_presents_with_transaction(false);
         lock.start_display_link();
     }
 }
 
+/// The view's `CADisplayLink` callback (macOS 14 and later).
+extern "C" fn display_link_fired(this: &Object, _: Sel, _display_link: id) {
+    crate::frame_stats::link_tick();
+    step(this as *const Object as *mut c_void);
+}
+
 extern "C" fn step(view: *mut c_void) {
+    let began = crate::frame_stats::step();
     let view = view as id;
     let window_state = unsafe { get_window_state(&*view) };
     let mut lock = window_state.lock();
+    if lock.closed.load(Ordering::Acquire) {
+        return;
+    }
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
         drop(lock);
         callback(Default::default());
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        if !lock.closed.load(Ordering::Acquire) {
+            lock.request_frame_callback = Some(callback);
+        }
     }
+    crate::frame_stats::step_end(began);
 }
 
 extern "C" fn valid_attributes_for_marked_text(_: &Object, _: Sel) -> id {

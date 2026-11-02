@@ -136,11 +136,14 @@ struct FrameDirtyAccumulator {
 #[derive(Clone)]
 pub(crate) struct WindowInvalidator {
     inner: Rc<RefCell<WindowInvalidatorInner>>,
+    /// Frame callbacks can outlive a handle removed by an earlier callback.
+    removed: Rc<Cell<bool>>,
 }
 
 impl WindowInvalidator {
     pub fn new() -> Self {
         WindowInvalidator {
+            removed: Rc::new(Cell::new(false)),
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
                 dirty: true,
                 draw_phase: DrawPhase::None,
@@ -216,6 +219,11 @@ impl WindowInvalidator {
 
     pub fn replace_views(&self, views: FxHashSet<EntityId>) {
         self.inner.borrow_mut().dirty_views = views;
+    }
+
+    /// Forget one view's pending notification, reporting whether it had one.
+    pub fn take_view(&self, entity: EntityId) -> bool {
+        self.inner.borrow_mut().dirty_views.remove(&entity)
     }
 
     pub fn not_drawing(&self) -> bool {
@@ -1129,6 +1137,19 @@ struct ModifierState {
     saw_keystroke: bool,
 }
 
+/// Whether a throttled window's next frame is due, `elapsed` after its last
+/// one, at a cap of one frame per `min_interval`.
+///
+/// Frame callbacks land on display ticks that jitter by a fraction of a
+/// millisecond, so a strict `elapsed >= min_interval` turns a 30 fps cap into
+/// 27 fps or less on a 240 Hz display (a tick at 33.2 ms waits for the next
+/// at 37.5 ms), and into 15 fps when the frame source itself runs at the cap.
+/// Allow a frame up to 2 ms (or an eighth of the interval) early.
+pub(crate) fn throttled_frame_is_due(elapsed: Duration, min_interval: Duration) -> bool {
+    let slack = (min_interval / 8).min(Duration::from_millis(2));
+    elapsed + slack >= min_interval
+}
+
 /// Tracks input event timestamps to determine if input is arriving at a high rate.
 /// Used for selective VRR (Variable Refresh Rate) optimization.
 #[derive(Clone, Debug)]
@@ -1534,9 +1555,15 @@ impl Window {
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
+            // The cap last sent to the platform window.
+            let mut reported_frame_interval_cap = None;
             move |request_frame_options| {
+                if invalidator.removed.get() {
+                    return;
+                }
                 let thermal_state = handle
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
+                    .map_err(|error| anyhow::anyhow!("native frame thermal callback: {error:#}"))
                     .log_err();
 
                 // Throttle frame rate based on conditions:
@@ -1555,10 +1582,21 @@ impl Window {
                     None
                 };
 
+                if min_frame_interval != reported_frame_interval_cap {
+                    reported_frame_interval_cap = min_frame_interval;
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            window
+                                .platform_window
+                                .set_frame_interval_cap(min_frame_interval)
+                        })
+                        .log_err();
+                }
+
                 let now = Instant::now();
                 if let Some(min_interval) = min_frame_interval {
                     if let Some(last_frame) = last_frame_time.get()
-                        && now.duration_since(last_frame) < min_interval
+                        && !throttled_frame_is_due(now.duration_since(last_frame), min_interval)
                     {
                         // Must still complete the frame on platforms that require it.
                         // On Wayland, `surface.frame()` was already called to request the
@@ -1566,6 +1604,7 @@ impl Window {
                         // `complete_frame`) or the compositor won't send another callback.
                         handle
                             .update(&mut cx, |_, window, _| window.complete_frame())
+                            .map_err(|error| anyhow::anyhow!("native frame throttle callback: {error:#}"))
                             .log_err();
                         return;
                     }
@@ -1578,9 +1617,20 @@ impl Window {
                         .update(&mut cx, |_, window, cx| {
                             for callback in next_frame_callbacks {
                                 callback(window, cx);
+                                if window.removed {
+                                    break;
+                                }
                             }
                         })
+                        .map_err(|error| anyhow::anyhow!("native next frame callback: {error:#}"))
                         .log_err();
+                }
+
+                // A next-frame callback may close its own popup. Its handle
+                // is removed before update returns; no draw or completion is
+                // owed to that destroyed surface.
+                if invalidator.removed.get() {
+                    return;
                 }
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
@@ -1603,12 +1653,18 @@ impl Window {
                                 window.present();
                                 arena_clear_needed.clear();
                             })
+                            .map_err(|error| anyhow::anyhow!("native frame draw callback: {error:#}"))
                             .log_err();
                     })
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
+                        .map_err(|error| anyhow::anyhow!("native frame present callback: {error:#}"))
                         .log_err();
+                }
+
+                if invalidator.removed.get() {
+                    return;
                 }
 
                 handle
@@ -1621,8 +1677,12 @@ impl Window {
                                 && window.input_rate_tracker.borrow().is_high_rate())
                         {
                             window.platform_window.pause_frame_requests();
+                            // Pausing clears the platform cap so the first frame
+                            // after idle is not held to the old animation rate.
+                            reported_frame_interval_cap = None;
                         }
                     })
+                    .map_err(|error| anyhow::anyhow!("native frame completion callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1631,6 +1691,7 @@ impl Window {
             move |_, _| {
                 handle
                     .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window resize callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1639,6 +1700,7 @@ impl Window {
             move || {
                 handle
                     .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window move callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1647,6 +1709,7 @@ impl Window {
             move || {
                 handle
                     .update(&mut cx, |_, window, cx| window.appearance_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window appearance callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1655,6 +1718,7 @@ impl Window {
             move || {
                 handle
                     .update(&mut cx, |_, window, cx| window.button_layout_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window button layout callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1676,6 +1740,7 @@ impl Window {
 
                         SystemWindowTabController::update_last_active(cx, window.handle.id);
                     })
+                    .map_err(|error| anyhow::anyhow!("native window activation callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1687,6 +1752,7 @@ impl Window {
                         window.hovered.set(active);
                         window.refresh();
                     })
+                    .map_err(|error| anyhow::anyhow!("native window hover callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1695,6 +1761,7 @@ impl Window {
             Box::new(move |event| {
                 handle
                     .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
+                    .map_err(|error| anyhow::anyhow!("native window input callback: {error:#}"))
                     .log_err()
                     .unwrap_or(DispatchEventResult::default())
             })
@@ -1711,6 +1778,7 @@ impl Window {
                         }
                         None
                     })
+                    .map_err(|error| anyhow::anyhow!("native window control hit test callback: {error:#}"))
                     .log_err()
                     .unwrap_or(None)
             })
@@ -1971,6 +2039,7 @@ impl Window {
     /// Close this window.
     pub fn remove_window(&mut self) {
         self.removed = true;
+        self.invalidator.removed.set(true);
     }
 
     /// Obtain the currently focused [`FocusHandle`]. If no elements are focused, returns `None`.
@@ -2379,6 +2448,12 @@ impl Window {
         self.platform_window.bounds()
     }
 
+    /// Look up a selector in the last painted frame for native fixture checks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_bounds(&self, selector: &str) -> Option<Bounds<Pixels>> {
+        self.rendered_frame.debug_bounds.get(selector).copied()
+    }
+
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
@@ -2386,6 +2461,18 @@ impl Window {
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
+    }
+
+    /// Read back the last rendered app scene for an in-app drag preview.
+    ///
+    /// This captures only GPUI content owned by this window. It neither reads
+    /// the desktop nor captures native child views. The returned pixels are
+    /// RGBA at the window's device scale. This synchronizes with the GPU, so
+    /// capture once at drag pickup rather than on every pointer movement.
+    #[cfg(feature = "scene-capture")]
+    pub fn capture_scene(&self) -> anyhow::Result<image::RgbaImage> {
+        self.platform_window
+            .capture_scene(&self.rendered_frame.scene)
     }
 
     /// Set the content size of the window.
@@ -2889,6 +2976,14 @@ impl Window {
         );
         let mut entities_ref = cx.entities.accessed_entities.get_mut();
         mem::swap(&mut entities, entities_ref.deref_mut());
+    }
+
+    /// Whether `view` was notified after this frame began drawing and before
+    /// now (a parent's render handing it new state, say), consuming that
+    /// notification: a cached view rendering now reflects it already.
+    /// Notifications made while drawing otherwise wait for the next frame.
+    pub(crate) fn take_notified_while_drawing(&self, view: EntityId) -> bool {
+        !self.invalidator.not_drawing() && self.invalidator.take_view(view)
     }
 
     fn invalidate_entities(&mut self) {
@@ -6903,12 +6998,13 @@ pub fn outline(
 
 #[cfg(test)]
 mod tests {
+    use super::throttled_frame_is_due;
     use crate::{
         AppContext as _, Bounds, Context, FocusHandle, InteractiveElement as _, IntoElement,
         ParentElement as _, Pixels, Render, Styled as _, TestAppContext, Window, canvas, div, px,
         size,
     };
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::Cell, rc::Rc, time::Duration};
 
     struct RootView {
         explicit_size: bool,
@@ -7031,6 +7127,108 @@ mod tests {
             "resize must wake a parked window"
         );
         assert!(!platform.simulate_display_tick());
+    }
+
+    #[test]
+    fn window_closing_during_next_frame_stops_later_callbacks() {
+        let mut cx = TestAppContext::single();
+        let handle = cx.add_window(|_, _| RootView {
+            explicit_size: false,
+            child_bounds: Rc::new(Cell::new(Bounds::default())),
+        });
+        let later_callback = Rc::new(Cell::new(false));
+        let mut platform = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.active.set(true);
+                window.on_next_frame(|window, _| window.remove_window());
+                let later_callback = later_callback.clone();
+                window.on_next_frame(move |_, _| later_callback.set(true));
+                window.platform_window.as_test().unwrap().clone()
+            })
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(
+            !later_callback.get(),
+            "callbacks cannot keep using a removed surface"
+        );
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+    }
+
+    #[test]
+    fn throttled_frames_tolerate_display_tick_jitter() {
+        let thirty_fps = Duration::from_micros(33_333);
+        let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+        // Eight 240 Hz ticks, landing 0.1 ms early. A strict comparison
+        // waits for the ninth tick (37.5 ms): 27 fps instead of 30.
+        assert!(throttled_frame_is_due(ms(33.2), thirty_fps));
+        // A frame source paced at 30 Hz itself, jittering early.
+        assert!(throttled_frame_is_due(ms(32.9), thirty_fps));
+        assert!(throttled_frame_is_due(ms(33.4), thirty_fps));
+        // Seven 240 Hz ticks is still too soon: the cap holds.
+        assert!(!throttled_frame_is_due(ms(29.2), thirty_fps));
+        assert!(!throttled_frame_is_due(ms(4.2), thirty_fps));
+
+        let sixty_fps = Duration::from_micros(16_667);
+        assert!(throttled_frame_is_due(ms(16.5), sixty_fps));
+        // Three 240 Hz ticks.
+        assert!(!throttled_frame_is_due(ms(12.5), sixty_fps));
+    }
+
+    #[test]
+    fn inactive_window_animation_caps_the_platform_frame_rate() {
+        let mut cx = TestAppContext::single();
+        let handle = cx.add_window(|_, _| RootView {
+            explicit_size: false,
+            child_bounds: Rc::new(Cell::new(Bounds::default())),
+        });
+        let platform = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.platform_window.as_test().unwrap().clone()
+            })
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(!platform.simulate_display_tick(), "clean window parks");
+        assert_eq!(platform.frame_interval_cap(), None);
+
+        // A spinner in an inactive window: GPUI draws it at 30 fps, so the
+        // display link need not wake the app at 120 or 240 Hz.
+        fn spin(window: &Window) {
+            window.on_next_frame(|window, _| {
+                window.refresh();
+                spin(window);
+            });
+        }
+        cx.update_window(handle.into(), |_, window, _| {
+            window.active.set(false);
+            spin(window);
+        })
+        .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert_eq!(
+            platform.frame_interval_cap(),
+            Some(Duration::from_micros(33_333)),
+            "an inactive window's animation should cap the frame source"
+        );
+
+        // Focused, the same animation runs at the display's full rate.
+        cx.update_window(handle.into(), |_, window, _| window.active.set(true))
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert_eq!(platform.frame_interval_cap(), None);
+
+        // Inactive again, then the animation stops and the window parks:
+        // the cap must not outlive the animation.
+        cx.update_window(handle.into(), |_, window, _| window.active.set(false))
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(platform.frame_interval_cap().is_some());
+        cx.update_window(handle.into(), |_, window, _| {
+            window.next_frame_callbacks.borrow_mut().clear();
+            window.active.set(true);
+        })
+        .unwrap();
+        while platform.simulate_display_tick() {}
+        assert_eq!(platform.frame_interval_cap(), None);
     }
 
     struct NativeFrameProbe {

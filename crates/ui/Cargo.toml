@@ -29,6 +29,10 @@ name = "macos-resource-profile"
 required-features = ["resource-profile"]
 
 [[example]]
+name = "render-isolation-profile"
+required-features = ["resource-profile"]
+
+[[example]]
 name = "ui-scenes"
 required-features = ["ui-scenes"]
 
@@ -41,6 +45,10 @@ name = "browser-fixture"
 required-features = ["browser-fixture"]
 
 [[example]]
+name = "traffic-lights-fixture"
+required-features = ["browser-fixture"]
+
+[[example]]
 name = "windows-render-fixture"
 required-features = ["windows-render-fixture"]
 
@@ -50,6 +58,10 @@ required-features = ["stall-watch-fixture"]
 
 [[example]]
 name = "appshots-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "error-banner-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -74,6 +86,10 @@ required-features = ["appshots-fixture"]
 
 [[example]]
 name = "browse-link-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "notifications-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -121,6 +137,10 @@ name = "composer-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "write-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "queue-steer-fixture"
 required-features = ["appshots-fixture"]
 
@@ -153,6 +173,10 @@ name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 
 [[example]]
+name = "agent-reveal-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "chat-mode-fixture"
 required-features = ["project-palette-fixture"]
 
@@ -181,7 +205,7 @@ harness-syntax.workspace = true
 harness-theme.workspace = true
 harness-visual.workspace = true
 gpui.workspace = true
-gpui_platform.workspace = true
+gpui_platform = { workspace = true, features = ["scene-capture"] }
 gpui_tokio.workspace = true
 reqwest.workspace = true
 gpui-base.workspace = true
@@ -242,3 +266,51 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[[example]]
+name = "menu-review-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "project-selector-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "session-overview-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "tab-tear-off-fixture"
+required-features = ["appshots-fixture", "browser-fixture"]
+
+[[example]]
+name = "harp-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "menu-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "gallery-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "annotation-review-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "markup-comment-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "viewed-image-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "accounts-provider-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "keep-awake-fixture"
+required-features = ["appshots-fixture"]

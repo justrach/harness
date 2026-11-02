@@ -69,36 +69,43 @@ fn assert_sidebar_click(cx: &mut gpui::TestAppContext, split: bool, parked_pane:
             );
             shell.settings.sidebar_collapsed = false;
             shell.state.update(cx, |state, cx| {
+                state.local_device_id = Some("local".into());
+                state.spaces = ["a", "b"].map(|id| serde_json::from_value(serde_json::json!({
+                    "id": id, "deviceId": "local", "path": format!("/fixtures/{id}"), "createdAt": Utc::now(),
+                })).unwrap()).into();
                 state.chats = ["current", "peer", "target", "parked"]
                     .map(|id| {
                         serde_json::from_value(serde_json::json!({
                             "id": id, "deviceId": "local", "archived": false,
+                            "spaceId": if id == "current" || id == "peer" { "a" } else { "b" },
                             "createdAt": Utc::now(),
                         }))
                         .unwrap()
                     })
                     .into();
                 state.select_chat(Some("current".into()), cx);
+                state.select_space(Some("a".into()), cx);
             });
             if split {
                 shell.chat_split = chat_split::ChatSplit::split(
                     None,
                     SplitAxis::Horizontal,
                     Some("peer".into()),
-                    None,
+                    Some("a".into()),
                 );
             }
             if let Some(peer) = parked_pane {
                 shell.chat_tabs = vec![
-                    ChatTab::default(),
+                    ChatTab { project: Some("a".into()), ..Default::default() },
                     ChatTab {
+                        project: Some("b".into()),
                         selected: Some(if peer { "parked" } else { "target" }.into()),
                         split: peer.then(|| {
                             chat_split::ChatSplit::split(
                                 None,
                                 SplitAxis::Horizontal,
                                 Some("target".into()),
-                                None,
+                                Some("b".into()),
                             )
                             .unwrap()
                         }),
@@ -168,7 +175,7 @@ fn assert_sidebar_click(cx: &mut gpui::TestAppContext, split: bool, parked_pane:
 }
 
 #[gpui::test]
-fn sidebar_click_opens_new_tab_without_replacing_current(cx: &mut gpui::TestAppContext) {
+fn cross_project_navigation_keeps_the_previous_project_view(cx: &mut gpui::TestAppContext) {
     for split in [false, true] {
         assert_sidebar_click(cx, split, None);
     }
@@ -407,7 +414,7 @@ impl Render for ChatSidebar {
 }
 
 #[gpui::test]
-fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppContext) {
+fn open_tabs_do_not_consume_conversation_sidebar_space(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -445,40 +452,21 @@ fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppC
         }))
     });
     let shell = host.read_with(cx, |host, _| host.0.clone());
-    // A scroll request resolves against the previous frame's row bounds, so
-    // the restored active tab comes into view on the next frame.
-    cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    let sidebar_bottom = px(600.0);
-    // The project filter stays on screen, below the capped tab list.
     let filter = cx
-        .debug_bounds("spaces-filter")
-        .expect("project filter rendered");
+        .debug_bounds("sidebar-new-tab")
+        .expect("new-tab row rendered");
+    let switcher = cx.debug_bounds("session-switcher").unwrap();
+    assert!(filter.top() >= switcher.bottom(), "{filter:?}");
     assert!(
-        filter.bottom() <= sidebar_bottom,
-        "filter pushed off: {filter:?}"
+        cx.debug_bounds("chat-tab-24").is_none(),
+        "open tabs no longer consume sidebar space"
     );
-    assert!(
-        filter.top() <= sidebar_bottom * MAX_SIDEBAR_SHARE + px(40.0),
-        "{filter:?}"
-    );
-    // The active (last) tab was scrolled into view above the filter.
-    let last = cx.debug_bounds("chat-tab-24").unwrap();
-    assert!(
-        last.top() >= px(0.0) && last.bottom() <= filter.top(),
-        "{last:?} vs {filter:?}"
-    );
-    let first = cx.debug_bounds("chat-tab-0").unwrap();
-    assert!(
-        first.bottom() <= px(26.0),
-        "first tab should be scrolled out: {first:?}"
-    );
-    let rows = cx.debug_bounds("chat-tab-1").unwrap();
-    assert_eq!(rows.size.height, px(26.0), "rows scroll rather than shrink");
-
-    // Switching back to the first tab scrolls it into view.
-    shell.update_in(cx, |shell, window, cx| shell.switch_chat_tab(0, window, cx));
-    cx.run_until_parked();
-    let first = cx.debug_bounds("chat-tab-0").unwrap();
-    assert!(first.top() >= px(0.0), "{first:?}");
+    shell.update(cx, |shell, cx| {
+        shell.chat_tabs.truncate(1);
+        shell.chat_tab = 0;
+        cx.notify();
+    });
+    assert_eq!(cx.debug_bounds("sidebar-new-tab").unwrap(), filter);
+    assert_eq!(cx.debug_bounds("session-switcher").unwrap(), switcher);
 }

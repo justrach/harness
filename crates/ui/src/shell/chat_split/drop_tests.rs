@@ -15,7 +15,7 @@ impl Render for DropPanes {
         self.0.update(cx, |shell, cx| {
             let width = f32::from(window.viewport_size().width);
             let main_width = width * shell.focused_chat_pane_share();
-            let main = shell.render_main(window, main_width, main_width, cx);
+            let main = shell.render_main(window, main_width, main_width, None, cx);
             div()
                 .size_full()
                 .flex()

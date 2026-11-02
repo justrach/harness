@@ -496,6 +496,7 @@ fn parse_catalog(bytes: &[u8]) -> Result<Vec<Model>, HarnessError> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         });
     }
     if models.is_empty() {

@@ -1,184 +1,146 @@
 use super::*;
 
-fn fixture(
-    cx: &mut gpui::TestAppContext,
-    split: bool,
-    parked: Option<bool>,
-) -> (tempfile::TempDir, gpui::WindowHandle<Shell>) {
-    let dir = tempfile::tempdir().unwrap();
-    cx.update(|cx| {
-        gpui_base::init(cx);
-        cx.set_global(Theme::default());
-        crate::app_menus::init(cx);
-        crate::history::init(
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            cx,
-        );
-        settings::init(settings::UiSettings::default(), dir.path(), cx);
-    });
-    let window = cx.add_window(|_, cx| {
-        let state = cx.new(|_| AppState::new());
-        let mut shell = Shell::new(
-            state,
-            EngineBootConfig {
-                data_dir: dir.path().into(),
-                ipc_port: 0,
-                edge_url: "http://127.0.0.1:1".into(),
-                edge_token: None,
-                org_id: None,
-                codegraff_client_id: None,
-                default_harness: harness_proto::HarnessId::Mock,
-            },
-            cx,
-        );
-        shell.settings.space_filter = None;
-        shell.state.update(cx, |state, cx| {
-            state.local_device_id = Some("local".into());
-            state.workspace_scope = Some(WorkspaceScope::Local);
-            state.chats = ["current", "peer", "target", "parked"]
-                .map(|id| {
-                    serde_json::from_value(serde_json::json!({
-                        "id": id, "deviceId": "local", "archived": false,
-                        "createdAt": Utc::now(),
-                    }))
-                    .unwrap()
-                })
-                .into();
-            state.select_chat(Some("current".into()), cx);
-        });
-        if split {
-            shell.chat_split = chat_split::ChatSplit::split(
-                None,
-                SplitAxis::Horizontal,
-                Some("peer".into()),
-                None,
-            );
-        }
-        if let Some(peer) = parked {
-            shell.chat_tabs = vec![
-                ChatTab::default(),
-                ChatTab {
-                    selected: Some(if peer { "parked" } else { "target" }.into()),
-                    split: peer.then(|| {
-                        chat_split::ChatSplit::split(
-                            None,
-                            SplitAxis::Horizontal,
-                            Some("target".into()),
-                            None,
-                        )
-                        .unwrap()
-                    }),
-                    ..Default::default()
-                },
-            ];
-        }
-        shell
-    });
-    (dir, window)
-}
-
-fn assert_target_preserved(shell: &Shell, cx: &App) {
-    assert_eq!(shell.chat_tabs.len(), 2, "must reveal or append, not duplicate");
-    assert_eq!(shell.chat_tab, 1);
-    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("target"));
-    assert_eq!(shell.chat_tabs[0].selected.as_deref(), Some("current"));
-}
-
 #[gpui::test]
-fn session_jump_shortcuts_preserve_tabs_and_split_layouts(cx: &mut gpui::TestAppContext) {
-    for split in [false, true] {
-        for parked in [None, Some(false), Some(true)] {
-            let (_dir, window) = fixture(cx, split, parked);
-            let (layout, draft, slot) = window
-                .update(cx, |shell, _, cx| {
-                    // Cmd-number jumps are also allowed from Settings.
-                    shell.route = Route::Settings(SettingsSection::Appearance);
-                    (
-                        shell.chat_split.clone(),
-                        shell.current_canvas_draft(cx),
-                        shell.sidebar_visible_order(cx).iter().position(|id| id == "target").unwrap(),
-                    )
+fn new_tab_shortcut_stays_in_the_focused_panel_and_session(cx: &mut gpui::TestAppContext) {
+    for combo in [
+        crate::settings::ShortcutId::NewSession.default_combo(),
+        "mod-alt-t",
+    ] {
+        let (_dir, window) = navigation_tests::fixture(cx, false, None);
+        let (session, session_count, focused, tab_count, other_panels) = window
+            .update(cx, |shell, window, cx| {
+                shell.boot_restored = true;
+                shell.ensure_workspace_sessions(cx);
+                shell.sync_panel_workspace(cx);
+                shell.workspace_split(SplitAxis::Horizontal, cx);
+                shell.settings.keymap.new_session = combo.into();
+                apply_keymap(
+                    cx,
+                    &shell.settings.keymap,
+                    shell.settings.composer_send_behavior,
+                );
+                window.activate_window();
+                let layout = shell.panel_layout(cx).unwrap();
+                let focused = layout.focused;
+                (
+                    shell.chat_tabs[shell.chat_tab].id.clone(),
+                    shell.chat_tabs.len(),
+                    focused,
+                    layout
+                        .panels
+                        .iter()
+                        .find(|panel| panel.id == focused)
+                        .unwrap()
+                        .tabs
+                        .len(),
+                    layout
+                        .panels
+                        .iter()
+                        .filter(|panel| panel.id != focused)
+                        .map(|panel| (panel.id, panel.tabs.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap();
+        let mut previous = None;
+        for (ix, editor_focused) in [true, false].into_iter().enumerate() {
+            window
+                .update(cx, |shell, window, cx| {
+                    let focus = if editor_focused {
+                        shell.composer.focus_handle(cx)
+                    } else {
+                        shell.shortcut_focus.clone()
+                    };
+                    window.focus(&focus, cx);
                 })
                 .unwrap();
-            // Exercise the registered binding and real shell action listener.
-            let combo = platform_combo(&format!("mod-{}", slot + 1));
-            let keystroke = gpui::Keystroke::parse(&combo).unwrap();
-            for _ in 0..2 {
-                cx.update_window(window.into(), |_, window, cx| {
-                    window.draw(cx).clear();
-                    window.dispatch_event(
-                        gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                            keystroke: keystroke.clone(),
-                            is_held: false,
-                            prefer_character_input: false,
-                        }),
-                        cx,
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, _, cx| {
+                    assert_eq!(shell.chat_tabs.len(), session_count);
+                    assert_eq!(shell.chat_tabs[shell.chat_tab].id, session);
+                    let layout = shell.panel_layout(cx).unwrap();
+                    assert_eq!(layout.focused, focused);
+                    let panel = layout
+                        .panels
+                        .iter()
+                        .find(|panel| panel.id == focused)
+                        .unwrap();
+                    assert_eq!(panel.tabs.len(), tab_count + ix + 1);
+                    let selected = panel.selected().cloned().unwrap();
+                    assert!(matches!(selected, workspace_panels::PanelTab::New(_)));
+                    assert_ne!(
+                        previous.as_ref(),
+                        Some(&selected),
+                        "each shortcut creates its own tab"
                     );
-                    window.dispatch_event(
-                        gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke: keystroke.clone() }),
-                        cx,
-                    );
-                }).unwrap();
-                window.update(cx, |shell, _, cx| {
-                    assert_target_preserved(shell, cx);
-                    assert_eq!(shell.chat_tabs[0].split, layout);
-                    assert_eq!(shell.chat_tabs[0].draft.as_ref(), Some(&draft));
-                    if parked == Some(true) {
-                        assert_eq!(shell.chat_split.as_ref().unwrap().panes[1].as_deref(), Some("parked"));
+                    previous = Some(selected);
+                    for (id, tabs) in &other_panels {
+                        assert_eq!(
+                            &layout
+                                .panels
+                                .iter()
+                                .find(|panel| panel.id == *id)
+                                .unwrap()
+                                .tabs,
+                            tabs
+                        );
                     }
-                }).unwrap();
-            }
-            window.update(cx, |shell, window, cx| {
-                let slot = shell.sidebar_visible_order(cx).iter().position(|id| id == "current").unwrap();
-                shell.jump_to_session(slot, window, cx);
-                assert_eq!(shell.chat_tab, 0);
-                assert_eq!(shell.chat_split, layout);
-                assert_eq!(shell.current_canvas_draft(cx), draft);
-                if split {
-                    let slot = shell.sidebar_visible_order(cx).iter().position(|id| id == "peer").unwrap();
-                    shell.jump_to_session(slot, window, cx);
-                    assert_eq!(shell.chat_tabs.len(), 2);
-                    assert_eq!(shell.chat_tab, 0);
-                    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
-                    assert_eq!(shell.chat_split.as_ref().unwrap().panes[1].as_deref(), Some("current"));
-                }
-                let selected = shell.state.read(cx).selected_chat.clone();
-                shell.jump_to_session(99, window, cx);
-                assert_eq!(shell.state.read(cx).selected_chat, selected);
-            }).unwrap();
+                    assert!(
+                        shell.workspace_panels.menu.is_none(),
+                        "tab choices belong inside the panel"
+                    );
+                })
+                .unwrap();
         }
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
     }
 }
 
 #[gpui::test]
-fn session_cycle_fallback_preserves_the_original_tab(cx: &mut gpui::TestAppContext) {
+fn session_jump_shortcuts_stay_in_the_current_project(cx: &mut gpui::TestAppContext) {
     for split in [false, true] {
-        for forward in [false, true] {
-            let (_dir, window) = fixture(cx, split, None);
-            window.update(cx, |shell, window, cx| {
-                // Leave the peer in its split but make the next sidebar row
-                // unopened in both directions, exercising the single-tab fallback.
-                shell.state.update(cx, |state, _| {
-                    state.chats.retain(|chat| chat.id == "current" || chat.id == "target");
-                });
-                let layout = shell.chat_split.clone();
-                let draft = shell.current_canvas_draft(cx);
-                shell.cycle_tab_or_session(forward, window, cx);
-                assert_target_preserved(shell, cx);
-                assert_eq!(shell.chat_tabs[0].split, layout);
-                assert_eq!(shell.chat_tabs[0].draft.as_ref(), Some(&draft));
-                // Once two tabs exist, Ctrl+Tab cycles tabs rather than
-                // continuing through sidebar sessions.
-                shell.cycle_tab_or_session(!forward, window, cx);
-                assert_eq!(shell.chat_tabs.len(), 2);
-                assert_eq!(shell.chat_tab, 0);
-                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("current"));
-                assert_eq!(shell.chat_split, layout);
-                assert_eq!(shell.current_canvas_draft(cx), draft);
-            }).unwrap();
-        }
+        let (_dir, window) = navigation_tests::fixture(cx, split, None);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.boot_restored = true;
+                shell.persist_chat_tabs(cx);
+                let slot = shell
+                    .sidebar_visible_order(cx)
+                    .iter()
+                    .position(|id| id == "peer")
+                    .unwrap();
+                shell.jump_to_session(slot, window, cx);
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
+                assert_eq!(shell.chat_tab_labels(cx), [SharedString::from("A")]);
+                assert_eq!(shell.chat_tabs.len(), 1);
+                assert_eq!(shell.settings.space_filter.as_deref(), Some("a"));
+            })
+            .unwrap();
     }
+}
+
+#[gpui::test]
+fn session_cycle_stays_scoped_and_project_cycle_restores_selection(cx: &mut gpui::TestAppContext) {
+    let (_dir, window) = navigation_tests::fixture(cx, false, None);
+    window
+        .update(cx, |shell, window, cx| {
+            shell.boot_restored = true;
+            shell.persist_chat_tabs(cx);
+            shell.cycle_session(true, window, cx);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
+            assert_eq!(shell.chat_tabs.len(), 1);
+            shell.open_project_tab(Some("b".into()), cx);
+            shell.cycle_chat_tab(false, window, cx);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
+            assert_eq!(shell.settings.space_filter.as_deref(), Some("a"));
+            shell.cycle_chat_tab(true, window, cx);
+            assert_eq!(shell.settings.space_filter.as_deref(), Some("b"));
+        })
+        .unwrap();
 }

@@ -1,6 +1,6 @@
 use super::*;
 use crate::shell::chat_tabs::navigation_tests::fixture;
-use crate::shell::chat_tabs::pane_reopen_tests::{mutations, press, reply};
+use crate::shell::chat_tabs::test_support::{mutations, press, reply};
 
 fn chosen(cx: &mut gpui::TestAppContext) -> (bool, bool) {
     cx.update(|cx| {

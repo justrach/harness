@@ -1372,6 +1372,35 @@ mod tests {
     }
 
     #[test]
+    fn json5_reads_the_bundled_catalogs_exactly_like_json() {
+        // Every bundled theme file (iOS and Android catalogs) is plain JSON,
+        // so the lenient parser must agree with serde_json on all of it.
+        for bundled in [
+            include_str!("../../../apps/ios/Harness/Theme/themes.json"),
+            include_str!("../../../apps/android/app/src/main/assets/themes.json"),
+        ] {
+            let strict: Value = serde_json::from_str(bundled).unwrap();
+            let lenient: Value = json5::from_str(bundled).unwrap();
+            assert_eq!(strict, lenient);
+        }
+    }
+
+    #[test]
+    fn imports_json5_flavoured_theme_sources() {
+        // BOM, block and line comments, single quotes, unquoted keys, escapes
+        // and trailing commas all show up in real-world VS Code theme files.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("theme.json"),
+            "\u{feff}/* header */ {\n  // line comment\n  colors: { 'editor.background': '#101010', \"foreground\": \"\\u0023eeeeee\", },\n  tokenColors: [{ scope: ['comment',], settings: { foreground: '#777777', }, },],\n}\n",
+        )
+        .unwrap();
+        let imported = import_file(&dir.path().join("theme.json"), options()).unwrap();
+        assert_eq!(imported.theme.colors.background, "#101010".parse().unwrap());
+        assert_eq!(imported.theme.syntax["comment"], "#777777".parse().unwrap());
+    }
+
+    #[test]
     fn reports_dropped_font_styles() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("theme.json"), r##"{

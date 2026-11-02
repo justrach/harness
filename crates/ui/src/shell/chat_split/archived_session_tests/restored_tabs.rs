@@ -18,6 +18,7 @@ fn archived_tabs_restore_and_deduplicate_their_focused_sessions(cx: &mut gpui::T
                         selected: Some(selections[ix].into()),
                         project: None,
                         layout: Some(split.to_saved()),
+                        ..Default::default()
                     }
                 })
                 .collect();
@@ -47,15 +48,13 @@ fn archived_tabs_restore_and_deduplicate_their_focused_sessions(cx: &mut gpui::T
                             shell.state.read(cx).selected_chat.as_deref(),
                             Some(selections[ix])
                         );
-                        let split = shell.chat_split.as_ref().unwrap();
-                        assert_eq!(split.axis, axis);
-                        assert_eq!(split.focus, 2);
-                        assert!(
-                            split.panes[0].is_none(),
-                            "the focused session must not also be a peer"
-                        );
-                        assert_eq!(split.panes[1].as_deref(), Some(peers[ix]));
-                        assert!(split.panes[2].is_none());
+                        shell.sync_panel_workspace(cx);
+                        let mut displayed = workspace_chat_ids(shell, cx);
+                        displayed.sort();
+                        let mut expected = vec![selections[ix].to_owned(), peers[ix].to_owned()];
+                        expected.sort();
+                        assert_eq!(displayed, expected,
+                            "workspace migration must keep both distinct chats without duplicating the selected one");
                     }
                     assert!(shell.state.read(cx).chats.iter().all(|chat| chat.archived));
                     assert_eq!(shell.state.read(cx).visible_chats().count(), 0);

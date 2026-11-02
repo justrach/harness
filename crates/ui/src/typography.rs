@@ -48,9 +48,8 @@ pub const WEIGHT_REGULAR: gpui::FontWeight = gpui::FontWeight::NORMAL;
 pub const WEIGHT_STRONG: gpui::FontWeight = gpui::FontWeight::MEDIUM;
 
 /// A bundled, virtual, or device-local interface font choice.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UiFontFamily {
-    #[default]
     Geist,
     GeistMono,
     System,
@@ -58,6 +57,12 @@ pub enum UiFontFamily {
 }
 
 impl UiFontFamily {
+    /// New-install desktop default. Existing saved preferences are resolved by
+    /// the settings loader before this platform default is used.
+    pub fn default_for_platform(macos: bool) -> Self {
+        if macos { Self::System } else { Self::Geist }
+    }
+
     pub fn label(&self) -> &str {
         match self {
             Self::Geist => "Geist",
@@ -74,6 +79,12 @@ impl UiFontFamily {
             Self::System => ".SystemUIFont",
             Self::Installed(name) => name,
         }
+    }
+}
+
+impl Default for UiFontFamily {
+    fn default() -> Self {
+        Self::default_for_platform(cfg!(target_os = "macos"))
     }
 }
 
@@ -108,7 +119,7 @@ impl<'de> Deserialize<'de> for UiFontFamily {
             value if value.starts_with("installed:") && value.len() > "installed:".len() => {
                 Self::Installed(value["installed:".len()..].to_owned())
             }
-            _ => Self::Geist,
+            _ => Self::default(),
         })
     }
 }
@@ -167,6 +178,15 @@ impl Default for UiFontSize {
 pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
+
+/// Conversation roles measured from Dia 1.54.2's bundled chat styles.
+/// Values are logical pixels at the 16px interface baseline; see
+/// `docs/design/dia-typography.md` for the reference and verification boundary.
+pub const CHAT_BODY_SIZE: f32 = 15.0;
+pub const CHAT_BODY_LINE_HEIGHT: f32 = CHAT_BODY_SIZE * 1.5;
+pub const CHAT_BUBBLE_SIZE: f32 = 14.0;
+pub const CHAT_BUBBLE_LINE_HEIGHT: f32 = CHAT_BUBBLE_SIZE * 1.68;
+pub const TOOL_TITLE_SIZE: f32 = 13.0;
 
 pub const CODE_FONT_SIZE_DEFAULT: f32 = 12.5;
 pub const TERMINAL_FONT_SIZE_DEFAULT: f32 = 13.0;
@@ -230,8 +250,9 @@ impl FontAvailability {
     }
 
     fn fallback(&self) -> UiFontFamily {
-        if self.geist {
-            UiFontFamily::Geist
+        let preferred = UiFontFamily::default();
+        if self.is_available(&preferred) {
+            preferred
         } else {
             UiFontFamily::System
         }
@@ -801,19 +822,23 @@ mod tests {
         }
         assert_eq!(
             serde_json::from_str::<UiFontFamily>(r#""futureFont""#).unwrap(),
-            UiFontFamily::Geist
+            UiFontFamily::default()
         );
     }
 
     #[test]
-    fn unavailable_family_resolves_to_geist() {
+    fn unavailable_family_resolves_to_available_platform_default() {
         let unavailable = UiFontFamily::Installed("Inter".into());
         let availability = FontAvailability::all().without(&unavailable);
         assert_eq!(
             resolve_effective(&unavailable, &availability),
-            UiFontFamily::Geist
+            UiFontFamily::default()
         );
         assert!(availability.is_available(&UiFontFamily::System));
+        assert_eq!(
+            resolve_effective(&unavailable, &FontAvailability::default()),
+            UiFontFamily::System
+        );
     }
 
     #[test]
@@ -837,7 +862,7 @@ mod tests {
         let without_mono = availability.without(&UiFontFamily::GeistMono);
         assert_eq!(
             resolve_effective_mono(&unavailable, &without_mono, false),
-            UiFontFamily::Geist
+            UiFontFamily::default()
         );
     }
 
@@ -894,6 +919,33 @@ mod tests {
             resolve_effective_mono(&persisted, &availability, false),
             persisted
         );
+    }
+
+    #[test]
+    fn new_install_interface_default_is_system_on_mac_and_geist_elsewhere() {
+        assert_eq!(
+            UiFontFamily::default_for_platform(true),
+            UiFontFamily::System
+        );
+        assert_eq!(
+            UiFontFamily::default_for_platform(false),
+            UiFontFamily::Geist
+        );
+        assert_eq!(
+            UiFontFamily::default(),
+            UiFontFamily::default_for_platform(cfg!(target_os = "macos"))
+        );
+        for (saved, expected) in [
+            ("system", UiFontFamily::System),
+            ("geist", UiFontFamily::Geist),
+            ("geistMono", UiFontFamily::GeistMono),
+            ("installed:Arial", UiFontFamily::Installed("Arial".into())),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<UiFontFamily>(serde_json::json!(saved)).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

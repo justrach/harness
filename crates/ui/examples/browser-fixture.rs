@@ -1,5 +1,8 @@
 #[path = "browser-fixture/transcript_links.rs"]
 mod transcript_links;
+#[cfg(target_os = "macos")]
+#[path = "browser-fixture/user_agent.rs"]
+mod user_agent;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[path = "browser-fixture/html_preview.rs"]
 mod html_preview;
@@ -9,6 +12,9 @@ mod saved_views;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "browser-fixture/chrome.rs"]
+mod chrome;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -35,6 +41,9 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
         let window = app
             .keyWindow()
             .or_else(|| app.mainWindow())
+            // Capture this fixture's visible window even if another app took
+            // keyboard focus while the asynchronous review was running.
+            .or_else(|| app.windows().iter().find(|window| window.isVisible()))
             .ok_or_else(|| anyhow::anyhow!("fixture window is not available"))?;
         std::process::Command::new("/usr/sbin/screencapture")
             .args(["-x", "-o", "-l", &window.windowNumber().to_string()])
@@ -135,6 +144,8 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| "/tmp/harness-browser-captures".into()),
     );
     std::fs::create_dir_all(&output)?;
+    let user_agent_fixture = std::env::var_os("HARNESS_BROWSER_USER_AGENT_FIXTURE_ONLY").is_some()
+        || std::env::var_os("HARNESS_BROWSER_USER_AGENT_GOOGLE").is_some();
     let temp = tempfile::tempdir()?;
     let data = temp.path().to_path_buf();
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -204,6 +215,12 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                if user_agent_fixture {
+                    #[cfg(target_os = "macos")]
+                    return user_agent::exercise(window, &output, cx).await;
+                    #[cfg(not(target_os = "macos"))]
+                    anyhow::bail!("the Safari-compatible user-agent fixture requires macOS");
+                }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if std::env::var_os("HARNESS_HTML_PREVIEW_FIXTURE_ONLY").is_some() {
                     html_preview::exercise(window, cx).await?;
@@ -224,6 +241,10 @@ fn main() -> anyhow::Result<()> {
                     ])).unwrap();
                     s.receive_transcript_frame(harness_doc::TranscriptFrame::Reset { reset: entries }, cx).unwrap();
                 });
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                if std::env::var_os("HARNESS_BROWSER_CHROME_FIXTURE_ONLY").is_some() {
+                    return chrome::exercise(window, &_origin, &output, cx).await;
+                }
                 let (first_id, first) = window.update(cx, |shell, w, cx| shell.fixture_open_browser(None, w, cx))?;
                 pause(cx, 500).await;
                 #[cfg(target_os = "linux")]
@@ -520,7 +541,15 @@ fn main() -> anyhow::Result<()> {
                 std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
-            if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
+            if let Err(error) = run {
+                eprintln!("Browser fixture failed: {error:#}");
+                *result.lock().unwrap() = Some(error.to_string());
+                if user_agent_fixture {
+                    // AppKit may exit directly from quit before main can
+                    // report errors. The focused fixture saves its JSON first.
+                    std::process::exit(1);
+                }
+            }
             let _ = window.update(cx, |shell, window, cx| shell.fixture_blur_browser(window, cx));
             pause(cx, 200).await;
             drop(state);

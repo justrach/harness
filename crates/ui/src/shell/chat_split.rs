@@ -298,7 +298,7 @@ impl ChatSplit {
     pub fn to_saved(&self) -> crate::settings::SavedChatLayout {
         crate::settings::SavedChatLayout {
             vertical: self.axis == SplitAxis::Vertical,
-            panes: self.panes.clone(),
+            panes: self.panes.iter().zip(&self.vanished).map(|(pane, vanished)| pane.clone().or_else(|| vanished.clone())).collect(),
             focus: self.focus,
             shares: self.shares.clone(),
             projects: self.projects.clone(),
@@ -381,7 +381,8 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         // Jump to the message box from anywhere (the browser keeps ⌘L for
         // its address bar: its Browser-scoped binding is bound later).
         KeyBinding::new(&b("cmd-l", "ctrl-shift-l"), FocusComposer, None),
-        // Chat tabs (`chat_tabs.rs`): Safari/Terminal's keys on macOS.
+        KeyBinding::new(&b("cmd-o", "ctrl-o"), NewChatTab, None),
+        // Project tab navigation.
         KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
         KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
     ];
@@ -423,7 +424,16 @@ impl Shell {
         matches!(self.route, Route::Chat) && self.chat_split.is_some()
     }
 
-    pub(super) fn split_chat(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn split_chat(
+        &mut self,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_split(axis, cx);
+            return;
+        }
         self.split_chat_opening(axis, None, window, cx);
     }
 
@@ -471,9 +481,11 @@ impl Shell {
             let transcript = cx.new(|cx| Transcript::new(self.state.clone(), cx));
             let links = Self::session_links(None, cx);
             let views = Self::view_opener(cx);
+            let labels = Self::model_labeler(&self.composer, cx);
             transcript.update(cx, |transcript, _| {
                 transcript.set_workspace_link_handler(links);
                 transcript.set_view_opener(views);
+                transcript.set_model_labeler(labels);
             });
             let events = cx.subscribe(&transcript, Self::on_transcript_event);
             PeerChatView { transcript, _events: events }
@@ -535,12 +547,20 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_focus_direction(direction, window, cx);
+            return;
+        }
         if let Some(ix) = self.chat_split.as_ref().and_then(|s| s.toward(direction)) {
             self.focus_chat_pane(ix, window, cx);
         }
     }
 
     pub(super) fn resize_chat_pane(&mut self, direction: PaneDirection, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_resize(direction, cx);
+            return;
+        }
         if let Some(split) = self.chat_split.as_mut()
             && split.resize(direction)
         {
@@ -550,6 +570,10 @@ impl Shell {
     }
 
     pub(super) fn equalize_chat_panes(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_equalize(cx);
+            return;
+        }
         if let Some(split) = self.chat_split.as_mut() {
             split.equalize();
             self.persist_chat_layout(cx);
@@ -558,6 +582,10 @@ impl Shell {
     }
 
     pub(super) fn toggle_chat_pane_zoom(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_zoom(cx);
+            return;
+        }
         if let Some(split) = self.chat_split.as_mut() {
             split.zoomed = !split.zoomed;
             cx.notify();
@@ -630,7 +658,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (bool, Option<super::chat_tabs::CloseArchive>) {
-        let closing = self.state.read(cx).selected_chat.clone();
+        let closing = self
+            .chat_split_active()
+            .then(|| self.state.read(cx).selected_chat.clone())
+            .flatten();
         let closed = self.close_focused_chat_view(window, cx);
         let archive = closing
             .filter(|_| closed)
@@ -742,11 +773,16 @@ impl Shell {
     /// Reconcile peer transcript views and their doc watches with the split.
     pub(super) fn sync_chat_panes(&mut self, cx: &mut Context<Self>) {
         self.persist_chat_layout(cx);
-        let wanted: Vec<String> = self
+        let mut wanted: Vec<String> = self
             .chat_split
             .as_ref()
             .map(|split| split.peer_chats().map(str::to_owned).collect())
             .unwrap_or_default();
+        for id in self.overview_live_chats(cx) {
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
         let stale: Vec<String> = self
             .peer_chat_views
             .keys()
@@ -764,9 +800,11 @@ impl Shell {
             let transcript = cx.new(|cx| Transcript::for_peer_chat(self.state.clone(), id.clone(), cx));
             let links = Self::session_links(Some(id.clone()), cx);
             let views = Self::view_opener(cx);
+            let labels = Self::model_labeler(&self.composer, cx);
             transcript.update(cx, |transcript, _| {
                 transcript.set_workspace_link_handler(links);
                 transcript.set_view_opener(views);
+                transcript.set_model_labeler(labels);
             });
             let events = cx.subscribe(&transcript, Self::on_transcript_event);
             self.state
@@ -1007,8 +1045,12 @@ impl Shell {
             .relative()
             .flex()
             .flex_col()
-            // The window titlebar overlays the top of the content area.
-            .pt(px(Theme::TITLEBAR_HEIGHT))
+            // Harp already places the whole split surface below the header.
+            .pt(px(if theme.is_harp() {
+                Theme::SPACE_SM
+            } else {
+                Theme::TITLEBAR_HEIGHT
+            }))
             .child(
                 div()
                     .flex_none()
@@ -1039,7 +1081,7 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .hover(|style| style.bg(theme.ink(0.08)))
+                            .hover(|style| style.bg(theme.element_hover))
                             .role(gpui::Role::Button)
                             .aria_label("Close this pane")
                             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
@@ -1345,10 +1387,15 @@ impl Shell {
         let mut zones = Vec::new();
         let right = self.can_split(SplitAxis::Horizontal);
         let below = self.can_split(SplitAxis::Vertical);
+        let header_clearance = if theme.is_harp() {
+            0.0
+        } else {
+            Theme::TITLEBAR_HEIGHT
+        };
         if right {
             zones.push(
                 zone("chat-drop-right", SplitAxis::Horizontal, "Open to the right ◨")
-                    .top(px(Theme::TITLEBAR_HEIGHT + 8.0))
+                    .top(px(header_clearance + 8.0))
                     .bottom(px(8.0))
                     .right(px(8.0))
                     .w(gpui::relative(0.3))

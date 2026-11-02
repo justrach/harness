@@ -232,7 +232,7 @@ const ENTRIES: &[SettingsEntry] = &[
     entry(S::Appshots, "Appshots", "screenshot capture window share"),
     entry(
         S::Archived,
-        "Archive sessions when closing tabs or panes",
+        "Archive sessions when closing panes",
         "close tab pane archive automatically",
     ),
     entry(

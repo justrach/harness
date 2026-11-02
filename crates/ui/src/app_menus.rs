@@ -227,7 +227,7 @@ pub(crate) fn close_tab_in(window: gpui::WindowHandle<shell::Shell>, cx: &mut Ap
 
 fn close_tab_in_with_archive(
     window: gpui::WindowHandle<shell::Shell>,
-    archive: bool,
+    _archive: bool,
     cx: &mut App,
 ) {
     window
@@ -235,14 +235,11 @@ fn close_tab_in_with_archive(
             // The right pane's active surface (the tab the user just opened),
             // then the focused split pane or chat tab, Ghostty-style, then
             // the chat itself, back to a new session.
-            if shell.close_active_surface(window, cx) {
+            if shell.workspace_close_focused(window, cx) || shell.close_active_surface(window, cx) {
                 return;
             }
-            if archive {
-                shell.close_chat_view_by_shortcut(window, cx);
-            } else {
-                shell.close_chat_view_with_archive(false, window, cx);
-            }
+            // Closing a local placement is always recoverable through History.
+            shell.close_chat_view_with_archive(false, window, cx);
         })
         .ok();
 }
@@ -375,11 +372,13 @@ pub fn app_menus() -> Vec<Menu> {
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
         menus.push(Menu::new("Window").items([
+            MenuItem::action("New Tab", shell::NewTab),
+            MenuItem::separator(),
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
             MenuItem::separator(),
             MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Reopen Closed Tab", shell::ReopenClosedChatTab),
+            MenuItem::action("Reopen Closed Tab or Session", shell::ReopenClosedChatTab),
             MenuItem::action("Close Window", CloseWindow),
         ]));
     }
@@ -423,6 +422,23 @@ mod tests {
             )),
             "the application menu should expose Settings"
         );
+    }
+
+    #[test]
+    fn native_new_tab_menu_uses_the_panel_tab_action() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let menus = app_menus();
+        let window = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Window")
+            .unwrap();
+        assert!(window.items.iter().any(|item| matches!(
+            item,
+            MenuItem::Action { name, action, .. }
+                if name.as_ref() == "New Tab" && action.name() == shell::NewTab.name()
+        )));
     }
 
     #[test]

@@ -106,8 +106,8 @@ impl Preview {
     }
     pub fn preferred_height(&self) -> f32 {
         self.pending.as_ref().map_or(480.0, |p| {
-            // No cost row: the card is a line shorter than the preview was.
-            (330.0 + p.model.options.len() as f32 * 60.0).min(480.0)
+            // Leave room for the catalog billing line and actual reasoning choices.
+            (380.0 + p.model.options.len() as f32 * 60.0).min(480.0)
         })
     }
     pub fn animating(&self, reduced: bool) -> bool {
@@ -266,6 +266,44 @@ fn billing_label(billing: &str) -> String {
     }
 }
 
+fn billing_text(model: &Model) -> &'static str {
+    match model.billing.as_deref() {
+        Some("plan") => "Your subscription",
+        Some("local") => "Runs locally",
+        Some("credits") => "Codegraff credits",
+        Some("api") => "API usage",
+        _ => "Not reported",
+    }
+}
+
+/// Facts reported by the catalog. An absent context window is not inferred
+/// from the model name, its description, or a selectable context option.
+fn detail_facts(model: &Model) -> Vec<(&'static str, String)> {
+    let mut facts = vec![("Billing", billing_text(model).to_string())];
+    if let Some(context) = model.context {
+        facts.push(("Context", harness_proto::context_label(context)));
+    }
+    facts.push(("Reasoning options", supported_reasoning_text(model)));
+    facts
+}
+
+fn supported_reasoning_text(model: &Model) -> String {
+    let (Some(first), Some(last)) = (
+        model.reasoning_levels.first(),
+        model.reasoning_levels.last(),
+    ) else {
+        return "Not reported".into();
+    };
+    let binary = binary_reasoning_switch(Some(model));
+    let first = reasoning_label_for_model(*first, binary);
+    let last = reasoning_label_for_model(*last, binary);
+    if first == last {
+        first.into()
+    } else {
+        format!("{first} – {last}")
+    }
+}
+
 fn validate_pending(pending: &Pending, live: Option<&Model>) -> bool {
     let Some(live) = live else {
         return false;
@@ -319,18 +357,14 @@ impl Pickers {
     }
     pub(super) fn preview_rows(&self, cx: &App) -> std::sync::Arc<Vec<ModelRowData>> {
         let key = ModelRowsKey {
+            preview: true,
             query: self.search.read(cx).text().trim().to_string(),
             rail: self.model_rail,
             effective: self.preview_viewed(cx),
             locked: self.harness_locked(cx),
             catalog_rev: self.catalog_rev,
             selected: self.effective_model_id(cx).map(str::to_owned),
-            chat_mode: self.chat_mode(cx),
         };
-        // A plain chat offers only its auto tiers, as the standard list does.
-        if key.chat_mode {
-            return std::sync::Arc::new(self.visible_model_rows(cx));
-        }
         if let Some((old, rows)) = self.model_rows_cache.borrow().as_ref()
             && *old == key
         {
@@ -499,6 +533,11 @@ impl Pickers {
                 config.model_options = p.options;
             });
         } else {
+            self.config.chat_mode = legacy_mode_after_explicit_route_change(
+                self.config.chat_mode,
+                (self.effective_harness(cx), self.effective_model_id(cx)),
+                (Some(p.harness), Some(p.model.id.as_str())),
+            );
             self.config.harness = Some(p.harness);
             self.config.model = Some(p.model.id.clone());
             self.config.reasoning = p.reasoning;
@@ -670,7 +709,6 @@ impl Pickers {
             cx,
         );
         let rows = self.model_rows(cx);
-        let grouped = rows.iter().any(|r| r.header.is_some());
         let entity = cx.entity();
         let row_data = rows.clone();
         let list = gpui::uniform_list("preview-models", rows.len(), move |range, window, app| {
@@ -679,7 +717,7 @@ impl Pickers {
                     .filter_map(|ix| {
                         row_data
                             .get(ix)
-                            .map(|row| this.preview_row(ix, row, grouped, window, cx))
+                            .map(|row| this.preview_row(ix, row, window, cx))
                     })
                     .collect::<Vec<_>>()
             })
@@ -687,6 +725,7 @@ impl Pickers {
         .size_full()
         .px(px(6.0))
         .track_scroll(&self.model_scroll);
+        let list = popover::faded_menu_list(&self.model_scroll_base(), list).into_any_element();
         let empty = match viewed.and_then(|h| self.models.get(&h)) {
             Some(Loadable::Error(message)) => self.retry_row(
                 "preview-retry",
@@ -702,22 +741,37 @@ impl Pickers {
             .size_full()
             .flex()
             .flex_col()
+            .font_weight(gpui::FontWeight::NORMAL)
             .text_color(theme.text)
             .child(tabs)
             .child(
                 div()
-                    .h(px(36.0))
+                    .h(px(50.0))
                     .flex_none()
-                    .px(px(12.0))
+                    .px(px(10.0))
+                    .pt(px(8.0))
+                    .pb(px(8.0))
                     .flex()
-                    .items_center()
-                    .gap(px(8.0))
                     .child(
-                        icons::icon(icons::MAGNIFER)
-                            .size(px(14.0))
-                            .text_color(theme.text_muted),
-                    )
-                    .child(div().flex_1().child(self.search.clone())),
+                        div()
+                            .w_full()
+                            .h_full()
+                            .px(px(9.0))
+                            .rounded(px(7.0))
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.input_bg)
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                icons::icon(icons::MAGNIFER)
+                                    .size(px(13.0))
+                                    .flex_none()
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(div().flex_1().min_w_0().child(self.search.clone())),
+                    ),
             )
             .child(
                 div().flex_1().min_h_0().flex().child(
@@ -736,7 +790,6 @@ impl Pickers {
         &mut self,
         ix: usize,
         row: &ModelRowData,
-        grouped: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -747,16 +800,17 @@ impl Pickers {
             .px(px(10.0))
             .flex()
             .items_center()
-            .gap(px(7.0));
+            .gap(px(8.0));
         if let Some(title) = &row.header {
             return base
                 .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text_muted)
                 .child(
                     icons::icon(provider(route(&row.model)).1)
-                        .size(px(14.0))
-                        .text_color(theme.text),
+                        .size(px(16.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
                 )
                 .child(title.clone())
                 .into_any_element();
@@ -795,68 +849,97 @@ impl Pickers {
             None
         };
         let entity = cx.entity();
+        let mut row_theme = theme.clone();
+        row_theme.element_hover = motion::mix(theme.surface_overlay, theme.element_hover, 0.5);
         let row = popover::menu_row_nav(
-            &theme,
+            &row_theme,
             selected,
             self.active == ix,
             format!("preview-row-{ix}"),
         )
         .w_full()
         .h(px(34.0))
+        .px(px(10.0))
         .py(px(0.0))
+        .gap(px(8.0))
+        .text_size(crate::typography::ui_rems(13.0))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .text_color(theme.text)
         .relative()
         .id(("preview-model", ix))
         .role(gpui::Role::Button)
         .aria_label(row.model.label.clone())
         .on_click(cx.listener(move |this, _, _, cx| this.preview_stage(ix, cx)))
-        .when(!grouped, |el| {
-            el.child(
-                icons::icon(model_icon(&row.model))
-                    .size(px(15.0))
-                    .text_color(theme.text),
-            )
-        })
+        .child(
+            icons::icon(model_icon(&row.model))
+                .size(px(16.0))
+                .flex_none()
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_muted
+                }),
+        )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                .when(selected, |el| el.font_weight(gpui::FontWeight::MEDIUM))
                 .child(row.model.label.clone()),
         )
-        .when(selected, |el| {
-            el.child(
-                icons::icon(icons::CHECK)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
-            )
-        })
         .child(
             div()
-                .id(("preview-star", ix))
-                .role(gpui::Role::Button)
-                .aria_label(if favorite {
-                    "Unstar model"
-                } else {
-                    "Star model"
-                })
-                .size(px(24.0))
+                .w(px(44.0))
+                .flex_none()
                 .flex()
                 .items_center()
-                .justify_center()
-                .rounded(px(5.0))
-                .hover(|s| s.bg(theme.surface_raised_hover))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.toggle_model_favorite(harness, &id, cx);
-                }))
+                .justify_end()
+                .gap(px(4.0))
                 .child(
-                    icons::icon(if favorite {
-                        icons::STAR_BOLD
-                    } else {
-                        icons::STAR
-                    })
-                    .size(px(12.0))
-                    .text_color(theme.text_muted),
+                    div()
+                        .size(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(selected, |el| {
+                            el.child(
+                                icons::icon(icons::CHECK)
+                                    .size(px(12.0))
+                                    .text_color(theme.accent),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .id(("preview-star", ix))
+                        .role(gpui::Role::Button)
+                        .aria_label(if favorite {
+                            "Unstar model"
+                        } else {
+                            "Star model"
+                        })
+                        .size(px(24.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.0))
+                        .hover(|s| s.bg(theme.surface_raised_hover))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_model_favorite(harness, &id, cx);
+                        }))
+                        .child(
+                            icons::icon(if favorite {
+                                icons::STAR_BOLD
+                            } else {
+                                icons::STAR
+                            })
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                        ),
                 ),
         )
         .into_any_element();
@@ -880,55 +963,72 @@ impl Pickers {
     }
     fn preview_detail(&self, row: &ModelRowData, theme: &Theme) -> AnyElement {
         let model = &row.model;
-        let panel = popover::popover_card(theme)
+        let mut panel = popover::nested_menu_card(theme)
             .id("preview-detail")
             .w(px(DETAIL_WIDTH))
             .flex_none()
             .max_h(px(360.0))
             .overflow_y_scroll()
-            .p(px(16.0))
+            .p(px(14.0))
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .text_size(crate::typography::ui_rems(11.0))
+            .text_size(crate::typography::ui_rems(12.0))
+            .line_height(crate::typography::ui_rems(18.0))
+            .font_weight(gpui::FontWeight::NORMAL)
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap(px(8.0))
                     .child(
                         icons::icon(model_icon(model))
-                            .size(px(20.0))
+                            .size(px(18.0))
+                            .flex_none()
                             .text_color(theme.text),
                     )
-                    .child(div().min_w_0().child(model.label.clone())),
-            )
-            .child(
-                div()
-                    .text_color(theme.text_muted)
-                    .child(format!("via {}", provider(route(model)).0)),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .text_size(crate::typography::ui_rems(13.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(model.label.clone()),
+                            )
+                            .when_some(model.id.split_once('/'), |el, (route, _)| {
+                                el.child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(format!("via {}", provider(route).0)),
+                                )
+                            }),
+                    ),
             );
-        // Only what the catalog says: no ratings or prices are made up.
-        let facts = [
-            ("Reasoning", reasoning_range(model)),
-            ("Billing", model.billing.as_deref().map(billing_label)),
-        ];
+        for (label, value) in detail_facts(model) {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .gap(px(10.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .child(div().text_color(theme.text_muted).child(label))
+                    .child(value),
+            );
+        }
         panel
-            .children(facts.into_iter().filter_map(|(label, value)| {
-                value.map(|value| {
-                    div()
-                        .flex()
-                        .justify_between()
-                        .child(label)
-                        .child(div().text_color(theme.text_muted).child(value))
-                })
-            }))
             .when_some(model.description.clone(), |el, description| {
                 el.child(
                     div()
                         .pt(px(12.0))
                         .border_t_1()
                         .border_color(theme.border)
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
                         .child(description),
                 )
@@ -956,6 +1056,7 @@ impl Pickers {
             .flex()
             .flex_col()
             .gap(px(16.0))
+            .font_weight(gpui::FontWeight::NORMAL)
             .child(
                 div()
                     .id("preview-back")
@@ -965,6 +1066,8 @@ impl Pickers {
                     .items_center()
                     .gap(px(6.0))
                     .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .hover(|style| style.text_color(theme.text))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.preview_back(cx)))
                     .child(
@@ -991,16 +1094,18 @@ impl Pickers {
                             .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_size(crate::typography::ui_rems(16.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_size(crate::typography::ui_rems(15.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .child(p.model.label.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child(format!("via {}", provider(route(&p.model)).0)),
-                            ),
+                            .when_some(p.model.id.split_once('/'), |el, (route, _)| {
+                                el.child(
+                                    div()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(format!("via {}", provider(route).0)),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -1096,8 +1201,14 @@ impl Pickers {
                         .justify_between()
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
-                        .child(if binary { "Off" } else { "Faster" })
-                        .child(if binary { "On" } else { "Deeper" }),
+                        .child(reasoning_label_for_model(
+                            p.model.reasoning_levels[0],
+                            binary,
+                        ))
+                        .child(reasoning_label_for_model(
+                            p.model.reasoning_levels[count - 1],
+                            binary,
+                        )),
                 );
         } else {
             body = body.child(
@@ -1158,14 +1269,23 @@ impl Pickers {
                     .child(div().flex().flex_wrap().gap(px(4.0)).children(choices)),
             );
         }
-        body = body.when_some(self.preview.error.clone(), |el, error| {
-            el.child(
+        body = body
+            .child(
                 div()
+                    .flex()
+                    .justify_between()
                     .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.danger)
-                    .child(error),
+                    .child("Billing")
+                    .child(billing_text(&p.model)),
             )
-        });
+            .when_some(self.preview.error.clone(), |el, error| {
+                el.child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            });
         div()
             .flex_1()
             .min_h_0()
@@ -1269,6 +1389,7 @@ impl Pickers {
             ],
             options: Vec::new(),
             billing: Some("api".into()),
+            context: Some(200_000),
         };
         let mut models: Vec<Model> = samples
             .iter()
@@ -1432,10 +1553,52 @@ mod section_tests {
                 options: Vec::new(),
                 maker: Some("anthropic".into()),
                 billing: Some("plan".into()),
+                context: None,
             },
             selected_only: false,
             header: None,
         }
+    }
+
+    #[test]
+    fn preview_details_use_catalog_billing_and_reasoning_without_estimates() {
+        let mut model = row("anthropic/model").model;
+        for (billing, expected) in [
+            (None, "Not reported"),
+            (Some("unknown"), "Not reported"),
+            (Some("plan"), "Your subscription"),
+            (Some("credits"), "Codegraff credits"),
+            (Some("api"), "API usage"),
+            (Some("local"), "Runs locally"),
+        ] {
+            model.billing = billing.map(str::to_owned);
+            assert_eq!(billing_text(&model), expected);
+        }
+        assert_eq!(supported_reasoning_text(&model), "Not reported");
+        model.reasoning_levels = vec![ReasoningLevel::None, ReasoningLevel::High];
+        assert_eq!(supported_reasoning_text(&model), "Off – On");
+        model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
+        assert_eq!(supported_reasoning_text(&model), "Low – High");
+    }
+
+    #[test]
+    fn preview_context_only_uses_reported_capacity() {
+        let mut model = row("anthropic/model-1m").model;
+        model.description = Some("A model with 1M context".into());
+        assert!(
+            detail_facts(&model)
+                .iter()
+                .all(|(label, _)| *label != "Context")
+        );
+        model.context = Some(1_050_000);
+        assert_eq!(
+            detail_facts(&model)
+                .into_iter()
+                .find(|(label, _)| *label == "Context"),
+            Some(("Context", "1.05M".into()))
+        );
+        model.context = None;
+        assert_eq!(detail_facts(&model).len(), 2);
     }
 
     #[test]
@@ -1674,6 +1837,49 @@ mod tests {
         });
     }
     #[gpui::test]
+    fn preview_regular_model_commit_normalizes_legacy_mode_without_changing_context(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (state, picker) = fixture(cx, false);
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "legacy-chat", "deviceId": "preview", "archived": false,
+                    "createdAt": "2026-10-23T00:00:00Z", "cwd": "/existing/project",
+                    "config": { "harness": "graff", "model": "codegraff/auto-low",
+                        "sandbox": "read-only", "chatMode": true }
+                }))
+                .unwrap(),
+            ];
+            state.selected_chat = Some("legacy-chat".into());
+        });
+        picker.update(cx, |p, cx| {
+            p.config.model = None;
+            p.config.reasoning = None;
+            p.fixture_preview_model("anthropic/claude-sonnet-4.6", cx);
+            assert!(
+                state
+                    .read(cx)
+                    .selected_chat_row()
+                    .unwrap()
+                    .config
+                    .as_ref()
+                    .unwrap()
+                    .chat_mode,
+                "browsing must not migrate the chat"
+            );
+            p.preview_commit(cx);
+            assert_eq!(p.preview.error, None);
+            let chat = state.read(cx).selected_chat_row().unwrap();
+            let config = chat.config.as_ref().unwrap();
+            assert!(!config.chat_mode);
+            assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-4.6"));
+            assert_eq!(config.sandbox, SandboxLevel::ReadOnly);
+            assert_eq!(chat.cwd.as_deref(), Some("/existing/project"));
+        });
+    }
+
+    #[gpui::test]
     fn preview_removed_catalog_capability_blocks_commit(cx: &mut gpui::TestAppContext) {
         let (_, picker) = fixture(cx, false);
         picker.update(cx, |p, cx| {
@@ -1782,6 +1988,54 @@ mod tests {
             assert_eq!(p.resolved(cx).reasoning, Some(ReasoningLevel::Low));
         });
     }
+    #[gpui::test]
+    fn preview_existing_legacy_chat_keeps_agent_reasoning_and_saved_context(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (state, picker) = fixture(cx, false);
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "legacy-chat", "deviceId": "preview", "archived": false,
+                    "createdAt": "2026-10-23T00:00:00Z", "cwd": "/existing/project",
+                    "config": { "harness": "graff", "model": "anthropic/claude-sonnet-4.6",
+                        "reasoning": "high", "sandbox": "read-only", "chatMode": true }
+                }))
+                .unwrap(),
+            ];
+            state.selected_chat = Some("legacy-chat".into());
+        });
+        picker.update(cx, |p, cx| {
+            p.config.model = None;
+            p.config.reasoning = None;
+            p.fixture_agent_ladder_only("anthropic/claude-sonnet-4.6", cx);
+            assert_eq!(p.resolved(cx).reasoning, Some(ReasoningLevel::High));
+            p.fixture_preview_model("anthropic/claude-sonnet-4.6", cx);
+            let pending = p
+                .preview
+                .pending
+                .as_mut()
+                .expect("normal model is selectable in a legacy chat");
+            assert!(
+                pending
+                    .model
+                    .reasoning_levels
+                    .contains(&ReasoningLevel::Low)
+            );
+            pending.reasoning = Some(ReasoningLevel::Low);
+            p.preview_commit(cx);
+            assert_eq!(p.preview.error, None);
+            assert_eq!(p.resolved(cx).reasoning, Some(ReasoningLevel::Low));
+            let chat = state.read(cx).selected_chat_row().unwrap();
+            let config = chat.config.as_ref().unwrap();
+            assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
+            assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-4.6"));
+            assert_eq!(config.sandbox, SandboxLevel::ReadOnly);
+            assert!(config.chat_mode);
+            assert_eq!(chat.cwd.as_deref(), Some("/existing/project"));
+        });
+    }
+
     #[gpui::test]
     fn preview_pointer_drag_and_keyboard_share_staged_reasoning(cx: &mut gpui::TestAppContext) {
         struct PointerFixture(Entity<Pickers>);
@@ -2140,6 +2394,7 @@ mod tests {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         };
         for theme in [Theme::light(), Theme::dark()] {
             let grok = brand_accent(&model("xai/grok-5"), HarnessId::Graff, &theme);
@@ -2170,6 +2425,7 @@ mod tests {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         };
         // Nothing listed: no row rather than a made-up value.
         assert_eq!(reasoning_range(&model), None);

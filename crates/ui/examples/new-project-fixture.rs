@@ -3,6 +3,19 @@ use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use harness_ui::*;
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let output = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--output=").map(std::path::PathBuf::from));
+    let width = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--width=")?.parse::<f32>().ok())
+        .unwrap_or(1100.0);
+    let walkthrough = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--walkthrough=").map(str::to_owned));
+    let warm = args.iter().any(|arg| arg == "--warm");
+    let opaque = args.iter().any(|arg| arg == "--opaque");
     let runtime = tokio::runtime::Runtime::new()?;
     let _guard = runtime.enter();
     tracing_subscriber::fmt().with_env_filter("warn").init();
@@ -12,10 +25,14 @@ fn main() -> anyhow::Result<()> {
         gpui_tokio::init(cx); gpui_base::init(cx);
         let mut settings = settings::UiSettings::default();
         settings.sidebar_show_branch = true;
+        if warm {
+            settings.theme_selection.light = "warm-harp-light".into();
+            settings.theme_selection.dark = "warm-harp-dark".into();
+        }
         if let Ok(path) = std::env::var("HARNESS_FIXTURE_BACKGROUND") {
             settings.new_thread_composer_background = Some(settings::NewThreadComposerBackground { path, name: "Uploaded background".into() });
         }
-        settings.surface = harness_theme::SurfacePreference::Frosted;
+        settings.surface = if opaque { harness_theme::SurfacePreference::Opaque } else { harness_theme::SurfacePreference::Frosted };
         settings.save(&data).unwrap();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);
@@ -57,11 +74,33 @@ fn main() -> anyhow::Result<()> {
         });
         let boot = EngineBootConfig { data_dir: data, ipc_port: 0, edge_url: String::new(), edge_token: None, org_id: None, codegraff_client_id: None, default_harness: HarnessId::ClaudeCode };
         let window = cx.open_window(WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(1100.),px(800.))))),
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(gpui::point(px(12.),px(30.)), size(px(width),px(800.))))),
             titlebar: Some(gpui::TitlebarOptions { title: None, appears_transparent: true, traffic_light_position: Some(gpui::point(px(14.),px(14.))) }),
             app_owns_titlebar_drag: true,
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
+        #[cfg(feature = "appshots-fixture")]
+        if let Some(output) = output {
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                window.update(cx, |shell, window, cx| {
+                    if let Some(step) = walkthrough.as_deref() {
+                        shell.fixture_project_walkthrough(step, window, cx);
+                    } else {
+                        shell.fixture_open_project_setup(cx);
+                    }
+                }).unwrap();
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                let capture_window: gpui::AnyWindowHandle = window.into();
+                capture_window.update(cx, |_, window, cx| {
+                    window.draw(cx).clear();
+                    window.render_to_image().unwrap().save(output).unwrap();
+                }).unwrap();
+                cx.update(|cx| cx.quit());
+            }).detach();
+        }
+        #[cfg(not(feature = "appshots-fixture"))]
+        let _ = (output, walkthrough);
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(100)).await;

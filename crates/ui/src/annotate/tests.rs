@@ -22,6 +22,79 @@ fn close(a: image::Rgba<u8>, rgb: u32, tolerance: i32) -> bool {
     (0..3).all(|c| (a[c] as i32 - want[c] as i32).abs() <= tolerance)
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn annotation_note_card_stays_inside_the_canvas_at_window_edges() {
+    use gpui::{Bounds, point, px, size};
+
+    for viewport in [size(px(1200.0), px(760.0)), size(px(480.0), px(640.0))] {
+        let layout = crate::attachments::image_preview_layout(viewport);
+        let image_origin = layout.frame.origin + point(px(60.0), px(40.0));
+        for preferred in [(-300.0, -300.0), (2000.0, 2000.0)] {
+            let relative = super::editor::note_popover_bounds(
+                preferred,
+                image_origin,
+                layout.frame,
+                viewport,
+                layout.gutter,
+            );
+            let card = Bounds::new(image_origin + relative.origin, relative.size);
+            assert!(card.left() >= layout.gutter);
+            assert!(card.right() <= viewport.width - layout.gutter);
+            assert!(card.top() >= layout.gutter);
+            assert!(card.bottom() <= layout.frame.bottom());
+            assert!(card.bottom() < layout.footer_top);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn comment_editor_keeps_its_pin_visible_near_each_window_edge() {
+    use gpui::{Bounds, point, px, size};
+
+    for viewport in [size(px(1200.0), px(800.0)), size(px(420.0), px(700.0))] {
+        let layout = crate::attachments::image_preview_layout(viewport);
+        let origin = layout.frame.origin;
+        let diameter = 24.0;
+        let radius = diameter / 2.0;
+        let width = f32::from(layout.frame.size.width);
+        let height = f32::from(layout.frame.size.height);
+        for pin in [
+            (radius, radius),
+            (width - radius, radius),
+            (radius, height - radius),
+            (width - radius, height - radius),
+            (width * 0.7, height * 0.8),
+        ] {
+            let relative = super::editor::comment_popover_bounds(
+                pin,
+                diameter,
+                origin,
+                layout.frame,
+                viewport,
+                layout.gutter,
+            );
+            let card = Bounds::new(origin + relative.origin, relative.size);
+            let pin = Bounds::new(
+                origin + point(px(pin.0 - radius), px(pin.1 - radius)),
+                size(px(diameter), px(diameter)),
+            );
+            assert!(
+                card.right() <= pin.left()
+                    || card.left() >= pin.right()
+                    || card.bottom() <= pin.top()
+                    || card.top() >= pin.bottom(),
+                "the comment field must not cover its numbered anchor"
+            );
+            assert!(card.left() >= layout.gutter);
+            assert!(card.right() <= viewport.width - layout.gutter);
+            assert!(card.top() >= layout.gutter);
+            assert!(card.bottom() <= layout.frame.bottom());
+        }
+    }
+}
+
 #[test]
 fn a_drag_normalizes_in_any_direction_and_clamps_to_the_image() {
     let size = (200.0, 100.0);
@@ -309,11 +382,217 @@ fn into_staged_carries_the_notes() {
         name: "a-annotated.png".into(),
         png: png(4, 4, [0, 0, 0, 255]),
         notes: Some("Annotations".into()),
+        #[cfg(target_os = "macos")]
+        editable: None,
     }
     .into_staged();
     assert_eq!(staged.name, "a-annotated.png");
     assert_eq!(staged.annotations.as_deref(), Some("Annotations"));
     assert!(staged.image.is_some());
+}
+
+#[test]
+fn freehand_export_keeps_width_in_image_pixels_and_preserves_the_source() {
+    let source = png(100, 80, [255, 255, 255, 255]);
+    let original = source.clone();
+    let mut doc = Annotations::default();
+    doc.add_stroke(vec![(20.0, 20.0), (80.0, 20.0)], 8.0, MarkColor::Blue)
+        .unwrap();
+    let normal = flatten(&source, &doc, 1.0).unwrap();
+    let resized = flatten(&source, &doc, 3.0).unwrap();
+    assert_eq!(
+        normal, resized,
+        "stored stroke width does not change with the viewport"
+    );
+    let out = decode_png(&normal);
+    assert!(close(*out.get_pixel(50, 17), MarkColor::Blue.rgb(), 8));
+    assert_eq!(*out.get_pixel(50, 25), image::Rgba([255; 4]));
+    assert_eq!(source, original, "flatten always draws into a copy");
+    assert!(prompt_block("drawing.png", &doc).is_none());
+
+    let dot = doc
+        .add_stroke(vec![(50.0, 50.0)], 10.0, MarkColor::Red)
+        .unwrap();
+    assert_eq!(doc.number(dot), None);
+    let out = decode_png(&flatten(&source, &doc, 1.0).unwrap());
+    assert!(close(*out.get_pixel(50, 50), MarkColor::Red.rgb(), 8));
+    assert_eq!(*out.get_pixel(50, 57), image::Rgba([255; 4]));
+}
+
+#[test]
+fn point_comments_number_with_legacy_regions_but_keep_bodies_outside_pixels() {
+    let mut doc = Annotations::default();
+    let region = doc
+        .add_rect(rect(20.0, 20.0, 40.0, 40.0), MarkColor::Red)
+        .unwrap();
+    doc.commit_text(region, "Legacy region");
+    let markup = doc
+        .add_markup_rect(rect(80.0, 20.0, 30.0, 30.0), 6.0, MarkColor::Blue)
+        .unwrap();
+    let comment = doc.add_comment((120.0, 50.0), MarkColor::Green).unwrap();
+    doc.commit_text(comment, "Move this label\nKeep <this> text separate");
+    assert_eq!(doc.number(region), Some(1));
+    assert_eq!(doc.number(markup), None);
+    assert_eq!(doc.number(comment), Some(2));
+    let svg = overlay_svg(180.0, 100.0, &doc, 1.0);
+    assert!(!svg.contains("Move this"));
+    assert!(!svg.contains("Legacy region"));
+    assert!(!svg.contains("Keep &lt;this&gt;"));
+    assert_eq!(svg.matches("text-anchor=\"middle\"").count(), 2);
+    let notes = prompt_block("review.png", &doc).unwrap();
+    assert!(notes.contains("1. [box 20,20,40,40] Legacy region"));
+    assert!(notes.contains("2. [point 120,50] Move this label\n   Keep <this> text separate"));
+    let out = decode_png(&flatten(&png(180, 100, [255; 4]), &doc, 1.0).unwrap());
+    assert!(close(*out.get_pixel(81, 35), MarkColor::Blue.rgb(), 8));
+    assert_eq!(*out.get_pixel(95, 35), image::Rgba([255; 4]));
+}
+
+#[test]
+fn an_erase_gesture_sweeps_fast_movement_and_undo_restores_every_hit() {
+    let mut doc = Annotations::default();
+    let a = doc
+        .add_stroke(vec![(25.0, 10.0), (25.0, 90.0)], 4.0, MarkColor::Red)
+        .unwrap();
+    let b = doc
+        .add_stroke(vec![(75.0, 10.0), (75.0, 90.0)], 4.0, MarkColor::Blue)
+        .unwrap();
+    let comment = doc.add_comment((50.0, 50.0), MarkColor::Green).unwrap();
+    doc.commit_text(comment, "Keep this comment");
+    let legacy = doc
+        .add_rect(rect(10.0, 10.0, 80.0, 80.0), MarkColor::Red)
+        .unwrap();
+    let before = doc.items().to_vec();
+    doc.begin_erase();
+    assert!(doc.erase_segment((0.0, 50.0), (50.0, 50.0), 1.0));
+    assert!(doc.erase_segment((50.0, 50.0), (100.0, 50.0), 1.0));
+    assert!(doc.end_erase());
+    assert!(doc.get(a).is_none() && doc.get(b).is_none());
+    assert!(doc.get(comment).is_some() && doc.get(legacy).is_some());
+    let erased = doc.items().to_vec();
+    assert!(doc.undo());
+    assert_eq!(doc.items(), before);
+    assert!(doc.redo());
+    assert_eq!(doc.items(), erased);
+    assert!(!doc.redo());
+}
+
+#[test]
+fn eraser_hits_drawn_edges_not_empty_box_interiors_and_can_erase_text() {
+    let mut doc = Annotations::default();
+    let outline = doc
+        .add_markup_rect(rect(10.0, 10.0, 80.0, 80.0), 4.0, MarkColor::Red)
+        .unwrap();
+    doc.begin_erase();
+    assert!(!doc.erase_segment((40.0, 50.0), (60.0, 50.0), 2.0));
+    assert!(!doc.end_erase());
+    assert!(doc.get(outline).is_some());
+    doc.begin_erase();
+    assert!(doc.erase_segment((8.0, 50.0), (8.0, 50.0), 3.0));
+    assert!(doc.end_erase());
+    assert!(doc.undo());
+    assert!(doc.can_redo());
+    doc.begin_erase();
+    assert!(!doc.erase_segment((200.0, 200.0), (300.0, 300.0), 1.0));
+    assert!(!doc.end_erase());
+    assert!(doc.can_redo(), "a no-op gesture leaves redo intact");
+
+    let text = doc.add_text((120.0, 20.0), 13.0, MarkColor::Blue);
+    doc.commit_text(text, "Erase this");
+    assert!(!doc.can_redo(), "a new edit starts a new history branch");
+    doc.begin_erase();
+    assert!(doc.erase_segment((122.0, 24.0), (122.0, 24.0), 1.0));
+    assert!(doc.end_erase());
+    assert!(doc.get(text).is_none());
+    assert!(doc.undo());
+    assert_eq!(doc.get(text).unwrap().text, "Erase this");
+}
+
+#[test]
+fn comment_text_edits_delete_and_redo_remain_reversible() {
+    let mut doc = Annotations::default();
+    let empty = doc.add_comment((10.0, 10.0), MarkColor::Red).unwrap();
+    doc.commit_text(empty, "  ");
+    assert!(doc.is_empty() && !doc.can_undo());
+    let id = doc.add_comment((30.0, 40.0), MarkColor::Blue).unwrap();
+    doc.commit_text(id, "Original");
+    doc.commit_text(id, "Updated");
+    assert!(doc.undo());
+    assert_eq!(doc.get(id).unwrap().text, "Original");
+    assert!(doc.redo());
+    assert_eq!(doc.get(id).unwrap().text, "Updated");
+    doc.commit_text(id, "");
+    assert!(doc.get(id).is_none());
+    assert!(doc.undo());
+    assert_eq!(doc.get(id).unwrap().text, "Updated");
+    assert!(doc.redo());
+    assert!(doc.get(id).is_none());
+}
+
+#[test]
+fn editable_document_round_trip_validates_geometry_and_keeps_ids_distinct() {
+    let mut doc = Annotations::default();
+    doc.add_stroke(vec![(10.0, 10.0), (90.0, 40.0)], 5.0, MarkColor::Blue)
+        .unwrap();
+    let comment = doc.add_comment((70.0, 50.0), MarkColor::Red).unwrap();
+    doc.commit_text(comment, "Outside the pixels");
+    assert!(doc.is_valid_for_image((100.0, 100.0)));
+    let json = serde_json::to_value(&doc).unwrap();
+    for field in ["selected", "undo", "redo", "erase_origin"] {
+        assert!(json.get(field).is_none());
+    }
+    let mut loaded: Annotations = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(loaded, doc);
+    assert!(!loaded.can_undo() && !loaded.can_redo());
+    assert!(loaded.is_valid_for_image((100.0, 100.0)));
+    let mut stale_id = json.clone();
+    stale_id["next_id"] = serde_json::json!(0);
+    loaded = serde_json::from_value(stale_id).unwrap();
+    let next = loaded.add_comment((20.0, 20.0), MarkColor::Green).unwrap();
+    assert!(next > comment);
+
+    let mut invalid = json.clone();
+    invalid["items"][0]["shape"]["Stroke"]["width"] = serde_json::json!(-1);
+    assert!(
+        !serde_json::from_value::<Annotations>(invalid)
+            .unwrap()
+            .is_valid_for_image((100.0, 100.0))
+    );
+    let mut invalid = json;
+    invalid["items"][1]["id"] = invalid["items"][0]["id"].clone();
+    assert!(
+        !serde_json::from_value::<Annotations>(invalid)
+            .unwrap()
+            .is_valid_for_image((100.0, 100.0))
+    );
+    assert!(!doc.is_valid_for_image((50.0, 50.0)));
+}
+
+#[test]
+fn malformed_or_unbounded_new_marks_are_rejected_without_history_changes() {
+    let mut doc = Annotations::default();
+    assert!(doc.add_stroke(vec![], 2.0, MarkColor::Red).is_none());
+    assert!(
+        doc.add_stroke(vec![(0.0, 0.0); MAX_STROKE_POINTS + 1], 2.0, MarkColor::Red)
+            .is_none()
+    );
+    assert!(
+        doc.add_stroke(vec![(f32::NAN, 0.0)], 2.0, MarkColor::Red)
+            .is_none()
+    );
+    assert!(
+        doc.add_stroke(vec![(0.0, 0.0)], 0.0, MarkColor::Red)
+            .is_none()
+    );
+    assert!(
+        doc.add_markup_rect(rect(0.0, 0.0, 20.0, 20.0), f32::INFINITY, MarkColor::Red)
+            .is_none()
+    );
+    assert!(
+        doc.add_comment((f32::INFINITY, 0.0), MarkColor::Red)
+            .is_none()
+    );
+    assert!(doc.is_empty() && !doc.can_undo() && !doc.can_redo());
+    assert!(!doc.erase_segment((0.0, 0.0), (1.0, 1.0), 1.0));
 }
 
 #[cfg(target_os = "linux")]
@@ -552,4 +831,25 @@ fn the_lightbox_annotates_end_to_end() {
         })
         .detach();
     });
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn first_comment_body_undo_removes_pin_and_redo_restores_words() {
+    let mut doc = Annotations::default();
+    let stroke = doc
+        .add_stroke(vec![(1.0, 1.0), (50.0, 50.0)], 4.0, MarkColor::Red)
+        .unwrap();
+    let pin = doc.add_comment((20.0, 20.0), MarkColor::Blue).unwrap();
+    doc.commit_text(pin, "Move this action");
+    assert!(doc.undo());
+    assert!(doc.get(pin).is_none());
+    assert!(doc.get(stroke).is_some());
+    assert!(doc.redo());
+    assert_eq!(doc.get(pin).unwrap().text, "Move this action");
+    doc.commit_text(pin, "Updated comment");
+    assert!(doc.undo());
+    assert_eq!(doc.get(pin).unwrap().text, "Move this action");
+    assert!(doc.redo());
+    assert_eq!(doc.get(pin).unwrap().text, "Updated comment");
 }
