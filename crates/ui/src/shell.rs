@@ -8920,6 +8920,7 @@ impl Shell {
             .when_some(self.render_cloud_sandbox_strip(theme, cx), |el, strip| {
                 el.child(strip)
             })
+            .when_some(self.render_sidebar_update_row(theme, cx), |el, row| el.child(row))
             .child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
             .into_any_element()
     }
