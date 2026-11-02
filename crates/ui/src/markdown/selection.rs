@@ -21,10 +21,11 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SelectionClaim(u64);
 
+static LAST_CLAIM: AtomicU64 = AtomicU64::new(0);
+
 impl SelectionClaim {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+        Self(LAST_CLAIM.fetch_add(1, Ordering::Relaxed) + 1)
     }
 }
 
@@ -75,15 +76,17 @@ pub(crate) fn current_claim() -> Option<SelectionClaim> {
         .map(|selection| selection.claim)
 }
 
+/// Last gesture, even if it has already ended or selected no text. Deferred
+/// handoffs must still see a complete press/release dispatched in one update.
+pub(crate) fn latest_claim() -> Option<SelectionClaim> {
+    let claim = LAST_CLAIM.load(Ordering::Relaxed);
+    (claim != 0).then_some(SelectionClaim(claim))
+}
+
 /// Only a gesture started after the caller's mouse-down snapshot may take
-/// ownership. An older active drag elsewhere is not a new claim here.
-pub(crate) fn drag_claim_after(previous: Option<SelectionClaim>) -> Option<SelectionClaim> {
-    state()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .filter(|selection| selection.dragging && Some(selection.claim) != previous)
-        .map(|selection| selection.claim)
+/// ownership. An older active or settled selection is not a new claim here.
+pub(crate) fn claim_after(previous: Option<SelectionClaim>) -> Option<SelectionClaim> {
+    latest_claim().filter(|claim| Some(*claim) != previous)
 }
 
 /// Revoke exactly the selection associated with an editor's handoff, even if
@@ -371,11 +374,25 @@ pub fn wash_range(key: &str) -> Option<Range<usize>> {
 /// The full selected text (Cmd+C), spans joined in document order.
 pub fn selected_text() -> Option<String> {
     let guard = state().lock().unwrap();
-    let sel = guard.as_ref()?;
-    if sel.spans.iter().all(|s| s.range.is_empty()) {
+    selection_text(guard.as_ref()?)
+}
+
+/// Copy may read only the claim associated with its own window, not another
+/// window's newer selection. Check the identity and snapshot under one lock.
+pub(crate) fn selected_text_for_claim(claim: SelectionClaim) -> Option<String> {
+    let guard = state().lock().unwrap();
+    selection_text(
+        guard
+            .as_ref()
+            .filter(|selection| selection.claim == claim)?,
+    )
+}
+
+fn selection_text(selection: &MdSelection) -> Option<String> {
+    if selection.spans.iter().all(|span| span.range.is_empty()) {
         return None;
     }
-    Some(join_spans(&sel.spans))
+    Some(join_spans(&selection.spans))
 }
 
 fn join_spans(spans: &[Span]) -> String {
@@ -450,17 +467,22 @@ mod tests {
         let _state = test_state_lock();
         begin_with_span("same-row", "first", 0..5);
         let first = current_claim().unwrap();
-        assert_eq!(drag_claim_after(None), Some(first));
-        assert_eq!(drag_claim_after(Some(first)), None);
+        assert_eq!(latest_claim(), Some(first));
+        assert_eq!(claim_after(None), Some(first));
+        assert_eq!(claim_after(Some(first)), None);
         end_active_drag();
         assert_eq!(current_claim(), Some(first));
-        assert_eq!(drag_claim_after(None), None);
+        assert_eq!(claim_after(None), Some(first));
+        assert_eq!(claim_after(Some(first)), None);
+        assert_eq!(selected_text_for_claim(first).as_deref(), Some("first"));
 
         // Reusing a row key, including after virtualization, is a new claim.
         begin_with_span("same-row", "second", 0..6);
         let second = current_claim().unwrap();
         assert_ne!(first, second);
-        assert_eq!(drag_claim_after(Some(first)), Some(second));
+        assert_eq!(claim_after(Some(first)), Some(second));
+        assert_eq!(selected_text_for_claim(first), None);
+        assert_eq!(selected_text_for_claim(second).as_deref(), Some("second"));
         assert!(!clear_claim(first));
         assert_eq!(selected_text().as_deref(), Some("second"));
         assert!(clear_claim(second));
@@ -472,6 +494,9 @@ mod tests {
         let empty = current_claim().unwrap();
         end_active_drag();
         assert_eq!(current_claim(), None);
+        assert_eq!(claim_after(Some(second)), Some(empty));
+        assert_eq!(claim_after(Some(empty)), None);
+        assert_eq!(selected_text_for_claim(empty), None);
         assert!(!clear_claim(empty));
     }
 

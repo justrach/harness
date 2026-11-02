@@ -2,6 +2,9 @@ use super::*;
 use crate::markdown::{render, selection};
 use gpui::{TestAppContext, VisualTestContext, WindowHandle};
 
+#[path = "selection_tests/lifecycle.rs"]
+mod lifecycle;
+
 const OUTPUT: &str = "Synthetic café output 👩🏽‍💻";
 const DRAFT: &str = "Synthetic café draft 👩🏽‍💻";
 

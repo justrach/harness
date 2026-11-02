@@ -1944,6 +1944,16 @@ enum CaretAffinity {
     Downstream,
 }
 
+/// The one process-global Markdown claim is associated with its window, not
+/// a particular editor entity. Replacement editors may inherit it only there.
+#[derive(Clone, Copy)]
+struct WindowMarkdownSelection {
+    window: gpui::WindowId,
+    claim: crate::markdown::selection::SelectionClaim,
+}
+
+impl gpui::Global for WindowMarkdownSelection {}
+
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
@@ -3135,9 +3145,12 @@ impl ComposerInput {
                 text.clone(),
                 serde_json::json!({ "harnessComposerV1": raw, "text": text }),
             ));
-        } else if let Some(text) = crate::markdown::selection::selected_text() {
+        } else if let Some(text) = self
+            .markdown_selection
+            .and_then(crate::markdown::selection::selected_text_for_claim)
+        {
             // The composer keeps focus while the user reads the transcript —
-            // Cmd+C with no input selection copies the markdown selection.
+            // Cmd+C copies only this window's associated Markdown claim.
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -5052,7 +5065,13 @@ impl gpui::Element for ComposerTextElement {
 }
 
 impl Render for ComposerInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(owner) = cx.try_global::<WindowMarkdownSelection>()
+            && owner.window == window.window_handle().window_id()
+            && Some(owner.claim) == crate::markdown::selection::current_claim()
+        {
+            self.markdown_selection = Some(owner.claim);
+        }
         if self.mentions_enabled && self.syntax_source != self.content {
             self.syntax_source = self.content.clone();
             self.syntax_spans.clear();
@@ -5149,7 +5168,7 @@ impl Render for ComposerInput {
                 if event.button != MouseButton::Left {
                     return;
                 }
-                let previous_claim = crate::markdown::selection::current_claim();
+                let previous_claim = crate::markdown::selection::latest_claim();
                 let was_focused = this.focus_handle.is_focused(window);
                 // Capture runs before the clicked control handles the press, so
                 // another input can take focus normally during bubbling.
@@ -5161,9 +5180,11 @@ impl Render for ComposerInput {
                 // bubbling. Resolve ownership afterwards, regardless of paint
                 // order, without clearing selections for unrelated controls.
                 window.defer(cx, move |window, cx| {
-                    if let Some(claim) =
-                        crate::markdown::selection::drag_claim_after(previous_claim)
-                    {
+                    if let Some(claim) = crate::markdown::selection::claim_after(previous_claim) {
+                        cx.set_global(WindowMarkdownSelection {
+                            window: window.window_handle().window_id(),
+                            claim,
+                        });
                         input
                             .update(cx, |input, cx| {
                                 input.markdown_selection = Some(claim);
