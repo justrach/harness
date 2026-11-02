@@ -42,6 +42,8 @@ use crate::state::{AppState, Indicator};
 use crate::theme::Theme;
 
 mod follow_up;
+mod write;
+pub use write::{ToggleWriteDocument, WriteFace};
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
 // ---------------------------------------------------------------------------
@@ -1872,6 +1874,9 @@ pub fn init(cx: &mut App, send_behavior: ComposerSendBehavior) {
         FollowUpSubmit,
         Some(MESSAGE_COMPOSER_CONTEXT),
     ));
+    // After the message bindings: at equal depth the later binding wins, so
+    // the Write page's Enter and Mod+Enter override the send behavior.
+    message_bindings.extend(write::bindings());
 
     cx.bind_keys(palette_input_bindings());
     // Sidebar search uses palette text editing but has no horizontal menu
@@ -1909,6 +1914,8 @@ pub enum ComposerInputEvent {
         range: Range<usize>,
         revision: u64,
     },
+    /// Open or close the Write page (the message composer's shortcut).
+    ToggleWrite,
 }
 
 /// Shaping inputs excluding mutable viewport and selection geometry.
@@ -1925,6 +1932,7 @@ struct InputLayoutKey {
     placeholder: SharedString,
     mentions_enabled: bool,
     active_line: Option<Range<usize>>,
+    write: Option<WriteFace>,
 }
 
 /// A soft-wrap boundary is both the previous row's end and the next row's
@@ -2040,6 +2048,14 @@ pub struct ComposerInput {
     /// Created once when Waiting promotes; retaining this entity preserves
     /// GPUI's global animation state across prepaint frames.
     mention_tooltip_view: Option<Entity<MentionPathTooltip>>,
+    /// Set while the draft is on the Write page: page type, raw markdown with
+    /// faint markers, and per-line heights for headings.
+    write: Option<WriteFace>,
+    /// The composer's text width while the page borrows the input.
+    write_saved_width: f32,
+    /// Row height of each shaped line in `last_lines`. Uniform outside the
+    /// Write page; a heading line is taller there.
+    line_heights: Vec<Pixels>,
 }
 
 impl ComposerInput {
@@ -2121,6 +2137,9 @@ impl ComposerInput {
             mention_tooltip_popup: None,
             mention_tooltip_task: None,
             mention_tooltip_view: None,
+            write: None,
+            write_saved_width: 0.0,
+            line_heights: Vec::new(),
         }
     }
 
@@ -2254,7 +2273,11 @@ impl ComposerInput {
     }
 
     fn refresh_projection(&mut self) {
-        self.projection = if self.mentions_enabled {
+        self.projection = if self.mentions_enabled && self.write.is_some() {
+            // The Write page keeps every markdown marker; only file and skill
+            // references still read as chips.
+            TextProjection::project(&self.content, None, true)
+        } else if self.mentions_enabled {
             TextProjection::rich(&self.content, Some(self.editing_source_range()))
         } else {
             TextProjection {
@@ -2926,7 +2949,14 @@ impl ComposerInput {
     fn vertical_target(&self, dir: f32) -> Option<(usize, CaretAffinity, Pixels)> {
         let current = self.cursor_point()?;
         let column = self.preferred_column.unwrap_or(current.x);
-        let target_y = f32::from(current.y) + dir * f32::from(self.line_height);
+        // One row away: this row's height going down, the row above's going up
+        // (they differ only around a heading on the Write page).
+        let step = if dir > 0.0 {
+            self.row_height_at(current.y)
+        } else {
+            self.row_height_at(current.y - px(1.0))
+        };
+        let target_y = f32::from(current.y) + dir * f32::from(step);
         if target_y < 0.0 {
             return Some((0, CaretAffinity::Downstream, column));
         }
@@ -3340,6 +3370,12 @@ impl ComposerInput {
         true
     }
 
+    fn toggle_write(&mut self, _: &ToggleWriteDocument, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mentions_enabled {
+            cx.emit(ComposerInputEvent::ToggleWrite);
+        }
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if escape_dismisses_completion(&event.keystroke.key, self.mention_open) {
             cx.emit(ComposerInputEvent::MentionDismiss);
@@ -3348,6 +3384,30 @@ impl ComposerInput {
     }
 
     // ---- geometry ----
+
+    /// Row height of shaped line `line_ix`: uniform outside the Write page,
+    /// where a heading line is taller.
+    fn line_height_of(&self, line_ix: usize) -> Pixels {
+        self.line_heights
+            .get(line_ix)
+            .copied()
+            .unwrap_or(self.line_height)
+    }
+
+    /// Row height of the line under content-local `y`, or the base height
+    /// outside the text.
+    fn row_height_at(&self, y: Pixels) -> Pixels {
+        let mut top = px(0.0);
+        for (line_ix, line) in self.last_lines.iter().enumerate() {
+            let height = self.line_height_of(line_ix);
+            let bottom = top + line.size(height).height;
+            if y < bottom {
+                return if y < top { self.line_height } else { height };
+            }
+            top = bottom;
+        }
+        self.line_height
+    }
 
     /// Content-local point for a byte index (y grows down from content top).
     fn point_for_index(&self, index: usize) -> Option<Point<Pixels>> {
@@ -3381,6 +3441,7 @@ impl ComposerInput {
             }
             if index <= line_start + line_len {
                 let relative_index = index - line_start;
+                let line_height = self.line_height_of(line_ix);
                 let local = if affinity == CaretAffinity::Downstream {
                     line.wrap_boundaries()
                         .iter()
@@ -3388,16 +3449,17 @@ impl ComposerInput {
                             line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index
                                 == relative_index
                         })
-                        .map(|row| point(px(0.0), self.line_height * (row + 1)))
-                        .or_else(|| line.position_for_index(relative_index, self.line_height))?
+                        .map(|row| point(px(0.0), line_height * (row + 1)))
+                        .or_else(|| line.position_for_index(relative_index, line_height))?
                 } else {
-                    line.position_for_index(relative_index, self.line_height)?
+                    line.position_for_index(relative_index, line_height)?
                 };
                 let y_offset: f32 = self
                     .last_lines
                     .iter()
                     .take(line_ix)
-                    .map(|l| f32::from(l.size(self.line_height).height))
+                    .enumerate()
+                    .map(|(ix, l)| f32::from(l.size(self.line_height_of(ix)).height))
                     .sum();
                 let indent = if local.y > px(0.0) {
                     self.line_indents.get(line_ix).copied().unwrap_or_default()
@@ -3419,6 +3481,7 @@ impl ComposerInput {
         let mut bounds = Vec::new();
         let mut y_offset = px(0.0);
         for (line_ix, line) in self.last_lines.iter().enumerate() {
+            let line_height = self.line_height_of(line_ix);
             let line_start = self.line_starts.get(line_ix).copied().unwrap_or(0);
             let local_start = range.start.saturating_sub(line_start).min(line.len());
             let local_end = range.end.saturating_sub(line_start).min(line.len());
@@ -3426,7 +3489,7 @@ impl ComposerInput {
                 || range.end <= line_start
                 || range.start >= line_start + line.len()
             {
-                y_offset += line.size(self.line_height).height;
+                y_offset += line.size(line_height).height;
                 continue;
             }
 
@@ -3438,15 +3501,15 @@ impl ComposerInput {
             for (row_ix, row_start, segment) in
                 display_row_segments(local_start..local_end, row_ends)
             {
-                let row_y = y_offset + self.line_height * row_ix;
+                let row_y = y_offset + line_height * row_ix;
                 let start_x = if segment.start == row_start {
                     px(0.0)
                 } else {
-                    line.position_for_index(segment.start, self.line_height)
+                    line.position_for_index(segment.start, line_height)
                         .map(|point| point.x)
                         .unwrap_or(px(0.0))
                 };
-                if let Some(end_point) = line.position_for_index(segment.end, self.line_height)
+                if let Some(end_point) = line.position_for_index(segment.end, line_height)
                     && end_point.x > start_x
                 {
                     bounds.push(Bounds::new(
@@ -3459,11 +3522,11 @@ impl ComposerInput {
                                 },
                             row_y,
                         ),
-                        size(end_point.x - start_x, self.line_height),
+                        size(end_point.x - start_x, line_height),
                     ));
                 }
             }
-            y_offset += line.size(self.line_height).height;
+            y_offset += line.size(line_height).height;
         }
         bounds
     }
@@ -3478,17 +3541,18 @@ impl ComposerInput {
             return (0, CaretAffinity::Downstream);
         }
         for (line_ix, line) in self.last_lines.iter().enumerate() {
-            let height = f32::from(line.size(self.line_height).height);
+            let line_height = self.line_height_of(line_ix);
+            let height = f32::from(line.size(line_height).height);
             let line_start = self.line_starts.get(line_ix).copied().unwrap_or(0);
             if y < height || line_ix + 1 == self.last_lines.len() {
-                let indent = if y >= f32::from(self.line_height) {
+                let indent = if y >= f32::from(line_height) {
                     self.line_indents.get(line_ix).copied().unwrap_or_default()
                 } else {
                     px(0.0)
                 };
                 let local = point(position.x - indent, px(y.min(height - 1.0).max(0.0)));
                 let ix = line
-                    .closest_index_for_position(local, self.line_height)
+                    .closest_index_for_position(local, line_height)
                     .unwrap_or_else(|ix| ix);
                 let affinity = line
                     .wrap_boundaries()
@@ -3496,7 +3560,7 @@ impl ComposerInput {
                     .position(|boundary| {
                         line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index == ix
                     })
-                    .filter(|row| local.y < self.line_height * (row + 1))
+                    .filter(|row| local.y < line_height * (row + 1))
                     .map_or(CaretAffinity::Downstream, |_| CaretAffinity::Upstream);
                 let mut raw = self
                     .projection
@@ -3811,7 +3875,9 @@ impl ComposerInput {
             marked_range: self.marked_range.clone(),
             placeholder: self.placeholder.clone(),
             mentions_enabled: self.mentions_enabled,
-            active_line: self.mentions_enabled.then(|| self.editing_source_range()),
+            active_line: (self.mentions_enabled && self.write.is_none())
+                .then(|| self.editing_source_range()),
+            write: self.write,
         };
         // Height-only animation, scrolling, selection and caret blinking do
         // not change shaping. Reuse the entity's single retained layout,
@@ -3835,7 +3901,11 @@ impl ComposerInput {
             (SharedString::from(self.projection.display.clone()), false)
         };
         let font_size = style.font_size.to_pixels(window.rem_size());
-        self.line_height = px(self.configured_line_height);
+        self.line_height = if self.write.is_some() {
+            write::body_line_height(font_size)
+        } else {
+            px(self.configured_line_height)
+        };
 
         // Chips read as inline code: the markdown renderer's recipe (mono font
         // + the spectrum's `code_text`) over the rounded `code_wash` beneath.
@@ -3861,12 +3931,13 @@ impl ComposerInput {
             }),
             strikethrough: None,
         };
-        let raw_faces = if self.mentions_enabled && !is_placeholder {
+        let write_mode = self.write.is_some() && !is_placeholder;
+        let raw_faces = if self.mentions_enabled && !is_placeholder && self.write.is_none() {
             composer_markdown::faces(&self.content)
         } else {
             Vec::new()
         };
-        let faces = if self.mentions_enabled && !is_placeholder {
+        let faces = if self.mentions_enabled && !is_placeholder && self.write.is_none() {
             raw_faces
                 .iter()
                 .cloned()
@@ -3881,7 +3952,10 @@ impl ComposerInput {
         } else {
             Vec::new()
         };
-        let syntax: Vec<_> = if self.mentions_enabled && self.syntax_source == self.content {
+        let syntax: Vec<_> = if self.mentions_enabled
+            && self.write.is_none()
+            && self.syntax_source == self.content
+        {
             self.syntax_spans
                 .iter()
                 .map(|span| {
@@ -3898,7 +3972,36 @@ impl ComposerInput {
         let marked = self.marked_range.as_ref().map(|r| {
             self.projection.raw_to_display(r.start)..self.projection.raw_to_display(r.end)
         });
+        // The Write page's styles, in display offsets and drawing order.
+        let write_spans: Vec<(Range<usize>, crate::write_markdown::WriteStyle)> = if write_mode {
+            crate::write_markdown::spans(&self.content)
+                .into_iter()
+                .map(|span| {
+                    (
+                        self.projection.raw_to_display(span.range.start)
+                            ..self.projection.raw_to_display(span.range.end),
+                        span.style,
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let write_palette = write::WritePalette::new(theme);
+        let mut write_events: Vec<(usize, bool, usize)> = write_spans
+            .iter()
+            .enumerate()
+            .flat_map(|(ix, (range, _))| [(range.start, false, ix), (range.end, true, ix)])
+            .collect();
+        // Opening before closing at one offset, so an empty span opens and
+        // closes in order.
+        write_events.sort_unstable();
+        let mut write_event = 0;
+        let mut write_active = std::collections::BTreeSet::new();
         let mut boundaries = vec![0, display.len()];
+        for (range, _) in &write_spans {
+            boundaries.extend([range.start, range.end]);
+        }
         for (range, _) in &syntax {
             boundaries.extend([range.start, range.end]);
         }
@@ -3975,7 +4078,40 @@ impl ComposerInput {
                         run.color = Theme::of(cx).syntax.color(*kind);
                     }
                 }
+                while write_event < write_events.len() && write_events[write_event].0 <= r[0] {
+                    let (_, closing, ix) = write_events[write_event];
+                    if closing {
+                        write_active.remove(&ix);
+                    } else {
+                        write_active.insert(ix);
+                    }
+                    write_event += 1;
+                }
+                if !chip && !write_active.is_empty() {
+                    write::style_run(
+                        &mut run,
+                        write_active.iter().map(|ix| write_spans[*ix].1),
+                        &write_palette,
+                    );
+                }
                 run
+            })
+            .collect();
+        // Headings and list items, by the display offset their line starts at.
+        let write_lines: HashMap<usize, (crate::write_markdown::WriteStyle, usize)> = write_spans
+            .iter()
+            .filter(|(_, style)| {
+                matches!(
+                    style,
+                    crate::write_markdown::WriteStyle::Heading(_)
+                        | crate::write_markdown::WriteStyle::ListItem { .. }
+                )
+            })
+            .map(|(range, style)| {
+                (
+                    range.start,
+                    (*style, self.projection.display_to_raw(range.start)),
+                )
             })
             .collect();
 
@@ -4001,6 +4137,7 @@ impl ComposerInput {
             .collect();
         let mut row_top = 0.0f32;
         let mut ink_extent: Option<(f32, f32)> = None;
+        let mut line_heights = Vec::new();
         for text in display.split('\n') {
             let raw_line = self
                 .content
@@ -4010,7 +4147,31 @@ impl ComposerInput {
                 .next()
                 .unwrap_or_default();
             let mut indent = px(0.0);
-            if self.mentions_enabled && !is_placeholder {
+            let write_line = write_lines.get(&display_at).copied();
+            let (line_font_size, line_height) = match write_line {
+                Some((crate::write_markdown::WriteStyle::Heading(level), _)) => {
+                    write::heading_metrics(level, font_size, self.line_height)
+                }
+                _ => (font_size, self.line_height),
+            };
+            if let Some((crate::write_markdown::WriteStyle::ListItem { indent: marker }, raw)) =
+                write_line
+            {
+                let end = self
+                    .projection
+                    .raw_to_display(raw + marker)
+                    .saturating_sub(display_at)
+                    .min(text.len());
+                if text.is_char_boundary(end) {
+                    let marker: SharedString = text[..end].to_string().into();
+                    let marker_run = run_for(marker.len(), false, false);
+                    indent = window
+                        .text_system()
+                        .shape_line(marker, font_size, &[marker_run], None)
+                        .width
+                        .min(width * 0.4);
+                }
+            } else if self.mentions_enabled && !is_placeholder && self.write.is_none() {
                 if let Some(prefix) = composer_markdown::list_prefix(raw_line).filter(|prefix| {
                     let marker_at = raw_at + prefix.indent;
                     let code_ix = code_ranges.partition_point(|range| range.end <= marker_at);
@@ -4050,7 +4211,7 @@ impl ComposerInput {
                 .collect();
             if let Ok(shaped) = window.text_system().shape_text(
                 text.to_string().into(),
-                font_size,
+                line_font_size,
                 &line_runs,
                 (!self.single_line).then_some((width - indent).max(px(20.0))),
                 None,
@@ -4068,7 +4229,7 @@ impl ComposerInput {
                     if !self.single_line {
                         wrap_reference_chips(&mut line, &chips, (width - indent).max(px(20.0)));
                     }
-                    let row_bottom = row_top + f32::from(line.size(self.line_height).height);
+                    let row_bottom = row_top + f32::from(line.size(line_height).height);
                     // A logical line can end in soft-wrapped whitespace
                     // rows. Count ink per visual row, not the whole line.
                     let mut row_start = 0;
@@ -4082,15 +4243,16 @@ impl ComposerInput {
                         .enumerate()
                     {
                         if !text[row_start..row_end].trim().is_empty() {
-                            let ink_top = row_top + row_ix as f32 * f32::from(self.line_height);
+                            let ink_top = row_top + row_ix as f32 * f32::from(line_height);
                             let top = ink_extent.map_or(ink_top, |(top, _)| top);
-                            ink_extent = Some((top, ink_top + f32::from(self.line_height)));
+                            ink_extent = Some((top, ink_top + f32::from(line_height)));
                         }
                         row_start = row_end;
                     }
                     row_top = row_bottom;
                     lines.push(line);
                     indents.push(indent);
+                    line_heights.push(line_height);
                 }
             }
             display_at = end + 1;
@@ -4111,7 +4273,8 @@ impl ComposerInput {
 
         let content_height: f32 = lines
             .iter()
-            .map(|l| f32::from(l.size(self.line_height).height))
+            .zip(&line_heights)
+            .map(|(l, height)| f32::from(l.size(*height).height))
             .sum();
         let max_line_width: f32 = lines
             .iter()
@@ -4126,6 +4289,7 @@ impl ComposerInput {
             .fold(INPUT_TEXT_SIZE, f32::max);
         self.last_layout_key = Some(key);
         self.last_lines = lines;
+        self.line_heights = line_heights;
         self.line_starts = line_starts;
         self.content_height = content_height.max(self.configured_line_height);
         self.max_line_width = if is_placeholder { 0.0 } else { max_line_width };
@@ -4136,6 +4300,10 @@ impl ComposerInput {
     }
 
     fn paint_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        if self.write.is_some() {
+            // The page scrolls whole; rows of mixed height never snap.
+            return bounds;
+        }
         let visible = f32::from(bounds.size.height);
         let top_overflow = self
             .fade_edges(self.settled_viewport_height.unwrap_or(visible), visible)
@@ -4176,7 +4344,7 @@ impl ComposerInput {
                 self.scroll_top = input_scroll_offset_for_cursor(
                     self.scroll_top,
                     f32::from(cursor.y),
-                    f32::from(self.line_height),
+                    f32::from(self.row_height_at(cursor.y)),
                     self.content_height,
                     element_height,
                     self.settled_viewport_height,
@@ -4407,7 +4575,10 @@ impl EntityInputHandler for ComposerInput {
             bounds.left() + start.x - px(self.scroll_left),
             bounds.top() + start.y - px(self.scroll_top),
         );
-        Some(Bounds::new(origin, size(px(2.0), self.line_height)))
+        Some(Bounds::new(
+            origin,
+            size(px(2.0), self.row_height_at(start.y)),
+        ))
     }
 
     fn character_index_for_point(
@@ -4426,6 +4597,9 @@ struct ComposerTextElement {
     input: Entity<ComposerInput>,
     /// Max content height before internal scrolling kicks in.
     max_content_height: f32,
+    /// Fill the parent instead of growing with the text (the Write page,
+    /// which scrolls inside a fixed viewport).
+    fill: bool,
 }
 
 struct MentionPathTooltip {
@@ -4494,10 +4668,14 @@ impl gpui::Element for ComposerTextElement {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&gpui::InspectorElementId>,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
+        if self.fill {
+            style.size.height = relative(1.0).into();
+            return (window.request_layout(style, [], cx), ());
+        }
         let input = self.input.clone();
         let text_style = window.text_style();
         let max_content = self.max_content_height;
@@ -4610,6 +4788,7 @@ impl gpui::Element for ComposerTextElement {
                     .then_some(point(px(0.0), px(0.0)))
             });
             if let Some(position) = position {
+                let row_height = input.row_height_at(position.y);
                 // The message caret is a rounded accent bar, inset from the
                 // line box. Keep native text geometry for selection and IME.
                 let (width, inset, radius) = if input.mentions_enabled {
@@ -4620,7 +4799,7 @@ impl gpui::Element for ComposerTextElement {
                 cursor = Some(quad(
                     Bounds::new(
                         origin + position + point(px(0.0), px(inset)),
-                        size(px(width), input.line_height - px(2.0 * inset)),
+                        size(px(width), row_height - px(2.0 * inset)),
                     ),
                     px(radius),
                     caret_color,
@@ -4636,7 +4815,8 @@ impl gpui::Element for ComposerTextElement {
                 CaretAffinity::Upstream,
             ),
         ) {
-            let lh = input.line_height;
+            let lh = input.row_height_at(start.y);
+            let end_lh = input.row_height_at(end.y);
             if start.y == end.y {
                 selection_quads.push(fill(
                     Bounds::from_corners(
@@ -4666,7 +4846,7 @@ impl gpui::Element for ComposerTextElement {
                 selection_quads.push(fill(
                     Bounds::from_corners(
                         point(origin.x, origin.y + end.y),
-                        point(origin.x + end.x, origin.y + end.y + lh),
+                        point(origin.x + end.x, origin.y + end.y + end_lh),
                     ),
                     selection_color,
                 ));
@@ -4740,11 +4920,12 @@ impl gpui::Element for ComposerTextElement {
 
         // WrappedLine isn't Clone — temporarily take the shaped lines out of the
         // entity for painting, then put them back for mouse mapping.
-        let (lines, indents, line_height, scroll, scroll_left) =
+        let (lines, indents, line_heights, base_line_height, scroll, scroll_left) =
             self.input.update(cx, |input, _| {
                 (
                     std::mem::take(&mut input.last_lines),
                     input.line_indents.clone(),
+                    input.line_heights.clone(),
                     input.line_height,
                     input.scroll_top,
                     input.scroll_left,
@@ -4765,6 +4946,10 @@ impl gpui::Element for ComposerTextElement {
                 }
                 let mut y = bounds.top() - px(scroll);
                 for (line_ix, line) in lines.iter().enumerate() {
+                    let line_height = line_heights
+                        .get(line_ix)
+                        .copied()
+                        .unwrap_or(base_line_height);
                     let height = line.size(line_height).height;
                     let indent = indents.get(line_ix).copied().unwrap_or_default();
                     if indent > px(0.0) && !line.wrap_boundaries().is_empty() {
@@ -4820,7 +5005,7 @@ impl gpui::Element for ComposerTextElement {
                     // (Clipping comes from the surrounding content mask.)
                     let _ = line.paint(
                         ghost_origin,
-                        line_height,
+                        base_line_height,
                         gpui::TextAlign::Left,
                         None,
                         window,
@@ -4949,40 +5134,77 @@ impl Render for ComposerInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_action(cx.listener(Self::toggle_write))
             .w_full()
-            .text_size(crate::typography::ui_rems(self.text_size))
-            .line_height(crate::typography::ui_rems(self.configured_line_height))
+            .when_some(self.write, |el, face| {
+                el.h_full()
+                    .text_size(crate::typography::ui_rems(write::WRITE_TEXT_SIZE))
+                    .font_family(face.family(cx))
+                    .child({
+                        let input = cx.entity();
+                        crate::edge_fade::edge_faded(
+                            write::PAGE_FADE_BAND,
+                            true,
+                            true,
+                            ComposerTextElement {
+                                input: input.clone(),
+                                max_content_height: f32::MAX,
+                                fill: true,
+                            },
+                        )
+                        // Rows scrolled past the page's edges fade out
+                        // instead of being cut through.
+                        .fade_overflow_y_with(move |cx| {
+                            let input = input.read(cx);
+                            let visible = input
+                                .last_bounds
+                                .map_or(0.0, |bounds| f32::from(bounds.size.height));
+                            write::page_fade_edges(
+                                input.scroll_top,
+                                visible,
+                                input.scrollable_height(),
+                            )
+                        })
+                    })
+            })
+            .when(self.write.is_none(), |el| {
+                el.text_size(crate::typography::ui_rems(self.text_size))
+                    .line_height(crate::typography::ui_rems(self.configured_line_height))
+                    .font_family(theme.font_sans.clone())
+            })
             .text_color(text_color)
-            .font_family(theme.font_sans.clone())
-            .child({
-                let input = cx.entity();
-                let ascent = self.max_ascent;
-                crate::edge_fade::edge_faded(
-                    INPUT_FADE_BAND,
-                    true,
-                    true,
-                    ComposerTextElement {
-                        input: input.clone(),
-                        max_content_height: self
-                            .viewport_height
-                            .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
-                    },
-                )
-                // Fade through the existing top padding, like the transcript
-                // scrolling under its chrome. Account for GPUI's baseline
-                // sampling without consuming another inset inside the text box.
-                .inset_top(ascent - self.overflow_top_padding)
-                .fade_overflow_y_with(move |cx| {
-                    let input = input.read(cx);
-                    let visible_height = input
-                        .last_bounds
-                        .map_or(0.0, |bounds| f32::from(bounds.size.height));
-                    input.fade_edges(
-                        input
-                            .settled_viewport_height
-                            .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
-                        visible_height,
+            .when(self.write.is_none(), |el| {
+                el.child({
+                    let input = cx.entity();
+                    let ascent = self.max_ascent;
+                    crate::edge_fade::edge_faded(
+                        INPUT_FADE_BAND,
+                        true,
+                        true,
+                        ComposerTextElement {
+                            input: input.clone(),
+                            max_content_height: self
+                                .viewport_height
+                                .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
+                            fill: false,
+                        },
                     )
+                    // Fade through the existing top padding, like the transcript
+                    // scrolling under its chrome. Account for GPUI's baseline
+                    // sampling without consuming another inset inside the text box.
+                    .inset_top(ascent - self.overflow_top_padding)
+                    .fade_overflow_y_with(move |cx| {
+                        let input = input.read(cx);
+                        let visible_height = input
+                            .last_bounds
+                            .map_or(0.0, |bounds| f32::from(bounds.size.height));
+                        input.fade_edges(
+                            input
+                                .settled_viewport_height
+                                .unwrap_or(TEXTAREA_MAX - TEXTAREA_PAD_V),
+                            visible_height,
+                        )
+                    })
                 })
             })
     }
@@ -5022,6 +5244,11 @@ pub enum ComposerEvent {
     Queued {
         chat_id: String,
         message_id: String,
+    },
+    /// An agent row in the footer chip's card was clicked: show that agent's
+    /// spawn chip (part `part_id`) in the transcript.
+    RevealAgent {
+        part_id: String,
     },
 }
 
@@ -5878,6 +6105,9 @@ pub struct Composer {
     _pickers_observe: Subscription,
     _picker_focus: Subscription,
     _input_events: Subscription,
+    /// The draft is on the Write page, which the shell shows in place of the
+    /// transcript and this composer (`composer/write.rs`).
+    write_open: bool,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -5947,7 +6177,7 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        probe_dictation();
+        probe_dictation(cx);
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
         let input = cx.new(|cx| {
@@ -5974,8 +6204,15 @@ impl Composer {
         );
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
         let input_events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
-            ComposerInputEvent::Submitted => this.on_submit(cx),
-            ComposerInputEvent::ModifiedSubmitted => this.on_modified_submit(cx),
+            ComposerInputEvent::Submitted => {
+                this.on_submit(cx);
+                this.close_write_if_sent(cx);
+            }
+            ComposerInputEvent::ModifiedSubmitted => {
+                this.on_modified_submit(cx);
+                this.close_write_if_sent(cx);
+            }
+            ComposerInputEvent::ToggleWrite => this.toggle_write(cx),
             ComposerInputEvent::Edited | ComposerInputEvent::CursorMoved => {
                 this.on_input_edited(cx)
             }
@@ -6022,6 +6259,9 @@ impl Composer {
         });
         cx.observe_global::<crate::settings::SettingsStore>(|this, cx| {
             this.on_input_edited(cx);
+            // The shell draws the composer cached: settings it shows (send
+            // behavior, shortcuts) must redraw it.
+            cx.notify();
         })
         .detach();
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
@@ -6110,6 +6350,7 @@ impl Composer {
             _pickers_observe: pickers_observe,
             _picker_focus: picker_focus,
             _input_events: input_events,
+            write_open: false,
         };
         // Dev knob: pre-stage attachments (drop/paste can't be synthesized on
         // a rig) — `HARNESS_ATTACH=/path/a.png[,/path/b.png]`, and
@@ -8297,6 +8538,8 @@ impl Composer {
 
         // Draft swap on chat navigation — the input entity itself survives.
         if key != self.current_key {
+            // The page belongs to the chat it was opened in.
+            self.close_write(cx);
             self.follow_up_menu_open = false;
             if !key.is_empty() && !self.current_key.is_empty() {
                 // Switching between established chats still snaps to the new
@@ -8466,6 +8709,10 @@ impl Composer {
                     }
                 }
             }
+        }
+        if self.wizard.is_some() {
+            // A question borrows the input; it is answered in the composer.
+            self.close_write(cx);
         }
         let input_context = message_input_context(self.wizard.is_some());
         let question_open = self.wizard.is_some();
@@ -10719,6 +10966,13 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::transcript::record_view_frame("composer");
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
+        if self.write_open {
+            // The Write page renders the input (`render_write_page`); one
+            // entity can't be drawn in two places.
+            return div();
+        }
         if self.focus_pending {
             self.focus_pending = false;
             let focus = self.input.focus_handle(cx);
@@ -11361,6 +11615,11 @@ impl Render for Composer {
         let dictate = self
             .show_dictation()
             .then(|| self.render_dictation_button(&theme, cx));
+        // Expanded drafts offer the Write page beside the utility buttons.
+        // Compact pills stay as they are; the shortcut works in both.
+        let write_button = (!self.input.read(cx).text().is_empty()
+            || self.input.focus_handle(cx).is_focused(window))
+        .then(|| self.render_write_button(&theme, cx));
         // Staged-thumbnail strip (attachment-ui.tsx AttachmentStrip), above
         // the input inside the pill in both modes.
         let strip = self.render_attachment_strip(&theme, cx);
@@ -11463,7 +11722,8 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_UTILITY_GAP))
                                 .child(attach)
-                                .children(dictate),
+                                .children(dictate)
+                                .children(write_button),
                         )
                         .child(send_button),
                 )
@@ -11642,7 +11902,24 @@ impl Render for Composer {
         // Steps and subagents of the running turn (crate::agent_work).
         let agent_work = (session_chrome_opacity > 0.0)
             .then(|| {
-                crate::agent_work::footer_chip(self.state.clone(), &theme, cx.entity_id(), cx)
+                // A click on an agent in the chip's card takes the chat to it.
+                let composer = cx.weak_entity();
+                let reveal: crate::agent_work::RevealAgent = Rc::new(move |part_id, _, cx| {
+                    composer
+                        .update(cx, |_, cx| {
+                            cx.emit(ComposerEvent::RevealAgent {
+                                part_id: part_id.to_owned(),
+                            })
+                        })
+                        .ok();
+                });
+                crate::agent_work::footer_chip(
+                    self.state.clone(),
+                    &theme,
+                    cx.entity_id(),
+                    Some(reveal),
+                    cx,
+                )
             })
             .flatten();
         // Chat mode: say so while the selected model may bill API rates.
@@ -11764,21 +12041,27 @@ pub fn set_scene_dictation_available(available: bool) {
     );
 }
 
-fn probe_dictation() {
+/// Find out once whether this device can dictate, then redraw the composer:
+/// the shell draws it cached, so a mic found later would otherwise wait for
+/// the composer's next unrelated change.
+fn probe_dictation(cx: &mut Context<Composer>) {
     #[cfg(feature = "ui-scenes")]
     if SCENE_DICTATION_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
         return;
     }
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    if cfg!(test) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if cfg!(test) || STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    STARTED.call_once(|| {
-        std::thread::spawn(|| {
-            let available = harness_adapters::DictationRuntime::detect().is_ok();
-            let _ = DICTATION_AVAILABLE.set(available);
-        });
-    });
+    cx.spawn(async move |composer, cx| {
+        let available = cx
+            .background_executor()
+            .spawn(async { harness_adapters::DictationRuntime::detect().is_ok() })
+            .await;
+        let _ = DICTATION_AVAILABLE.set(available);
+        composer.update(cx, |_, cx| cx.notify()).ok();
+    })
+    .detach();
 }
 
 impl Composer {
@@ -12029,6 +12312,10 @@ mod prompt_history_tests;
 #[cfg(test)]
 #[path = "composer/question_recovery_tests.rs"]
 mod question_recovery_tests;
+
+#[cfg(test)]
+#[path = "composer/write_tests.rs"]
+mod write_tests;
 
 #[cfg(test)]
 mod tests {
@@ -18897,6 +19184,11 @@ impl Composer {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The Write page's "Aa", as clicking it does.
+    pub fn fixture_toggle_write_face(&mut self, cx: &mut Context<Self>) {
+        self.toggle_write_face(cx);
     }
 
     pub fn fixture_clear_appshots(&mut self, cx: &mut Context<Self>) {

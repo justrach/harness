@@ -37,8 +37,10 @@ struct AgentWorkChip: View {
             }
             .buttonStyle(.plain)
             .modifier(ChipSurface(glass: glass))
-            .popover(isPresented: $showCard) {
-                AgentWorkCard(store: store)
+            // Above the chip, the arrow pointing down at it. Left free, the system put a card that
+            // didn't fit above beside the chip, squeezed into the width left of it.
+            .popover(isPresented: $showCard, arrowEdge: .bottom) {
+                AgentWorkCard(store: store, available: PopoverFit.availableWidth())
                     .presentationCompactAdaptation(.popover)
             }
             .accessibilityLabel(Self.accessibilityLabel(work))
@@ -195,6 +197,9 @@ struct RingSpinner: View {
 /// The card: the timeline, the agents and the tools, whichever exist.
 struct AgentWorkCard: View {
     let store: SessionStore
+    /// The width the popover may take (PopoverFit); nil keeps 320pt.
+    var available: CGFloat? = nil
+    static let idealWidth: CGFloat = 320
 
     var body: some View {
         let work = AgentWork.work(store.entries)
@@ -215,7 +220,7 @@ struct AgentWorkCard: View {
             .padding(16)
         }
         .scrollBounceBehavior(.basedOnSize)
-        .frame(width: 320)
+        .frame(width: min(Self.idealWidth, max(240, available ?? Self.idealWidth)))
         .frame(maxHeight: 520)
         .fixedSize(horizontal: false, vertical: true)
         .background(Theme.surfaceDialog)

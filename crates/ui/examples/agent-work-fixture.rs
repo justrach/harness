@@ -231,7 +231,7 @@ impl Render for Preview {
                                     .child(caption("Subagents"))
                                     .child(
                                         agent_work::card(&p)
-                                            .child(agent_work::agents(&working, &p, phase)),
+                                            .child(agent_work::agents(&working, &p, phase, None)),
                                     ),
                             ),
                     )
@@ -241,7 +241,7 @@ impl Render for Preview {
         // The footer as the composer lays it out: chip, then the context ring.
         let usage = self.state.read(cx).context_usage;
         let chip = (self.mode == "footer")
-            .then(|| agent_work::footer_chip(self.state.clone(), &theme, view, cx))
+            .then(|| agent_work::footer_chip(self.state.clone(), &theme, view, None, cx))
             .flatten();
         let footer = div()
             .w(px(420.0))
@@ -330,7 +330,7 @@ fn main() -> anyhow::Result<()> {
                 cx.notify();
             });
             // The same card the footer chip opens on hover.
-            let card = agent_work::hover_card(state.clone(), cx);
+            let card = agent_work::hover_card(state.clone(), state.entity_id(), None, cx);
             let (w, h) = if mode == "sheet" {
                 (900., 760.)
             } else {
