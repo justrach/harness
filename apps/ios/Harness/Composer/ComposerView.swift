@@ -55,20 +55,26 @@ struct ComposerShell<Chips: View>: View {
     var token: AnyView? = nil
     /// Bumped to put the cursor here from outside (Inspect's Ask for changes).
     var focusTick = 0
+    /// Open the draft on the full-height Write page; nil hides the button.
+    var onExpand: (() -> Void)? = nil
     @ViewBuilder var chips: Chips
 
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     private var compact: Bool { verticalSizeClass == .compact }
     @State private var focused = false
     @State private var editor = ComposerEditorController()
-    /// Inside a stacked phone split: where this composer reports its keyboard focus (PhoneSplitContainer).
-    @Environment(\.stackedComposerFocus) private var stackedComposerFocus
     /// Above the fold in laptop pose: where this composer reports its keyboard focus (HomeView).
     @Environment(\.foldComposerFocus) private var foldComposerFocus
 
     private var expanded: Bool {
         alwaysExpanded || keepExpanded || focused || !attachments.isEmpty
             || draft.contains("\n") || draft.count > 26
+    }
+
+    /// The Write button rides the expanded card's top-right corner; the
+    /// one-line and landscape layouts have no corner to spare.
+    private var showsExpand: Bool {
+        onExpand != nil && expanded && !compact && !singleLine
     }
 
     /// One animatable shape for background/glass/hairline: capsule-radius
@@ -102,15 +108,11 @@ struct ComposerShell<Chips: View>: View {
             }
             .onChange(of: focusTick) { _, _ in focused = true }
             .onChange(of: focused) { _, focused in
-                stackedComposerFocus?(focused)
                 foldComposerFocus?(focused)
             }
-            // Leaving the session while typing (switching sessions, closing it) lets the split have its rest back.
+            // Leaving the session while typing (switching sessions, closing it) gives laptop pose its list back.
             .onDisappear {
-                if focused {
-                    stackedComposerFocus?(false)
-                    foldComposerFocus?(false)
-                }
+                if focused { foldComposerFocus?(false) }
             }
     }
 
@@ -119,52 +121,63 @@ struct ComposerShell<Chips: View>: View {
     /// (attach circle · scrolling chips · pinned send) along the card's
     /// bottom edge — everything stays inside the glass.
     private var surface: some View {
-        shellLayout {
-            if expanded, !attachments.isEmpty, !singleLine {
+        VStack(alignment: .leading, spacing: 6) {
+            // The one-line composer (iPhone Duo) has no room beside the text, so
+            // staged images sit above the line, still inside the glass.
+            if singleLine, !attachments.isEmpty {
                 AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
-                    .padding(.bottom, 10)
+                    .padding([.horizontal, .top], 7)
             }
-            if singleLine, expanded, onAttach != nil {
-                attachButton
-            }
-            input
-                .padding(.leading, expanded && !singleLine ? 4 : (singleLine && expanded ? 0 : 13))
-                .padding(.trailing, expanded && !singleLine ? 4 : 0)
-                .padding(.vertical, expanded && !singleLine ? 4 : 5)
-                .frame(minWidth: compact || singleLine ? 140 : nil,
-                       minHeight: expanded && !compact && !singleLine ? 64 : nil, alignment: .topLeading)
-                .fixedSize(horizontal: false, vertical: true)
-            if singleLine {
-                if expanded, let token {
-                    token
+            shellLayout {
+                if expanded, !attachments.isEmpty, !singleLine {
+                    AttachmentStripView(attachments: attachments, remove: onRemoveAttachment)
+                        .padding(.bottom, 10)
                 }
-                actionButton
-            } else if expanded {
-                HStack(spacing: 8) {
-                    if onAttach != nil {
-                        attachButton
+                if singleLine, expanded, onAttach != nil {
+                    attachButton
+                }
+                input
+                    .padding(.leading, expanded && !singleLine ? 4 : (singleLine && expanded ? 0 : 13))
+                    .padding(.trailing, expanded && !singleLine ? 4 : 0)
+                    .padding(.vertical, expanded && !singleLine ? 4 : 5)
+                    .frame(minWidth: compact || singleLine ? 140 : nil,
+                           minHeight: expanded && !compact && !singleLine ? 64 : nil, alignment: .topLeading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .overlay(alignment: .topTrailing) {
+                        if showsExpand { expandButton }
                     }
-                    // Chips scroll; the send button stays pinned.
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            chips
+                if singleLine {
+                    if expanded, let token {
+                        token
+                    }
+                    actionButton
+                } else if expanded {
+                    HStack(spacing: 8) {
+                        if onAttach != nil {
+                            attachButton
                         }
-                    }
-                    .scrollClipDisabled(false)
-                    .mask {
-                        HStack(spacing: 0) {
-                            Rectangle()
-                            LinearGradient(colors: [.black, .clear],
-                                           startPoint: .leading, endPoint: .trailing)
-                                .frame(width: 24)
+                        // Chips scroll; the send button stays pinned.
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                chips
+                            }
                         }
+                        .scrollClipDisabled(false)
+                        .mask {
+                            HStack(spacing: 0) {
+                                Rectangle()
+                                LinearGradient(colors: [.black, .clear],
+                                               startPoint: .leading, endPoint: .trailing)
+                                    .frame(width: 24)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        actionButton
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, compact ? 0 : 8)
+                } else {
                     actionButton
                 }
-                .padding(.top, compact ? 0 : 8)
-            } else {
-                actionButton
             }
         }
         .padding(.horizontal, expanded && !singleLine ? 12 : 5)
@@ -202,6 +215,8 @@ struct ComposerShell<Chips: View>: View {
                            editor.apply(text: draft)
                        },
                        onPasteImages: onPasteImages)
+            // Room for the Write button, so text never runs under it.
+            .padding(.trailing, showsExpand ? 34 : 0)
             .overlay(alignment: .topLeading) {
                 if draft.isEmpty {
                     Text(placeholder)
@@ -211,6 +226,27 @@ struct ComposerShell<Chips: View>: View {
                         .accessibilityHidden(true)
                 }
             }
+    }
+
+    private var expandButton: some View {
+        Button {
+            editor.commit()
+            onExpand?()
+        } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: 28, height: 28)
+                .background(ink(0.06), in: Circle())
+                .overlay(Circle().strokeBorder(hairline(0.08), lineWidth: 1))
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .offset(x: 8, y: -8)
+        .transition(.opacity)
+        .accessibilityLabel("Write in full screen")
+        .accessibilityIdentifier("composer-expand")
     }
 
     private var attachButton: some View {
@@ -247,8 +283,6 @@ struct ComposerShell<Chips: View>: View {
                 editor.commit()
                 onSend()
                 editor.apply(text: draft)
-                // In a stacked split the session took the screen for typing; sending hands it back.
-                if stackedComposerFocus != nil { focused = false }
             }
         } label: {
             Group {
@@ -312,6 +346,10 @@ struct ComposerView: View {
     @State private var showModelPicker = false
     @State private var showTraitPicker = false
     @State private var showOptionPicker: ModelOptionInfo?
+    /// The draft open on the full-height Write page.
+    @State private var showWrite = false
+    /// The model picker opened from the Write page's dock (a sheet over it).
+    @State private var showWriteModelPicker = false
     /// Live catalog for the chat's harness from its space's device.
     @State private var catalogs: [String: [ModelInfo]] = [:]
     @State private var catalogsLoading = true
@@ -511,20 +549,22 @@ struct ComposerView: View {
                 // A Duo stops from the status pill above the composer, never next to Send.
                 showStop: runLive && !duoChat,
                 busy: uploading || queueEditBusy || attachmentDraft.loading,
-                keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil,
+                keepExpanded: showModelPicker || showTraitPicker || showOptionPicker != nil || showWrite,
                 onSend: send,
                 onStop: { store.sendInterrupt() },
                 onAdvanceQueue: advanceQueue,
                 questionClosedAtMs: questionClosedAtMs,
-                attachments: editingQueuedId == nil ? attachments : [],
-                onAttach: editingQueuedId == nil ? { showPicker = true } : nil,
-                onPasteImages: editingQueuedId == nil ? { stagePasted($0) } : nil,
+                // While a queued row is retyped, these are images to add to it.
+                attachments: attachments,
+                onAttach: { showPicker = true },
+                onPasteImages: { stagePasted($0) },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 attachmentDraft: attachmentDraft,
                 autoFocus: model.launchFocusComposer,
                 singleLine: duoChat,
                 token: duoChat ? AnyView(chipToken) : nil,
-                focusTick: DuoComposerFocus.shared.tick(chat.id)
+                focusTick: DuoComposerFocus.shared.tick(chat.id),
+                onExpand: { showWrite = true }
             ) {
                 if let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)
@@ -566,22 +606,23 @@ struct ComposerView: View {
                 _ = await store.renewQueuedEdit(lease)
             }
         }
-        .sheet(isPresented: $showModelPicker) {
-            ModelPickerSheet(
-                harness: .constant(harness),
-                modelId: Binding(
-                    get: { currentModel.id },
-                    set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
-                ),
-                reasoning: Binding(
-                    get: { chat.config?.reasoning },
-                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
-                ),
-                lockedHarness: true,
-                catalogs: isChat ? [harness: models] : scopedCatalogs,
-                catalogsLoading: catalogsLoading || catalogSource != catalogKey,
-                onRetry: { catalogRetry += 1 }
-            )
+        .sheet(isPresented: $showModelPicker) { modelPicker }
+        .sheet(isPresented: $showWrite) {
+            WriteSheet(
+                text: $text,
+                attachmentDraft: attachmentDraft,
+                sendLabel: editingQueuedId != nil ? "Save queued message"
+                    : (runLive ? "Queue message" : "Send message"),
+                busy: uploading || queueEditBusy || attachmentDraft.loading,
+                onSend: send,
+                onPasteImages: { stagePasted($0) },
+                pickerItems: $pickerItems
+            ) {
+                ComposerChip(label: currentModel.label, badgeHarness: harness) {
+                    showWriteModelPicker = true
+                }
+            }
+            .sheet(isPresented: $showWriteModelPicker) { modelPicker }
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(
@@ -621,7 +662,7 @@ struct ComposerView: View {
             catalogsLoading = false
         }
         .task(id: queueEdit?.terminal == true ? nil : queueEditLease?.leaseId) {
-            guard let lease = queueEditLease, queueEdit?.terminal != true else { return }
+            guard let lease = queueEditLease, queueEdit?.terminal != true, model.demo == nil else { return }
             while !Task.isCancelled, queueEditLease?.leaseId == lease.leaseId {
                 try? await Task.sleep(for: .seconds(20))
                 guard !Task.isCancelled else { return }
@@ -635,14 +676,14 @@ struct ComposerView: View {
         .onChange(of: text) { _, new in
             if editingQueuedId == nil { DraftStore.save(new, for: DraftStore.chatKey(chat.id)) }
         }
-        .onChange(of: uploading || queueEditBusy || editingQueuedId != nil, initial: true) { _, blocked in
+        .onChange(of: uploading || queueEditBusy, initial: true) { _, blocked in
             attachmentDraft.enabled = !blocked
         }
         .onChange(of: ObjectIdentifier(attachmentDraft)) { _, _ in
-            attachmentDraft.enabled = !uploading && !queueEditBusy && editingQueuedId == nil
+            attachmentDraft.enabled = !uploading && !queueEditBusy
         }
         .onAppear {
-            attachmentDraft.enabled = !uploading && !queueEditBusy && editingQueuedId == nil
+            attachmentDraft.enabled = !uploading && !queueEditBusy
             queueEditorVisible = true
             if model.launchSheet == "config" {
                 model.launchSheet = nil
@@ -650,6 +691,9 @@ struct ComposerView: View {
             } else if model.launchSheet == "reasoning" {
                 model.launchSheet = nil
                 showTraitPicker = true
+            } else if model.launchSheet == "write" {
+                model.launchSheet = nil
+                showWrite = true
             }
         }
         .onDisappear {
@@ -659,10 +703,31 @@ struct ComposerView: View {
             releaseAttachmentLease()
             guard let lease = queueEditLease else { return }
             text = queueEdit?.originalDraft ?? ""
+            attachments = queueEdit?.originalImages ?? []
             queueEdit = nil
             queueEditBusy = false
+            guard model.demo == nil else { return }
             Task { _ = await store.finishQueuedEdit(lease, action: "cancel") }
         }
+    }
+
+    /// The model picker, from the composer's chip or the Write page's.
+    private var modelPicker: some View {
+        ModelPickerSheet(
+            harness: .constant(harness),
+            modelId: Binding(
+                get: { currentModel.id },
+                set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
+            ),
+            reasoning: Binding(
+                get: { chat.config?.reasoning },
+                set: { writeConfig(model: chat.config?.model, reasoning: $0) }
+            ),
+            lockedHarness: true,
+            catalogs: isChat ? [harness: models] : scopedCatalogs,
+            catalogsLoading: catalogsLoading || catalogSource != catalogKey,
+            onRetry: { catalogRetry += 1 }
+        )
     }
 
     /// Merge a model/effort change into the chat's config row (LWW; the host
@@ -723,23 +788,35 @@ struct ComposerView: View {
     @MainActor
     private func beginQueueEdit(_ item: QueuedMessage) async {
         guard editingQueuedId == nil, !queueEditBusy, !attachmentDraft.loading else { return }
-        guard model.hostSupportsQueueEditLease(chat) else {
-            uploadError = "Update the chat host to edit queued messages safely."
-            return
+        let result: QueueEditStartResult
+        if model.demo != nil {
+            // No host in demo mode; the edit writes the local row.
+            result = .acquired(QueueEditLease(rowId: item.id, leaseId: "demo", text: item.text,
+                                              baseTextHash: "", expiresAtMs: .max,
+                                              attachments: item.attachments))
+        } else {
+            guard model.hostSupportsQueueEditLease(chat) else {
+                uploadError = "Update the chat host to edit queued messages safely."
+                return
+            }
+            queueEditBusy = true
+            result = await store.beginQueuedEdit(id: item.id, instanceId: queueEditInstanceId)
+            queueEditBusy = false
         }
-        queueEditBusy = true
-        let result = await store.beginQueuedEdit(id: item.id, instanceId: queueEditInstanceId)
-        queueEditBusy = false
         switch result {
         case .acquired(let lease):
             guard queueEditorVisible else {
                 // Navigation won the race with the host ACK. Release the
                 // newly acquired lease instead of leaving a ghost editor.
-                _ = await store.finishQueuedEdit(lease, action: "cancel")
+                if model.demo == nil { _ = await store.finishQueuedEdit(lease, action: "cancel") }
                 return
             }
+            let rowAttachments = lease.attachments ?? item.attachments
             queueEdit = QueueComposerEdit(lease: lease, originalDraft: text,
-                                          hasAttachments: !item.attachments.isEmpty)
+                                          hasAttachments: !rowAttachments.isEmpty,
+                                          rowAttachments: rowAttachments,
+                                          originalImages: attachments)
+            attachments = []
             text = MessageQueue.visibleText(lease.text, attachments: item.attachments)
             uploadError = nil
         case .locked:
@@ -858,6 +935,7 @@ struct ComposerView: View {
     @MainActor
     private func cancelQueueEdit() async {
         guard let lease = queueEditLease, !queueEditBusy else { return }
+        guard model.demo == nil else { return finishLocalQueueEdit(.finished, failure: "") }
         queueEditBusy = true
         let result = await store.finishQueuedEdit(lease, action: "cancel")
         queueEditBusy = false
@@ -866,16 +944,44 @@ struct ComposerView: View {
 
     @MainActor
     private func commitQueueEdit() async {
-        guard let lease = queueEditLease, !queueEditBusy else { return }
-        let edited = queueEdit?.textToCommit(text)
+        guard let lease = queueEditLease, let edit = queueEdit, !queueEditBusy else { return }
+        let added = attachments
+        let edited = edit.textToCommit(text, addingImages: !added.isEmpty)
         queueEditBusy = true
+        defer { queueEditBusy = false }
+        // Images attached while retyping upload to the host first, then ride
+        // on the commit after the row's own.
+        let deviceId = queueImageDeviceId
+        var uploaded: [String] = []
+        for staged in added {
+            let path: String
+            if model.demo != nil {
+                path = "/demo/queued/\(staged.name)"
+            } else {
+                do {
+                    path = try await store.uploadAttachment(name: staged.name, data: staged.data)
+                } catch {
+                    uploadError = "Attachment upload failed — \(error.localizedDescription)"
+                    return
+                }
+            }
+            AttachmentImageCache.shared.seed(deviceId: deviceId, path: path,
+                                             name: staged.name, data: staged.data)
+            uploaded.append(path)
+        }
+        let paths = edit.attachmentsToCommit(uploaded: uploaded)
         let result: QueueEditFinishResult
-        if let edited {
-            result = await store.finishQueuedEdit(lease, action: "commit", text: edited)
+        if model.demo != nil {
+            let saved = store.applyQueuedAttachmentsLocally(
+                id: lease.rowId, text: edited ?? lease.text,
+                attachments: paths ?? edit.rowAttachments)
+            result = saved ? .finished : .missing
+        } else if let edited {
+            result = await store.finishQueuedEdit(lease, params: SessionStore.finishQueuedEditParams(
+                chatId: store.chatId, lease: lease, action: "commit", text: edited, attachments: paths))
         } else {
             result = await store.finishQueuedEdit(lease, action: "discard")
         }
-        queueEditBusy = false
         finishLocalQueueEdit(result, failure: "Couldn't save the protected edit.")
     }
 
@@ -885,6 +991,7 @@ struct ComposerView: View {
         switch result {
         case .finished:
             text = queueEdit?.originalDraft ?? ""
+            attachments = queueEdit?.originalImages ?? []
             queueEdit = nil
             uploadError = nil
         case .conflict:
@@ -1044,9 +1151,6 @@ struct QuestionPanel: View {
     @State private var promptHeight: CGFloat = 0
     @FocusState private var typing: Bool
     @Environment(\.verticalSizeClass) private var verticalSizeClass
-    /// Inside a stacked phone split: typing an answer gives the session the screen, as the composer does.
-    /// Without it the list kept the top half and the answer field sat behind the keyboard.
-    @Environment(\.stackedComposerFocus) private var stackedComposerFocus
 
     /// The question and its options scroll inside this height, so a long
     /// question leaves the transcript above it readable and keeps the answer
@@ -1061,9 +1165,6 @@ struct QuestionPanel: View {
             EmptyView()
         } else {
             panel(for: questions[min(max(page, 0), questions.count - 1)])
-                .onChange(of: typing) { _, typing in stackedComposerFocus?(typing) }
-                // Answered or dismissed while typing: the split gets its rest back.
-                .onDisappear { if typing { stackedComposerFocus?(false) } }
         }
     }
 

@@ -112,6 +112,10 @@ mod stale_input;
 mod tabs;
 #[cfg(test)]
 mod titlebar_tests;
+#[cfg(test)]
+mod typing_tests;
+#[cfg(test)]
+mod work_pane_tests;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 

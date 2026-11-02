@@ -282,6 +282,16 @@ fn main() -> anyhow::Result<()> {
                         .ok();
                 }
                 state.apply_sessions(sessions);
+                // The scene's cloud sandboxes also reach the shell (the
+                // running-sandbox strip and titlebar button), not just
+                // Settings › Accounts.
+                if let Some(sandboxes) = scene
+                    .accounts
+                    .as_ref()
+                    .and_then(|accounts| accounts.get("codegraffSandboxes"))
+                {
+                    state.apply_cloud_sandboxes_value(sandboxes, cx);
+                }
                 cx.notify();
             })
         });

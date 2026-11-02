@@ -2395,7 +2395,8 @@ impl AppState {
     /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
     /// narrowed to the current project filter. The jump shortcuts and their
     /// hints both count positions here, so neither can drift from the rows on
-    /// screen.
+    /// screen. `None` includes every project; an empty filter is the shell's
+    /// explicit projectless selection.
     pub fn sidebar_chats(
         &self,
         now: DateTime<Utc>,
@@ -2404,6 +2405,7 @@ impl AppState {
         self.overview_chats(now)
             .into_iter()
             .filter(|(_, chat)| match space_filter {
+                Some("") => chat.space_id.is_none(),
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,
             })
@@ -5644,6 +5646,30 @@ mod tests {
         assert_eq!(rows, ["parent"]);
         // The child row itself is still addressable (deep links, tabs).
         assert!(state.chats.iter().any(|c| c.id == "child"));
+    }
+
+    #[test]
+    fn sidebar_project_filters_distinguish_all_projectless_and_named_projects() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut in_project = chat("project", 0, Some(2));
+        in_project.space_id = Some("project-a".into());
+        let mut archived = chat("archived", 0, Some(3));
+        archived.archived = true;
+        state.apply_spaces(vec![space("project-a", "d1", "/tmp/project-a", 0)]);
+        state.apply_chats(vec![in_project, chat("projectless", 0, Some(1)), archived]);
+        let ids = |filter| {
+            state
+                .sidebar_chats(now, filter)
+                .into_iter()
+                .map(|(_, chat)| chat.id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(None), ["project", "projectless"]);
+        assert_eq!(ids(Some("project-a")), ["project"]);
+        assert!(ids(Some("missing-project")).is_empty());
+        assert_eq!(ids(Some("")), ["projectless"]);
     }
 
     #[test]

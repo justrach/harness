@@ -260,6 +260,7 @@ final class ParityTests: XCTestCase {
                 case .pinned: kind = "pinned"
                 case .project: kind = "project"
                 case .device: kind = "device"
+                case .status: kind = "status"
                 }
                 return ["id": group.id, "kind": kind, "chats": group.chats.map(\.id)]
             }
@@ -485,6 +486,16 @@ final class ParityTests: XCTestCase {
     }
 
     // MARK: Run errors (the desktop runs the same cases in harness-proto `run_errors`)
+
+    /// The engine runs the same cases (`localhost_view::url_rule`).
+    func testLocalhostPagesOpenTheSameAddressesAsTheEngine() throws {
+        let cases = try rows(load("vectors/localhost-pages.json"), "cases")
+        XCTAssertGreaterThan(cases.count, 10)
+        for c in cases {
+            let input = try XCTUnwrap(c["input"] as? String)
+            XCTAssertEqual(LocalhostPages.pageURL(input), c["opens"] as? String, input)
+        }
+    }
 
     func testRunErrorsReadTheSameAsTheDesktop() throws {
         let v = try load("vectors/run-errors.json")

@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""Prepare, upload and publish a verified Mac-only Harness release.
+"""Prepare, upload and publish a verified stable Harness release.
 
 The macOS app is built, Developer ID signed and notarized on the operator's
-Mac (scripts/package-macos.sh). Other platforms and shared update feeds are
-excluded from this reconciliation. The steps, each safe to rerun:
+Mac (scripts/package-macos.sh); CI builds the Linux and Windows companions from
+the same tag. The steps, each safe to rerun:
 
-  companions  disabled for this Mac-only candidate
+  companions  download the tag workflow's Linux/Windows artifacts
   prepare     verify the signed app, updater tarball and DMG; stage every
               asset with its stable aliases and a manifest.json (local only)
   upload      put the staged assets on a draft release (created from
               docs/releases/v<version>.md if missing) and check GitHub's
               digests against the manifest; the release stays a draft
-  publish     recheck exact-artifact evidence and digests, publish without
-              changing latest, and read the versioned public manifest back
-  release     prepare + upload (stops at the draft)
-
-Upload and publish require --verification with Mac QA results for these exact
-artifact hashes and the clean, tagged source commit. See macos-reconciliation.md.
+  publish     recheck the draft's digests, publish it as latest, and read
+              the public manifest back
+  release     companions + prepare + upload (stops at the draft)
 """
 
 from __future__ import annotations
@@ -38,10 +35,11 @@ from pathlib import Path
 
 REPO = "justrach/harness"
 ROOT = Path(__file__).resolve().parent.parent
-COMPANION_PLATFORMS = ()
-REQUIRED_CHECKS = (
-    "launch", "workspace_restore", "session_close_recovery", "provider_switch",
-    "browser_inspector", "image_gallery_annotation",
+COMPANION_PLATFORMS = (
+    "linux-aarch64.tar.gz",
+    "linux-x86_64.tar.gz",
+    "windows-x86_64.exe",
+    "windows-x86_64.zip",
 )
 
 
@@ -69,16 +67,20 @@ def companion_names(version: str) -> tuple[str, ...]:
 
 
 def expected_names(version: str) -> tuple[str, ...]:
-    """Only verified macOS arm64 artifacts; no shared-feed companions."""
+    """Every release asset except manifest.json. The two capitalized names
+    are stable download links, byte-identical to their versioned files."""
     return (
         "Harness-macos-arm64.dmg",
         f"harness-{version}-macos-arm64.dmg",
         f"harness-{version}-macos-arm64-app.tar.gz",
+        "Harness-windows-x86_64.zip",
+        *companion_names(version),
     )
 
 
 ALIASES = {
     "Harness-macos-arm64.dmg": "harness-{version}-macos-arm64.dmg",
+    "Harness-windows-x86_64.zip": "harness-{version}-windows-x86_64.zip",
 }
 
 
@@ -91,12 +93,7 @@ def sha256(path: Path) -> str:
 
 
 def make_manifest(version: str, dist: Path) -> dict:
-    require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is not None, "invalid release version")
     names = expected_names(version)
-    require(
-        {path.name for path in dist.iterdir()} <= set(names) | {"manifest.json"},
-        "staging contains unexpected artifacts; this candidate permits macOS arm64 only",
-    )
     for name in names:
         path = dist / name
         require(path.is_file() and path.stat().st_size > 0, f"missing artifact: {name}")
@@ -109,37 +106,6 @@ def make_manifest(version: str, dist: Path) -> dict:
         "version": version,
         "files": {name: {"sha256": sha256(dist / name)} for name in sorted(names)},
     }
-
-
-def validate_verification(evidence: dict, manifest: dict, source_commit: str) -> None:
-    """An old preview pass cannot clear different distribution bytes."""
-    require(isinstance(evidence, dict), "verification must be a JSON object")
-    require(evidence.get("platform") == "macos-arm64", "verification must be for macos-arm64")
-    require(evidence.get("version") == manifest["version"], "verification version mismatch")
-    require(re.fullmatch(r"[0-9a-f]{40}", source_commit) is not None, "invalid source commit")
-    require(evidence.get("sourceCommit") == source_commit, "verification source commit mismatch")
-    require(
-        evidence.get("artifactSha256") == {name: item["sha256"] for name, item in manifest["files"].items()},
-        "verification artifact hashes do not match this candidate",
-    )
-    checks = evidence.get("checks", {})
-    require(isinstance(checks, dict) and all(checks.get(check) is True for check in REQUIRED_CHECKS),
-            "required Mac artifact checks are not all complete")
-    require(isinstance(evidence.get("reviewer"), str) and bool(evidence["reviewer"].strip()),
-            "verification must identify its human reviewer")
-
-
-def require_verified_candidate(args: argparse.Namespace, manifest: dict) -> None:
-    require(args.verification is not None, "--verification is required before upload or publication")
-    evidence = json.loads(args.verification.read_text())
-    require(not run("git", "-C", ROOT, "status", "--porcelain", "--untracked-files=normal").strip(),
-            "publication requires a clean source checkout")
-    source = run("git", "-C", ROOT, "rev-parse", "HEAD").strip()
-    validate_verification(evidence, manifest, source)
-    tag = run("git", "-C", ROOT, "rev-list", "-n", "1", f"v{args.version}").strip()
-    require(tag == source, "release tag does not identify the verified source commit")
-    remote = run("gh", "api", f"repos/{REPO}/commits/v{args.version}", "--jq", ".sha").strip()
-    require(remote == source, "remote release tag does not identify the verified source commit")
 
 
 def check_developer_id(path: Path) -> None:
@@ -238,8 +204,44 @@ def preflight() -> None:
     )
 
 
+def release_run(version: str) -> dict:
+    """The successful tag workflow run that built this version's companions."""
+    tag = f"v{version}"
+    runs = json.loads(run(
+        "gh", "run", "list", "-R", REPO, "--workflow", "release", "--branch", tag,
+        "--json", "databaseId,headSha,status,conclusion", "--limit", "5",
+    ))
+    tag_sha = run("git", "-C", ROOT, "rev-list", "-n", "1", tag).strip()
+    for candidate in runs:
+        if candidate["headSha"] != tag_sha:
+            continue
+        require(candidate["status"] == "completed", f"the {tag} workflow is still running")
+        require(candidate["conclusion"] == "success", f"the {tag} workflow did not succeed")
+        return candidate
+    raise ValueError(f"no release workflow run for {tag} at {tag_sha[:8]}")
+
+
 def companions(args: argparse.Namespace) -> None:
-    raise ValueError("companion releases are disabled: this reconciliation is macOS arm64 only")
+    version = args.version
+    workflow = release_run(version)
+    target = args.other_dir
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    # Artifact downloads occasionally fail on a transient network error.
+    for attempt in range(3):
+        try:
+            run("gh", "run", "download", str(workflow["databaseId"]), "-R", REPO, "-D", target)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == 2:
+                raise
+            shutil.rmtree(target)
+            target.mkdir(parents=True)
+            time.sleep(5)
+    for name in companion_names(version):
+        require(any(target.rglob(name)), f"the workflow run has no {name}")
+    print(f"Downloaded the {version} companions to {target}")
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -280,7 +282,7 @@ def release_state(version: str) -> dict | None:
     try:
         return json.loads(run(
             "gh", "release", "view", f"v{version}", "-R", REPO,
-            "--json", "tagName,isDraft,isPrerelease,assets",
+            "--json", "tagName,isDraft,isPrerelease",
         ))
     except subprocess.CalledProcessError:
         return None
@@ -299,25 +301,12 @@ def check_remote_digests(version: str, manifest: dict) -> None:
     ]
     require(len(releases) == 1, f"expected one v{version} release, found {len(releases)}")
     remote = {asset["name"]: asset.get("digest") for asset in releases[0]["assets"]}
-    require(set(remote) == set(expected_names(version)) | {"manifest.json"},
-            "remote release contains unexpected or missing assets; macOS arm64 only")
-    manifest_bytes = (json.dumps(manifest, indent=2) + "\n").encode()
-    require(remote["manifest.json"] == "sha256:" + hashlib.sha256(manifest_bytes).hexdigest(),
-            "GitHub's manifest does not match the verified manifest")
+    require("manifest.json" in remote, "the release has no manifest.json")
     for name, entry in manifest["files"].items():
         require(
             remote.get(name) == f"sha256:{entry['sha256']}",
             f"GitHub's copy of {name} does not match the manifest",
         )
-
-
-def validate_draft_scope(release: dict | None, version: str) -> None:
-    require(release is not None and release.get("tagName") == f"v{version}", "release tag mismatch")
-    require(release.get("isDraft") is True and release.get("isPrerelease") is False,
-            "publication requires an unpublished stable draft release")
-    allowed = set(expected_names(version)) | {"manifest.json"}
-    require(all(asset.get("name") in allowed for asset in release.get("assets", [])),
-            "existing draft contains artifacts outside this Mac-only candidate")
 
 
 def upload(args: argparse.Namespace) -> None:
@@ -326,7 +315,6 @@ def upload(args: argparse.Namespace) -> None:
     dist = args.out
     manifest = json.loads((dist / "manifest.json").read_text())
     require(manifest == make_manifest(version, dist), "manifest does not match staged bytes")
-    require_verified_candidate(args, manifest)
     app_hashes = check_app_tarball(
         dist / f"harness-{version}-macos-arm64-app.tar.gz", version, args.graff_version
     )
@@ -341,10 +329,12 @@ def upload(args: argparse.Namespace) -> None:
         require(notes.is_file(), f"missing release notes: {notes}")
         run(
             "gh", "release", "create", f"v{version}", "-R", REPO, "--draft",
-            "--verify-tag", "--latest=false", "--title", f"Harness v{version} (macOS)", "--notes-file", notes,
+            "--verify-tag", "--title", f"Harness v{version}", "--notes-file", notes,
         )
         release = release_state(version)
-    validate_draft_scope(release, version)
+    require(release is not None and release["tagName"] == f"v{version}", "release tag mismatch")
+    require(release["isDraft"] and not release["isPrerelease"],
+            "upload requires an unpublished stable draft release")
     files = [dist / name for name in expected_names(version)] + [dist / "manifest.json"]
     run("gh", "release", "upload", f"v{version}", *files, "-R", REPO, "--clobber")
     check_remote_digests(version, manifest)
@@ -355,21 +345,19 @@ def upload(args: argparse.Namespace) -> None:
 def publish(args: argparse.Namespace) -> None:
     version = args.version
     manifest = json.loads((args.out / "manifest.json").read_text())
-    require(manifest == make_manifest(version, args.out), "manifest does not match staged bytes")
-    require_verified_candidate(args, manifest)
     release = release_state(version)
-    validate_draft_scope(release, version)
+    require(release is not None and release["isDraft"], f"v{version} is not a draft")
     check_remote_digests(version, manifest)
-    run("gh", "release", "edit", f"v{version}", "-R", REPO, "--draft=false", "--latest=false")
-    url = f"https://github.com/{REPO}/releases/download/v{version}/manifest.json"
+    run("gh", "release", "edit", f"v{version}", "-R", REPO, "--draft=false", "--latest")
+    url = f"https://github.com/{REPO}/releases/latest/download/manifest.json"
     for attempt in range(10):
         with urllib.request.urlopen(url, timeout=30) as response:
             public = json.load(response)
         if public.get("version") == version:
             break
         time.sleep(3)
-    require(public == manifest, "the versioned public manifest does not match the staged one")
-    print(f"Published Mac-only v{version}; shared latest and updater feeds are unchanged.")
+    require(public == manifest, "the public latest manifest does not match the staged one")
+    print(f"Published v{version}; the public latest manifest reports {version}.")
 
 
 def main() -> int:
@@ -387,7 +375,6 @@ def main() -> int:
     parser.add_argument("--package-dir", type=Path, default=ROOT / "target/package")
     parser.add_argument("--other-dir", type=Path, default=ROOT / "target/release-companions")
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--verification", type=Path, help="exact-artifact Mac QA evidence JSON")
     args = parser.parse_args()
     args.out = args.out or ROOT / f"target/stable-release/v{args.version}"
     steps = {
@@ -395,7 +382,7 @@ def main() -> int:
         "prepare": [prepare],
         "upload": [upload],
         "publish": [publish],
-        "release": [prepare, upload],
+        "release": [companions, prepare, upload],
     }[args.action]
     try:
         if any(step in (prepare, upload) for step in steps):

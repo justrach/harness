@@ -11,16 +11,14 @@ struct SessionView: View {
     @Environment(\.pageSession) private var pageSession
     /// Open another session beside this one, or close this pane: set only on a Max-class iPhone (SplitScreen).
     @Environment(\.splitScreen) private var splitScreen
-    /// Open a new session below this one, in the phone's stacked split (⌘D on the desktop).
-    @Environment(\.stackedSplit) private var stackedSplit
-    /// Close this pane of the stacked split, while two are shown.
-    @Environment(\.stackedClose) private var stackedClose
     /// Above the fold in laptop pose: draw the header strip here, with a back button (FoldPaneHeader).
     @Environment(\.foldPaneHeader) private var foldPaneHeader
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     /// iPhone Duo lying flat: chat left of the fold, Inspect right (DuoInspect).
     @Environment(\.duoFlat) private var duoFlat
+    /// Flat Duo: bring the session list in beside this session, or put it away (HomeView).
+    @Environment(\.toggleFlatList) private var toggleFlatList
     /// Beside the list: the session's page is lifted (ContentPlane).
     @Environment(\.liftedPlane) private var liftedPlane
     /// Flat Duo: the chat column's width, for the rounded seam at the fold.
@@ -30,6 +28,8 @@ struct SessionView: View {
     @Environment(\.duoLaptop) private var duoLaptop
     /// Laptop pose: how far the keyboard reaches into this view, and the header strip's height.
     @State private var keyboardOverlap: CGFloat = 0
+    /// Half open: the lower half shows the control pad until work is asked for.
+    @State private var halfPanel: DuoHalfPanel = .controls
     @State private var paneHeaderHeight: CGFloat = 0
     /// Upright Duo: this view's top in the window (the fold is measured from the window's top).
     @State private var viewMinY: CGFloat = 0
@@ -38,20 +38,15 @@ struct SessionView: View {
     @State private var windowMidX: CGFloat = 0
     /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
+    /// The side the system's vertical bar stands on (the Duo's cover display), and the content's safe area.
+    @State private var verticalBarEdge: HorizontalEdge?
+    @State private var contentSafeInsets = EdgeInsets()
     let chatId: String
 
     /// Reserve the back button and native bar margins. Anchor the rest to the
     /// trailing edge so the title can use the space before the controls.
     private static let headerChromeInset: CGFloat = 100
     private static let topFadeHeight: CGFloat = 28
-
-    /// Room the stacked split's trailing buttons take from the title: the titled Split button (about 90pt),
-    /// or the × (36pt), each plus the bar's 16pt gap before it. The header is a trailing item too, so any
-    /// shortfall pushes the button into the bar's "More" menu instead of narrowing the title.
-    private var stackedButtonsWidth: CGFloat {
-        if stackedSplit != nil { return 112 }
-        return stackedClose == nil ? 0 : 56
-    }
 
     /// The view's own width, the only reliable basis for capping the principal
     /// toolbar item (its container proposes an unbounded width).
@@ -90,8 +85,9 @@ struct SessionView: View {
     }
 
     private var headerInset: CGFloat {
-        // A Duo's back button is in the side bar (folded, or lying flat), so the title can start at the edge.
-        duoChat && (horizontalSizeClass == .compact || duoFlat) ? 32 : Self.headerChromeInset
+        DuoChat.headerInset(duoChat: duoChat, compactWidth: horizontalSizeClass == .compact, flat: duoFlat,
+                            listToggle: toggleFlatList != nil, chrome: Self.headerChromeInset,
+                            hitTarget: Theme.hitTarget)
     }
 
     /// A Duo shows a running turn as the pill above the composer, so the header's status dots step aside.
@@ -223,6 +219,18 @@ struct SessionView: View {
 
     private var chat: Chat? { model.chat(id: chatId) }
 
+    /// The transcript's row padding: beside the cover display's vertical bar the text takes the width the bar's
+    /// column leaves (CoverLayout); everywhere else 20pt a side.
+    private var transcriptRowInsets: CoverLayout.RowInsets {
+        let compact = horizontalSizeClass == .compact
+        guard compact, !flatSplit, !paneChrome else { return .standard }
+        let edge = CoverLayout.barEdge(reported: verticalBarEdge, duo: duoChat, compactWidth: compact,
+                                       leadingInset: contentSafeInsets.leading,
+                                       trailingInset: contentSafeInsets.trailing)
+        return CoverLayout.rowInsets(barEdge: edge,
+                                     barInset: edge == .leading ? contentSafeInsets.leading : contentSafeInsets.trailing)
+    }
+
     /// iPhone Duo lying flat, this session alone on the screen: chat and Inspect split at the fold.
     private var flatSplit: Bool { (duoFlat || DuoChat.demoFlat) && splitScreen == nil }
 
@@ -280,48 +288,30 @@ struct SessionView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(paneChrome ? .hidden : .automatic, for: .navigationBar)  // a Max draws its own header
         .toolbar {
+            if let toggleFlatList {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: toggleFlatList) {
+                        Image(systemName: "sidebar.leading")
+                            .fontWeight(.semibold)
+                    }
+                    .accessibilityLabel("Show or hide the session list")
+                    .accessibilityIdentifier("duo-flat-toggle-list")
+                }
+            }
             if let chat {
                 // Tap the session header to rename — model/effort changes
                 // moved into the composer's picker chips.
                 ToolbarItem(placement: .topBarTrailing) {
                     headerTitle(chat)
-                        // Claim the remaining bar width, less the stacked split's
-                        // trailing buttons: the title expands before the
-                        // fixed-size navigation and status marks. The title and
+                        // Claim the remaining bar width: the title expands before
+                        // the fixed-size navigation and status marks. The title and
                         // pager carry their own swipe (headerControls).
                         // A folded Duo's back button is in the side bar, so the title can start at the edge.
-                        .frame(width: max(140, viewWidth - headerInset - stackedButtonsWidth),
+                        .frame(width: max(140, viewWidth - headerInset),
                                alignment: .leading)
                 }
                 // Bare text on the bar, not a glass capsule.
                 .sharedBackgroundVisibility(.hidden)
-            }
-            if let stackedSplit {
-                ToolbarItem(placement: .topBarTrailing) {
-                    // Titled: the icon alone read as a plain box. A Label in the bar drops its title, so the
-                    // icon and the word are laid out here.
-                    Button(action: stackedSplit) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "rectangle.split.1x2")
-                                .fontWeight(.semibold)
-                            Text("Split")
-                                .font(Theme.sans(15, weight: .semibold))
-                        }
-                        .padding(.horizontal, 4)
-                        .fixedSize()
-                    }
-                    .accessibilityLabel("Open another session below this one")
-                    .accessibilityIdentifier("stacked-split-open")
-                }
-            }
-            if let stackedClose {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: stackedClose) {
-                        Label("Close this pane", systemImage: "xmark")
-                    }
-                    .fontWeight(.semibold)
-                    .accessibilityIdentifier("stacked-pane-close")
-                }
             }
         }
         .alert("Rename session", isPresented: $renamingSession) {
@@ -424,15 +414,18 @@ struct SessionView: View {
                                inspectDiff: { summary in
                                    inspect.segment = .diff
                                    inspect.selectedFile = summary.files.first
+                                   halfPanel = .work
                                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                },
                                inspectTool: { tool in
                                    inspect.show(tool)
+                                   halfPanel = .work
                                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                                })
                     .frame(maxHeight: .infinity)
                     .clipped()
-                    .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
+                // Below the transcript, not over it: no text runs under the chips.
+                runPill(chat: chat, store: store)
                 if typing {
                     DuoStatusStrip(model: inspectModel, activity: DuoStatusStrip.activity(inspectModel, running: running)) {
                         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -458,11 +451,26 @@ struct SessionView: View {
             .frame(maxHeight: typing ? .infinity : nil)
             if !typing {
                 Color.clear.frame(height: layout.gap)
-                InspectCard(model: inspectModel, state: inspect, title: true,
-                            approve: approveAction(store),
-                            askForChanges: { DuoComposerFocus.shared.request(chat.id) })
+                if halfPanel == .controls {
+                    DuoControlPad(running: running) { control in
+                        switch control {
+                        case .stop: store.sendInterrupt()
+                        case .talk: DuoComposerFocus.shared.request(chat.id)
+                        case .showChanges, .terminal:
+                            if let segment = control.segment { inspect.segment = segment }
+                            halfPanel = .work
+                        }
+                    }
                     .frame(maxHeight: .infinity)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(.opacity)
+                } else {
+                    InspectCard(model: inspectModel, state: inspect, title: true,
+                                close: { halfPanel = .controls },
+                                approve: approveAction(store),
+                                askForChanges: { DuoComposerFocus.shared.request(chat.id) })
+                        .frame(maxHeight: .infinity)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
         }
         .padding(.bottom, keyboardOverlap)
@@ -483,7 +491,10 @@ struct SessionView: View {
             }
                 .padding(.leading, 16)
                 .padding(.bottom, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("run-status-row")
         }
     }
 
@@ -511,7 +522,8 @@ struct SessionView: View {
                                    inspect.open = true
                                }
                            } : nil,
-                           inspectTool: flat ? { tool in withAnimation(Motion.collapse) { inspect.show(tool) } } : nil)
+                           inspectTool: flat ? { tool in withAnimation(Motion.collapse) { inspect.show(tool) } } : nil,
+                           rowInsets: transcriptRowInsets)
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
@@ -523,13 +535,14 @@ struct SessionView: View {
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
-                .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
-                .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
                 .overlay(alignment: .leading) {
                     // Swipe in from the edge to go back; the pager owns the rest of the width.
                     if duoChat, horizontalSizeClass == .compact { EdgeSwipeBack { dismiss() } }
                 }
             VStack(spacing: 0) {
+                // A Duo's running turn: the pill row, in layout above the composer. It floated over the
+                // transcript, and text ran under and between the glass chips.
+                runPill(chat: chat, store: store)
                 // A Duo's running turn is the pill; the strip shows only sends and connection trouble there.
                 if duoChat ? (status == .errored || model.sendState(for: chat) != nil
                               || model.connectivity.state != .connected)
@@ -561,6 +574,7 @@ struct SessionView: View {
                 }
                 .padding(.bottom, 8)
             }
+            .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
             .background {
                 LinearGradient(
                     stops: [
@@ -596,6 +610,8 @@ struct SessionView: View {
             }
         }
         .background(page.ignoresSafeArea())
+        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { contentSafeInsets = $0 }
+        .onVerticalBarEdgeChange { verticalBarEdge = $0 }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
             columnMinX = frame.minX
             // The fold is the window's middle; the side bar's column is outside this view's frame.

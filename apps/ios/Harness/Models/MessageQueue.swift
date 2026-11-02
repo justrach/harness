@@ -62,6 +62,11 @@ struct QueueComposerEdit {
     let lease: QueueEditLease
     let originalDraft: String
     let hasAttachments: Bool
+    /// The row's images when the edit began.
+    var rowAttachments: [String] = []
+    /// The draft's own images, set aside like its text while the row is
+    /// retyped, so images attached now belong to the queued message.
+    var originalImages: [StagedAttachment] = []
     private(set) var terminal = false
 
     mutating func receive(_ result: QueueEditFinishResult) {
@@ -71,9 +76,16 @@ struct QueueComposerEdit {
         }
     }
 
-    func textToCommit(_ text: String) -> String? {
-        guard let edited = MessageQueue.editedText(text, hasAttachments: hasAttachments) else { return nil }
+    func textToCommit(_ text: String, addingImages: Bool = false) -> String? {
+        guard let edited = MessageQueue.editedText(text, hasAttachments: hasAttachments || addingImages)
+        else { return nil }
         return edited + (AppshotContext.suffix(lease.text) ?? "")
+    }
+
+    /// The row's attachment list to commit: nil leaves the row's images as
+    /// they are; images attached in the composer go after them.
+    func attachmentsToCommit(uploaded: [String]) -> [String]? {
+        uploaded.isEmpty ? nil : rowAttachments + uploaded
     }
 }
 

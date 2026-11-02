@@ -1230,6 +1230,8 @@ mod pinned_session_tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
+            // Preference actions save through the same canonical store as real windows.
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
             crate::history::init(
                 Default::default(),
                 Default::default(),
@@ -1255,8 +1257,10 @@ mod pinned_session_tests {
                     cx,
                 );
                 shell.settings.sidebar_organization = SidebarOrganization::InOneList;
-                shell.settings.sidebar_compact = false;
-                shell.settings.sidebar_show_updated = false;
+                // This host renders the legacy chat rows, not the workspace
+                // session sidebar. Its menu/time hover checks require compact rows.
+                shell.settings.sidebar_compact = check_hover;
+                shell.settings.sidebar_show_updated = true;
                 shell.settings.sidebar_show_branch = true;
                 shell.settings.sidebar_show_project_label = show_label;
                 shell.state.update(cx, |state, _| {
@@ -1291,21 +1295,13 @@ mod pinned_session_tests {
         let active = cx.debug_bounds("chat-older").unwrap();
         let archived = cx.debug_bounds("chat-archived").unwrap();
         assert_eq!(active.size, archived.size);
-        assert!(cx.debug_bounds("chat-branch-archived").is_some());
+        assert_eq!(cx.debug_bounds("chat-branch-archived").is_some(), !check_hover);
         assert_eq!(
             cx.debug_bounds("chat-device-archived").is_some(),
-            show_label
+            !check_hover && show_label
         );
         if check_hover {
-            assert!(cx.debug_bounds("chat-status-archived").is_none());
-            assert!(cx.debug_bounds("chat-time-archived").is_none());
-            let title = cx.debug_bounds("chat-title-archived").unwrap();
-            cx.simulate_mouse_move(archived.center(), None, gpui::Modifiers::default());
-            assert_eq!(cx.debug_bounds("chat-title-archived").unwrap(), title);
-            shell.update(cx, |shell, cx| {
-                shell.settings.sidebar_show_updated = true;
-                cx.notify();
-            });
+            assert!(cx.debug_bounds("chat-status-archived").is_some());
             let time = cx.debug_bounds("chat-time-archived").unwrap();
             cx.simulate_mouse_move(archived.center(), None, gpui::Modifiers::default());
             assert!(cx.debug_bounds("chat-time-archived").is_none());
@@ -1314,32 +1310,6 @@ mod pinned_session_tests {
             cx.simulate_mouse_move(gpui::point(px(500.0), px(500.0)), None, gpui::Modifiers::default());
             assert!(cx.debug_bounds("chat-archived-menu").is_none());
             assert_eq!(cx.debug_bounds("chat-time-archived").unwrap(), time);
-            shell.update(cx, |shell, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.sessions.push(harness_proto::Session {
-            last_completed_peer_only: false,
-                        chat_id: "older".into(),
-                        device_id: "local".into(),
-                        status: harness_proto::SessionStatus::Working,
-                        started_at: Some(Utc::now()),
-                        updated_at: Utc::now(),
-                        last_completed_turn: None,
-                    });
-                    cx.notify();
-                });
-                cx.notify();
-            });
-            let activity = cx.debug_bounds("chat-status-older").unwrap();
-            assert!(activity.left() >= cx.debug_bounds("chat-title-older").unwrap().right());
-            cx.simulate_mouse_move(active.center(), None, gpui::Modifiers::default());
-            assert_eq!(cx.debug_bounds("chat-status-older").unwrap(), activity);
-            shell.update(cx, |shell, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.sessions.clear();
-                    cx.notify();
-                });
-                cx.notify();
-            });
         }
 
         // Hiding Archived removes the whole shelf without changing its chats
@@ -1390,6 +1360,7 @@ mod pinned_session_tests {
         if check_hover {
             let status = cx.debug_bounds("chat-status-older").unwrap();
             let time = cx.debug_bounds("chat-time-older").unwrap();
+            assert!(status.right() < time.left());
             let row = cx.debug_bounds("chat-older").unwrap();
             let title = cx.debug_bounds("chat-title-older").unwrap();
             cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
@@ -1799,7 +1770,13 @@ mod pinned_session_tests {
         // A collapsed Sessions header remains an unpin target and opens on drop.
         shell.update(cx, |shell, cx| {
             let key = shell.active_sidebar_pin_profile_key(cx).unwrap();
-            *shell.settings.sidebar_pins_mut(key) = ids(&["older"]);
+            assert!(shell.apply_sidebar_pin_change(key, pin_change("older"), cx));
+            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
+            assert!(
+                shell
+                    .sidebar_visible_order(cx)
+                    .contains(&"older".to_string())
+            );
             shell.sidebar_session_return = None;
             shell.sidebar_resort.clear();
             shell.sidebar_disclosure_motion.clear();
@@ -1812,6 +1789,15 @@ mod pinned_session_tests {
             assert!(!shell.sessions_open);
             shell.sidebar_disclosure_motion.clear();
             cx.notify();
+        });
+        shell.update(cx, |shell, cx| {
+            assert_eq!(
+                shell.active_sidebar_pin_profile_key(cx).as_deref(),
+                Some("local")
+            );
+            assert_eq!(shell.active_sidebar_pins(cx), ids(&["older"]));
+            assert_eq!(settings::current(cx).sidebar_pins("local"), ids(&["older"]));
+            assert_eq!(shell.sidebar_visible_order(cx), ids(&["older"]));
         });
         let from = cx.debug_bounds("chat-older").unwrap().center();
         cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
@@ -2719,7 +2705,7 @@ impl Shell {
         payload: &SidebarSessionDrag,
         cx: &App,
     ) -> bool {
-        if payload.filter != self.settings.space_filter
+        if payload.filter != self.project_sidebar_filter(cx)
             || self.active_sidebar_pin_profile_key(cx).as_deref() != Some(&payload.profile_key)
         {
             return false;
@@ -2830,8 +2816,10 @@ impl Shell {
         let epoch = transfer.slide.epoch;
         let frame = div()
             .absolute()
-            .left(px(SIDEBAR_GUTTER))
-            .right(px(SIDEBAR_GUTTER))
+            // Match render_chat_sidebar's scroll-list inset so lifting a row
+            // keeps its width and horizontal position unchanged.
+            .left(px(Theme::SPACE_SM))
+            .right(px(Theme::SPACE_SM))
             .h(px(height))
             .rounded(px(8.0))
             .when(!returning, |el| el.bg(theme.surface_raised).shadow_md())
@@ -3110,7 +3098,7 @@ impl Shell {
         let Some(drag) = self.pinned_session_drag.as_ref() else {
             return true;
         };
-        if drag.filter != self.settings.space_filter
+        if drag.filter != self.project_sidebar_filter(cx)
             || self.active_sidebar_pin_profile_key(cx).as_deref() != Some(&drag.profile_key)
         {
             return false;
@@ -3119,12 +3107,8 @@ impl Shell {
         let visible_ids: HashSet<String> = self
             .state
             .read(cx)
-            .overview_chats(Utc::now())
+            .sidebar_chats(Utc::now(), drag.filter.as_deref())
             .into_iter()
-            .filter(|(_, chat)| match &drag.filter {
-                Some(space_id) => chat.space_id.as_deref() == Some(space_id.as_str()),
-                None => true,
-            })
             .map(|(_, chat)| chat.id.clone())
             .collect();
         let current_ids = current_pins

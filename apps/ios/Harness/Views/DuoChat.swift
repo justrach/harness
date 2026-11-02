@@ -12,6 +12,8 @@ import SwiftUI
 enum DuoChat {
     /// UserDefaults: this device has reported a fold or its inner display, so it is an iPhone Duo.
     static let foldableKey = "foldableDevice"
+    /// UserDefaults: the session list stands beside an open session on the inner display lying flat.
+    static let flatListKey = "duoFlatListShown"
 
     /// A window that only an iPhone Duo has: an active fold, or a phone window regular both ways (the inner
     /// display lying flat).
@@ -25,9 +27,25 @@ enum DuoChat {
         fold == .none && phone && regularWidth && regularHeight
     }
 
-    /// Rig (DEBUG): `-demo-duo-flat` lays a session out as on a Duo lying flat, chat and Inspect, on any wide
-    /// simulator. The Duo simulator has no command to unfold, so its inner display can't be captured from a
-    /// script.
+    /// Lying flat, the session list stands beside an open session only once the person asks for it (the
+    /// session bar's sidebar button), and never beside Inspect, which takes its place. Beside a 296pt list the
+    /// chat was left a cramped column of the 669pt display.
+    static func listBesideSession(flat: Bool, listShown: Bool, sessionOpen: Bool, inspectOpen: Bool) -> Bool {
+        flat && listShown && sessionOpen && !inspectOpen
+    }
+
+    /// Room the session bar keeps before its title. Folded on the cover display the back button is in the
+    /// side bar, so the title starts at the edge. Lying flat the session is pushed onto the list's stack: its
+    /// bar has the back button and the list's toggle, which the folded inset let the title slide under.
+    static func headerInset(duoChat: Bool, compactWidth: Bool, flat: Bool, listToggle: Bool,
+                            chrome: CGFloat, hitTarget: CGFloat) -> CGFloat {
+        if flat { return chrome + (listToggle ? hitTarget + 8 : 0) }
+        return duoChat && compactWidth ? 32 : chrome
+    }
+
+    /// Rig (DEBUG): `-demo-duo-flat` lays home and a session out as on a Duo lying flat (one stack, the list
+    /// beside a session when asked for, chat and Inspect) on any wide simulator. The Duo simulator has no
+    /// command to unfold, so its inner display can't be captured from a script.
     #if DEBUG
     static let demoFlat = ProcessInfo.processInfo.arguments.contains("-demo-duo-flat")
     #else
@@ -35,9 +53,73 @@ enum DuoChat {
     #endif
 }
 
+// MARK: - Cover display
+
+/// The transcript beside a vertical bar. On the Duo's cover display (466 x 678 pt) the system puts the status
+/// bar, the camera and the navigation bar (with the back button) in one column on the trailing side: an 84pt
+/// safe-area inset, the system's, which content must stay out of (HIG, "Vertical controls"). Rows used to pad
+/// 20pt on both sides inside what was left, so the text had 342pt of the 466. Beside the bar the column's own
+/// empty edge already separates the text from the controls: the rows keep a smaller gap there, and the scroll
+/// indicator moves into a gutter at the column's edge, short of the bar's controls, instead of over the text.
+enum CoverLayout {
+    /// Row padding on each side everywhere else.
+    static let standardPadding: CGFloat = 20
+    /// Row padding on the side away from the bar.
+    static let openSidePadding: CGFloat = 16
+    /// Text to the safe-area edge on the bar's side.
+    static let barSideGap: CGFloat = 8
+    /// How far the transcript reaches into the bar's inset, for its scroll indicator. The cover display's bar
+    /// controls start 17pt into the column (back button at x 399, column at 382).
+    static let gutter: CGFloat = 12
+    /// An inset at least this wide on the bar's side is a bar column (status bar and controls).
+    static let minimumBarInset: CGFloat = 44
+
+    struct RowInsets: Hashable {
+        /// Row padding, measured from the transcript's (possibly extended) edges.
+        var leading: CGFloat
+        var trailing: CGFloat
+        /// How far the transcript extends past the safe area on each side.
+        var bleedLeading: CGFloat = 0
+        var bleedTrailing: CGFloat = 0
+
+        static let standard = RowInsets(leading: CoverLayout.standardPadding, trailing: CoverLayout.standardPadding)
+
+        /// The text column's width in a safe area this wide.
+        func textWidth(safeWidth: CGFloat) -> CGFloat {
+            safeWidth + bleedLeading + bleedTrailing - leading - trailing
+        }
+    }
+
+    /// Which side a vertical bar stands on. The iOS 27.1 SDK reports it (`toolbarVerticalEdge`); builds on older
+    /// SDKs read it from the insets: a Duo at compact width with a bar-wide inset on one side only.
+    static func barEdge(reported: HorizontalEdge?, duo: Bool, compactWidth: Bool,
+                        leadingInset: CGFloat, trailingInset: CGFloat) -> HorizontalEdge? {
+        if let reported { return reported }
+        guard duo, compactWidth else { return nil }
+        if trailingInset >= minimumBarInset, leadingInset < 1 { return .trailing }
+        if leadingInset >= minimumBarInset, trailingInset < 1 { return .leading }
+        return nil
+    }
+
+    /// Row insets beside a vertical bar on `barEdge` whose safe-area inset is `barInset` wide; the standard
+    /// 20pt either side when there is no bar column.
+    static func rowInsets(barEdge: HorizontalEdge?, barInset: CGFloat) -> RowInsets {
+        guard let barEdge, barInset >= minimumBarInset else { return .standard }
+        let bleed = min(gutter, barInset / 4)
+        switch barEdge {
+        case .trailing:
+            return RowInsets(leading: openSidePadding, trailing: bleed + barSideGap, bleedTrailing: bleed)
+        case .leading:
+            return RowInsets(leading: bleed + barSideGap, trailing: openSidePadding, bleedLeading: bleed)
+        }
+    }
+}
+
 extension EnvironmentValues {
     /// The session is on an iPhone Duo: chips, diff card and the status pill (DuoChat).
     @Entry var duoChat: Bool = false
+    /// Flat Duo: show or hide the session list beside the open session (HomeView's `flatListShown`).
+    @Entry var toggleFlatList: (() -> Void)? = nil
 }
 
 /// The folded chat's type scale: two sizes plus mono, two weights.

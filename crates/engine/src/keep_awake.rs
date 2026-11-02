@@ -177,7 +177,7 @@ mod tests {
     }
 
     // Exercise real watcher transitions with a fake power-assertion handle.
-    // Tests never change the computer's sleep settings or acquire an IOKit assertion.
+    // These watcher tests never change sleep settings or acquire an IOKit assertion.
     #[tokio::test]
     async fn keep_awake_follows_work_setting_and_owner_lifetime() {
         let held = Arc::new(AtomicUsize::new(0));
@@ -260,5 +260,63 @@ mod tests {
         task.abort();
         let _ = task.await;
         assert_eq!(held.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_assertion_follows_the_setting_and_working_chats() {
+        let listed = || {
+            let out = std::process::Command::new("pmset")
+                .args(["-g", "assertions"])
+                .output()
+                .expect("pmset");
+            let me = format!("pid {}(", std::process::id());
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|line| line.contains(&me) && line.contains("Harness: agents are working"))
+        };
+        let held = platform::Assertion::acquire().expect("assertion");
+        assert!(listed());
+        drop(held);
+        assert!(!listed());
+
+        // The task holds it only while the setting is on and a chat works.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let settle = || tokio::time::sleep(std::time::Duration::from_millis(50));
+            let (sessions_tx, sessions) = watch::channel(vec![session(SessionStatus::Idle)]);
+            let (enabled_tx, enabled) = watch::channel(true);
+            let task = spawn(sessions, enabled);
+            settle().await;
+            assert!(!listed(), "idle chats leave sleep alone");
+            sessions_tx.send_replace(vec![session(SessionStatus::Working)]);
+            settle().await;
+            assert!(listed(), "a working chat keeps the Mac awake");
+            enabled_tx.send_replace(false);
+            settle().await;
+            assert!(!listed(), "turning the setting off releases it");
+            enabled_tx.send_replace(true);
+            settle().await;
+            assert!(listed());
+            task.abort();
+            let _ = task.await;
+            assert!(!listed(), "engine shutdown releases it");
+        });
+    }
+
+    #[tokio::test]
+    async fn the_task_ends_when_the_engine_drops_its_channels() {
+        let (sessions_tx, sessions) = watch::channel(vec![session(SessionStatus::Working)]);
+        let (enabled_tx, enabled) = watch::channel(false);
+        let task = spawn(sessions, enabled);
+        drop(sessions_tx);
+        drop(enabled_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("task ended")
+            .expect("task did not panic");
     }
 }

@@ -7,23 +7,39 @@ Their current stable downloads and automatic-update feeds must remain unchanged.
 
 ## Build and publication paths
 
-- Tag pushes and manual `release.yml` dispatches build only the signed/notarized
-  macOS candidate, when the credentials are configured. They do not publish.
-- Linux, Windows and companion release jobs are disabled in this candidate.
-  TestFlight and Android release builds/uploads are disabled; App Store's
-  read-only check remains available, but submission does not.
-- `cut-release.yml` can tag an explicitly merged release PR and request the Mac
-  candidate build. It cannot start TestFlight or publish artifacts.
-- A tagged TUI dispatch cannot build or attach platform companions to this release.
-- The local `stable_macos_release.py` path accepts only the two versioned Mac
-  artifacts and the byte-identical DMG alias. Unexpected local or remote assets
-  cause failure. `companions` is disabled.
+The integration preserves the upstream release workflows and the existing
+`scripts/stable_macos_release.py` multi-platform release path. Merging the
+workspace changes does not publish a release. The disabled jobs used in the
+isolated Mac review candidate are not part of the integration.
 
-After a clean tagged commit, prepare the distribution locally with
+A Mac-only distribution remains a separate, explicitly authorized release:
+
+- Do not push a release tag or dispatch the shared release workflows for this
+  candidate: those workflows retain their normal multi-platform behavior.
+- Do not use a `release/v*` branch for the integration pull request; merging that
+  release branch can run the upstream release automation.
+- The release owner still needs to choose the Mac version and the tag/publication
+  route. No independent Mac-only publication route is ready.
+- The dedicated `scripts/macos_candidate_release.py` helper accepts only the two
+  versioned Mac artifacts and the byte-identical DMG alias. Unexpected local or
+  remote assets cause failure. `companions` is disabled in this helper only.
+  No workflow calls it automatically.
+
+The candidate helper still requires a local and remote `v<version>` tag before
+upload or publication. Pushing that tag can start the unchanged shared release
+workflow, including other platforms and shared feeds. `--latest=false` in the
+local helper does not prevent a separately triggered workflow from publishing.
+Do not use its `upload`, `publish` or `release` commands until the release owner
+has resolved this routing and authorized the release. This document does not
+choose a new tag namespace or change the existing release policy.
+
+For local preparation, build from a clean commit with
 `scripts/package-macos.sh`, pinning the exact graff binary/version. Run
-`stable_macos_release.py prepare --graff-version <version>` to verify Developer ID
-signatures, notarization/stapling, executable identity across the bundle/DMG/app
-archive, and SHA-256 hashes. This step is local only.
+`python3 scripts/macos_candidate_release.py prepare --graff-version <version>`
+to verify Developer ID signatures, notarization/stapling, executable identity
+across the bundle/DMG/app archive, and SHA-256 hashes. This step is local only and
+stages under `target/macos-candidate-release/`, separate from the existing stable
+release staging directory.
 
 Test those exact distribution artifacts on Mac. Save the review JSON outside the
 staging directory and outside tracked source, for example under `target/qa/`:
@@ -53,19 +69,23 @@ staging directory and outside tracked source, for example under `target/qa/`:
 Only set a check true after testing that artifact. Evidence must match the
 version, exact files and clean source commit; the local and remote tags must
 identify that commit. Rebuilding or changing bytes invalidates the evidence.
-Upload requires `--verification <path>` and leaves a draft. Publishing is a
-separate, explicitly authorized action that rechecks local and remote digests.
+Once the release route has been resolved, upload requires
+`--verification <path>` and leaves a draft. Publishing is a separate, explicitly
+authorized action that rechecks local and remote digests.
 No evidence for the final distribution has been created as part of the UI work.
 
 ## Automatic updates remain on their existing feeds
 
-The Mac-only release is published at its versioned GitHub URL with
-`--latest=false`. It does not modify GitHub's shared latest release, R2's shared
-manifest/latest.txt, Windows aliases, or the updater's current endpoints. The
-initial Mac-only release is therefore a versioned manual download. Do not
-promote it through the shared feed: older Windows/Linux clients use that feed.
-A future Mac-specific automatic-update channel needs a separate reviewed change.
+The candidate helper's publication command uses a versioned GitHub URL and
+`--latest=false`. That command does not modify GitHub's shared latest release,
+R2's shared manifest/latest.txt, Windows aliases, or the updater's current
+endpoints. These safeguards apply to the helper itself; they do not solve the
+shared-workflow tag trigger described above. A versioned manual Mac download
+remains the intended outcome, pending the release owner's routing decision.
+Do not promote it through the shared feed: older Windows/Linux clients use that
+feed. A future Mac-specific automatic-update channel needs a separate reviewed
+change.
 
 No tag, draft upload, publication, release environment, credential, or live update
-feed is changed merely by adding these guards. Nothing in this document
+feed is changed merely by merging the workspace changes. Nothing in this document
 constitutes authorization to publish.
