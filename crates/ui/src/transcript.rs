@@ -2447,9 +2447,28 @@ fn frame_stats_enabled() -> bool {
 
 const FRAME_STATS_WINDOW: usize = 240;
 
+thread_local! {
+    static RENDER_TOTALS: RefCell<HashMap<&'static str, u64>> = RefCell::default();
+}
+
+/// Renders of `view` ("transcript", "composer", "sidebar", "shell", or
+/// "transcript-row" for each row built) on this thread so far. Counted while
+/// `HARNESS_FRAME_STATS` is set, and always in tests: what a profile or a
+/// test reads to see what one keystroke or streamed chunk rebuilt.
+pub fn render_total(view: &str) -> u64 {
+    RENDER_TOTALS.with(|totals| totals.borrow().get(view).copied().unwrap_or_default())
+}
+
+fn count_render(view: &'static str) {
+    if cfg!(test) || frame_stats_enabled() {
+        RENDER_TOTALS.with(|totals| *totals.borrow_mut().entry(view).or_default() += 1);
+    }
+}
+
 /// Opt-in cadence counters complement per-row timings: inexpensive rows can
 /// still exhaust a battery when an unrelated animation rebuilds them at 120Hz.
 pub(crate) fn record_view_frame(view: &'static str) -> bool {
+    count_render(view);
     if !frame_stats_enabled() {
         return false;
     }
@@ -4040,7 +4059,11 @@ pub struct Transcript {
     spring_kick: bool,
     /// One `on_next_frame` callback in flight at most.
     spring_scheduled: bool,
-    scroll_anim: Option<Task<()>>,
+    /// A glide to a row (a rail click, or the agents card revealing an
+    /// agent: [`Self::scroll_to_row_at`]), stepped once per display frame.
+    pub(crate) row_glide: Option<crate::rail::RowGlide>,
+    /// One row-glide `on_next_frame` callback in flight at most.
+    row_glide_scheduled: bool,
     /// The agent chip the agents card just revealed, ringed for a moment
     /// ([`agent_reveal`]).
     agent_flash: Option<agent_reveal::AgentFlash>,
@@ -4396,7 +4419,8 @@ impl Transcript {
             spring_settled_at: None,
             spring_kick: false,
             spring_scheduled: false,
-            scroll_anim: None,
+            row_glide: None,
+            row_glide_scheduled: false,
             agent_flash: None,
             agent_flash_task: None,
             selection_drag_position: None,
@@ -4592,12 +4616,7 @@ impl Transcript {
         self.spring_last_tick = None;
         self.spring_settled_at = None;
         self.spring_kick = false;
-        self.scroll_anim = None;
-    }
-
-    /// Store the animation after [`Self::begin_scroll_navigation`].
-    pub(crate) fn set_scroll_task(&mut self, task: Task<()>) {
-        self.scroll_anim = Some(task);
+        self.row_glide = None;
     }
 
     /// Give the viewport to the user/navigation without dropping the
@@ -4843,7 +4862,7 @@ impl Transcript {
         self.spring_last_tick = None;
         self.spring_settled_at = None;
         self.spring_kick = false;
-        self.scroll_anim = None;
+        self.row_glide = None;
         // A glued offset re-snaps to the end on EVERY layout — the pad would
         // land and the viewport hard-track its bottom in the same frame,
         // skipping the glide entirely (rig-traced). Pin the offset to a
@@ -5596,7 +5615,7 @@ impl Transcript {
             self.spring_last_tick = None;
             self.spring_settled_at = None;
             self.spring_kick = false;
-            self.scroll_anim = None;
+            self.row_glide = None;
             self.stop_selection_scroll();
         }
 
@@ -8230,6 +8249,9 @@ impl Transcript {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
         };
+        count_render("transcript-row");
+        // Rows render while the list lays out, after `render` returned.
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
         let workspace_root = self.workspace_root(cx);
@@ -11100,6 +11122,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         self.pane_cadence.painted(cx.background_executor().now());
         if record_view_frame("transcript") {
             tracing::warn!(
@@ -11243,6 +11266,20 @@ impl Render for Transcript {
                 });
             }
         }
+        // Row-glide driver (a rail click): one step per display frame, like
+        // the spring, so the glide runs at the screen's refresh rate.
+        if self.row_glide.is_some() && !self.row_glide_scheduled {
+            self.row_glide_scheduled = true;
+            let entity = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                entity
+                    .update(cx, |this: &mut Transcript, cx| {
+                        this.row_glide_scheduled = false;
+                        this.step_row_glide(cx);
+                    })
+                    .ok();
+            });
+        }
         // Programmatic `scroll_to` does not invoke the list's user-scroll
         // handler. Refresh distance-derived state once layout has measured the
         // replay, guarded so a stale A callback cannot mutate B (or a newer A).
@@ -11351,7 +11388,7 @@ impl Render for Transcript {
                     self.pinned,
                     self.own_turn.is_some(),
                     self.spring_last_tick.is_some(),
-                    self.scroll_anim.is_some(),
+                    self.row_glide.is_some(),
                     self.user_collapse_scroll.is_some(),
                     self.content_width,
                 );
@@ -14544,6 +14581,85 @@ mod tests {
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    /// A rail click glides the transcript to a row. The glide used to step on
+    /// a 16 ms timer, so on a 120 or 240 Hz display it held each position for
+    /// two to four frames (60 fps motion). It must move on every display
+    /// frame, with no timer involved.
+    #[gpui::test]
+    fn rail_glide_moves_on_every_display_frame(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        struct GlideFixture(Entity<Transcript>);
+        impl Render for GlideFixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| GlideFixture(transcript.clone()));
+        let paragraph = "A synthetic paragraph that wraps across a few lines. ".repeat(12);
+        transcript.update(cx, |this, cx| {
+            let entries = (0..120)
+                .map(|ix| {
+                    assistant(
+                        &format!("m{ix}"),
+                        MessageStatus::Complete,
+                        vec![text_part(&format!("t{ix}"), &paragraph)],
+                    )
+                })
+                .collect();
+            this.state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = entries;
+                state.transcript_revision += 1;
+            });
+            this.sync(cx);
+            this.rail_enabled = false;
+            this.pinned = false;
+            this.list.scroll_to(ListOffset {
+                item_ix: 100,
+                offset_in_item: px(0.0),
+            });
+        });
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.refresh();
+                window.draw(cx).clear();
+            })
+        };
+        frame(cx);
+        let top = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| {
+                let top = this.list.logical_scroll_top();
+                (top.item_ix, f32::from(top.offset_in_item))
+            })
+        };
+        let start = top(cx);
+        transcript.update(cx, |this, cx| this.scroll_to_row(40, cx));
+        // Let the ease-in-out leave its flat start so each step is visible.
+        std::thread::sleep(Duration::from_millis(80));
+        frame(cx); // Render schedules the glide's first frame.
+        let mut previous = top(cx);
+        for frame_ix in 0..4 {
+            std::thread::sleep(Duration::from_millis(4));
+            frame(cx);
+            let now = top(cx);
+            assert_ne!(
+                now, previous,
+                "display frame {frame_ix}: the glide must move on every frame"
+            );
+            previous = now;
+        }
+        assert!(previous.0 < start.0, "the glide heads up toward row 40");
     }
 
     #[gpui::test]
