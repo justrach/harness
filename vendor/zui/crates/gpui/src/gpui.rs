@@ -33,6 +33,7 @@ mod interactive;
 mod key_dispatch;
 mod keymap;
 mod path_builder;
+mod path_cache;
 mod platform;
 pub mod prelude;
 /// Profiling utilities for task, frame, and thread performance tracking.
