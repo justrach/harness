@@ -20,6 +20,7 @@ use harness_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::turn_replies::{REPLIES_TRUNCATED_NOTE, turn_replies};
 
+mod graff_peer;
 mod peer_messages;
 mod rooms;
 use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
@@ -47,6 +48,7 @@ pub struct ToolDef {
 
 pub struct Tools {
     harness: Arc<Harness>,
+    peer: Arc<dyn graff_peer::PeerSend>,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -150,7 +152,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "send_message",
-            description: "Send an actionable question, blocker, or final requested result to a chat, not acknowledgements or progress updates. Use unmentioned room posts for progress (they wake nobody). Messages are attributed to your chat; peer reply chains are bounded and another send is refused while your earlier message is queued. mode 'auto' starts an idle chat, steers when supported, otherwise queues. With wait=true, terminal callers wait for the reply; from a chat it returns a status snapshot, so end your turn rather than polling.",
+            description: "Send an actionable question, blocker, or final requested result to a chat, not acknowledgements or progress updates. Use unmentioned room posts for progress (they wake nobody). Messages are attributed to your chat; peer reply chains are bounded and another send is refused while your earlier message is queued. mode 'auto' starts an idle chat, steers when supported, reaches a working graff chat on this device through its peer inbox, otherwise queues. With wait=true, terminal callers wait for the reply; from a chat it returns a status snapshot, so end your turn rather than polling.",
             input_schema: chat_key_schema(json!({
                 "text": { "type": "string" },
                 "mode": { "type": "string", "enum": ["auto", "run", "steer", "queue"], "default": "auto" },
@@ -444,7 +446,10 @@ fn last_pending_input(messages: &[RenderedMessage]) -> Option<Value> {
 
 impl Tools {
     pub fn new(harness: Arc<Harness>) -> Self {
-        Self { harness }
+        Self {
+            harness,
+            peer: Arc::new(graff_peer::GraffCli),
+        }
     }
 
     pub fn list(&self) -> Vec<ToolDef> {
@@ -1063,12 +1068,22 @@ impl Tools {
                 }
             })
             .unwrap_or(SessionStatus::Idle);
-        let chosen = match mode {
+        let steers = info.is_some_and(HarnessInfo::steers_mid_turn);
+        // A working graff chat here reads its own peer inbox mid-turn; the
+        // prompt queue would hold this until the whole turn ends (#1803).
+        let peer_to = if mode == "auto" && live == SessionStatus::Working && !steers {
+            self.graff_peer_target(chat, harness, session).await
+        } else {
+            None
+        };
+        let mut chosen = match mode {
             "auto" => match live {
                 SessionStatus::Idle | SessionStatus::Errored => "run",
                 SessionStatus::Working => {
-                    if info.is_some_and(HarnessInfo::steers_mid_turn) {
+                    if steers {
                         "steer"
+                    } else if peer_to.is_some() {
+                        "peer"
                     } else {
                         "queue"
                     }
@@ -1081,6 +1096,7 @@ impl Tools {
             "run" | "steer" | "queue" => mode,
             other => anyhow::bail!("unknown mode {other:?}; expected auto, run, steer, or queue"),
         };
+        let mut fallback = None;
         let id = match chosen {
             "run" => {
                 let config = chat.config.clone();
@@ -1131,13 +1147,57 @@ impl Tools {
                     )
                     .await?
             }
+            "peer" => {
+                let to = peer_to.as_deref().unwrap_or_default();
+                let from = match self.harness.origin().chat_id.as_deref() {
+                    Some(origin) => format!("harness:{}", short(origin)),
+                    None => "harness".to_owned(),
+                };
+                match self.peer.send(&from, to, &text).await {
+                    Ok(detail) => {
+                        return Ok(json!({
+                            "delivery": "peer",
+                            "id": to,
+                            "detail": detail,
+                            "chatStatusAtSend": status,
+                        }));
+                    }
+                    // Explicit fallback: the queue still delivers at turn end.
+                    Err(err) => {
+                        chosen = "queue";
+                        fallback = Some(err.to_string());
+                        self.harness.queue_message(&chat.id, &text).await?
+                    }
+                }
+            }
             _ => self.harness.queue_message(&chat.id, &text).await?,
         };
-        Ok(json!({
+        let mut sent = json!({
             "delivery": chosen,
             "id": id,
             "chatStatusAtSend": status,
-        }))
+        });
+        if let Some(reason) = fallback {
+            sent["peerFallback"] = json!(reason);
+        }
+        Ok(sent)
+    }
+
+    /// The graff session id native peer mail can reach for `chat`, if any.
+    async fn graff_peer_target(
+        &self,
+        chat: &Chat,
+        harness: HarnessId,
+        session: Option<&Session>,
+    ) -> Option<String> {
+        if harness != HarnessId::Graff {
+            return None;
+        }
+        let local = match self.harness.origin().device_id.clone() {
+            Some(id) => id,
+            None => self.harness.local_device_id().await.ok()?,
+        };
+        graff_peer::target(chat, harness, session, &local).map(str::to_owned)
     }
 
     /// Wait, then report the outcome with the assistant replies of the turn
@@ -1276,6 +1336,9 @@ mod tests {
     struct World {
         writes: Mutex<Vec<(String, Value)>>,
         queued: Mutex<Vec<Value>>,
+        /// Chats and session rows a test adds to the fixed workspace.
+        chats: Mutex<Vec<Value>>,
+        sessions: Mutex<Vec<Value>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1298,7 +1361,8 @@ mod tests {
                     "id": "space-1", "deviceId": "dev-local", "path": "/repo/comet",
                     "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
                 }])),
-                methods::WATCH_CHATS => stream(json!([
+                methods::WATCH_CHATS => {
+                    let mut chats = json!([
                     {
                         "id": "chat-alpha-1", "deviceId": "dev-local", "title": "Alpha",
                         "archived": false, "spaceId": "space-1",
@@ -1315,14 +1379,20 @@ mod tests {
                         "archived": true, "spaceId": "space-1",
                         "createdAt": "2026-08-30T00:00:00Z"
                     }
-                ])),
-                methods::WATCH_SESSIONS => stream(json!([])),
+                    ]);
+                    let extra = self.chats.lock().unwrap().clone();
+                    chats.as_array_mut().unwrap().extend(extra);
+                    stream(chats)
+                }
+                methods::WATCH_SESSIONS => stream(json!(*self.sessions.lock().unwrap())),
                 methods::WATCH_QUEUE => stream(json!({ "items": *self.queued.lock().unwrap() })),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
                     { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
                       "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true },
                     { "id": "codex", "name": "Codex", "supportsSteering": true,
-                      "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
+                      "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true },
+                    { "id": "graff", "name": "graff", "supportsSteering": true,
+                      "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": true, "enabled": true }
                 ])),
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
@@ -1683,6 +1753,143 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, methods::QUEUE_MESSAGE);
         assert_eq!(writes[0].1["holdForTurnEnd"], true);
+    }
+
+    /// Records peer-inbox sends instead of running graff.
+    #[derive(Default)]
+    struct FakePeer {
+        sent: Mutex<Vec<(String, String, String)>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl graff_peer::PeerSend for FakePeer {
+        async fn send(&self, from: &str, to: &str, text: &str) -> anyhow::Result<String> {
+            if self.fail {
+                anyhow::bail!("graff peer send failed: no live agent matches '{to}'");
+            }
+            self.sent
+                .lock()
+                .unwrap()
+                .push((from.to_owned(), to.to_owned(), text.to_owned()));
+            Ok(format!("sent to {to} (device room, 1 woken)"))
+        }
+    }
+
+    /// A chat "Delta" on `harness`, hosted on `device`, with a fresh working
+    /// session row when `working`.
+    fn world_with_delta(harness: &str, device: &str, working: bool) -> Arc<World> {
+        let world = Arc::new(World::default());
+        world.chats.lock().unwrap().push(json!({
+            "id": "chat-delta-4", "deviceId": device, "title": "Delta",
+            "archived": false, "spaceId": "space-1",
+            "config": { "harness": harness, "model": "m", "reasoning": null, "sandbox": "workspace-write" },
+            "harnessSessionId": "session-1700000000000-42",
+            "createdAt": "2026-09-03T00:00:00Z"
+        }));
+        if working {
+            world.sessions.lock().unwrap().push(json!({
+                "chatId": "chat-delta-4", "deviceId": device, "status": "working",
+                "startedAt": null, "updatedAt": chrono::Utc::now()
+            }));
+        }
+        world
+    }
+
+    fn peer_tools(world: Arc<World>, peer: Arc<FakePeer>) -> Tools {
+        let origin = Origin {
+            chat_id: Some("chat-beta-2".into()),
+            device_id: None,
+        };
+        Tools {
+            harness: Arc::new(Harness::with_client(memory_client(world), origin)),
+            peer,
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_sends_to_a_working_graff_chat_through_its_peer_inbox() {
+        let world = world_with_delta("graff", "dev-local", true);
+        let peer = Arc::new(FakePeer::default());
+        let sent = peer_tools(world.clone(), peer.clone())
+            .call(
+                "send_message",
+                json!({ "chat": "delta", "text": "evidence: flaky on CI" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["sent"]["delivery"], "peer", "{sent}");
+        assert_eq!(sent["sent"]["id"], "session-1700000000000-42");
+        assert!(sent["sent"].get("peerFallback").is_none());
+        let sends = peer.sent.lock().unwrap();
+        let [(from, to, text)] = sends.as_slice() else {
+            panic!("one peer send: {sends:?}");
+        };
+        assert_eq!(from, "harness:chat-bet");
+        assert_eq!(to, "session-1700000000000-42");
+        assert!(
+            text.starts_with("[Message from Harness chat Beta (chat-bet)"),
+            "{text}"
+        );
+        assert!(text.ends_with("evidence: flaky on CI"));
+        assert!(
+            world.writes.lock().unwrap().is_empty(),
+            "nothing enters the prompt queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_peer_send_falls_back_to_the_queue_and_says_so() {
+        let world = world_with_delta("graff", "dev-local", true);
+        let peer = Arc::new(FakePeer {
+            fail: true,
+            ..FakePeer::default()
+        });
+        let sent = peer_tools(world.clone(), peer)
+            .call(
+                "send_message",
+                json!({ "chat": "delta", "text": "evidence" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["sent"]["delivery"], "queue");
+        assert!(
+            sent["sent"]["peerFallback"]
+                .as_str()
+                .unwrap()
+                .contains("no live agent matches"),
+            "{sent}"
+        );
+        let writes = world.writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, methods::QUEUE_MESSAGE);
+        assert_eq!(writes[0].1["holdForTurnEnd"], true);
+    }
+
+    #[tokio::test]
+    async fn peer_inbox_is_only_for_working_graff_chats_on_this_device() {
+        // (harness, host device, working, mode) -> the existing choice.
+        for (harness, device, working, mode, expected) in [
+            ("graff", "dev-remote", true, "auto", "queue"),
+            ("codex", "dev-local", true, "auto", "queue"),
+            ("claude-code", "dev-local", true, "auto", "steer"),
+            ("graff", "dev-local", false, "auto", "run"),
+            ("graff", "dev-local", true, "queue", "queue"),
+        ] {
+            let world = world_with_delta(harness, device, working);
+            let peer = Arc::new(FakePeer::default());
+            let sent = peer_tools(world.clone(), peer.clone())
+                .call(
+                    "send_message",
+                    json!({ "chat": "delta", "text": "evidence", "mode": mode }),
+                )
+                .await
+                .unwrap();
+            let case = format!("{harness} on {device}, working={working}, mode={mode}");
+            assert_eq!(sent["sent"]["delivery"], expected, "{case}");
+            assert!(peer.sent.lock().unwrap().is_empty(), "{case}");
+            assert_eq!(world.writes.lock().unwrap().len(), 1, "{case}");
+        }
     }
 
     #[tokio::test]
