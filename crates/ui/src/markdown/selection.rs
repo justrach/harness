@@ -14,7 +14,19 @@
 //! registry, geometry and mouse listeners live in `render.rs`.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+/// Identity of one gesture, independent of row keys and painted listeners.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectionClaim(u64);
+
+impl SelectionClaim {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// One element's slice of the selection, in document order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +42,7 @@ pub struct Span {
 
 #[derive(Clone, Default)]
 struct MdSelection {
+    claim: SelectionClaim,
     /// Element that owns the drag (where the mouse went down).
     anchor_key: String,
     /// Stable surface identity, retained when virtualization unmounts the anchor.
@@ -51,6 +64,40 @@ struct MdSelection {
 fn state() -> &'static Mutex<Option<MdSelection>> {
     static STATE: OnceLock<Mutex<Option<MdSelection>>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(None))
+}
+
+/// The current gesture, including a settled or virtualized selection.
+pub(crate) fn current_claim() -> Option<SelectionClaim> {
+    state()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|selection| selection.claim)
+}
+
+/// Only a gesture started after the caller's mouse-down snapshot may take
+/// ownership. An older active drag elsewhere is not a new claim here.
+pub(crate) fn drag_claim_after(previous: Option<SelectionClaim>) -> Option<SelectionClaim> {
+    state()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|selection| selection.dragging && Some(selection.claim) != previous)
+        .map(|selection| selection.claim)
+}
+
+/// Revoke exactly the selection associated with an editor's handoff, even if
+/// its text listeners have unmounted. Never clear a newer surface's claim.
+pub(crate) fn clear_claim(claim: SelectionClaim) -> bool {
+    let mut guard = state().lock().unwrap();
+    if guard
+        .as_ref()
+        .is_some_and(|selection| selection.claim == claim)
+    {
+        *guard = None;
+        return true;
+    }
+    false
 }
 
 /// Selection state is process-global; tests that exercise its lifecycle must
@@ -93,6 +140,7 @@ pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, us
 /// Begin a drag anchored at `(key, ix)`; claims the global selection.
 pub fn begin(key: &str, ix: usize) {
     *state().lock().unwrap() = Some(MdSelection {
+        claim: SelectionClaim::new(),
         anchor_key: key.to_string(),
         anchor_owner: None,
         anchor_ix: ix,
@@ -106,6 +154,7 @@ pub fn begin(key: &str, ix: usize) {
 /// Begin with an immediate span (double/triple click inside one element).
 pub fn begin_with_span(key: &str, text: &str, range: Range<usize>) {
     *state().lock().unwrap() = Some(MdSelection {
+        claim: SelectionClaim::new(),
         anchor_key: key.to_string(),
         anchor_owner: None,
         anchor_ix: range.start,
@@ -394,6 +443,36 @@ mod tests {
             ("p2", "second"),
             ("p3", "third one"),
         ]
+    }
+
+    #[test]
+    fn selection_claims_distinguish_repeated_gestures_and_reject_stale_revocations() {
+        let _state = test_state_lock();
+        begin_with_span("same-row", "first", 0..5);
+        let first = current_claim().unwrap();
+        assert_eq!(drag_claim_after(None), Some(first));
+        assert_eq!(drag_claim_after(Some(first)), None);
+        end_active_drag();
+        assert_eq!(current_claim(), Some(first));
+        assert_eq!(drag_claim_after(None), None);
+
+        // Reusing a row key, including after virtualization, is a new claim.
+        begin_with_span("same-row", "second", 0..6);
+        let second = current_claim().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(drag_claim_after(Some(first)), Some(second));
+        assert!(!clear_claim(first));
+        assert_eq!(selected_text().as_deref(), Some("second"));
+        assert!(clear_claim(second));
+        assert_eq!(current_claim(), None);
+        assert!(!is_dragging());
+        assert!(!clear_claim(second));
+
+        begin("empty-click", 0);
+        let empty = current_claim().unwrap();
+        end_active_drag();
+        assert_eq!(current_claim(), None);
+        assert!(!clear_claim(empty));
     }
 
     #[test]

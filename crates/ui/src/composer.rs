@@ -1958,6 +1958,9 @@ pub struct ComposerInput {
     placeholder: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
+    /// Markdown gesture handed off from this window. Its identity survives
+    /// virtualization and prevents an editor from revoking a newer claim.
+    markdown_selection: Option<crate::markdown::selection::SelectionClaim>,
     caret_affinity: CaretAffinity,
     marked_range: Option<Range<usize>>,
     /// Retained through vertical moves across short rows; other moves reset it.
@@ -2081,6 +2084,7 @@ impl ComposerInput {
             placeholder: placeholder.into(),
             selected_range: 0..0,
             selection_reversed: false,
+            markdown_selection: None,
             caret_affinity: CaretAffinity::Downstream,
             marked_range: None,
             preferred_column: None,
@@ -2691,6 +2695,7 @@ impl ComposerInput {
     }
 
     fn restore(&mut self, snapshot: EditSnapshot, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         self.invalidate_mention_tooltip();
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.content = snapshot.content;
@@ -2741,7 +2746,20 @@ impl ComposerInput {
         }
     }
 
+    fn claim_input_selection(&mut self, cx: &mut Context<Self>) {
+        if self
+            .markdown_selection
+            .take()
+            .is_some_and(crate::markdown::selection::clear_claim)
+        {
+            // The owning row may be cached, unmounted, or in another pane;
+            // invalidating only this editor would leave its old wash painted.
+            cx.refresh_windows();
+        }
+    }
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         self.last_edit = None;
         let offset = self.projection.normalize_range(offset..offset).start;
         self.selected_range = offset..offset;
@@ -2755,6 +2773,7 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         self.last_edit = None;
         self.extend_selection(offset, cx);
     }
@@ -4402,6 +4421,7 @@ impl ComposerInput {
     }
 
     fn replace_range(&mut self, range: Range<usize>, new_text: &str, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         let range = self.projection.normalize_range(range);
         self.invalidate_mention_tooltip();
         // An IME commit is the tail of a composition whose pre-composition
@@ -4520,6 +4540,7 @@ impl EntityInputHandler for ComposerInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        self.claim_input_selection(cx);
         let range = self.projection.normalize_range(range);
         self.invalidate_mention_tooltip();
         // First keystroke of a composition: snapshot the text as it stood
@@ -5128,6 +5149,7 @@ impl Render for ComposerInput {
                 if event.button != MouseButton::Left {
                     return;
                 }
+                let previous_claim = crate::markdown::selection::current_claim();
                 let was_focused = this.focus_handle.is_focused(window);
                 // Capture runs before the clicked control handles the press, so
                 // another input can take focus normally during bubbling.
@@ -5139,9 +5161,12 @@ impl Render for ComposerInput {
                 // bubbling. Resolve ownership afterwards, regardless of paint
                 // order, without clearing selections for unrelated controls.
                 window.defer(cx, move |window, cx| {
-                    if crate::markdown::selection::is_dragging() {
+                    if let Some(claim) =
+                        crate::markdown::selection::drag_claim_after(previous_claim)
+                    {
                         input
                             .update(cx, |input, cx| {
+                                input.markdown_selection = Some(claim);
                                 let cursor = input.cursor_offset();
                                 input.selected_range = cursor..cursor;
                                 input.selection_reversed = false;
@@ -12341,6 +12366,10 @@ mod question_recovery_tests;
 #[cfg(test)]
 #[path = "composer/write_tests.rs"]
 mod write_tests;
+
+#[cfg(test)]
+#[path = "composer/selection_tests.rs"]
+mod selection_tests;
 
 #[cfg(test)]
 mod tests {
