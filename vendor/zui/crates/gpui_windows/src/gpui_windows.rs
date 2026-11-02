@@ -1,7 +1,10 @@
 #![cfg(target_os = "windows")]
+// Modified by Harness: adds `frame_schedule`, `device_wake` and `native_tests`, demand-driven
+// frames adapted from longbridge/gpui-fast 124f79b and ec3f4a3. See vendor/zui/NOTICE.
 
 mod clipboard;
 mod destination_list;
+mod device_wake;
 mod direct_manipulation;
 mod direct_write;
 mod directx_atlas;
@@ -10,7 +13,10 @@ mod directx_renderer;
 mod dispatcher;
 mod display;
 mod events;
+pub(crate) mod frame_schedule;
 mod keyboard;
+#[cfg(test)]
+mod native_tests;
 mod platform;
 mod system_notifications;
 mod system_settings;

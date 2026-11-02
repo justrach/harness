@@ -10,6 +10,7 @@ on:
       - 'apps/harness/**'
       - 'dist/windows/**'
       - 'crates/**'
+      - 'vendor/zui/**'
       - 'scripts/test-windows-*.ps1'
       - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
@@ -24,6 +25,7 @@ on:
       - 'apps/harness/**'
       - 'dist/windows/**'
       - 'crates/**'
+      - 'vendor/zui/**'
       - 'scripts/test-windows-*.ps1'
       - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
@@ -95,6 +97,8 @@ jobs:
         run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download" -CargoProfile release
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
+      - name: Frame scheduling tests
+        run: cargo test --release --locked -p gpui_windows --lib --test frame_schedule frame_schedule
       - name: Application and updater tests
         run: cargo test --release --locked -p harness -p harness-update -p harness-observe
       - name: GUI subsystem and redirected CLI output
