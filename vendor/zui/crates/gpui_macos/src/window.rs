@@ -843,6 +843,23 @@ impl MacWindowState {
             return;
         }
 
+        // A window that fell back to the view link while a Metal link is preferred (one couldn't
+        // be made at the time, say mid-transition into full screen) tries again, rather than
+        // waiting in `nextDrawable` for the rest of its life.
+        if preferred_frame_source_kind() == FrameSourceKind::Metal
+            && matches!(self.frame_source, Some(FrameSource::View(_)))
+        {
+            let view = self.native_view.as_ptr();
+            if let Some(link) =
+                unsafe { MetalDisplayLink::new(self.renderer.layer_ptr() as id, view) }
+            {
+                log::info!("window frames: switched from the view display link to CAMetalDisplayLink");
+                // Dropping the view link invalidates it: no callback after this.
+                self.frame_source = Some(FrameSource::Metal(link));
+                self.renderer.set_display_link_attached(true);
+            }
+        }
+
         if self.frame_source.is_none() {
             let view = self.native_view.as_ptr();
             let kind = preferred_frame_source_kind();
@@ -854,6 +871,16 @@ impl MacWindowState {
             } else {
                 unsafe { ViewDisplayLink::new(view, sel!(gpuiDisplayLinkFired:)) }
             };
+            let source_name = match (&metal_link, &view_link) {
+                (Some(_), _) => "CAMetalDisplayLink",
+                (None, Some(_)) => "view CADisplayLink",
+                (None, None) => "CVDisplayLink",
+            };
+            if metal_link.is_some() || kind != FrameSourceKind::Metal {
+                log::debug!("window frames: {source_name} (preferred {kind:?})");
+            } else {
+                log::info!("window frames: fell back to the {source_name}");
+            }
             self.frame_source = Some(match (metal_link, view_link) {
                 (Some(link), _) => {
                     self.renderer.set_display_link_attached(true);

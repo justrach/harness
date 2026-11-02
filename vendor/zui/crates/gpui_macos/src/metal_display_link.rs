@@ -61,12 +61,14 @@ impl MetalDisplayLink {
     pub(crate) unsafe fn new(layer: id, delegate: id) -> Option<Self> {
         unsafe {
             if layer.is_null() || delegate.is_null() {
+                warn_once("the window has no layer or view yet");
                 return None;
             }
             let class = Class::get("CAMetalDisplayLink")?;
             let link: id = msg_send![class, alloc];
             let link: id = msg_send![link, initWithMetalLayer: layer];
             if link.is_null() {
+                warn_once("initWithMetalLayer: returned nil");
                 return None;
             }
             let _: () = msg_send![link, setDelegate: delegate];
@@ -108,6 +110,15 @@ impl MetalDisplayLink {
 
     pub(crate) fn is_running(&self) -> bool {
         !self.paused
+    }
+}
+
+/// Says once a run why a link couldn't be made: a window that falls back retries each time
+/// its frames start.
+fn warn_once(reason: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!("CAMetalDisplayLink not made: {reason}; using the view display link");
     }
 }
 
