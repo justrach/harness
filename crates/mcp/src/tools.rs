@@ -22,6 +22,7 @@ use crate::turn_replies::{REPLIES_TRUNCATED_NOTE, turn_replies};
 
 mod graff_peer;
 mod peer_messages;
+mod relay_ledger;
 mod rooms;
 use crate::harness::{HarnessInfo, TurnOutcome, Harness, session_for, short};
 
@@ -49,6 +50,7 @@ pub struct ToolDef {
 pub struct Tools {
     harness: Arc<Harness>,
     peer: Arc<dyn graff_peer::PeerSend>,
+    relay: relay_ledger::RelayLedger,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -449,6 +451,7 @@ impl Tools {
         Self {
             harness,
             peer: Arc::new(graff_peer::GraffCli),
+            relay: relay_ledger::RelayLedger::on_device(),
         }
     }
 
@@ -1027,7 +1030,11 @@ impl Tools {
             return Ok(text.to_owned());
         }
         let entries = self.harness.transcript(origin_id).await?;
-        let depth = peer_messages::next_depth(&render_entries(&entries, RenderOptions::default()))?;
+        let rendered = render_entries(&entries, RenderOptions::default());
+        // Peer-inbox mail is not in the transcript; the ledger carries its depth.
+        let ledger = self.relay.inbound(origin_id, &rendered, now_millis());
+        let inbound = peer_messages::inbound_depth(&rendered).max(ledger);
+        let depth = peer_messages::checked_next(inbound)?;
         let title = match self.harness.resolve_chat(origin_id).await {
             Ok(chat) => chat.title,
             Err(_) => None,
@@ -1149,11 +1156,29 @@ impl Tools {
             }
             "peer" => {
                 let to = peer_to.as_deref().unwrap_or_default();
-                let from = match self.harness.origin().chat_id.as_deref() {
+                let origin = self.harness.origin().chat_id.as_deref();
+                let from = match origin {
                     Some(origin) => format!("harness:{}", short(origin)),
                     None => "harness".to_owned(),
                 };
-                match self.peer.send(&from, to, &text).await {
+                // Record the hop before sending: unrecorded, it would not count.
+                let recorded = match origin {
+                    Some(origin) => self.relay.record(
+                        &chat.id,
+                        peer_messages::relay_depth(&text),
+                        Some(origin),
+                        now_millis(),
+                    ),
+                    None => {
+                        self.relay.clear(&chat.id);
+                        Ok(())
+                    }
+                };
+                let sent = match recorded {
+                    Ok(()) => self.peer.send(&from, to, &text).await,
+                    Err(err) => Err(err.context("relay depth not recorded")),
+                };
+                match sent {
                     Ok(detail) => {
                         return Ok(json!({
                             "delivery": "peer",
@@ -1165,7 +1190,7 @@ impl Tools {
                     // Explicit fallback: the queue still delivers at turn end.
                     Err(err) => {
                         chosen = "queue";
-                        fallback = Some(err.to_string());
+                        fallback = Some(format!("{err:#}"));
                         self.harness.queue_message(&chat.id, &text).await?
                     }
                 }
@@ -1339,6 +1364,8 @@ mod tests {
         /// Chats and session rows a test adds to the fixed workspace.
         chats: Mutex<Vec<Value>>,
         sessions: Mutex<Vec<Value>>,
+        /// Transcript entries by chat id, in place of the shared two-message one.
+        transcripts: Mutex<std::collections::HashMap<String, Value>>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -1397,6 +1424,14 @@ mod tests {
                 methods::LIST_MODELS => RpcReply::Value(json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
                 ])),
+                methods::WATCH_DOC_MESSAGES
+                    if params["chatId"]
+                        .as_str()
+                        .is_some_and(|id| self.transcripts.lock().unwrap().contains_key(id)) =>
+                {
+                    let id = params["chatId"].as_str().unwrap_or_default();
+                    stream(json!({ "reset": self.transcripts.lock().unwrap()[id] }))
+                }
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
@@ -1502,7 +1537,15 @@ mod tests {
 
     fn tools(world: Arc<World>, origin: Origin) -> Tools {
         let client = memory_client(world);
-        Tools::new(Arc::new(Harness::with_client(client, origin)))
+        Tools {
+            relay: relay_ledger::RelayLedger::at(scratch_dir()),
+            ..Tools::new(Arc::new(Harness::with_client(client, origin)))
+        }
+    }
+
+    /// A fresh relay-ledger directory that is never the real one.
+    fn scratch_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("harness-relay-test-{}", uuid::Uuid::new_v4()))
     }
 
     #[tokio::test]
@@ -1776,35 +1819,153 @@ mod tests {
         }
     }
 
-    /// A chat "Delta" on `harness`, hosted on `device`, with a fresh working
-    /// session row when `working`.
-    fn world_with_delta(harness: &str, device: &str, working: bool) -> Arc<World> {
-        let world = Arc::new(World::default());
+    /// A chat on `harness`, hosted on `device`, whose ACP session is
+    /// `session_id`, with a fresh working session row when `working`.
+    fn add_chat(
+        world: &World,
+        (id, title, session_id): (&str, &str, &str),
+        harness: &str,
+        device: &str,
+        working: bool,
+    ) {
         world.chats.lock().unwrap().push(json!({
-            "id": "chat-delta-4", "deviceId": device, "title": "Delta",
+            "id": id, "deviceId": device, "title": title,
             "archived": false, "spaceId": "space-1",
             "config": { "harness": harness, "model": "m", "reasoning": null, "sandbox": "workspace-write" },
-            "harnessSessionId": "session-1700000000000-42",
+            "harnessSessionId": session_id,
             "createdAt": "2026-09-03T00:00:00Z"
         }));
         if working {
             world.sessions.lock().unwrap().push(json!({
-                "chatId": "chat-delta-4", "deviceId": device, "status": "working",
+                "chatId": id, "deviceId": device, "status": "working",
                 "startedAt": null, "updatedAt": chrono::Utc::now()
             }));
         }
+    }
+
+    const DELTA: (&str, &str, &str) = ("chat-delta-4", "Delta", "session-1700000000000-42");
+    const ECHO: (&str, &str, &str) = ("chat-echo-5", "Echo", "session-1700000000000-43");
+
+    fn world_with_delta(harness: &str, device: &str, working: bool) -> Arc<World> {
+        let world = Arc::new(World::default());
+        add_chat(&world, DELTA, harness, device, working);
         world
     }
 
     fn peer_tools(world: Arc<World>, peer: Arc<FakePeer>) -> Tools {
+        peer_tools_as(world, peer, "chat-beta-2", scratch_dir())
+    }
+
+    fn peer_tools_as(
+        world: Arc<World>,
+        peer: Arc<FakePeer>,
+        origin: &str,
+        ledger: std::path::PathBuf,
+    ) -> Tools {
         let origin = Origin {
-            chat_id: Some("chat-beta-2".into()),
+            chat_id: Some(origin.to_owned()),
             device_id: None,
         };
         Tools {
             harness: Arc::new(Harness::with_client(memory_client(world), origin)),
             peer,
+            relay: relay_ledger::RelayLedger::at(ledger),
         }
+    }
+
+    /// Two working graff chats on this device, each sending as itself.
+    fn delta_and_echo() -> (Arc<World>, Arc<FakePeer>, Tools, Tools, std::path::PathBuf) {
+        let world = Arc::new(World::default());
+        add_chat(&world, DELTA, "graff", "dev-local", true);
+        add_chat(&world, ECHO, "graff", "dev-local", true);
+        let ledger = scratch_dir();
+        let peer = Arc::new(FakePeer::default());
+        let delta = peer_tools_as(world.clone(), peer.clone(), DELTA.0, ledger.clone());
+        let echo = peer_tools_as(world.clone(), peer.clone(), ECHO.0, ledger.clone());
+        (world, peer, delta, echo, ledger)
+    }
+
+    fn last_peer_text(peer: &FakePeer) -> String {
+        peer.sent.lock().unwrap().last().unwrap().2.clone()
+    }
+
+    #[tokio::test]
+    async fn peer_inbox_hops_count_toward_the_relay_limit() {
+        let (world, peer, delta, echo, _) = delta_and_echo();
+        for hop in 1..=peer_messages::MAX_DEPTH {
+            let (from, to) = if hop % 2 == 1 {
+                (&delta, "echo")
+            } else {
+                (&echo, "delta")
+            };
+            let sent = from
+                .call(
+                    "send_message",
+                    json!({ "chat": to, "text": format!("hop {hop}") }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(sent["sent"]["delivery"], "peer", "hop {hop}: {sent}");
+            let text = last_peer_text(&peer);
+            assert!(text.contains(&format!("Relay depth: {hop}/4")), "{text}");
+        }
+        // Delta received hop 4; its next send is refused before anything moves.
+        let err = delta
+            .call("send_message", json!({ "chat": "echo", "text": "hop 5" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("peer reply chain limit reached"), "{err}");
+        assert_eq!(peer.sent.lock().unwrap().len(), 4);
+        assert!(world.writes.lock().unwrap().is_empty(), "nothing queued");
+    }
+
+    #[tokio::test]
+    async fn a_persons_prompt_clears_the_relay_ledger() {
+        let (world, peer, _, echo, ledger) = delta_and_echo();
+        let relay = relay_ledger::RelayLedger::at(ledger.clone());
+        relay
+            .record(ECHO.0, 3, Some(DELTA.0), now_millis())
+            .unwrap();
+        echo.call("send_message", json!({ "chat": "delta", "text": "result" }))
+            .await
+            .unwrap();
+        assert!(last_peer_text(&peer).contains("Relay depth: 4/4"));
+
+        relay
+            .record(ECHO.0, 3, Some(DELTA.0), now_millis())
+            .unwrap();
+        world.transcripts.lock().unwrap().insert(
+            ECHO.0.to_owned(),
+            json!([{ "id": "u9", "role": "user", "createdAt": now_millis() + 1_000,
+                     "deviceId": "dev-local",
+                     "parts": [{ "kind": "text", "id": "t", "text": "New task: check CI" }] }]),
+        );
+        echo.call(
+            "send_message",
+            json!({ "chat": "delta", "text": "question" }),
+        )
+        .await
+        .unwrap();
+        assert!(last_peer_text(&peer).contains("Relay depth: 1/4"));
+        assert!(!ledger.join(format!("{}.json", ECHO.0)).exists());
+    }
+
+    #[tokio::test]
+    async fn expired_entries_are_ignored_and_unreadable_ones_allow_one_hop() {
+        let (_, peer, _, echo, ledger) = delta_and_echo();
+        let relay = relay_ledger::RelayLedger::at(ledger.clone());
+        let old = now_millis() - relay_ledger::ENTRY_TTL_MS - 1;
+        relay.record(ECHO.0, 4, Some(DELTA.0), old).unwrap();
+        echo.call("send_message", json!({ "chat": "delta", "text": "result" }))
+            .await
+            .unwrap();
+        assert!(last_peer_text(&peer).contains("Relay depth: 1/4"));
+
+        std::fs::write(ledger.join(format!("{}.json", ECHO.0)), b"{not json").unwrap();
+        echo.call("send_message", json!({ "chat": "delta", "text": "result" }))
+            .await
+            .unwrap();
+        assert!(last_peer_text(&peer).contains("Relay depth: 4/4"));
     }
 
     #[tokio::test]
