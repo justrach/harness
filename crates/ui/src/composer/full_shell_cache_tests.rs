@@ -276,6 +276,209 @@ fn assert_shell_entrance_settles(
     cx.update(|window, _| window.remove_window());
 }
 
+fn animation_frame(cx: &mut gpui::VisualTestContext) -> Vec<(gpui::ElementId, f32)> {
+    std::thread::sleep(Duration::from_millis(16));
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+        window.draw(cx).clear();
+    });
+    motion::FADE_TEST_SAMPLES.with_borrow_mut(|samples| {
+        std::mem::take(samples.as_mut().expect("fade observer must be active"))
+    })
+}
+
+fn assert_settled(samples: &[(gpui::ElementId, f32)], panel: Panel) -> usize {
+    let target = panel.animation_id();
+    let mut observed = 0;
+    for (id, alpha) in samples {
+        if *id == target {
+            observed += 1;
+            assert!(*alpha >= 0.999, "{panel:?} entrance restarted: {alpha}");
+        }
+    }
+    observed
+}
+
+#[gpui::test]
+fn full_shell_question_and_queue_stay_opaque_during_streaming_and_queue_mutations(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let _observer = FadeObserver::start();
+    let (_shell, state, cx) = open_shell(cx, dir.path(), Panel::Question, false);
+    let mut entries = transcript(Panel::Question);
+    entries[0].parts.push(MessagePart::Text {
+        id: "live-text".into(),
+        text: String::new(),
+    });
+    state.update(cx, |state, cx| {
+        state
+            .receive_transcript_frame(TranscriptFrame::reset(&entries), cx)
+            .unwrap();
+        state.queue = vec![harness_doc::QueuedMessage::new(
+            "waiting",
+            "Synthetic follow-up",
+            "local",
+        )];
+        cx.notify();
+    });
+    let mut text_len = 0;
+    let mut observed = [0, 0];
+    for frame in 0..60 {
+        if frame >= 21 && frame % 3 == 0 {
+            state.update(cx, |state, cx| {
+                let text = format!(" Chunk {frame}.");
+                text_len += text.len();
+                state
+                    .receive_transcript_frame(
+                        TranscriptFrame::Delta {
+                            upsert: Vec::new(),
+                            append: vec![harness_doc::TextAppend {
+                                entry: "assistant".into(),
+                                part: "live-text".into(),
+                                text,
+                                len: text_len,
+                            }],
+                            remove: Vec::new(),
+                            count: 1,
+                        },
+                        cx,
+                    )
+                    .unwrap();
+                // Keep the tray mounted while adding, reordering, removing
+                // and editing its rows; neither entrance should restart.
+                if state.queue.len() == 1 {
+                    state.queue.push(harness_doc::QueuedMessage::new(
+                        "second",
+                        "Another synthetic follow-up",
+                        "local",
+                    ));
+                    state.queue.swap(0, 1);
+                } else {
+                    state.queue.remove(0);
+                }
+                state.queue[0].text = format!("Updated synthetic follow-up {frame}");
+                cx.notify();
+            });
+        }
+        let samples = animation_frame(cx);
+        if frame >= 20 {
+            observed[0] += assert_settled(&samples, Panel::Question);
+            observed[1] += assert_settled(&samples, Panel::Queue);
+        }
+    }
+    assert!(observed.iter().all(|count| *count >= 10), "{observed:?}");
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.transcript.len(), 1);
+        assert!(state.transcript[0].parts.iter().any(|part| {
+            matches!(part, MessagePart::Text { text, .. } if text.len() == text_len)
+        }));
+        assert!(!state.queue.is_empty());
+    });
+    cx.update(|window, _| window.remove_window());
+}
+
+#[gpui::test]
+fn full_shell_queue_remount_restarts_only_its_own_entrance(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let _observer = FadeObserver::start();
+    let (_shell, state, cx) = open_shell(cx, dir.path(), Panel::Question, false);
+    for _ in 0..25 {
+        animation_frame(cx);
+    }
+    for mounted in [true, false, true, false] {
+        state.update(cx, |state, cx| {
+            state.queue = if mounted {
+                vec![harness_doc::QueuedMessage::new(
+                    "same-row",
+                    "Synthetic remounted follow-up",
+                    "local",
+                )]
+            } else {
+                Vec::new()
+            };
+            cx.notify();
+        });
+        let samples = animation_frame(cx);
+        assert!(assert_settled(&samples, Panel::Question) > 0);
+        let queue_samples: Vec<_> = samples
+            .iter()
+            .filter(|(id, _)| *id == Panel::Queue.animation_id())
+            .collect();
+        if mounted {
+            assert!(
+                queue_samples.iter().any(|(_, alpha)| *alpha < 0.999),
+                "a genuinely new tray must still animate, including with the same row ID"
+            );
+        } else {
+            assert!(
+                queue_samples.is_empty(),
+                "an empty queue must unmount the tray"
+            );
+        }
+        let mut settled_queue = 0;
+        for frame in 0..25 {
+            let samples = animation_frame(cx);
+            assert_settled(&samples, Panel::Question);
+            if frame >= 15 {
+                settled_queue += assert_settled(&samples, Panel::Queue);
+            }
+        }
+        if mounted {
+            // A real state update ensures this check isn't satisfied merely
+            // by the tray remaining cached after its initial entrance.
+            state.update(cx, |_, cx| cx.notify());
+            settled_queue += assert_settled(&animation_frame(cx), Panel::Queue);
+            assert!(settled_queue > 0);
+        }
+    }
+    cx.update(|window, _| window.remove_window());
+}
+
+#[gpui::test]
+fn full_shell_settled_panels_survive_resize_and_motion_preference_changes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let _observer = FadeObserver::start();
+    let (_shell, state, cx) = open_shell(cx, dir.path(), Panel::Question, false);
+    state.update(cx, |state, cx| {
+        state.queue = vec![harness_doc::QueuedMessage::new(
+            "waiting",
+            "Synthetic resize follow-up",
+            "local",
+        )];
+        cx.notify();
+    });
+    for _ in 0..25 {
+        animation_frame(cx);
+    }
+    // Stay in the inline route: geometry and preferences invalidate the
+    // cache, but neither panel's identity changes or needs a new entrance.
+    for (width, height, reduced_motion) in [
+        (1400., 1000., false),
+        (1100., 850., true),
+        (1250., 950., false),
+        (1200., 900., true),
+        (1400., 1000., false),
+    ] {
+        cx.simulate_resize(size(px(width), px(height)));
+        cx.update(|_, cx| motion::set_reduced_motion(cx, reduced_motion));
+        state.update(cx, |_, cx| cx.notify());
+        let samples = animation_frame(cx);
+        assert!(assert_settled(&samples, Panel::Question) > 0);
+        assert!(assert_settled(&samples, Panel::Queue) > 0);
+        if reduced_motion {
+            for (_, alpha) in samples {
+                assert_eq!(alpha, 1.0);
+            }
+        }
+    }
+    cx.update(|window, _| window.remove_window());
+}
+
 #[gpui::test]
 fn full_shell_cached_question_entrance_does_not_restart(cx: &mut gpui::TestAppContext) {
     assert_shell_entrance_settles(cx, Panel::Question, false);
