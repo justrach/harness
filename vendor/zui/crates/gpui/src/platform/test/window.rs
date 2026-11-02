@@ -37,6 +37,7 @@ pub(crate) struct TestWindowState {
     input_handler: Option<PlatformInputHandler>,
     is_fullscreen: bool,
     frame_requested: Rc<Cell<bool>>,
+    frame_interval_cap: Option<std::time::Duration>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
 }
 
@@ -91,6 +92,7 @@ impl TestWindow {
             input_handler: None,
             is_fullscreen: false,
             frame_requested: Rc::new(Cell::new(true)),
+            frame_interval_cap: None,
             request_frame_callback: None,
         })))
     }
@@ -108,6 +110,12 @@ impl TestWindow {
         callback(RequestFrameOptions::default());
         self.0.lock().request_frame_callback = Some(callback);
         true
+    }
+
+    /// The frame interval cap GPUI last set (see
+    /// [`PlatformWindow::set_frame_interval_cap`]).
+    pub fn frame_interval_cap(&self) -> Option<std::time::Duration> {
+        self.0.lock().frame_interval_cap
     }
 
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
@@ -288,7 +296,13 @@ impl PlatformWindow for TestWindow {
     }
 
     fn pause_frame_requests(&self) {
-        self.0.lock().frame_requested.set(false);
+        let mut state = self.0.lock();
+        state.frame_requested.set(false);
+        state.frame_interval_cap = None;
+    }
+
+    fn set_frame_interval_cap(&self, interval: Option<std::time::Duration>) {
+        self.0.lock().frame_interval_cap = interval;
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(crate::PlatformInput) -> DispatchEventResult>) {

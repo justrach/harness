@@ -436,6 +436,37 @@ impl GlideTimeline {
     }
 }
 
+/// An in-flight [`Transcript::scroll_to_row`] glide.
+#[derive(Debug, Clone)]
+pub(crate) struct RowGlide {
+    pub(crate) target: usize,
+    pub(crate) started: Instant,
+    pub(crate) total: Duration,
+    timeline: GlideTimeline,
+    /// Row-height estimate for unmeasured territory.
+    height_ema: Option<f32>,
+}
+
+impl RowGlide {
+    fn new(target: usize) -> Self {
+        Self {
+            target,
+            started: Instant::now(),
+            total: motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale()),
+            timeline: GlideTimeline::new(),
+            height_ema: None,
+        }
+    }
+
+    /// Linear progress through the glide, `0..=1`.
+    fn progress(&self) -> f32 {
+        if self.total.is_zero() {
+            return 1.0;
+        }
+        (self.started.elapsed().as_secs_f32() / self.total.as_secs_f32()).min(1.0)
+    }
+}
+
 /// `HARNESS_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
 /// the smoothness measurement knob (same family as `HARNESS_FRAME_STATS`).
 fn scroll_trace_enabled() -> bool {
@@ -476,153 +507,155 @@ impl Transcript {
             cx.notify();
             return;
         }
-        self.set_scroll_task(cx.spawn(async move |this, cx| {
-            let started = Instant::now();
-            let total = motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale());
-            let mut timeline = GlideTimeline::new();
-            let mut height_ema: Option<f32> = None;
-            let trace = scroll_trace_enabled();
-            let frames = (total.as_millis() / 16) as usize + 90;
-            for _ in 0..frames {
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-                let raw = (started.elapsed().as_secs_f32() / total.as_secs_f32()).min(1.0);
-                let eased = motion::SCROLL_GLIDE.curve.eval(raw);
-                let frac = timeline.step(eased);
-                let done = this.update(cx, |t, cx| {
-                    let list = t.list_state().clone();
-                    if raw >= 1.0 {
-                        list.scroll_to(ListOffset {
-                            item_ix: target,
-                            offset_in_item: px(0.0),
-                        });
-                        cx.notify();
-                        return true;
-                    }
-                    // Materialize the glued bottom representation as the true
-                    // top anchor (same visual position, sticky anchor).
-                    let viewport = f32::from(list.viewport_bounds().size.height);
-                    if t.is_glued() && viewport > 0.0 {
-                        list.scroll_by(px(-(viewport + 0.5)));
-                    }
-                    let top = list.logical_scroll_top();
-                    let top_height = list
-                        .bounds_for_item(top.item_ix)
-                        .map(|b| f32::from(b.size.height).max(1.0));
-                    // Row-height estimate for unmeasured territory: the mean
-                    // over the whole visible span, recomputed per frame (the
-                    // ~dozen mixed row kinds in a viewport average out — a
-                    // single-row estimate whipsaws between paragraphs and
-                    // code blocks and modulates the per-frame step visibly).
-                    if viewport > 0.0 {
-                        let bottom = f32::from(list.viewport_bounds().bottom());
-                        let mut ix = top.item_ix;
-                        let mut count = 0.0f32;
-                        while let Some(b) = list.bounds_for_item(ix) {
-                            if f32::from(b.top()) >= bottom {
-                                break;
-                            }
-                            count += 1.0;
-                            ix += 1;
-                        }
-                        if count > 0.0 {
-                            let mean = viewport / count;
-                            let ema = height_ema.get_or_insert(mean);
-                            *ema += 0.5 * (mean - *ema);
-                        }
-                    }
-                    if height_ema.is_none() {
-                        height_ema = top_height;
-                    }
-                    // Where the viewport top actually is, in fractional item
-                    // space — read back per frame (self-correcting: an anchor
-                    // the layout adjusted or re-glued keeps its real remaining
-                    // distance and continues the same timeline).
-                    let here = top.item_ix as f32
-                        + top_height
-                            .map(|h| (f32::from(top.offset_in_item) / h).clamp(0.0, 1.0))
-                            .unwrap_or(0.0);
-                    if trace {
-                        tracing::warn!(
-                            ms = started.elapsed().as_millis() as u64,
-                            eased,
-                            here,
-                            dist = t.distance_from_bottom(),
-                            "scroll-glide"
-                        );
-                    }
+        self.row_glide = Some(RowGlide::new(target));
+        // Render schedules the first step on the next display frame.
+        cx.notify();
+    }
 
-                    if target < top.item_ix {
-                        // Above the viewport (unmeasured): progressive
-                        // item-space anchoring within the eased timeline.
-                        let next = here - frac * (here - target as f32);
-                        // Small steps ride `scroll_by` — the list keeps a
-                        // 320px measured leading overdraw, so a step that
-                        // fits inside it crosses rows at their TRUE heights
-                        // (pixel-exact frames through the gentle start and
-                        // landing, where jitter would show most).
-                        let step_px = (here - next) * height_ema.unwrap_or(0.0);
-                        if step_px > 0.0 && step_px <= crate::transcript::OVERDRAW_PX * 0.8 {
-                            list.scroll_by(px(-step_px));
-                            cx.notify();
-                            return false;
-                        }
-                        let ix = (next.floor().max(0.0) as usize).min(top.item_ix);
-                        let within = next - ix as f32;
-                        let offset = if ix == top.item_ix {
-                            // Same row as the current anchor: measured height,
-                            // pixel-exact — and never below the current offset,
-                            // so motion stays monotone even when a height
-                            // estimate was corrected.
-                            top_height
-                                .map(|h| (within * h).min(f32::from(top.offset_in_item)))
-                                .unwrap_or(0.0)
-                        } else {
-                            within * height_ema.unwrap_or(0.0)
-                        };
-                        list.scroll_to(ListOffset {
-                            item_ix: ix,
-                            offset_in_item: px(offset),
-                        });
-                        cx.notify();
-                        return false;
-                    }
-                    match list.bounds_for_item(target) {
-                        Some(bounds) => {
-                            // Measured: pixel-exact step along the timeline.
-                            let delta = f32::from(bounds.top() - list.viewport_bounds().top());
-                            list.scroll_by(px(frac * delta));
-                        }
-                        None => {
-                            // Below but unmeasured: item space, same timeline.
-                            let next = here + frac * (target as f32 - here);
-                            let ix = (next.floor().max(0.0) as usize).min(target);
-                            let within = next - ix as f32;
-                            list.scroll_to(ListOffset {
-                                item_ix: ix,
-                                offset_in_item: px(within * height_ema.unwrap_or(0.0)),
-                            });
-                        }
-                    }
-                    cx.notify();
-                    false
-                });
-                match done {
-                    Ok(true) | Err(_) => return,
-                    Ok(false) => {}
+    /// One frame of the [`Self::scroll_to_row`] glide. Runs from
+    /// `window.on_next_frame`, so the glide moves on every display frame
+    /// (120 Hz on ProMotion, 240 Hz on a 240 Hz monitor) rather than on a
+    /// 16 ms timer that held each position for several frames.
+    pub(crate) fn step_row_glide(&mut self, cx: &mut Context<Self>) {
+        let Some(mut glide) = self.row_glide.take() else {
+            return;
+        };
+        let raw = glide.progress();
+        let eased = motion::SCROLL_GLIDE.curve.eval(raw);
+        let frac = glide.timeline.step(eased);
+        let trace = scroll_trace_enabled();
+        let done = self.apply_row_glide_step(&mut glide, raw, eased, frac, trace, cx);
+        if !done {
+            self.row_glide = Some(glide);
+        }
+    }
+
+    /// Moves the list one glide step; returns whether the glide landed.
+    fn apply_row_glide_step(
+        &mut self,
+        glide: &mut RowGlide,
+        raw: f32,
+        eased: f32,
+        frac: f32,
+        trace: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let list = self.list_state().clone();
+        if raw >= 1.0 {
+            list.scroll_to(ListOffset {
+                item_ix: glide.target,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+            return true;
+        }
+        // Materialize the glued bottom representation as the true
+        // top anchor (same visual position, sticky anchor).
+        let viewport = f32::from(list.viewport_bounds().size.height);
+        if self.is_glued() && viewport > 0.0 {
+            list.scroll_by(px(-(viewport + 0.5)));
+        }
+        let top = list.logical_scroll_top();
+        let top_height = list
+            .bounds_for_item(top.item_ix)
+            .map(|b| f32::from(b.size.height).max(1.0));
+        // Row-height estimate for unmeasured territory: the mean
+        // over the whole visible span, recomputed per frame (the
+        // ~dozen mixed row kinds in a viewport average out — a
+        // single-row estimate whipsaws between paragraphs and
+        // code blocks and modulates the per-frame step visibly).
+        if viewport > 0.0 {
+            let bottom = f32::from(list.viewport_bounds().bottom());
+            let mut ix = top.item_ix;
+            let mut count = 0.0f32;
+            while let Some(b) = list.bounds_for_item(ix) {
+                if f32::from(b.top()) >= bottom {
+                    break;
                 }
+                count += 1.0;
+                ix += 1;
             }
-            // Timeline exhausted (shouldn't happen): land exactly.
-            this.update(cx, |t, cx| {
-                t.list_state().scroll_to(ListOffset {
-                    item_ix: target,
-                    offset_in_item: px(0.0),
-                });
+            if count > 0.0 {
+                let mean = viewport / count;
+                let ema = glide.height_ema.get_or_insert(mean);
+                *ema += 0.5 * (mean - *ema);
+            }
+        }
+        if glide.height_ema.is_none() {
+            glide.height_ema = top_height;
+        }
+        // Where the viewport top actually is, in fractional item
+        // space — read back per frame (self-correcting: an anchor
+        // the layout adjusted or re-glued keeps its real remaining
+        // distance and continues the same timeline).
+        let here = top.item_ix as f32
+            + top_height
+                .map(|h| (f32::from(top.offset_in_item) / h).clamp(0.0, 1.0))
+                .unwrap_or(0.0);
+        if trace {
+            tracing::warn!(
+                ms = glide.started.elapsed().as_millis() as u64,
+                eased,
+                here,
+                dist = self.distance_from_bottom(),
+                "scroll-glide"
+            );
+        }
+
+        if glide.target < top.item_ix {
+            // Above the viewport (unmeasured): progressive
+            // item-space anchoring within the eased timeline.
+            let next = here - frac * (here - glide.target as f32);
+            // Small steps ride `scroll_by` — the list keeps a
+            // 320px measured leading overdraw, so a step that
+            // fits inside it crosses rows at their TRUE heights
+            // (pixel-exact frames through the gentle start and
+            // landing, where jitter would show most).
+            let step_px = (here - next) * glide.height_ema.unwrap_or(0.0);
+            if step_px > 0.0 && step_px <= crate::transcript::OVERDRAW_PX * 0.8 {
+                list.scroll_by(px(-step_px));
                 cx.notify();
-            })
-            .ok();
-        }));
+                return false;
+            }
+            let ix = (next.floor().max(0.0) as usize).min(top.item_ix);
+            let within = next - ix as f32;
+            let offset = if ix == top.item_ix {
+                // Same row as the current anchor: measured height,
+                // pixel-exact — and never below the current offset,
+                // so motion stays monotone even when a height
+                // estimate was corrected.
+                top_height
+                    .map(|h| (within * h).min(f32::from(top.offset_in_item)))
+                    .unwrap_or(0.0)
+            } else {
+                within * glide.height_ema.unwrap_or(0.0)
+            };
+            list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(offset),
+            });
+            cx.notify();
+            return false;
+        }
+        match list.bounds_for_item(glide.target) {
+            Some(bounds) => {
+                // Measured: pixel-exact step along the timeline.
+                let delta = f32::from(bounds.top() - list.viewport_bounds().top());
+                list.scroll_by(px(frac * delta));
+            }
+            None => {
+                // Below but unmeasured: item space, same timeline.
+                let next = here + frac * (glide.target as f32 - here);
+                let ix = (next.floor().max(0.0) as usize).min(glide.target);
+                let within = next - ix as f32;
+                list.scroll_to(ListOffset {
+                    item_ix: ix,
+                    offset_in_item: px(within * glide.height_ema.unwrap_or(0.0)),
+                });
+            }
+        }
+        cx.notify();
+        false
     }
 
     /// The rail element — an absolute overlay along the transcript's left edge.
