@@ -95,7 +95,7 @@ pub const Prefs = struct {
     files_show_all: bool = false,
     archive_sessions_on_close: bool = false,
     escape_stops_active_agent: bool = false,
-    transcript_compact_mode: bool = false,
+    transcript_compact_mode: bool = true,
     pause_animations_in_background: bool = false,
     // The sidebar's ⋯ menu (`sidebar_*`): all on, as the GPUI app's.
     sidebar_compact: bool = true,
@@ -171,7 +171,6 @@ pub const Sort = enum {
 /// toggle away, and an existing settings file keeps what it chose.
 pub fn firstRun() Prefs {
     var p: Prefs = .{};
-    p.transcript_compact_mode = true;
     p.sidebar_show_branch = false;
     return p;
 }
@@ -414,6 +413,9 @@ pub const Store = struct {
         };
         defer s.gpa.free(body);
         s.apply(body);
+        // Compact mode is the default now (`transcript_compact_default_applied`):
+        // a file from before it was turns it on once, whatever it said.
+        if (!compactDefaultApplied(body)) s.set(.transcript_compact_mode, true);
     }
 
     pub fn apply(s: *Store, body: []const u8) void {
@@ -469,6 +471,8 @@ pub const Store = struct {
     pub fn set(s: *Store, comptime flag: Flag, on: bool) void {
         @field(s.prefs, @tagName(flag)) = on;
         s.write(comptime camel(@tagName(flag)), .{ .bool = on });
+        // A choice made from here on is kept: the one-time switch is done.
+        if (flag == .transcript_compact_mode) s.write(compact_default_key, .{ .bool = true });
     }
 
     pub fn toggle(s: *Store, comptime flag: Flag) void {
@@ -514,6 +518,19 @@ pub const Store = struct {
         std.Io.Dir.cwd().rename(tmp, std.Io.Dir.cwd(), path, s.io) catch return;
     }
 };
+
+/// The GPUI app's marker that compact mode's new default was applied.
+const compact_default_key = "transcriptCompactDefaultApplied";
+
+/// Whether the file `body` already had compact mode's default applied.
+fn compactDefaultApplied(body: []const u8) bool {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const v = json.parseFromSliceLeaky(json.Value, arena.allocator(), body, .{}) catch return true;
+    if (v != .object) return true;
+    const m = v.object.get(compact_default_key) orelse return false;
+    return m == .bool and m.bool;
+}
 
 /// `text`'s object with `key` set to `value`, every other key as it was.
 pub fn merged(a: Allocator, text: []const u8, key: []const u8, value: json.Value) ![]u8 {
@@ -583,7 +600,36 @@ test "a new install shows less; an existing file keeps its choices (missing_and_
     var old: Store = .{ .gpa = testing.allocator, .io = testing.io };
     defer old.deinit();
     old.apply("{}");
-    try testing.expect(!old.get(.transcript_compact_mode) and old.get(.sidebar_show_branch));
+    try testing.expect(old.get(.transcript_compact_mode) and old.get(.sidebar_show_branch));
+}
+
+test "compact mode turns on once for a file written before it was the default, then keeps the choice" {
+    const io = testing.io;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "ui-settings.json", .data = "{\"transcriptCompactMode\":false,\"sidebarWidth\":300}" });
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}), a);
+    const path = try std.fs.path.join(a, &.{ base, "ui-settings.json" });
+    {
+        var s: Store = .{ .gpa = testing.allocator, .io = io, .path = try testing.allocator.dupe(u8, path) };
+        defer s.deinit();
+        s.load();
+        try testing.expect(s.get(.transcript_compact_mode));
+        try testing.expectEqual(@as(?f64, 300), s.number("sidebarWidth"));
+        // Turned off after that, in Settings.
+        s.toggle(.transcript_compact_mode);
+    }
+    const saved = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20));
+    const back = try json.parseFromSliceLeaky(json.Value, a, saved, .{});
+    try testing.expect(back.object.get(compact_default_key).?.bool);
+    try testing.expectEqual(@as(i64, 300), back.object.get("sidebarWidth").?.integer);
+    var again: Store = .{ .gpa = testing.allocator, .io = io, .path = try testing.allocator.dupe(u8, path) };
+    defer again.deinit();
+    again.load();
+    try testing.expect(!again.get(.transcript_compact_mode));
 }
 
 test "the sidebar's view options read as the GPUI app saves them" {

@@ -12,6 +12,8 @@ const Harness = struct {
     fn init(h: *Harness) !void {
         @import("theme.zig").registerFonts();
         h.a = .init(testing.allocator, testing.io, 1);
+        // Each step as its own row: these tests are about the detailed transcript.
+        h.a.settings.set(.transcript_compact_mode, false);
         h.a.dark = true;
         h.a.openChat("synthetic-parent", null);
         try h.t.init(testing.allocator, .init(&h.a, @import("view.zig").view), .{ .width = 1400, .height = 900, .dark = true });

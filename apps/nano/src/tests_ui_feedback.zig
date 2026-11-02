@@ -11,6 +11,8 @@ const Harness = struct {
     fn init(h: *Harness) !void {
         @import("theme.zig").registerFonts();
         h.a = .init(testing.allocator, testing.io, 1);
+        // Each step as its own row: these tests are about the detailed transcript.
+        h.a.settings.set(.transcript_compact_mode, false);
         h.a.offscreen = true;
         h.a.dark = false;
         h.a.view.sidebar_open = false;

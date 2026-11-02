@@ -23,6 +23,7 @@ test "a short live turn stays visible when its expanded reasoning shrinks to too
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
+    a.settings.set(.transcript_compact_mode, false);
     a.offscreen = true;
     a.dark = false;
     a.view.sidebar_open = false;

@@ -916,6 +916,11 @@ pub struct UiSettings {
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
+    /// Compact mode became the default for everyone, and a file written
+    /// before that was switched on once. False only when the file lacks
+    /// it; every later choice is kept (Harness Nano reads the same key).
+    #[serde(default)]
+    pub transcript_compact_default_applied: bool,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -1020,7 +1025,8 @@ impl Default for UiSettings {
             code_fences_fit_content: false,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_harness: true,
-            transcript_compact_mode: false,
+            transcript_compact_mode: true,
+            transcript_compact_default_applied: true,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -1666,7 +1672,6 @@ impl UiSettings {
     /// toggle away, and existing settings files keep what they chose.
     pub fn first_run() -> Self {
         Self {
-            transcript_compact_mode: true,
             sidebar_show_branch: false,
             ..Self::default()
         }
@@ -1818,6 +1823,12 @@ impl UiSettings {
         self.legacy_accent_color = None;
         // Turning archive-on-close on was a choice; don't ask about it again.
         self.archive_on_close_chosen |= self.archive_sessions_on_close;
+        // Compact mode is the default now: a file from before it was turns
+        // it on once, whatever it said. What's chosen after that stays.
+        if !self.transcript_compact_default_applied {
+            self.transcript_compact_mode = true;
+            self.transcript_compact_default_applied = true;
+        }
         self
     }
 
@@ -2623,6 +2634,7 @@ mod tests {
             transcript_width: 960.0,
             open_web_links_in_harness: false,
             transcript_compact_mode: true,
+            transcript_compact_default_applied: true,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,
@@ -2961,6 +2973,32 @@ mod tests {
         assert_eq!(fresh.sidebar_organization, SidebarOrganization::ByStatus);
         std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+    }
+
+    #[test]
+    fn compact_mode_turns_on_once_for_existing_files_then_keeps_the_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        // Written before compact mode was the default, with it off.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"transcriptCompactMode":false,"sidebarWidth":300}"#,
+        )
+        .unwrap();
+        let mut loaded = UiSettings::load(dir.path());
+        assert!(loaded.transcript_compact_mode);
+        assert!(loaded.transcript_compact_default_applied);
+        assert_eq!(loaded.sidebar_width, 300.0);
+        // Turned off again after that: it stays off.
+        loaded.transcript_compact_mode = false;
+        loaded.save(dir.path()).unwrap();
+        assert!(!UiSettings::load(dir.path()).transcript_compact_mode);
+        // Harness Nano writes single keys; its marker counts the same.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"transcriptCompactMode":false,"transcriptCompactDefaultApplied":true}"#,
+        )
+        .unwrap();
+        assert!(!UiSettings::load(dir.path()).transcript_compact_mode);
     }
 
     fn signed_in(user_id: &str, org_id: Option<&str>) -> AuthState {
