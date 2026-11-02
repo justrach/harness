@@ -5,6 +5,9 @@
 use harness_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use harness_proto::ToolCall;
 
+mod card;
+pub use card::changes_cue;
+
 /// Files the latest agent turn edited, with summed line counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnChanges {
