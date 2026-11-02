@@ -236,7 +236,6 @@ rust-embed = "=8.7.2"
 libc.workspace = true
 objc = "0.2"
 wry = { version = "0.56", default-features = false, features = ["os-webview"] }
-raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }

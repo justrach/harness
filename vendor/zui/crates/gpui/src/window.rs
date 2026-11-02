@@ -1134,6 +1134,19 @@ struct ModifierState {
     saw_keystroke: bool,
 }
 
+/// Whether a throttled window's next frame is due, `elapsed` after its last
+/// one, at a cap of one frame per `min_interval`.
+///
+/// Frame callbacks land on display ticks that jitter by a fraction of a
+/// millisecond, so a strict `elapsed >= min_interval` turns a 30 fps cap into
+/// 27 fps or less on a 240 Hz display (a tick at 33.2 ms waits for the next
+/// at 37.5 ms), and into 15 fps when the frame source itself runs at the cap.
+/// Allow a frame up to 2 ms (or an eighth of the interval) early.
+pub(crate) fn throttled_frame_is_due(elapsed: Duration, min_interval: Duration) -> bool {
+    let slack = (min_interval / 8).min(Duration::from_millis(2));
+    elapsed + slack >= min_interval
+}
+
 /// Tracks input event timestamps to determine if input is arriving at a high rate.
 /// Used for selective VRR (Variable Refresh Rate) optimization.
 #[derive(Clone, Debug)]
@@ -1539,6 +1552,8 @@ impl Window {
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
+            // The cap last sent to the platform window.
+            let mut reported_frame_interval_cap = None;
             move |request_frame_options| {
                 let thermal_state = handle
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
@@ -1560,10 +1575,21 @@ impl Window {
                     None
                 };
 
+                if min_frame_interval != reported_frame_interval_cap {
+                    reported_frame_interval_cap = min_frame_interval;
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            window
+                                .platform_window
+                                .set_frame_interval_cap(min_frame_interval)
+                        })
+                        .log_err();
+                }
+
                 let now = Instant::now();
                 if let Some(min_interval) = min_frame_interval {
                     if let Some(last_frame) = last_frame_time.get()
-                        && now.duration_since(last_frame) < min_interval
+                        && !throttled_frame_is_due(now.duration_since(last_frame), min_interval)
                     {
                         // Must still complete the frame on platforms that require it.
                         // On Wayland, `surface.frame()` was already called to request the
@@ -1626,6 +1652,9 @@ impl Window {
                                 && window.input_rate_tracker.borrow().is_high_rate())
                         {
                             window.platform_window.pause_frame_requests();
+                            // Pausing clears the platform's cap, so the first
+                            // frame after an idle isn't held to it.
+                            reported_frame_interval_cap = None;
                         }
                     })
                     .log_err();
@@ -6916,12 +6945,13 @@ pub fn outline(
 
 #[cfg(test)]
 mod tests {
+    use super::throttled_frame_is_due;
     use crate::{
         AppContext as _, Bounds, Context, FocusHandle, InteractiveElement as _, IntoElement,
         ParentElement as _, Pixels, Render, Styled as _, TestAppContext, Window, canvas, div, px,
         size,
     };
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::Cell, rc::Rc, time::Duration};
 
     struct RootView {
         explicit_size: bool,
@@ -7044,6 +7074,83 @@ mod tests {
             "resize must wake a parked window"
         );
         assert!(!platform.simulate_display_tick());
+    }
+
+    #[test]
+    fn throttled_frames_tolerate_display_tick_jitter() {
+        let thirty_fps = Duration::from_micros(33_333);
+        let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+        // Eight 240 Hz ticks, landing 0.1 ms early. A strict comparison
+        // waits for the ninth tick (37.5 ms): 27 fps instead of 30.
+        assert!(throttled_frame_is_due(ms(33.2), thirty_fps));
+        // A frame source paced at 30 Hz itself, jittering early.
+        assert!(throttled_frame_is_due(ms(32.9), thirty_fps));
+        assert!(throttled_frame_is_due(ms(33.4), thirty_fps));
+        // Seven 240 Hz ticks is still too soon: the cap holds.
+        assert!(!throttled_frame_is_due(ms(29.2), thirty_fps));
+        assert!(!throttled_frame_is_due(ms(4.2), thirty_fps));
+
+        let sixty_fps = Duration::from_micros(16_667);
+        assert!(throttled_frame_is_due(ms(16.5), sixty_fps));
+        // Three 240 Hz ticks.
+        assert!(!throttled_frame_is_due(ms(12.5), sixty_fps));
+    }
+
+    #[test]
+    fn inactive_window_animation_caps_the_platform_frame_rate() {
+        let mut cx = TestAppContext::single();
+        let handle = cx.add_window(|_, _| RootView {
+            explicit_size: false,
+            child_bounds: Rc::new(Cell::new(Bounds::default())),
+        });
+        let platform = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.platform_window.as_test().unwrap().clone()
+            })
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(!platform.simulate_display_tick(), "clean window parks");
+        assert_eq!(platform.frame_interval_cap(), None);
+
+        // A spinner in an inactive window: GPUI draws it at 30 fps, so the
+        // display link need not wake the app at 120 or 240 Hz.
+        fn spin(window: &Window) {
+            window.on_next_frame(|window, _| {
+                window.refresh();
+                spin(window);
+            });
+        }
+        cx.update_window(handle.into(), |_, window, _| {
+            window.active.set(false);
+            spin(window);
+        })
+        .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert_eq!(
+            platform.frame_interval_cap(),
+            Some(Duration::from_micros(33_333)),
+            "an inactive window's animation should cap the frame source"
+        );
+
+        // Focused, the same animation runs at the display's full rate.
+        cx.update_window(handle.into(), |_, window, _| window.active.set(true))
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert_eq!(platform.frame_interval_cap(), None);
+
+        // Inactive again, then the animation stops and the window parks:
+        // the cap must not outlive the animation.
+        cx.update_window(handle.into(), |_, window, _| window.active.set(false))
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(platform.frame_interval_cap().is_some());
+        cx.update_window(handle.into(), |_, window, _| {
+            window.next_frame_callbacks.borrow_mut().clear();
+            window.active.set(true);
+        })
+        .unwrap();
+        while platform.simulate_display_tick() {}
+        assert_eq!(platform.frame_interval_cap(), None);
     }
 
     struct NativeFrameProbe {
