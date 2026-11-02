@@ -81,3 +81,7 @@ gpui = { workspace = true, features = ["test-support"] }
 [[test]]
 name = "frame_source_recovery"
 harness = false
+
+[[test]]
+name = "frame_source_idle_cycles"
+harness = false

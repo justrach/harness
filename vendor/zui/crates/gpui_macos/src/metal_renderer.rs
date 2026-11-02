@@ -638,6 +638,7 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        let drawable_requested_at = std::time::Instant::now();
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
@@ -647,6 +648,7 @@ impl MetalRenderer {
             );
             return;
         };
+        let drawable_wait = drawable_requested_at.elapsed();
 
         loop {
             let mut instance_buffer = self
@@ -671,11 +673,14 @@ impl MetalRenderer {
                         if let Some(instance_buffer) = instance_buffer.take() {
                             instance_buffer_pool.lock().release(instance_buffer);
                         }
-                        if gpu_stats::enabled() {
+                        if gpu_stats::enabled() || crate::frame_stats::enabled() {
                             let (start, end): (f64, f64) = unsafe {
                                 (msg_send![buffer, GPUStartTime], msg_send![buffer, GPUEndTime])
                             };
-                            gpu_stats::record(end - start, blur_count, device_bytes);
+                            crate::frame_stats::gpu_time(end - start);
+                            if gpu_stats::enabled() {
+                                gpu_stats::record(end - start, blur_count, device_bytes);
+                            }
                         }
                     });
                     let block = block.copy();
@@ -689,6 +694,7 @@ impl MetalRenderer {
                         command_buffer.present_drawable(drawable);
                         command_buffer.commit();
                     }
+                    crate::frame_stats::present(drawable_wait, self.presents_with_transaction);
                     return;
                 }
                 Err(err) => {

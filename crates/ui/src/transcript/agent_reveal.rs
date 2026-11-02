@@ -437,8 +437,11 @@ mod tests {
         });
         transcript.update(cx, |t, cx| t.sync(cx));
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        // Tests have no display link: deliver the frame callbacks the glide
+        // steps on, then draw.
         let draw = |visual: &mut gpui::VisualTestContext| {
             visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
                 window.refresh();
                 window.draw(cx).clear();
             });
@@ -510,8 +513,10 @@ mod tests {
         let flash = transcript.read_with(&visual, |t, _| t.agent_flash_now(reduced));
         assert_eq!(flash.map(|(id, _)| id), Some("s2".to_owned()));
 
-        // The list glides to the chip's row, laying out rows it had not.
+        // The list glides to the chip's row, laying out rows it had not. The
+        // glide's timeline runs on the wall clock, so let real time pass too.
         for _ in 0..80 {
+            std::thread::sleep(Duration::from_millis(8));
             visual.executor().advance_clock(Duration::from_millis(32));
             draw(&mut visual);
         }
