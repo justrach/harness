@@ -218,6 +218,11 @@ impl WindowInvalidator {
         self.inner.borrow_mut().dirty_views = views;
     }
 
+    /// Forget one view's pending notification, reporting whether it had one.
+    pub fn take_view(&self, entity: EntityId) -> bool {
+        self.inner.borrow_mut().dirty_views.remove(&entity)
+    }
+
     pub fn not_drawing(&self) -> bool {
         self.inner.borrow().draw_phase == DrawPhase::None
     }
@@ -2889,6 +2894,14 @@ impl Window {
         );
         let mut entities_ref = cx.entities.accessed_entities.get_mut();
         mem::swap(&mut entities, entities_ref.deref_mut());
+    }
+
+    /// Whether `view` was notified after this frame began drawing and before
+    /// now (a parent's render handing it new state, say), consuming that
+    /// notification: a cached view rendering now reflects it already.
+    /// Notifications made while drawing otherwise wait for the next frame.
+    pub(crate) fn take_notified_while_drawing(&self, view: EntityId) -> bool {
+        !self.invalidator.not_drawing() && self.invalidator.take_view(view)
     }
 
     fn invalidate_entities(&mut self) {

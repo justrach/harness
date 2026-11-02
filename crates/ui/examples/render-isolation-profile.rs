@@ -37,7 +37,12 @@ fn main() -> anyhow::Result<()> {
     anyhow::bail!("This profiler requires macOS")
 }
 
-fn entry(id: String, role: MessageRole, text: String, status: Option<MessageStatus>) -> SessionMessageEntry {
+fn entry(
+    id: String,
+    role: MessageRole,
+    text: String,
+    status: Option<MessageStatus>,
+) -> SessionMessageEntry {
     SessionMessageEntry {
         parts: vec![MessagePart::Text {
             id: format!("{id}-text"),
@@ -381,12 +386,119 @@ fn main() -> anyhow::Result<()> {
     typing.print();
     streaming.print();
     typing_live.print();
+
+    // HARNESS_VERIFY_CACHE=1: a frame that reused the cached transcript and
+    // composer must match one drawn from scratch, after each change below.
+    if std::env::var_os("HARNESS_VERIFY_CACHE").is_some() {
+        let mut done = last.clone();
+        done.status = Some(MessageStatus::Complete);
+        if let MessagePart::Text { text, .. } = &mut done.parts[0] {
+            text.push_str(&" More detail, streamed in.".repeat(1));
+        }
+        let keys = |app: &gpui::ApplicationHandle, keys: &[&str]| {
+            for key in keys {
+                app.update(|cx| {
+                    cx.update_window(window.into(), |_, window, cx| {
+                        window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                    })
+                    .unwrap()
+                });
+                frame(app);
+            }
+        };
+        let hover = |app: &gpui::ApplicationHandle, x: f32, y: f32| {
+            app.update(|cx| {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                            position: gpui::point(px(x), px(y)),
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                })
+                .unwrap()
+            });
+        };
+        let scenarios: [(&str, &dyn Fn(&gpui::ApplicationHandle)); 7] = [
+            ("reply-finished", &|app| {
+                app.update(|cx| {
+                    state.update(cx, |state, cx| {
+                        let after = entries[entries.len() - 2].id.clone();
+                        state
+                            .receive_transcript_frame(
+                                TranscriptFrame::Delta {
+                                    upsert: vec![harness_doc::TranscriptUpsert {
+                                        after: Some(after),
+                                        entry: done.clone(),
+                                    }],
+                                    append: Vec::new(),
+                                    remove: Vec::new(),
+                                    count: entries.len(),
+                                },
+                                cx,
+                            )
+                            .unwrap();
+                        state.apply_sessions(vec![session(harness_proto::SessionStatus::Idle)]);
+                        cx.notify();
+                    })
+                })
+            }),
+            ("composer-grew", &|app| {
+                keys(
+                    app,
+                    &["shift-enter", "a", "shift-enter", "b", "shift-enter", "c"],
+                )
+            }),
+            ("composer-shrank", &|app| keys(app, &["cmd-a", "backspace"])),
+            ("typed-again", &|app| keys(app, &["o", "k"])),
+            ("hover-attach", &|app| hover(app, 443.0, 815.0)),
+            ("hover-transcript", &|app| hover(app, 1138.0, 372.0)),
+            ("hover-none", &|app| hover(app, 700.0, 500.0)),
+        ];
+        for (name, scenario) in scenarios {
+            scenario(&app);
+            settle(&app, Duration::from_millis(700));
+            let cached = app.update(|cx| {
+                window
+                    .update(cx, |_, window, _| window.render_to_image().unwrap())
+                    .unwrap()
+            });
+            app.update(|cx| window.update(cx, |_, window, _| window.refresh()).unwrap());
+            frame(&app);
+            let fresh = app.update(|cx| {
+                window
+                    .update(cx, |_, window, _| window.render_to_image().unwrap())
+                    .unwrap()
+            });
+            let differing = cached
+                .enumerate_pixels()
+                .filter(|(x, y, pixel)| *pixel != fresh.get_pixel(*x, *y))
+                .map(|(x, y, _)| (x, y))
+                .fold(None, |bounds: Option<(u32, u32, u32, u32)>, (x, y)| {
+                    Some(bounds.map_or((x, y, x, y), |(a, b, c, d)| {
+                        (a.min(x), b.min(y), c.max(x), d.max(y))
+                    }))
+                });
+            if let Some(dir) = std::env::var_os("HARNESS_VERIFY_DIR") {
+                let dir = std::path::PathBuf::from(dir);
+                cached.save(dir.join(format!("{name}-cached.png")))?;
+                fresh.save(dir.join(format!("{name}-fresh.png")))?;
+            }
+            match differing {
+                None => println!("cache pixels match: {name}"),
+                Some(bounds) => println!("CACHE DIFFERS: {name} in {bounds:?} (device px)"),
+            }
+        }
+    }
     // Optional: the final frame, to check the typed and streamed text landed.
     if let Some(path) = std::env::var_os("HARNESS_PROFILE_SHOT") {
         settle(&app, Duration::from_millis(500));
         app.update(|cx| {
             window
-                .update(cx, |_, window, _| window.render_to_image().unwrap().save(&path))
+                .update(cx, |_, window, _| {
+                    window.render_to_image().unwrap().save(&path)
+                })
                 .unwrap()
         })?;
     }

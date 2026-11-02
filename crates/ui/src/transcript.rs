@@ -8250,6 +8250,8 @@ impl Transcript {
             return gpui::Empty.into_any_element();
         };
         count_render("transcript-row");
+        // Rows render while the list lays out, after `render` returned.
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
         let workspace_root = self.workspace_root(cx);
@@ -11120,6 +11122,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         self.pane_cadence.painted(cx.background_executor().now());
         if record_view_frame("transcript") {
             tracing::warn!(
