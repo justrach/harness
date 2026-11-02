@@ -409,27 +409,24 @@ pub(super) struct DividerDrag {
 /// The name screen readers give the pane that takes your typing while the column is split.
 pub(super) const FOCUS_CUE_LABEL: &str = "Typing here";
 
-/// The focused pane's cue: a 2px accent rule along the titlebar's bottom edge and a quiet
-/// accent outline down the pane's other edges. It takes no space and covers no text, the way
-/// editors and terminals mark the split that has the keyboard. Never intercepts the mouse.
+/// The focused pane's cue: a solid 2px ring in the accent around the whole pane, its top edge
+/// along the titlebar's bottom. It takes no space and covers no text, the way editors and
+/// terminals mark the split that has the keyboard: one color that means focus, on every edge,
+/// strong enough to find at a glance. Never intercepts the mouse.
 fn focus_cue(theme: &Theme) -> AnyElement {
     div()
         .absolute()
-        .top(px(Theme::TITLEBAR_HEIGHT - 2.0))
+        .top(px(Theme::TITLEBAR_HEIGHT - FOCUS_RING_WIDTH))
         .left_0()
         .right_0()
         .bottom_0()
-        .border_l_1()
-        .border_r_1()
-        .border_b_1()
-        .border_color(theme.accent.opacity(FOCUS_OUTLINE_OPACITY))
-        .child(div().w_full().h(px(2.0)).bg(theme.accent))
+        .border(px(FOCUS_RING_WIDTH))
+        .border_color(theme.accent)
         .into_any_element()
 }
 
-/// How strongly the side and bottom edges of the focused pane are outlined: enough to find
-/// the pane at a glance, quiet beside the rule along its top.
-const FOCUS_OUTLINE_OPACITY: f32 = 0.45;
+/// How thick the focused pane's ring is: WCAG 2.2's focus appearance asks for at least 2px.
+const FOCUS_RING_WIDTH: f32 = 2.0;
 
 /// A live read-only transcript for one unfocused pane's chat.
 pub(super) struct PeerChatView {
