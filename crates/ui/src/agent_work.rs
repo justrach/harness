@@ -50,6 +50,12 @@ pub const SPIN: MotionSpec = MotionSpec::new(1000, CubicBezier::new(0.0, 0.0, 1.
 pub const ENTER: MotionSpec = MotionSpec::new(180, crate::motion::EASE_OUT_QUINT);
 /// The spinner's gap, in turns (54 degrees).
 const SPINNER_GAP: f32 = 0.15;
+/// Angles a spinner's arc is drawn at, per turn. GPUI keeps the triangles of
+/// every path shape it builds (2048 shapes, 16 MiB a thread): an arc at a new
+/// angle every frame would fill that with shapes drawn once. On these steps a
+/// turning spinner is at most this many shapes, each reused from the turn
+/// before, and one step a frame at 240 Hz over its one-second turn.
+pub const SPINNER_STEPS: f32 = 240.0;
 /// Substeps shown under the active step, newest last.
 pub const MAX_SUBSTEPS: usize = 3;
 /// Step dots in the composer footer before it switches to "3/9".
@@ -578,9 +584,10 @@ pub fn spin_phase(view: EntityId, cx: &mut App) -> f32 {
 }
 
 /// The arc a spinner draws at `phase`: start and sweep in turns, clockwise
-/// from 12 o'clock.
+/// from 12 o'clock. The start is on one of [`SPINNER_STEPS`] angles a turn.
 pub fn spinner_arc(phase: f32) -> (f32, f32) {
-    (phase.rem_euclid(1.0), 1.0 - SPINNER_GAP)
+    let start = (phase.rem_euclid(1.0) * SPINNER_STEPS).round() / SPINNER_STEPS;
+    (start.rem_euclid(1.0), 1.0 - SPINNER_GAP)
 }
 
 fn arc_path(
@@ -1750,6 +1757,50 @@ mod tests {
         // One shared 1s linear clock: every spinner reads the same phase.
         assert_eq!(SPIN.duration_ms, 1000);
         assert_eq!(SPIN.curve.eval(0.5), 0.5);
+    }
+
+    /// The spinner's clock as a 240 Hz display samples it: each frame's arc
+    /// is one step on from the last, so quantizing never holds or skips one.
+    #[test]
+    fn a_spinner_moves_one_step_every_frame_at_240_hz() {
+        let step = 1.0 / SPINNER_STEPS;
+        let start = |frame: u32| {
+            let elapsed = Duration::from_secs_f64(f64::from(frame) / 240.0);
+            let phase = (elapsed.as_secs_f32() / SPIN.total().as_secs_f32()).fract();
+            spinner_arc(phase).0
+        };
+        for frame in 1..2400 {
+            let moved = (start(frame) - start(frame - 1)).rem_euclid(1.0);
+            assert!(
+                (moved - step).abs() < step * 0.01,
+                "frame {frame} moved {moved} turns, not one step"
+            );
+        }
+    }
+
+    /// A spinner turning for 3000 frames on the wall clock (no two frames
+    /// at exactly the same phase) leaves GPUI's path cache holding its track
+    /// and at most one arc per step, not 16 MiB of arcs drawn once.
+    #[test]
+    fn a_turning_spinner_keeps_the_path_cache_small() {
+        let center = point(px(40.3), px(17.5));
+        let radius = (12.0 - 1.5) / 2.0;
+        let mut starts = HashSet::new();
+        for frame in 0..3000 {
+            let phase = (frame as f32 * 0.016_734).fract();
+            let (start, sweep) = spinner_arc(phase);
+            starts.insert(start.to_bits());
+            arc_path(center, radius, 0.0, 1.0, 1.5, None).unwrap();
+            arc_path(center, radius, start, sweep, 1.5, None).unwrap();
+        }
+        let (shapes, bytes) = gpui::kept_path_shapes();
+        assert!(starts.len() <= SPINNER_STEPS as usize);
+        assert_eq!(shapes, starts.len() + 1, "one arc per step, and the track");
+        assert!(
+            bytes < 4 * 1024 * 1024,
+            "a turning spinner keeps {} KiB of paths",
+            bytes / 1024
+        );
     }
 
     #[test]

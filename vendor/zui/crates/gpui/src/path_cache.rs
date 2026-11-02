@@ -1,7 +1,8 @@
 // Adapted from gpui-fast (https://github.com/longbridge/gpui-fast, Apache-2.0),
 // `crates/gpui/src/fast/path_cache.rs` and `crates/gpui/src/fast/tests/path_cache.rs`
 // at f0572b0. Changed for Harness: moved from gpui-fast's `fast` module to
-// `crate::path_cache`, and its build tests moved into this file (`build_tests`).
+// `crate::path_cache`, its build tests moved into this file (`build_tests`), and
+// `kept_path_shapes` added so the application can check what it keeps.
 // See vendor/zui/NOTICE.
 
 //! Tessellated paths kept from one build to the next.
@@ -239,6 +240,18 @@ pub(crate) fn path_cache_stats() -> PathCacheStats {
             held_shapes: kept.index.len() + heavy.is_some() as usize,
             ..kept.stats
         }
+    })
+}
+
+/// How many path shapes this thread keeps, and what they weigh in bytes:
+/// for applications to check that what they draw stays within the cache.
+pub fn kept_path_shapes() -> (usize, usize) {
+    KEPT_PATHS.with_borrow(|kept| {
+        let heavy = kept.heavy.as_ref();
+        (
+            kept.index.len() + heavy.is_some() as usize,
+            kept.bytes + heavy.map_or(0, |(key, path)| weight(key, path)),
+        )
     })
 }
 

@@ -50,8 +50,6 @@ unsafe impl GlobalAlloc for Counting {
 static GLOBAL: Counting = Counting;
 
 const FRAMES: usize = 3000;
-/// `agent_work::SPINNER_GAP`.
-const SPINNER_GAP: f32 = 0.15;
 
 /// `agent_work::arc_path`: a polyline arc, `start` and `sweep` in turns.
 fn arc(center: Point<Pixels>, radius: f32, start: f32, sweep: f32, stroke: f32, dash: bool) {
@@ -174,8 +172,9 @@ fn main() {
     let spinner = |frame: usize| {
         let center = point(px(300.0), px(700.0));
         let radius = (12.0 - 1.5) / 2.0;
+        let (start, sweep) = harness_ui::agent_work::spinner_arc(phase(frame));
         arc(center, radius, 0.0, 1.0, 1.5, false);
-        arc(center, radius, phase(frame), 1.0 - SPINNER_GAP, 1.5, false);
+        arc(center, radius, start, sweep, 1.5, false);
     };
     let runs = [
         run("spinner", spinner),
