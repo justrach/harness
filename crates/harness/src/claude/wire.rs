@@ -68,6 +68,20 @@ pub(crate) struct SystemFrame {
     /// (`total_tokens`, `tool_uses`, `duration_ms`).
     #[serde(default)]
     pub usage: Option<Value>,
+    /// `compact_boundary`: the frame's id.
+    #[serde(default)]
+    pub uuid: Option<String>,
+    /// `compact_boundary`: `{trigger: "manual" | "auto", pre_tokens}`.
+    #[serde(default)]
+    pub compact_metadata: Option<CompactMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct CompactMetadata {
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub pre_tokens: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

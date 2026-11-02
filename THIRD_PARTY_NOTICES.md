@@ -64,6 +64,15 @@ Icons is MIT licensed, Copyright (c) 2023 LobeHub; the complete license is
 retained at `crates/ui/assets/icons/LICENSE.lobehub`. The marks identify each
 model's maker and imply no affiliation or endorsement.
 
+The additional gateway/runtime marks (except MLX/oMLX) use the same upstream
+MIT license, from `@lobehub/icons-static-svg` 1.98.0. Original SVG geometry is
+preserved. These identify routes separately from the model maker.
+
+The MLX wordmark comes from `ml-explore/mlx` (`docs/logo/mlx_logo.svg`, MIT;
+license retained as `LICENSE.mlx`). The oMLX favicon comes from `jundot/omlx`
+(`apps/omlx-web/omlx_web/static/favicon.svg`, Apache-2.0; license retained as
+`LICENSE.omlx`). Geometry is unchanged.
+
 ## Bundled theme palette adaptations
 
 Harness includes manually curated palette adaptations derived from the projects

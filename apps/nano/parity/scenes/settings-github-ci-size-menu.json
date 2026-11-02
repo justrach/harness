@@ -1,0 +1,155 @@
+{
+    "name": "settings-github-ci-size-menu",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 18,
+            "y": 762
+        },
+        {
+            "do": "click",
+            "x": 100,
+            "y": 750
+        },
+        {
+            "do": "click",
+            "x": 60,
+            "y": 442
+        },
+        {
+            "do": "click",
+            "x": 943,
+            "y": 468
+        },
+        {
+            "do": "hover",
+            "x": 1150,
+            "y": 20
+        }
+    ],
+    "replies": {
+        "CodegraffGithubRunners": {
+            "available": true,
+            "enabled": true,
+            "installUrl": "https://example.test/install",
+            "installations": [
+                {
+                    "installationId": "1",
+                    "account": "fieldnotes-org",
+                    "accountType": "Organization",
+                    "suspended": false,
+                    "monthlyBudgetMicroUsd": 50000000,
+                    "untrustedBudgetMicroUsd": 5000000,
+                    "usedThisMonthMicroUsd": 12340000,
+                    "maxConcurrent": 4,
+                    "repos": [
+                        {
+                            "fullName": "fieldnotes-org/site",
+                            "enabled": true,
+                            "defaultSize": "medium",
+                            "private": false
+                        },
+                        {
+                            "fullName": "fieldnotes-org/api",
+                            "enabled": false,
+                            "defaultSize": null,
+                            "private": true
+                        }
+                    ]
+                }
+            ],
+            "recentJobs": [
+                {
+                    "repo": "fieldnotes-org/site",
+                    "runId": 11,
+                    "jobId": 21,
+                    "workflow": "CI",
+                    "jobName": "build",
+                    "tier": "trusted",
+                    "size": "medium",
+                    "state": "completed",
+                    "durationSeconds": 184,
+                    "costMicroUsd": 42000,
+                    "conclusion": "success"
+                },
+                {
+                    "repo": "fieldnotes-org/site",
+                    "runId": 12,
+                    "jobId": 22,
+                    "workflow": "CI",
+                    "jobName": "test",
+                    "tier": "trusted",
+                    "size": "small",
+                    "state": "in_progress",
+                    "durationSeconds": null
+                }
+            ],
+            "sizes": [
+                {
+                    "key": "small",
+                    "cpu": 2,
+                    "memoryGiB": 4,
+                    "diskGiB": 40,
+                    "pricePerHourMicroUsd": 300000
+                },
+                {
+                    "key": "medium",
+                    "cpu": 4,
+                    "memoryGiB": 16,
+                    "diskGiB": 80,
+                    "pricePerHourMicroUsd": 800000
+                }
+            ]
+        }
+    }
+}

@@ -117,6 +117,32 @@ struct SetGraffDraftSubagentsParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SetKeepAwakeParams {
+    enabled: bool,
+}
+
+/// `GetKeepAwake` / `SetKeepAwake` reply.
+fn keep_awake_reply(registry: &HarnessRegistry) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": registry.keep_awake(),
+        "supported": crate::keep_awake::SUPPORTED,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct SetAutonomyParams {
+    autonomy: harness_proto::Autonomy,
+}
+
+/// `GetAutonomy` / `SetAutonomy` reply.
+fn autonomy_reply(registry: &HarnessRegistry) -> serde_json::Value {
+    serde_json::json!({
+        "autonomy": registry.autonomy(),
+        "chosen": registry.autonomy_chosen(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
 struct SetGraffCompactAtParams {
     /// Percent of the context window; `null` restores graff's default.
     pct: Option<u8>,
@@ -450,6 +476,31 @@ struct SimulatorInputParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WatchLocalhostPageParams {
+    url: String,
+    /// Rejoin this page (after a dropped connection) if it is still open.
+    #[serde(default)]
+    view_id: Option<String>,
+    /// The viewer's page area in points, and its scale.
+    width: f64,
+    height: f64,
+    #[serde(default)]
+    scale: Option<f64>,
+    #[serde(default)]
+    quality: Option<u32>,
+    #[serde(default)]
+    fps: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalhostPageInputParams {
+    view_id: String,
+    input: crate::localhost_view::PageInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SubscribeTerminalParams {
     terminal_id: String,
     #[serde(default)]
@@ -707,6 +758,7 @@ pub struct EngineRpc {
     project_actions: ProjectActionsStore,
     previews: Option<harness_preview::PreviewService>,
     simulators: Option<crate::simulators::Simulators>,
+    localhost_view: Option<crate::localhost_view::LocalhostView>,
     change_requests: CheckoutChangeRequests,
     diff_sync: CheckoutDiffSync,
     uploads: Uploads,
@@ -753,6 +805,7 @@ impl EngineRpc {
             project_actions,
             previews: None,
             simulators: None,
+            localhost_view: None,
             change_requests,
             diff_sync,
             uploads,
@@ -774,6 +827,61 @@ impl EngineRpc {
     pub fn with_simulators(mut self, simulators: crate::simulators::Simulators) -> Self {
         self.simulators = Some(simulators);
         self
+    }
+
+    pub fn with_localhost_view(mut self, view: crate::localhost_view::LocalhostView) -> Self {
+        self.localhost_view = Some(view);
+        self
+    }
+
+    #[inline(never)]
+    fn handle_localhost_view<'a>(
+        &'a self,
+        method: &'a str,
+        params: serde_json::Value,
+    ) -> futures::future::BoxFuture<'a, Result<RpcReply, RpcError>> {
+        Box::pin(async move { self.localhost_view_reply(method, params).await })
+    }
+
+    async fn localhost_view_reply(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        let view = self.localhost_view.as_ref().ok_or_else(|| {
+            RpcError::Failed("viewing localhost is not available on this engine".into())
+        })?;
+        match method {
+            methods::WATCH_LOCALHOST_PAGE => {
+                let p: WatchLocalhostPageParams = parse_params(params)?;
+                let events = view
+                    .watch(crate::localhost_view::WatchRequest {
+                        url: p.url,
+                        view_id: p.view_id,
+                        width: p.width,
+                        height: p.height,
+                        scale: p.scale,
+                        quality: p.quality,
+                        fps: p.fps,
+                    })
+                    .await
+                    .map_err(RpcError::Failed)?;
+                let stream =
+                    events.filter_map(|event| async move { serde_json::to_value(&event).ok() });
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
+            methods::LOCALHOST_PAGE_INPUT => {
+                let p: LocalhostPageInputParams = parse_params(params)?;
+                view.input(&p.view_id, p.input)
+                    .await
+                    .map_err(RpcError::Failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::LIST_LOCALHOST_SERVERS => {
+                RpcReply::value(&serde_json::json!({ "servers": view.servers().await }))
+            }
+            _ => Err(RpcError::UnknownMethod(method.to_string())),
+        }
     }
 
     fn simulators(&self) -> Result<&crate::simulators::Simulators, RpcError> {
@@ -1423,10 +1531,14 @@ fn forwardable(method: &str) -> bool {
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
+            | methods::GET_AUTONOMY
+            | methods::SET_AUTONOMY
             | methods::GET_GRAFF_DRAFT_SUBAGENTS
             | methods::SET_GRAFF_DRAFT_SUBAGENTS
             | methods::GET_GRAFF_COMPACT_AT
             | methods::SET_GRAFF_COMPACT_AT
+            | methods::GET_KEEP_AWAKE
+            | methods::SET_KEEP_AWAKE
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
@@ -1498,6 +1610,10 @@ fn forwardable(method: &str) -> bool {
             | methods::SHUTDOWN_SIMULATOR
             | methods::WATCH_SIMULATOR_SCREEN
             | methods::SIMULATOR_INPUT
+            // Localhost pages render in a browser on the computer serving them.
+            | methods::WATCH_LOCALHOST_PAGE
+            | methods::LOCALHOST_PAGE_INPUT
+            | methods::LIST_LOCALHOST_SERVERS
             // Agent accounts are per-device CLI logins (the device switcher
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
@@ -1522,6 +1638,8 @@ fn forwardable(method: &str) -> bool {
             | methods::READ_ATTACHMENT_CHUNK
             // Updates report/apply on the device whose binary they concern.
             | methods::UPDATE_STATUS
+            | methods::CHECK_FOR_UPDATES
+            | methods::QUEUE_UPDATE
             | methods::APPLY_UPDATE
     )
 }
@@ -1535,6 +1653,7 @@ fn is_stream_method(method: &str) -> bool {
             | methods::WATCH_TOOL_PROGRESS
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_SIMULATOR_SCREEN
+            | methods::WATCH_LOCALHOST_PAGE
             | methods::WATCH_CHECKOUT_DIFFS
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
@@ -1959,6 +2078,12 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&serde_json::json!({}))
             }
             methods::GET_TITLE_SETTINGS => RpcReply::value(&self.registry.title_settings()),
+            methods::GET_AUTONOMY => RpcReply::value(&autonomy_reply(&self.registry)),
+            methods::SET_AUTONOMY => {
+                let p: SetAutonomyParams = parse_params(params)?;
+                self.registry.set_autonomy(p.autonomy);
+                RpcReply::value(&autonomy_reply(&self.registry))
+            }
             methods::GET_GRAFF_DRAFT_SUBAGENTS => {
                 RpcReply::value(&self.registry.graff_draft_subagents())
             }
@@ -1966,6 +2091,12 @@ impl RpcService for EngineRpc {
                 let p: SetGraffDraftSubagentsParams = parse_params(params)?;
                 self.registry.set_graff_draft_subagents(p.enabled);
                 RpcReply::value(&self.registry.graff_draft_subagents())
+            }
+            methods::GET_KEEP_AWAKE => RpcReply::value(&keep_awake_reply(&self.registry)),
+            methods::SET_KEEP_AWAKE => {
+                let p: SetKeepAwakeParams = parse_params(params)?;
+                self.registry.set_keep_awake(p.enabled);
+                RpcReply::value(&keep_awake_reply(&self.registry))
             }
             methods::GET_GRAFF_COMPACT_AT => RpcReply::value(&self.registry.graff_compact_at()),
             methods::SET_GRAFF_COMPACT_AT => {
@@ -2594,6 +2725,12 @@ impl RpcService for EngineRpc {
             methods::CHECK_FOR_UPDATES => {
                 self.updater()?.check_now();
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::QUEUE_UPDATE => {
+                self.updater()?
+                    .queue_update()
+                    .map_err(|e| RpcError::Failed(format!("{e:#}")))?;
+                RpcReply::value(&serde_json::json!({ "ok": true, "queued": true }))
             }
             methods::APPLY_UPDATE => {
                 let version = self
@@ -3494,6 +3631,9 @@ impl RpcService for EngineRpc {
             | methods::SHUTDOWN_SIMULATOR
             | methods::WATCH_SIMULATOR_SCREEN
             | methods::SIMULATOR_INPUT => self.handle_simulators(method, params).await,
+            methods::WATCH_LOCALHOST_PAGE
+            | methods::LOCALHOST_PAGE_INPUT
+            | methods::LIST_LOCALHOST_SERVERS => self.handle_localhost_view(method, params).await,
             methods::WRITE_TERMINAL => {
                 let p: WriteTerminalParams = parse_params(params)?;
                 self.terminals
@@ -4146,6 +4286,27 @@ mod tests {
     }
 
     #[test]
+    fn device_updates_route_to_the_requested_host() {
+        for method in [
+            methods::UPDATE_STATUS,
+            methods::CHECK_FOR_UPDATES,
+            methods::QUEUE_UPDATE,
+        ] {
+            assert!(
+                forwardable(method),
+                "{method} must not act on the viewer's device"
+            );
+        }
+        assert!(is_stream_method(methods::UPDATE_STATUS));
+        assert!(!is_stream_method(methods::CHECK_FOR_UPDATES));
+        assert!(!is_stream_method(methods::QUEUE_UPDATE));
+        assert_eq!(
+            forward_deadline(methods::QUEUE_UPDATE),
+            std::time::Duration::from_secs(30)
+        );
+    }
+
+    #[test]
     fn local_device_is_not_forwardable() {
         assert!(!forwardable(methods::LOCAL_DEVICE));
         assert!(!forwardable(methods::SHOW_VISUAL));
@@ -4238,6 +4399,52 @@ mod tests {
             forward_deadline(methods::SIMULATOR_INPUT),
             Duration::from_secs(30)
         );
+    }
+
+    /// Localhost pages are watched on the computer serving them: a
+    /// device-addressed call over the relay, the page proxied as a stream.
+    #[test]
+    fn localhost_page_methods_route_to_the_serving_computer() {
+        for method in [
+            methods::WATCH_LOCALHOST_PAGE,
+            methods::LOCALHOST_PAGE_INPUT,
+            methods::LIST_LOCALHOST_SERVERS,
+        ] {
+            assert!(forwardable(method), "{method}");
+            assert_eq!(
+                is_stream_method(method),
+                method == methods::WATCH_LOCALHOST_PAGE,
+                "{method}"
+            );
+        }
+        use std::time::Duration;
+        assert_eq!(
+            forward_deadline(methods::LOCALHOST_PAGE_INPUT),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn localhost_page_params_parse_from_the_phones_shape() {
+        let watch: WatchLocalhostPageParams = serde_json::from_value(serde_json::json!({
+            "url": "http://localhost:3000", "width": 390, "height": 700, "scale": 2, "fps": 12
+        }))
+        .unwrap();
+        assert_eq!(watch.url, "http://localhost:3000");
+        assert_eq!(
+            (watch.width, watch.height, watch.fps),
+            (390.0, 700.0, Some(12))
+        );
+        assert!(watch.view_id.is_none());
+        let input: LocalhostPageInputParams = serde_json::from_value(serde_json::json!({
+            "viewId": "page-1", "input": { "kind": "scroll", "x": 1, "y": 2, "dx": 0, "dy": 40 }
+        }))
+        .unwrap();
+        assert_eq!(input.view_id, "page-1");
+        assert!(matches!(
+            input.input,
+            crate::localhost_view::PageInput::Scroll { .. }
+        ));
     }
 
     #[test]

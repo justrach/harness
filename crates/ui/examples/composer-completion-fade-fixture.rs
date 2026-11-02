@@ -114,6 +114,27 @@ fn main() -> anyhow::Result<()> {
                         window.update(cx, |composer, _, cx| composer.fixture_input_scroll(cx))?;
                     println!("578 one row up: scroll {:.2} fades {:?}", up.0, up.1);
                     capture("578-one-row-up.png", cx)?;
+
+                    // Soft-wrapped whitespace belongs to the same logical
+                    // line, but must not count as hidden written text.
+                    for (name, suffix) in [
+                        ("spaces", " ".repeat(400)),
+                        ("em-spaces", "\u{2003}".repeat(100)),
+                        ("mixed-spaces", " \u{2003}".repeat(100)),
+                    ] {
+                        let draft = format!("{rows}{suffix}\n");
+                        window.update(cx, |composer, _, cx| {
+                            composer.fixture_set_draft_at_last_glyph(&draft, cx)
+                        })?;
+                        cx.background_executor().timer(settle).await;
+                        let position = window
+                            .update(cx, |composer, _, cx| composer.fixture_input_scroll(cx))?;
+                        println!(
+                            "578 wrapped {name}: scroll {:.2} fades {:?}",
+                            position.0, position.1
+                        );
+                        capture(&format!("578-wrapped-{name}.png"), cx)?;
+                    }
                     Ok(())
                 }
                 .await;

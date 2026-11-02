@@ -28,8 +28,9 @@
 //! transformations), so `menu-in`/`dialog-in` approximate their scale component
 //! with fade + translate; see the module report in ARCHITECTURE §4 follow-ups.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -65,9 +66,12 @@ const PULSE_LEASE: Duration = Duration::from_millis(300);
 /// (every 2·N ticks) land inside [`PULSE_LEASE`] and keep it renewed.
 const BACKGROUND_TICK_DIVISOR: u64 = 3;
 
+type PulseNotifier = Rc<dyn Fn(&mut App)>;
+
 struct PulseClock {
     epoch: Instant,
     leases: HashMap<EntityId, PulseLease>,
+    background_views: HashMap<EntityId, PulseNotifier>,
     tick: u64,
     running: bool,
 }
@@ -101,6 +105,7 @@ impl Default for PulseClock {
         Self {
             epoch: Instant::now(),
             leases: HashMap::new(),
+            background_views: HashMap::new(),
             tick: 0,
             running: false,
         }
@@ -144,11 +149,48 @@ pub fn pulse_lease_slow(view: EntityId, cx: &mut App) {
     pulse_lease_every(view, 2, cx);
 }
 
+/// Route a background pane's passive motion through its shared repaint budget.
+/// Explicit input still notifies normally. Removing/replacing the route also
+/// retires its old lease, so promotion, hiding and release leave no stale tick.
+pub(crate) fn set_background_notifier(
+    view: EntityId,
+    notifier: Option<PulseNotifier>,
+    cx: &mut App,
+) {
+    let clock = cx.default_global::<PulseClock>();
+    clock.leases.remove(&view);
+    if let Some(notifier) = notifier {
+        clock.background_views.insert(view, notifier);
+    } else {
+        clock.background_views.remove(&view);
+    }
+}
+
+/// Transient tool reveals use the same pane budget as loaders and text veils.
+/// Defer out of paint before updating the owning transcript entity.
+pub(crate) fn request_view_frame(view: EntityId, window: &mut Window, cx: &mut App) {
+    if let Some(notify) = cx
+        .default_global::<PulseClock>()
+        .background_views
+        .get(&view)
+        .cloned()
+    {
+        cx.defer(move |cx| notify(cx));
+    } else {
+        window.on_next_frame(move |_, cx| cx.notify(view));
+    }
+}
+
 fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
     if cx.reduce_motion() {
         return;
     }
     let clock = cx.default_global::<PulseClock>();
+    let stride = if clock.background_views.contains_key(&view) {
+        stride.max(BACKGROUND_TICK_DIVISOR)
+    } else {
+        stride
+    };
     let now = Instant::now();
     clock
         .leases
@@ -213,7 +255,16 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
                         .filter_map(|(view, lease)| lease.take_tick(tick).then_some(*view))
                         .collect();
                     for view in views {
-                        cx.notify(view);
+                        let notify = cx
+                            .default_global::<PulseClock>()
+                            .background_views
+                            .get(&view)
+                            .cloned();
+                        if let Some(notify) = notify {
+                            notify(cx);
+                        } else {
+                            cx.notify(view);
+                        }
                     }
                     false
                 });
@@ -660,6 +711,8 @@ struct FadeEntry {
     started: Instant,
     /// Frame counter at the last read (liveness stamp — see module notes).
     seen: u64,
+    /// The cached view that read it last (see [`HoverOwner`]).
+    owner: Option<EntityId>,
 }
 
 impl FadeEntry {
@@ -728,6 +781,7 @@ impl HoverFades {
         }
         let origin = if reduced { target } else { current };
         let seen = self.frame;
+        let owner = self.entries.get(key).and_then(|entry| entry.owner);
         self.entries.insert(
             key.to_string(),
             FadeEntry {
@@ -735,21 +789,46 @@ impl HoverFades {
                 target,
                 started: now,
                 seen,
+                owner,
             },
         );
     }
 
+    /// Whether something is hovered (fading in or held): a cached view
+    /// reading it must re-read it every frame, or it's pruned as unmounted.
+    pub fn any_held(&self) -> bool {
+        self.entries.values().any(|entry| entry.target == 1.0)
+    }
+
     /// Hover progress (0..1) for `key` at `now`; stamps liveness.
     pub fn value_at(&mut self, key: &str, now: Instant) -> f32 {
+        self.value_for(key, now, None)
+    }
+
+    /// [`Self::value_at`], read while `owner` (a cached view) renders.
+    fn value_for(&mut self, key: &str, now: Instant, owner: Option<EntityId>) -> f32 {
         let frame = self.frame;
         let (duration, curve) = (self.duration(), self.spec.curve);
         match self.entries.get_mut(key) {
             Some(entry) => {
                 entry.seen = frame;
+                if owner.is_some() {
+                    entry.owner = owner;
+                }
                 entry.value(now, duration, curve)
             }
             None => 0.0,
         }
+    }
+
+    /// Whether a fade `owner` reads is mid-flight or held hovered at `now`:
+    /// the cached view must render again this frame, or its color freezes
+    /// (or, unread for a frame, the entry is pruned as unmounted).
+    pub fn owner_needs_frame(&self, owner: EntityId, now: Instant) -> bool {
+        let duration = self.duration();
+        self.entries.values().any(|entry| {
+            entry.owner == Some(owner) && (entry.target == 1.0 || !entry.settled(now, duration))
+        })
     }
 
     /// Once-per-frame bookkeeping: advance the frame counter, prune entries
@@ -817,7 +896,36 @@ pub fn reveal_listener(
 
 /// Hover progress (0..1) for `key` this frame.
 pub fn hover_t(key: &str) -> f32 {
-    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, Instant::now()))
+    let owner = HOVER_OWNER.with(Cell::get);
+    HOVER_FADES.with(|fades| fades.borrow_mut().value_for(key, Instant::now(), owner))
+}
+
+thread_local! {
+    static HOVER_OWNER: Cell<Option<EntityId>> = const { Cell::new(None) };
+}
+
+/// While alive, hover fades read on this thread belong to `owner`, a cached
+/// view. A frame that reuses the view reads none of them, so the window's
+/// root asks [`hover_needs_frame`] whether to notify it instead. Hold one
+/// across the view's render and anything it renders later (list rows).
+pub struct HoverOwner(Option<EntityId>);
+
+impl HoverOwner {
+    pub fn enter(owner: EntityId) -> Self {
+        Self(HOVER_OWNER.with(|current| current.replace(Some(owner))))
+    }
+}
+
+impl Drop for HoverOwner {
+    fn drop(&mut self) {
+        HOVER_OWNER.with(|current| current.set(self.0));
+    }
+}
+
+/// Whether a hover fade `owner` read is mid-flight or held: call after
+/// [`hover_fades_active`] in the same frame, and notify `owner` when true.
+pub fn hover_needs_frame(owner: EntityId) -> bool {
+    HOVER_FADES.with(|fades| fades.borrow().owner_needs_frame(owner, Instant::now()))
 }
 
 /// Record a hover flip for `key` (reduced motion snaps).
@@ -851,6 +959,12 @@ pub fn hover_fades_active() -> bool {
     let now = Instant::now();
     let reveals = HOVER_REVEALS.with(|reveals| reveals.borrow_mut().tick_at(now));
     HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(now)) | reveals
+}
+
+/// Something is hovered (see [`HoverFades::any_held`]); call after
+/// [`hover_fades_active`] in the same frame.
+pub fn hover_fades_held() -> bool {
+    HOVER_FADES.with(|fades| fades.borrow().any_held())
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component
@@ -1342,6 +1456,28 @@ mod tests {
     }
 
     #[test]
+    fn a_hover_fade_needs_frames_only_for_the_view_that_reads_it() {
+        let mut fades = HoverFades::default();
+        let t0 = Instant::now();
+        let ms = |m: u64| t0 + Duration::from_millis(m);
+        let (owner, other) = (EntityId::from(1u64), EntityId::from(2u64));
+
+        fades.set_at("copy", true, false, t0);
+        fades.value_for("copy", t0, Some(owner));
+        assert!(fades.owner_needs_frame(owner, ms(75)), "fading in");
+        assert!(
+            !fades.owner_needs_frame(other, ms(75)),
+            "another view's fade"
+        );
+        assert!(fades.owner_needs_frame(owner, ms(400)), "held hovered");
+        // An unowned read (the shell's own) keeps the owner.
+        fades.value_at("copy", ms(400));
+        fades.set_at("copy", false, false, ms(400));
+        assert!(fades.owner_needs_frame(owner, ms(475)), "fading out");
+        assert!(!fades.owner_needs_frame(owner, ms(1000)), "settled at rest");
+    }
+
+    #[test]
     fn hover_fade_reduced_motion_snaps() {
         let mut fades = HoverFades::default();
         let t0 = Instant::now();
@@ -1383,6 +1519,20 @@ mod tests {
         fades.value_at("a", ms(300));
         assert!(!fades.tick_at(ms(500)), "settled at rest");
         assert!(fades.entries.is_empty(), "rest entries are pruned");
+    }
+
+    #[test]
+    fn a_hover_is_held_until_it_leaves() {
+        let mut fades = HoverFades::with_spec(HOVER_FADE);
+        let start = Instant::now();
+        assert!(!fades.any_held());
+        fades.set_at("row", true, false, start);
+        assert!(fades.any_held(), "fading in");
+        fades.tick_at(start + Duration::from_millis(400));
+        fades.value_at("row", start + Duration::from_millis(400));
+        assert!(fades.any_held(), "settled hovered");
+        fades.set_at("row", false, false, start + Duration::from_millis(500));
+        assert!(!fades.any_held(), "left");
     }
 
     #[test]

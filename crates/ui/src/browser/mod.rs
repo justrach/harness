@@ -965,4 +965,85 @@ mod tests {
             );
         });
     }
+
+    /// The live "browser-frames" reader threads in this process.
+    #[cfg(target_os = "linux")]
+    fn browser_frame_threads() -> usize {
+        std::fs::read_dir("/proc/self/task")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|name| name.trim_end() == "browser-frames")
+            })
+            .count()
+    }
+
+    /// Stops every WebKit helper this process started, as a crash or a
+    /// missing display does.
+    #[cfg(target_os = "linux")]
+    fn stop_webkit_helpers() {
+        let parent = std::process::id().to_string();
+        for process in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            // "pid (comm) state ppid ..."; comm may itself contain ") ".
+            let Ok(stat) = std::fs::read_to_string(process.path().join("stat")) else {
+                continue;
+            };
+            let Some((head, tail)) = stat.rsplit_once(") ") else {
+                continue;
+            };
+            let helper = head
+                .split_once(" (")
+                .is_some_and(|(_, comm)| comm.starts_with("webkit-"));
+            if helper && tail.split(' ').nth(1) == Some(parent.as_str()) {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &process.file_name().to_string_lossy()])
+                    .status();
+            }
+        }
+    }
+
+    /// A WebKit helper that stops while its page is open (it crashed, or found
+    /// no display, as on CI) is reported by its "browser-frames" reader
+    /// thread, which wakes the page's event task from that thread. GPUI's test
+    /// scheduler fails a test when that happens, so tests that open a page,
+    /// such as `queued_browser_navigation_and_close_batches_obey_delivery_order`,
+    /// failed whenever a helper exited before they finished. Here the helper
+    /// always stops mid-test.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn a_browser_helper_stopping_mid_test_cannot_wake_the_test_scheduler(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            crate::composer::init(cx, Default::default());
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            BrowserSurface::new(BrowserContext::default(), false, window, cx)
+        });
+        window
+            .update(cx, |browser, window, cx| {
+                browser.navigate("https://example.com/", window, cx)
+            })
+            .unwrap();
+        // The page's event task now waits on its channel, as it does between
+        // any two steps of a test.
+        cx.run_until_parked();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            stop_webkit_helpers();
+            if browser_frame_threads() == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a browser-frames thread outlived its helper"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        cx.run_until_parked();
+    }
 }

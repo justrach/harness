@@ -1,0 +1,30 @@
+{
+ "width": 1440, "height": 860, "dark": false, "scale": 2,
+ "devices": [{"id": "d", "name": "Studio"}],
+ "spaces": [{"id": "s", "deviceId": "d", "path": "/work/fieldnotes", "gitDetected": true}],
+ "chats": [
+  {"id": "a", "deviceId": "d", "title": "Tidy the release notes", "archived": false, "spaceId": "s", "lastMessageAt": "2026-10-24T00:00:00Z"},
+  {"id": "b", "deviceId": "d", "title": "Sketch the onboarding flow", "archived": false, "spaceId": "s", "lastMessageAt": "2026-10-23T00:00:00Z"}
+ ],
+ "open": "a",
+ "transcripts": {
+  "a": [
+   {"id": "u1", "role": "user", "parts": [{"id": "p", "kind": "text", "text": "Can you tidy the release notes?"}]},
+   {"id": "r1", "role": "assistant", "parts": [{"id": "p", "kind": "text", "text": "Done: the notes are grouped by area now, and `notes/release.md` has the new headings."}]}
+  ]
+ },
+ "steps": [
+  {"snap": "chat"},
+  {"press": "cmd+d"},
+  {"expect": "Tidy the release notes"},
+  {"snap": "split-right"},
+  {"press": "cmd+t"},
+  {"composer": "hey there"},
+  {"press": "cmd+d"},
+  {"snap": "new-chat-split"},
+  {"press": "cmd+d"},
+  {"snap": "three-panes"},
+  {"press": "cmd+shift+enter"},
+  {"snap": "zoomed"}
+ ]
+}

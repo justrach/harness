@@ -11,9 +11,12 @@ import SwiftUI
 enum SplitScreen {
     static let maxPanes = 2
 
-    /// A Max-class iPhone: a phone whose window is regular width. iPad is excluded on purpose.
-    static func isAvailable(idiom: UIUserInterfaceIdiom, sizeClass: UserInterfaceSizeClass?) -> Bool {
-        idiom == .phone && sizeClass == .regular
+    /// A window that is wide but short: regular width with compact height, the shape of a Max-class iPhone
+    /// in landscape. Decided by size classes alone, never by idiom: on iPhone Duo and in resizable iPhone
+    /// Mirroring an iPhone app can have any combination. A window that is regular both ways (iPad, or iPhone
+    /// Duo's inner display) gets the full sidebar instead.
+    static func isAvailable(horizontal: UserInterfaceSizeClass?, vertical: UserInterfaceSizeClass?) -> Bool {
+        horizontal == .regular && vertical == .compact
     }
 
     /// The session a new pane opens: the most recently used one that is not already on screen.
@@ -69,9 +72,4 @@ struct SplitScreenControls {
 extension EnvironmentValues {
     /// Set per pane by Home; nil everywhere split screen is not available.
     @Entry var splitScreen: SplitScreenControls? = nil
-    /// The phone's stacked split, like the desktop's ⌘D: open the session list below this session.
-    /// Set on a session alone in the stacked split's detail; nil everywhere else.
-    @Entry var stackedSplit: (() -> Void)? = nil
-    /// × on a pane of the phone's stacked split while two are shown; nil everywhere else.
-    @Entry var stackedClose: (() -> Void)? = nil
 }

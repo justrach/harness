@@ -11,11 +11,14 @@ final class SplitScreenTests: XCTestCase {
 
     // MARK: only a Max
 
-    func testOnlyAPhoneAtRegularWidthHasSplitScreen() {
-        XCTAssertTrue(SplitScreen.isAvailable(idiom: .phone, sizeClass: .regular), "a Pro Max in landscape")
-        XCTAssertFalse(SplitScreen.isAvailable(idiom: .phone, sizeClass: .compact), "every other iPhone")
-        XCTAssertFalse(SplitScreen.isAvailable(idiom: .phone, sizeClass: nil))
-        XCTAssertFalse(SplitScreen.isAvailable(idiom: .pad, sizeClass: .regular), "iPad keeps its sidebar")
+    func testOnlyAWideShortWindowHasSplitScreen() {
+        XCTAssertTrue(SplitScreen.isAvailable(horizontal: .regular, vertical: .compact), "a Pro Max in landscape")
+        XCTAssertFalse(SplitScreen.isAvailable(horizontal: .compact, vertical: .compact), "other iPhones in landscape")
+        XCTAssertFalse(SplitScreen.isAvailable(horizontal: .compact, vertical: .regular),
+                       "portrait, and iPhone Duo's outer display")
+        XCTAssertFalse(SplitScreen.isAvailable(horizontal: nil, vertical: nil))
+        XCTAssertFalse(SplitScreen.isAvailable(horizontal: .regular, vertical: .regular),
+                       "iPad and iPhone Duo's inner display keep the sidebar")
     }
 
     func testTwoPanesIsTheMostThereIs() {

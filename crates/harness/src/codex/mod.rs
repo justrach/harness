@@ -37,6 +37,7 @@
 //!   always ends with `Done { status: Interrupted }`.
 
 pub(crate) mod catalog;
+mod compaction;
 pub mod dictation;
 mod normalize;
 mod npm_repair;
@@ -99,6 +100,7 @@ pub fn resolve_codex_executable() -> Option<PathBuf> {
 pub fn login_command(codex_home: &std::path::Path) -> Result<Command, HarnessError> {
     let exe = CodexHarness::new().resolve_executable()?;
     let mut cmd = Command::new(&exe);
+    crate::apply_run_environment(&mut cmd, None);
     crate::compose_child_path(&mut cmd, &exe);
     cmd.arg("login").env("CODEX_HOME", codex_home);
     Ok(cmd)
@@ -173,6 +175,7 @@ impl CodexHarness {
     async fn discover_skills(&self, cwd: Option<&std::path::Path>) -> Result<Value, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
         cmd.arg("app-server");
         if let Some(cwd) = cwd {
             cmd.current_dir(cwd);
@@ -232,6 +235,7 @@ impl CodexHarness {
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
         let exe = self.resolve_executable()?;
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         cmd.stdin(Stdio::piped())
@@ -490,6 +494,7 @@ fn parse_model_list_page(result: &Value) -> (Vec<(Model, bool)>, Option<String>)
                 options,
                 maker: None,
                 billing: None,
+                context: None,
             },
             item.get("isDefault").and_then(Value::as_bool) == Some(true),
         ));
@@ -685,19 +690,23 @@ impl CodexHarness {
         {
             npm_repair::ensure_starts(&exe).await;
         }
-        // Yolo mode: danger-full-access + approvalPolicy "never" (set below) —
-        // codex's --dangerously-bypass-approvals-and-sandbox equivalent.
-        // Parity with the Claude adapter, which auto-approves every
-        // can_use_tool and so effectively grants full access. This also
-        // sidesteps codex ≤0.144.x's workspace-write bug where a linked
-        // worktree on a slash-named branch derives a malformed mount that
-        // kills every command.
+        // Full access (the engine's default autonomy, and every caller that
+        // predates the setting): danger-full-access + approvalPolicy "never"
+        // (set below), codex's --dangerously-bypass-approvals-and-sandbox
+        // equivalent. Parity with the Claude adapter's bypassPermissions.
+        // This also sidesteps codex <=0.144.x's workspace-write bug where a
+        // linked worktree on a slash-named branch derives a malformed mount
+        // that kills every command. A restricted autonomy (read only /
+        // workspace) keeps the stamped sandbox and asks on escalation.
         request.sandbox = if title_only {
             harness_proto::SandboxLevel::ReadOnly
+        } else if restricted(&request) {
+            request.sandbox
         } else {
             harness_proto::SandboxLevel::DangerFullAccess
         };
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, controls.origin.as_ref().filter(|_| !title_only));
         cmd.arg("app-server");
         crate::compose_child_path(&mut cmd, &exe);
         if !request.cwd.is_empty() {
@@ -958,14 +967,12 @@ async fn run_session(session: Session) {
     let request_input = Arc::new(request_input);
 
     // ---- wire params ------------------------------------------------------
-    // Parity with the Claude adapter, which auto-approves every `can_use_tool`
-    // regardless of `auto_approve` (harness sessions run unattended; combined
-    // with the danger-full-access override above this is codex's yolo mode):
-    // never surface wire approvals. "on-request" turned
-    // every command into a yes/no question (user report: "asking me for
-    // approval at every step"). The approval-as-input plumbing below stays for
-    // stray requests and a future explicit permission-mode setting.
-    let approval_policy = "never";
+    // Full access never surfaces wire approvals: "on-request" turned every
+    // command into a yes/no question (user report: "asking me for approval
+    // at every step"). A restricted autonomy is the user explicitly asking
+    // for those questions, so codex asks on escalation and each approval
+    // round-trips through `request_input` below.
+    let approval_policy = approval_policy(&request, title_only);
     let effort = to_effort(request.reasoning);
     // Service tier rides thread-start and every turn (mirrors the Codex IDE
     // client). "default" means Standard — omit it entirely.
@@ -1177,6 +1184,8 @@ async fn run_session(session: Session) {
     let mut reasoning_streams: HashMap<String, ReasoningStream> = HashMap::new();
     // Token usage is held until the turn ends, emitted just before Done.
     let mut pending_usage: Option<AgentEvent> = None;
+    // Compaction chips: sizes from the meter around each one.
+    let mut compactions = compaction::CompactionChips::default();
     // Steers whose `turn/steer` lost the turn-completed race; delivered as the
     // next `turn/start` when the expected turn's end notification arrives.
     let mut queued_steers: VecDeque<String> = VecDeque::new();
@@ -1253,6 +1262,11 @@ async fn run_session(session: Session) {
                             Phase::Completed
                         };
                         let item = params.get("item").unwrap_or(&Value::Null);
+                        for event in compactions.item(phase, item) {
+                            if !send(&event_tx, event).await {
+                                break 'main;
+                            }
+                        }
                         if phase == Phase::Completed {
                             let output = match item_type(item) {
                                 "exitedReviewMode" => item.get("review").and_then(Value::as_str),
@@ -1316,8 +1330,15 @@ async fn run_session(session: Session) {
                     }
 
                     "thread/tokenUsage/updated" => {
-                        if let Some(usage) = normalize::context_usage_event(&params)
-                            && !send(&event_tx, usage).await { break 'main; }
+                        if let Some(usage) = normalize::context_usage_event(&params) {
+                            let tokens = match &usage {
+                                AgentEvent::ContextUsage { tokens, .. } => *tokens,
+                                _ => None,
+                            };
+                            if !send(&event_tx, usage).await { break 'main; }
+                            if let Some(chip) = compactions.context(tokens)
+                                && !send(&event_tx, chip).await { break 'main; }
+                        }
                         if let Some(usage) = usage_event(&params) {
                             pending_usage = Some(usage);
                         }
@@ -1714,6 +1735,23 @@ type RequestInputFn = Box<
         + Sync,
 >;
 
+/// Whether the run carries a restricted autonomy (read only / workspace
+/// without auto-approve): the engine stamps one only when the user picked
+/// it, so everything else keeps the unattended full-access behaviour.
+fn restricted(request: &RunRequest) -> bool {
+    !request.auto_approve && request.sandbox != harness_proto::SandboxLevel::DangerFullAccess
+}
+
+/// The wire `approvalPolicy` for a run: "never" for titles and full access,
+/// "on-request" when the user's autonomy asks before escalating.
+fn approval_policy(request: &RunRequest, title_only: bool) -> &'static str {
+    if !title_only && restricted(request) {
+        "on-request"
+    } else {
+        "never"
+    }
+}
+
 /// Serve one server→client request. Approval requests round-trip through
 /// `request_input` as a synthesized yes/no question (in a subtask so the
 /// message loop keeps flowing); with `auto_approve` they're accepted outright
@@ -1909,6 +1947,24 @@ use crate::{Signal, send_signal, shutdown_child};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn autonomy_request(sandbox: harness_proto::SandboxLevel, auto_approve: bool) -> RunRequest {
+        serde_json::from_value(json!({
+            "prompt": "p", "cwd": "", "sandbox": sandbox, "autoApprove": auto_approve
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn full_access_never_asks_and_restricted_autonomy_asks() {
+        use harness_proto::SandboxLevel::*;
+        assert_eq!(approval_policy(&autonomy_request(DangerFullAccess, true), false), "never");
+        assert_eq!(approval_policy(&autonomy_request(DangerFullAccess, false), false), "never");
+        assert_eq!(approval_policy(&autonomy_request(WorkspaceWrite, true), false), "never");
+        assert_eq!(approval_policy(&autonomy_request(WorkspaceWrite, false), false), "on-request");
+        assert_eq!(approval_policy(&autonomy_request(ReadOnly, false), false), "on-request");
+        assert_eq!(approval_policy(&autonomy_request(ReadOnly, false), true), "never");
+    }
     use serde_json::json;
 
     #[test]

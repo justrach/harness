@@ -14,7 +14,7 @@ use futures::stream::BoxStream;
 use harness_adapters::{Harness, HarnessError, RunControls};
 use harness_doc::{MessageRole, MessageStatus, SessionCommandPayload};
 use harness_engine::{EngineCore, HarnessRegistry};
-use harness_proto::graff_worktree::{GraffWorktree, name_for_chat};
+use harness_proto::graff_worktree::GraffWorktree;
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SteeringMode, WorktreeSpec,
@@ -157,7 +157,7 @@ fn run(message_id: &str, cwd: &str, worktree: Option<WorktreeSpec>) -> SessionCo
     SessionCommandPayload::Run {
         request: RunRequest {
             turn_origin: Default::default(),
-            prompt: "work in your own tree".into(),
+            prompt: "Fix login redirect after sign-in".into(),
             harness: Some(HarnessId::Graff),
             model: None,
             reasoning: None,
@@ -208,7 +208,7 @@ async fn graff_chats_run_and_resume_in_graffs_own_worktree() {
         .expect("queue first run");
     wait_for(|| completed_turns(&core) == 1, "first turn").await;
 
-    let name = name_for_chat(CHAT);
+    let name = "fix-login-redirect-after-sign-in-1a7188e911beeb31".to_string();
     let tree = GraffWorktree::path_in(&repo_path, &name);
     let first = seen.lock().unwrap()[0].clone();
     assert_eq!(first.cwd, repo_path, "Graff launches from the repo");
@@ -275,7 +275,54 @@ async fn graff_chats_run_and_resume_in_graffs_own_worktree() {
     assert_eq!(resumed_context.checkout_id, context.checkout_id);
     assert_eq!(resumed_context.head_sha, context.head_sha);
 
+    // A retry carrying the original directive and a different prompt must keep
+    // the existing tree rather than derive another branch from the new task.
+    let mut retry = run(
+        "msg-3",
+        &repo_path,
+        Some(WorktreeSpec {
+            repo_path: repo_path.clone(),
+            base: "main".into(),
+            space_id: None,
+            agent_name: None,
+        }),
+    );
+    if let SessionCommandPayload::Run { request, .. } = &mut retry {
+        request.prompt = "Now test the callback".into();
+    }
+    core.doc_host.queue_command(CHAT, retry).unwrap();
+    wait_for(|| completed_turns(&core) == 3, "retry turn").await;
+    let retry = seen.lock().unwrap()[2].clone();
+    // Queued directives can carry a stale name. A recorded checkout is the
+    // authority for this conversation, not an old name in another request.
+    core.doc_host
+        .queue_command(
+            CHAT,
+            run(
+                "msg-4",
+                &repo_path,
+                Some(WorktreeSpec {
+                    repo_path: repo_path.clone(),
+                    base: "main".into(),
+                    space_id: None,
+                    agent_name: Some("stale-queued-name".into()),
+                }),
+            ),
+        )
+        .unwrap();
+    wait_for(|| completed_turns(&core) == 4, "retry with a stale name").await;
+    let stale = seen.lock().unwrap()[3].clone();
     core.shutdown().await;
+    assert_eq!(retry.agent_name.as_deref(), Some(name.as_str()));
+    assert_eq!(retry.cwd, repo_path);
+    assert_eq!(
+        stale.agent_name.as_deref(),
+        Some(name.as_str()),
+        "a stale directive must not move an existing conversation"
+    );
+    assert!(
+        !std::path::Path::new(&GraffWorktree::path_in(&repo_path, "stale-queued-name")).exists()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

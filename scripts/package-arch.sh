@@ -6,7 +6,8 @@
 # Reuses the binary package-linux.sh already built; builds only if missing.
 #
 # Usage: scripts/package-arch.sh
-# Env:   PROFILE=debug to package target/debug/harness; default release.
+# Env:   PROFILE=debug to package target/debug/harness, release for
+#        target/release; default dist (what ships).
 #        BIN=<path> override the binary (dry-run/testing).
 #        NFPM_ARCH=amd64|arm64 override the package arch (default: uname -m).
 
@@ -14,7 +15,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
-PROFILE="${PROFILE:-release}"
+PROFILE="${PROFILE:-dist}"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 OUT_DIR="$ROOT/target/package"
 PKG="$OUT_DIR/harness-$VERSION-linux-$(uname -m).pkg.tar.zst"
@@ -22,10 +23,10 @@ PKG="$OUT_DIR/harness-$VERSION-linux-$(uname -m).pkg.tar.zst"
 cd "$ROOT"
 BIN="${BIN:-$ROOT/target/$PROFILE/harness}"
 if [[ ! -x "$BIN" ]]; then
-  if [[ "$PROFILE" == "release" ]]; then
-    cargo build --release -p harness
-  else
+  if [[ "$PROFILE" == "debug" ]]; then
     cargo build -p harness
+  else
+    cargo build --profile "$PROFILE" -p harness
   fi
   BIN="$ROOT/target/$PROFILE/harness"
 fi

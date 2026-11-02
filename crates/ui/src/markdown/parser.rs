@@ -551,13 +551,21 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
 
 /// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
 /// which pulldown-cmark has no option for (agents paste naked PR/issue URLs
-/// constantly; user report: the link isn't clickable). Runs already inside a
-/// link or code span pass through untouched. Idempotent, so nested containers
-/// re-applying it on their merged output is harmless.
+/// constantly; user report: the link isn't clickable). Existing links pass
+/// through untouched. Code spans link only when the entire literal text is a
+/// safe web URL, preserving code styling and the exact destination. Idempotent,
+/// so nested containers re-applying it on their merged output is harmless.
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
-    for run in runs {
-        if run.style.link.is_some() || run.style.code {
+    for mut run in runs {
+        if run.style.link.is_some() {
+            out.push(run);
+        } else if run.style.code {
+            // Unlike prose, code has no sentence punctuation to trim. Do not
+            // turn URLs embedded in commands or snippets into partial links.
+            if crate::browser::model::transcript_address(&run.text).is_ok() {
+                run.style.link = Some(run.text.clone());
+            }
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -1209,13 +1217,67 @@ mod tests {
         assert_eq!(link.style.link.as_deref(), Some("https://x.dev"));
     }
 
-    /// Non-links stay text: glued schemes, bare schemes, code spans, and the
+    #[test]
+    fn inline_code_web_urls_are_links_without_losing_code_style() {
+        for url in [
+            "http://127.0.0.1:3000/preview",
+            "https://example.com/path?q=yes#section",
+            "HTTPS://EXAMPLE.COM/path",
+            "https://example.com/path?",
+            "https://example.com/Foo_(bar)",
+        ] {
+            let source = format!("Try **`{url}`** now\n");
+            let tree = parse_full(&source);
+            let Block::Paragraph { runs } = &tree.blocks[0].block else {
+                panic!("paragraph")
+            };
+            let code = runs.iter().find(|r| r.style.code).unwrap();
+            assert_eq!(code.text, url);
+            assert_eq!(code.style.link.as_deref(), Some(url), "{url}");
+            assert!(code.style.bold);
+            for chunk in [1, 3, 11] {
+                assert_eq!(stream(chunk, &source).tree(), &tree);
+            }
+        }
+    }
+
+    #[test]
+    fn inline_code_autolinks_only_complete_safe_web_urls() {
+        for text in [
+            "curl https://example.com",
+            "https://example.com and https://example.org",
+            "https://",
+            "https:///path",
+            "https://example.com/%GG",
+            "https://user:pass@example.com",
+            "https://example.com\\path",
+            "https://example.com/\u{0007}",
+            "javascript:alert(1)",
+            "file:///tmp/example.txt",
+            "example.com",
+        ] {
+            let source = format!("`{text}`\n");
+            assert_eq!(only_link(&source), None, "{text}");
+        }
+        // An explicit destination wins even when its label is a code URL.
+        assert_eq!(
+            only_link("[`https://shown.dev`](https://real.dev)\n"),
+            Some(("https://shown.dev".into(), "https://real.dev".into()))
+        );
+        let tree = parse_full("```text\nhttps://example.com\n```\n");
+        assert!(
+            matches!(&tree.blocks[0].block, Block::CodeBlock { code, .. }
+            if code == "https://example.com")
+        );
+    }
+
+    /// Non-links stay text: glued schemes, bare schemes, code commands, and the
     /// destination text of a real markdown link.
     #[test]
     fn autolink_leaves_non_urls_alone() {
         assert_eq!(only_link("foohttps://x.dev is glued\n"), None);
         assert_eq!(only_link("the https:// scheme alone\n"), None);
-        assert_eq!(only_link("`https://x.dev` in code\n"), None);
+        assert_eq!(only_link("`curl https://x.dev` in code\n"), None);
         // A markdown link whose TEXT is a URL keeps the written destination.
         assert_eq!(
             only_link("[https://shown.dev](https://real.dev)\n"),

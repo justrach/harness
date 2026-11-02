@@ -773,12 +773,12 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     .await;
     assert_eq!(chat.title.as_deref(), Some("Fix Login Flow"));
     // Branch renamed from the title, chat row updated to match.
-    assert_eq!(chat.branch.as_deref(), Some("harness/fix-login-flow"));
+    assert_eq!(chat.branch.as_deref(), Some("task/fix-login-flow"));
     let context = chat
         .source_context
         .as_ref()
         .expect("renamed source context");
-    assert_eq!(context.branch, "harness/fix-login-flow");
+    assert_eq!(context.branch, "task/fix-login-flow");
     assert_eq!(context.cwd, original_context.cwd);
     assert_eq!(context.repo_root, original_context.repo_root);
     assert_eq!(context.checkout_id, original_context.checkout_id);
@@ -793,7 +793,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .expect("git");
     assert_eq!(
         String::from_utf8_lossy(&head.stdout).trim(),
-        "harness/fix-login-flow"
+        "task/fix-login-flow"
     );
 
     // A titled chat is never re-titled: rename, run again, title sticks.
@@ -824,6 +824,14 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
     core.shutdown().await;
 }
 
+#[test]
+fn branch_names_describe_task_without_app_branding() {
+    assert_eq!(
+        worktree_branch_from_title("Fix login redirect after sign-in"),
+        "task/fix-login-redirect-after-sign-in"
+    );
+}
+
 #[tokio::test]
 async fn rename_worktree_branch_guards_and_collisions() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -852,15 +860,15 @@ async fn rename_worktree_branch_guards_and_collisions() {
         .rename_worktree_branch(wt_path, &wt.branch, "Add Dark Mode!")
         .await
         .expect("renamed");
-    assert_eq!(renamed, "harness/add-dark-mode");
+    assert_eq!(renamed, "task/add-dark-mode");
 
-    // Already renamed → the guard (branch no longer harness/<folder>) makes any
+    // Already renamed → the guard (branch no longer task/<folder>) makes any
     // further title rename a no-op.
     let again = repos
-        .rename_worktree_branch(wt_path, "harness/add-dark-mode", "Different Title")
+        .rename_worktree_branch(wt_path, "task/add-dark-mode", "Different Title")
         .await
         .expect("second rename");
-    assert_eq!(again, "harness/add-dark-mode");
+    assert_eq!(again, "task/add-dark-mode");
 
     // Collision: a second worktree whose title slug already exists gets the
     // stable hash suffix.
@@ -873,20 +881,20 @@ async fn rename_worktree_branch_guards_and_collisions() {
         .await
         .expect("suffixed rename");
     assert!(
-        renamed2.starts_with("harness/add-dark-mode-")
-            && renamed2.len() == "harness/add-dark-mode-".len() + 6,
+        renamed2.starts_with("task/add-dark-mode-")
+            && renamed2.len() == "task/add-dark-mode-".len() + 6,
         "suffixed: {renamed2}"
     );
 
     // Slug edge cases.
     assert_eq!(
         worktree_branch_from_title("  Fix `Login` Flow!  "),
-        "harness/fix-login-flow"
+        "task/fix-login-flow"
     );
-    assert_eq!(worktree_branch_from_title("***"), "harness/update");
+    assert_eq!(worktree_branch_from_title("***"), "task/changes");
     assert_eq!(
         worktree_branch_from_title("Cafe's Dark Mode"),
-        "harness/cafes-dark-mode"
+        "task/cafes-dark-mode"
     );
 }
 

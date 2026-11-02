@@ -8,8 +8,8 @@ use gpui::{SharedString, div, prelude::*, px};
 use crate::motion;
 use crate::theme::Theme;
 
-/// One starter: a card on the first-run screen and a chip under the
-/// new-session composer.
+/// One starter: a chip on the first-run checklist and a tile in the 2x2
+/// grid under the new-session composer.
 #[derive(Debug)]
 pub(crate) struct Starter {
     pub id: &'static str,
@@ -103,23 +103,28 @@ pub(crate) fn chip(starter: &Starter, theme: &Theme) -> gpui::Stateful<gpui::Div
         .child(SharedString::from(starter.title))
 }
 
-/// A first-run card: icon, title and a one-line blurb.
-pub(crate) fn card(
-    id: &'static str,
-    icon: &'static str,
-    title: &'static str,
-    blurb: &'static str,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let id: SharedString = format!("starter-card-{id}").into();
+/// Starters laid out two per row for the home grid (2x2 with a project,
+/// a single row of what's left without one).
+pub(crate) fn grid_rows(has_project: bool) -> Vec<Vec<&'static Starter>> {
+    let starters: Vec<&'static Starter> = available(has_project).collect();
+    starters.chunks(2).map(|row| row.to_vec()).collect()
+}
+
+/// A home-grid tile: solid card, accent icon, title and a one-line blurb.
+/// Fills its share of the row so two sit side by side under the composer.
+pub(crate) fn tile(starter: &'static Starter, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    let id: SharedString = format!("starter-tile-{}", starter.id).into();
     div()
         .id(id.clone())
-        .w(px(240.0))
+        .flex_1()
+        .min_w_0()
+        .h(px(TILE_HEIGHT))
         .flex()
         .flex_col()
-        .gap(px(6.0))
-        .p(px(14.0))
-        .rounded(px(12.0))
+        .justify_center()
+        .gap(px(4.0))
+        .px(px(14.0))
+        .rounded(px(Theme::PANEL_RADIUS))
         .border_1()
         .border_color(theme.border)
         .bg(motion::hover_blend(&id, theme.surface_card, theme.surface_raised_hover))
@@ -135,20 +140,39 @@ pub(crate) fn card(
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(
-                    crate::icons::icon(icon)
+                    crate::icons::icon(starter.icon)
                         .size(px(15.0))
                         .flex_none()
                         .text_color(theme.accent),
                 )
-                .child(SharedString::from(title)),
+                .child(div().min_w_0().truncate().child(SharedString::from(starter.title))),
         )
         .child(
             div()
+                .min_w_0()
+                .truncate()
                 .text_size(crate::typography::ui_rems(12.0))
-                .line_height(crate::typography::ui_rems(17.0))
-                .text_color(theme.text_muted.opacity(0.8))
-                .child(SharedString::from(blurb)),
+                .text_color(theme.text_muted)
+                .child(SharedString::from(starter.blurb)),
         )
+}
+
+/// Height of one home-grid tile; the composer reserves two rows of these.
+pub(crate) const TILE_HEIGHT: f32 = 64.0;
+/// Gap between tiles, both across and down.
+pub(crate) const TILE_GAP: f32 = 8.0;
+
+/// The home greeting above the composer: "Hi Rach. What should Graff do?",
+/// or without a name just the question.
+pub(crate) fn greeting(name: Option<&str>) -> String {
+    let first = name
+        .map(str::trim)
+        .and_then(|name| name.split_whitespace().next())
+        .filter(|first| !first.contains('@'));
+    match first {
+        Some(first) => format!("Hi {first}. What should Graff do?"),
+        None => "What should Graff do?".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +188,21 @@ mod tests {
     #[test]
     fn fresh_folder_starters_never_need_a_project() {
         assert!(STARTERS.iter().all(|s| !(s.fresh_folder && s.needs_project)));
+    }
+
+    #[test]
+    fn grid_is_two_by_two_with_a_project() {
+        let rows = grid_rows(true);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.len() == 2));
+        assert!(grid_rows(false).iter().all(|row| row.len() <= 2));
+    }
+
+    #[test]
+    fn greeting_uses_the_first_name_only() {
+        assert_eq!(greeting(Some("Rach Pradhan")), "Hi Rach. What should Graff do?");
+        assert_eq!(greeting(Some("  ")), "What should Graff do?");
+        assert_eq!(greeting(Some("rach@example.com")), "What should Graff do?");
+        assert_eq!(greeting(None), "What should Graff do?");
     }
 }

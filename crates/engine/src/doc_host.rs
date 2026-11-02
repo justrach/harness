@@ -5561,22 +5561,66 @@ impl DocHost {
                 // `take()` resolves the request before dispatch, so the journal
                 // and steer→new-turn fallbacks reuse the created path instead of
                 // minting another checkout.
-                let worktree_spec = request.worktree.take();
+                let mut worktree_spec = request.worktree.take();
+                if let Some(spec) = worktree_spec.as_mut()
+                    && spec.base.is_empty()
+                {
+                    let repos = self
+                        .inner
+                        .repos
+                        .get()
+                        .ok_or_else(|| EngineError::Other("repositories unavailable".into()))?;
+                    spec.base = repos
+                        .branches(Path::new(&spec.repo_path))
+                        .await?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| {
+                            EngineError::Other("No committed base for a new worktree.".into())
+                        })?;
+                }
                 let fresh_worktree = match &worktree_spec {
                     // Graff owns its worktrees: the adapter launches
                     // `graff acp -w <name>` from the repo, and Graff creates
                     // (or reuses) the tree and runs its own workspace setup.
                     // The chat is re-homed when the session reports the tree.
-                    Some(spec) if self.harness_for_request(chat_id, &request) == HarnessId::Graff => {
+                    Some(spec)
+                        if self.harness_for_request(chat_id, &request) == HarnessId::Graff =>
+                    {
+                        let existing_tree = self
+                            .workspace()
+                            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+                            .and_then(|chat| chat.cwd)
+                            .and_then(|cwd| {
+                                harness_proto::graff_worktree::GraffWorktree::from_path(&cwd)
+                            })
+                            .filter(|tree| {
+                                std::fs::canonicalize(&tree.root)
+                                    .ok()
+                                    .zip(std::fs::canonicalize(&spec.repo_path).ok())
+                                    .is_some_and(|(root, repo)| root == repo)
+                            });
                         request.cwd = spec.repo_path.clone();
                         request.worktree = Some(harness_proto::WorktreeSpec {
-                            agent_name: Some(harness_proto::graff_worktree::name_for_chat(chat_id)),
+                            agent_name: Some(
+                                existing_tree
+                                    .map(|tree| tree.name)
+                                    .or_else(|| spec.agent_name.clone())
+                                    .unwrap_or_else(|| {
+                                        harness_proto::graff_worktree::name_for_task(
+                                            chat_id,
+                                            &request.prompt,
+                                        )
+                                    }),
+                            ),
                             ..spec.clone()
                         });
                         None
                     }
                     Some(spec) => {
-                        let (cwd, fresh) = self.materialize_worktree(chat_id, &spec).await?;
+                        let (cwd, fresh) = self
+                            .materialize_worktree(chat_id, &spec, &request.prompt)
+                            .await?;
                         request.cwd = cwd;
                         fresh
                     }
@@ -5588,7 +5632,7 @@ impl DocHost {
                     ws.claim_chat(chat_id, Some(&request.cwd))?;
                     // A pre-existing row (the client's createChat raced ahead)
                     // still carries the repo folder — repoint it at the fresh
-                    // worktree, and stamp the actual `harness/<name>` branch so
+                    // worktree, and stamp the actual task branch so
                     // the footer and the title-rename flow see it.
                     if let Some(wt) = &fresh_worktree {
                         if let Err(err) = ws.set_chat_cwd(chat_id, &wt.path) {
@@ -6023,6 +6067,8 @@ impl DocHost {
                 harness_proto::peer_mail::ARCHIVED_REFUSAL.into(),
             ));
         }
+        let mut request = request;
+        self.retarget_independent_request(chat_id, &mut request)?;
         let context = self.capture_source_context(&request.cwd).await;
         if let Some(context) = &context
             && let Some(drift) = self.drift_since_last_turn(sessions, chat_id, context).await
@@ -6083,6 +6129,7 @@ impl DocHost {
         &self,
         chat_id: &str,
         spec: &harness_proto::WorktreeSpec,
+        task: &str,
     ) -> Result<(String, Option<harness_proto::Worktree>), EngineError> {
         if let Some(ws) = self.workspace()
             && let Ok(Some(chat)) = ws.chat(chat_id)
@@ -6100,7 +6147,7 @@ impl DocHost {
             .get()
             .ok_or_else(|| EngineError::Other("repos engine not wired".into()))?;
         let worktree = repos
-            .create_worktree(std::path::Path::new(&spec.repo_path), &spec.base)
+            .create_worktree_for_task(std::path::Path::new(&spec.repo_path), &spec.base, task)
             .await?;
         tracing::info!(
             chat = %chat_id,
@@ -6325,6 +6372,8 @@ fn encode_part_segment(part_id: &str) -> String {
 
 #[path = "doc_host_branch_drift.rs"]
 mod branch_drift;
+#[path = "doc_host_checkout_isolation.rs"]
+mod checkout_isolation;
 
 #[cfg(test)]
 mod transfer_progress_tests {

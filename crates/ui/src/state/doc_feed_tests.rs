@@ -13,6 +13,12 @@ fn shared_doc_feed_survives_either_consumer_closing(cx: &mut gpui::TestAppContex
                 .insert("shared".into(), Task::ready(()));
             state.watch_peer_chat("shared".into(), cx);
             state.watch_subagent_doc("shared".into(), cx);
+            state
+                .peer_progress_tasks
+                .insert("shared".into(), Task::ready(()));
+            state
+                .peer_tool_progress
+                .insert("shared".into(), vec![harness_proto::build_wait_item(123)]);
             state.sub_transcripts.insert("shared".into(), Vec::new());
             state.transcript_baselines.insert(
                 "shared".into(),
@@ -32,6 +38,14 @@ fn shared_doc_feed_survives_either_consumer_closing(cx: &mut gpui::TestAppContex
                 "surviving consumer lost rows"
             );
             assert!(state.transcript_baselines.contains_key("shared"));
+            assert_eq!(
+                state.peer_progress_tasks.contains_key("shared"),
+                close_child_first
+            );
+            assert_eq!(
+                state.peer_tool_progress.contains_key("shared"),
+                close_child_first
+            );
             if close_child_first {
                 state.unwatch_peer_chat("shared");
             } else {
@@ -40,6 +54,8 @@ fn shared_doc_feed_survives_either_consumer_closing(cx: &mut gpui::TestAppContex
             assert!(!state.sub_watch_tasks.contains_key("shared"));
             assert!(!state.sub_transcripts.contains_key("shared"));
             assert!(!state.transcript_baselines.contains_key("shared"));
+            assert!(!state.peer_progress_tasks.contains_key("shared"));
+            assert!(!state.peer_tool_progress.contains_key("shared"));
         });
     }
 }

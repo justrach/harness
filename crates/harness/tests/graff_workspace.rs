@@ -158,6 +158,10 @@ async fn graff_runs_and_resumes_in_its_own_named_worktree() {
 
     let first = run_graff_worktree_fixture(&root, None, Some("harness-chat1")).await;
     assert_eq!(started_in(&first), ("fresh".to_owned(), tree.clone()), "{first:?}");
+    assert_eq!(
+        std::fs::read_to_string(tree.join("selected-base")).unwrap(),
+        "main"
+    );
 
     let respawned = run_graff_worktree_fixture(&root, Some("saved"), Some("harness-chat1")).await;
     assert_eq!(started_in(&respawned), ("saved".to_owned(), tree.clone()), "{respawned:?}");

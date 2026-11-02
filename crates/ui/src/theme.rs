@@ -833,6 +833,9 @@ impl Theme {
     pub const PANEL_RADIUS: f32 = 10.0;
     /// Small control radius (buttons, chips).
     pub const CONTROL_RADIUS: f32 = 6.0;
+    /// The smallest pointer target for an icon-sized control. The visible
+    /// glyph or pill stays its own size; the hit area around it grows.
+    pub const HIT_TARGET: f32 = 32.0;
     /// Base spacing steps.
     pub const SPACE_XS: f32 = 4.0;
     pub const SPACE_SM: f32 = 8.0;
@@ -1007,6 +1010,59 @@ impl Theme {
         let window = flatten(self.glass(), self.adverse_backdrop());
         self.input_bg
             .opacity(self.contrast_checked_tint_alpha(self.input_bg, base, window))
+    }
+
+    /// A bright, opaque writing plane above the conversation. Light palettes
+    /// keep a trace of their input tint; dark palettes retain their raised fill.
+    pub fn composer_bg(&self) -> Hsla {
+        let input = flatten(self.input_bg, self.bg);
+        if self.appearance.is_dark() {
+            input
+        } else {
+            flatten(gpui::white().opacity(0.82), input)
+        }
+    }
+
+    /// Foreground for controls filled with the primary accent. `on_accent`
+    /// is authored for the stronger fill, so lighter primary tones may need
+    /// a different foreground to remain readable.
+    pub fn on_primary_accent(&self) -> Hsla {
+        if contrast_ratio(self.on_accent, self.accent) >= 4.5 {
+            self.on_accent
+        } else if contrast_ratio(gpui::black(), self.accent)
+            >= contrast_ratio(gpui::white(), self.accent)
+        {
+            gpui::black()
+        } else {
+            gpui::white()
+        }
+    }
+
+    pub fn composer_shadows(&self) -> Vec<gpui::BoxShadow> {
+        let opacity = if self.appearance.is_dark() {
+            0.18
+        } else {
+            0.05
+        };
+        [(1.0, 2.0), (3.0, 10.0)]
+            .into_iter()
+            .map(|(offset, blur)| gpui::BoxShadow {
+                color: gpui::black().opacity(opacity),
+                offset: gpui::point(gpui::px(0.0), gpui::px(offset)),
+                blur_radius: gpui::px(blur),
+                spread_radius: gpui::px(0.0),
+                inset: false,
+            })
+            .collect()
+    }
+
+    /// The conversation column's lift over the shell chrome, extending the
+    /// composer's contrast to the main screen: light palettes wash the column
+    /// toward white, so the sidebar's tone reads as chrome around a bright
+    /// page. The wash is translucent, so glass still shows through. Dark
+    /// palettes keep the column flush on the shell.
+    pub fn content_plane(&self) -> Option<Hsla> {
+        (!self.appearance.is_dark()).then(|| gpui::white().opacity(0.55))
     }
 
     /// Section-card fill (settings cards and similar in-panel cards). The

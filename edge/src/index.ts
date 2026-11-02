@@ -61,6 +61,7 @@ import { RefreshLeeway } from "./refresh-leeway";
 import { AUTH_ORG_HEADER, RoomActor, roomStore } from "./room-actor";
 import { ROOM_ID, RoomError, memberKey, newRoomId } from "./room-core";
 import { sweepExpiredRooms } from "./room-store-pg";
+import { crashReportRoute } from "./crash-reports";
 import { personalOrgId } from "./auth";
 import installSh from "./install.sh";
 
@@ -288,6 +289,9 @@ export default {
 
     const room = await roomRoute(request, env, url, parts, auth);
     if (room) return room;
+
+    const crashes = await crashReportRoute(request, env, parts, auth.userId);
+    if (crashes) return crashes;
 
     // ── login vault (docs/adr/0005): one room per user, named from the
     //    verified bearer only. The DO additionally requires a device

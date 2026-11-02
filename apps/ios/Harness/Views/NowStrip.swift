@@ -15,7 +15,7 @@ struct NowStrip: View {
             Text("Now")
                 .font(Theme.sans(13, weight: .semibold))
                 .foregroundStyle(Theme.text)
-                .padding(.horizontal, 16)
+                .padding(.horizontal, Theme.gutter)
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 10) {
                     ForEach(chats) { chat in
@@ -27,7 +27,7 @@ struct NowStrip: View {
                 }
                 .scrollTargetLayout()
             }
-            .contentMargins(.horizontal, 16, for: .scrollContent)
+            .contentMargins(.horizontal, Theme.gutter, for: .scrollContent)
             .scrollTargetBehavior(.viewAligned)
             .scrollIndicators(.hidden)
         }
@@ -59,13 +59,11 @@ private struct NowCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     if waiting {
-                        Circle().fill(Theme.warning).frame(width: 8, height: 8)
-                        Text(indicator == .errored ? "Run failed" : "Needs you")
-                            .foregroundStyle(Theme.warning)
+                        StatusChip(label: indicator == .errored ? "Run failed" : "Needs you",
+                                   hue: indicator == .errored ? Theme.danger : Theme.warning)
                     } else {
                         MiniSpinner()
-                        Text("Running")
-                            .foregroundStyle(Theme.statusWorking)
+                        StatusChip(label: "Running", hue: Theme.statusWorking)
                     }
                     Spacer(minLength: 4)
                     Text(relativeTime(chat.calledAt))

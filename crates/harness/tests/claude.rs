@@ -94,6 +94,82 @@ async fn run_to_end(
     .expect("run finished in time")
 }
 
+/// Re-exec isolates the inherited directory without mutating this test process's
+/// environment (other adapter tests can run concurrently).
+#[tokio::test]
+async fn build_wait_environment_is_scoped_to_the_launched_run() {
+    const CHILD: &str = "HARNESS_TEST_BUILD_WAIT_ENV_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = tokio::time::timeout(
+            Duration::from_secs(30),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "build_wait_environment_is_scoped_to_the_launched_run",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("HARNESS_BUILD_WAIT_DIR", "/synthetic/parent-run")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("isolated test completes")
+        .expect("isolated test starts");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let origin = || harness_adapters::RunOrigin {
+        chat_id: "synthetic-chat".into(),
+        build_wait_dir: Some("/synthetic/current-run".into()),
+    };
+    for (origin, expected, title) in [
+        (Some(origin()), "build-wait:/synthetic/current-run", false),
+        (
+            Some(harness_adapters::RunOrigin::default()),
+            "build-wait:unset",
+            false,
+        ),
+        (None, "build-wait:unset", false),
+        (Some(origin()), "build-wait:unset", true),
+    ] {
+        let (mut controls, _steer, _token) = controls("A");
+        controls.origin = origin;
+        let agent = harness();
+        let req = request("scenario:build-wait-env");
+        let stream = if title {
+            agent.run_title(req, controls).await
+        } else {
+            agent.run(req, controls).await
+        }
+        .expect("run starts");
+        let events = tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.map(|event| event.unwrap()).collect::<Vec<_>>(),
+        )
+        .await
+        .expect("run completes");
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into(),
+            }),
+            "title={title}: {events:?}"
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".build-wait-env"), "probe").unwrap();
+    harness().commands_for(dir.path()).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".build-wait-env-observed")).unwrap(),
+        "unset"
+    );
+}
+
 #[tokio::test]
 async fn happy_path_normalizes_events_and_tags_subagents() {
     let (controls, _steer, _token) = controls("A");
@@ -469,6 +545,7 @@ async fn turn_interrupt_ends_the_turn_and_keeps_the_process() {
     let (mut controls, steer, _token) = controls("A");
     controls.origin = Some(harness_adapters::RunOrigin {
         chat_id: "turn-chat".into(),
+        ..Default::default()
     });
     assert!(!harness.interrupt_turn("turn-chat"), "no run yet");
     let mut stream = harness

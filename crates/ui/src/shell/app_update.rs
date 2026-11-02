@@ -3,6 +3,11 @@
 //! nothing would be interrupted, and the one-time "Updated" confirmation on
 //! the version it restarted into.
 //!
+//! Automatic updates stay out of sight: no control while an update downloads
+//! or waits for its own restart, and no heads-up for a restart while another
+//! app is in front. The control shows only when the person has something to
+//! do (a failure, updates set to manual, or "Later" chosen).
+//!
 //! The rules live in pure functions ([`update_control`],
 //! [`auto_restart_decision`], [`updated_confirmation`]) with their own tests;
 //! the shell only gathers their inputs and acts on the answer.
@@ -53,18 +58,19 @@ pub(super) enum UpdateControl {
     Advisory,
     /// Desktop install with automatic updates off: a click downloads.
     Available,
+    /// A download the person started (automatic ones show nothing).
     Downloading,
-    /// Staged. `auto` = it restarts on its own in a quiet window;
-    /// `on_quit` = otherwise it installs when Harness quits.
+    /// Staged, and it won't restart into it on its own. `on_quit` = it
+    /// installs when Harness quits.
     Ready {
-        auto: bool,
         on_quit: bool,
     },
     Failed(SharedString),
 }
 
 /// The control for this frame and the version it is about, or `None` when
-/// there is nothing to show. Pure.
+/// there is nothing to show. `postponed` is the version "Later" was chosen
+/// for. Pure.
 pub(super) fn update_control(
     status: Option<&harness_update::UpdateStatus>,
     flow: &UpdateFlow,
@@ -72,18 +78,27 @@ pub(super) fn update_control(
     dismissed: Option<&str>,
     env_auto_update: bool,
     restart_setting: bool,
+    postponed: Option<&str>,
 ) -> Option<(UpdateControl, String)> {
     if desktop_update {
         match flow {
+            // It restarts into the update on its own: nothing to do.
+            UpdateFlow::Ready(staged)
+                if env_auto_update
+                    && restart_setting
+                    && postponed != Some(staged.version.as_str()) =>
+            {
+                return None;
+            }
             UpdateFlow::Ready(staged) => {
                 return Some((
                     UpdateControl::Ready {
-                        auto: env_auto_update && restart_setting,
                         on_quit: env_auto_update,
                     },
                     staged.version.clone(),
                 ));
             }
+            UpdateFlow::Downloading if env_auto_update => return None,
             UpdateFlow::Downloading | UpdateFlow::Failed(_) | UpdateFlow::Idle => {}
         }
     }
@@ -113,17 +128,12 @@ pub(super) fn update_control_label(control: &UpdateControl, version: &str) -> St
             format!("Harness v{version} is available. Click to download it.")
         }
         UpdateControl::Downloading => format!("Downloading v{version}…"),
-        UpdateControl::Ready { auto: true, .. } => format!(
-            "v{version} is ready — Harness restarts to install it when you're idle. Click to restart now."
-        ),
-        UpdateControl::Ready {
-            auto: false,
-            on_quit: true,
-        } => format!("v{version} is ready — it installs when you quit. Click to restart now."),
-        UpdateControl::Ready {
-            auto: false,
-            on_quit: false,
-        } => format!("v{version} is ready. Click to restart and install it."),
+        UpdateControl::Ready { on_quit: true } => {
+            format!("v{version} is ready — it installs when you quit. Click to restart now.")
+        }
+        UpdateControl::Ready { on_quit: false } => {
+            format!("v{version} is ready. Click to restart and install it.")
+        }
         UpdateControl::Failed(message) => {
             format!("Updating to v{version} failed: {message}. Click to try again.")
         }
@@ -286,6 +296,9 @@ pub(super) fn updated_confirmation(
 
 /// The shell's app-update UI state beyond the download flow itself.
 pub(super) struct AppUpdateUi {
+    /// Render an inert ready-update button for manual layout testing in a
+    /// debug build. This never stages an update or starts a restart watcher.
+    pub dev_preview: bool,
     /// "Later" was chosen for this version: no automatic restart for it (it
     /// still installs on quit).
     pub postponed: Option<String>,
@@ -305,6 +318,8 @@ pub(super) struct AppUpdateUi {
 impl AppUpdateUi {
     pub(super) fn new() -> Self {
         Self {
+            dev_preview: cfg!(debug_assertions)
+                && std::env::var("HARNESS_DEV_APP_UPDATE").as_deref() == Ok("1"),
             postponed: None,
             countdown_started: None,
             watch: None,
@@ -403,6 +418,9 @@ impl Shell {
     }
 
     fn update_control_now(&self, cx: &App) -> Option<(UpdateControl, String)> {
+        if self.app_update.dev_preview {
+            return Some((UpdateControl::Ready { on_quit: false }, "preview".into()));
+        }
         update_control(
             self.state.read(cx).update.as_ref(),
             &self.update_flow,
@@ -410,6 +428,7 @@ impl Shell {
             self.update_dismissed.as_deref(),
             harness_update::desktop_auto_update_enabled(),
             settings::with_current(cx, |s| s.restart_to_install_updates),
+            self.app_update.postponed.as_deref(),
         )
     }
 
@@ -423,15 +442,32 @@ impl Shell {
         }
     }
 
+    /// Width the titlebar's left cluster gains for the cloud and update
+    /// controls, for the rows that start past the cluster.
+    pub(super) fn titlebar_extra_slots(&self, cx: &App) -> f32 {
+        self.titlebar_cloud_slot(cx) + self.titlebar_update_slot(cx)
+    }
+
+    /// How many of those controls show.
+    pub(super) fn titlebar_extra_slot_count(&self, cx: &App) -> usize {
+        usize::from(self.titlebar_cloud_slot(cx) > 0.0)
+            + usize::from(self.titlebar_update_slot(cx) > 0.0)
+    }
+
     /// The update control in the titlebar's left cluster, at the cluster's
     /// 24px button geometry. Hidden when there is no update.
     pub(super) fn render_update_control(
         &mut self,
         theme: &Theme,
+        control_gap: f32,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let (control, version) = self.update_control_now(cx)?;
-        let label = update_control_label(&control, &version);
+        let label = if self.app_update.dev_preview {
+            "Update button preview — no download, install or restart.".into()
+        } else {
+            update_control_label(&control, &version)
+        };
         let tone = match control {
             UpdateControl::Downloading => theme.text_muted,
             UpdateControl::Failed(_) => theme.danger,
@@ -440,7 +476,8 @@ impl Shell {
             }
         };
         let ready = matches!(control, UpdateControl::Ready { .. });
-        let clickable = !matches!(control, UpdateControl::Downloading);
+        let clickable =
+            !self.app_update.dev_preview && !matches!(control, UpdateControl::Downloading);
         let fade_key = "window-control-titlebar-update";
         let mut button = div()
             .id("titlebar-update")
@@ -498,7 +535,7 @@ impl Shell {
         Some(
             div()
                 .flex_none()
-                .ml(px(TITLEBAR_GROUP_GAP))
+                .ml(px(control_gap))
                 .child(button)
                 .into_any_element(),
         )
@@ -578,6 +615,12 @@ impl Shell {
         let now = Instant::now();
         let decision = auto_restart_decision(&self.restart_inputs_now(now, cx));
         match (decision, self.app_update.countdown_started) {
+            // Working in another app: restart behind it, without a heads-up
+            // the person wouldn't see.
+            (AutoRestart::Restart, None) if cx.active_window().is_none() => {
+                self.restart_into_update_now(true, cx);
+                self.still_staged()
+            }
             (AutoRestart::Restart, None) => {
                 self.app_update.countdown_started = Some(now);
                 cx.notify();
@@ -589,7 +632,7 @@ impl Shell {
                 self.app_update.countdown_started = None;
                 let background = cx.active_window().is_none();
                 self.restart_into_update_now(background, cx);
-                None
+                self.still_staged()
             }
             (AutoRestart::Restart, Some(_)) => {
                 cx.notify();
@@ -602,6 +645,12 @@ impl Shell {
             }
             (_, None) => Some(AUTO_RESTART_POLL),
         }
+    }
+
+    /// After a restart attempt: keep watching if it backed out (an unsaved
+    /// edit appeared) and left the update staged.
+    fn still_staged(&self) -> Option<Duration> {
+        matches!(self.update_flow, UpdateFlow::Ready(_)).then_some(AUTO_RESTART_POLL)
     }
 
     /// The automatic restart itself. Re-checks unsaved edits at the last
@@ -822,6 +871,7 @@ mod tests {
             update_available: available,
             checked_at: None,
             error: None,
+            host: None,
         }
     }
 
@@ -839,7 +889,7 @@ mod tests {
                        flow: &UpdateFlow,
                        desktop: bool,
                        dismissed: Option<&str>| {
-            update_control(status, flow, desktop, dismissed, true, true)
+            update_control(status, flow, desktop, dismissed, true, true, None)
         };
         assert_eq!(control(None, &UpdateFlow::Idle, true, None), None);
         assert_eq!(
@@ -856,8 +906,21 @@ mod tests {
             control(Some(&available), &UpdateFlow::Idle, true, None),
             Some((UpdateControl::Available, v.clone()))
         );
+        // An automatic download shows nothing; one the person started does.
         assert_eq!(
             control(Some(&available), &UpdateFlow::Downloading, true, None),
+            None
+        );
+        assert_eq!(
+            update_control(
+                Some(&available),
+                &UpdateFlow::Downloading,
+                true,
+                None,
+                false,
+                true,
+                None
+            ),
             Some((UpdateControl::Downloading, v.clone()))
         );
         assert_eq!(
@@ -869,41 +932,62 @@ mod tests {
             ),
             Some((UpdateControl::Failed("offline".into()), v.clone()))
         );
-        // Staged: the staged version, even if the feed moved on since.
+        // Staged for its own restart: nothing to show.
         assert_eq!(
-            control(
+            control(Some(&available), &ready("0.2.135"), true, None),
+            None
+        );
+        // Staged and waiting on the person: the staged version, even if the
+        // feed moved on since.
+        let later = Some("0.2.135");
+        assert_eq!(
+            update_control(
                 Some(&status("0.2.136", true)),
                 &ready("0.2.135"),
                 true,
+                None,
+                true,
+                true,
+                later
+            ),
+            Some((UpdateControl::Ready { on_quit: true }, v.clone()))
+        );
+        assert_eq!(
+            update_control(
+                Some(&available),
+                &ready("0.2.135"),
+                true,
+                None,
+                true,
+                true,
+                Some("0.2.134")
+            ),
+            None,
+            "Later for an older version doesn't hold this one"
+        );
+        assert_eq!(
+            update_control(
+                Some(&available),
+                &ready("0.2.135"),
+                true,
+                None,
+                true,
+                false,
                 None
             ),
-            Some((
-                UpdateControl::Ready {
-                    auto: true,
-                    on_quit: true
-                },
-                v.clone()
-            ))
+            Some((UpdateControl::Ready { on_quit: true }, v.clone()))
         );
         assert_eq!(
-            update_control(Some(&available), &ready("0.2.135"), true, None, true, false),
-            Some((
-                UpdateControl::Ready {
-                    auto: false,
-                    on_quit: true
-                },
-                v.clone()
-            ))
-        );
-        assert_eq!(
-            update_control(Some(&available), &ready("0.2.135"), true, None, false, true),
-            Some((
-                UpdateControl::Ready {
-                    auto: false,
-                    on_quit: false
-                },
-                v.clone()
-            ))
+            update_control(
+                Some(&available),
+                &ready("0.2.135"),
+                true,
+                None,
+                false,
+                true,
+                None
+            ),
+            Some((UpdateControl::Ready { on_quit: false }, v.clone()))
         );
         // Report-only installs stay advisory until that version is dismissed.
         assert_eq!(
@@ -930,18 +1014,11 @@ mod tests {
         let label = |control| update_control_label(&control, "0.2.135");
         assert_eq!(label(UpdateControl::Downloading), "Downloading v0.2.135…");
         assert_eq!(
-            label(UpdateControl::Ready {
-                auto: true,
-                on_quit: true
-            }),
-            "v0.2.135 is ready — Harness restarts to install it when you're idle. Click to restart now."
+            label(UpdateControl::Ready { on_quit: true }),
+            "v0.2.135 is ready — it installs when you quit. Click to restart now."
         );
         assert!(
-            label(UpdateControl::Ready {
-                auto: false,
-                on_quit: true
-            })
-            .contains("installs when you quit")
+            label(UpdateControl::Ready { on_quit: false }).contains("Click to restart and install")
         );
         assert!(
             label(UpdateControl::Failed("offline".into())).contains("offline. Click to try again.")

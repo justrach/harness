@@ -498,10 +498,15 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return false;
         }
+        // Compare what dispatch would actually run: the live runtime was
+        // baked from a request carrying the device's autonomy, not the
+        // sandbox the sender stamped.
+        let mut request = request.clone();
+        self.inner.registry.autonomy().apply(&mut request);
         lock(&self.inner.runs).get(chat_id).is_some_and(|h| {
             !(h.steerable
                 && h.runtime_config
-                    .can_route(harness_id, request, h.steers_attachments))
+                    .can_route(harness_id, &request, h.steers_attachments))
         })
     }
 
@@ -581,6 +586,12 @@ impl SessionsEngine {
         mut message_id: Option<String>,
         startup_retry: bool,
     ) -> Result<String, EngineError> {
+        // The device's default autonomy decides what every run may do,
+        // whatever sandbox the sender stamped (clients have always sent
+        // workspace-write while agents ran unattended). Stamped before the
+        // runtime-config comparison below, so changing the setting replaces
+        // a live runtime on its next send instead of steering into it.
+        self.inner.registry.autonomy().apply(&mut request);
         // Imported Claude Code / Codex chats always run in graff — callers
         // that bypass the doc host (MCP send_message, crash recovery) reach
         // dispatch with the source harness still named.
@@ -719,12 +730,32 @@ impl SessionsEngine {
 
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
-        // An imported chat's first graff turn carries the earlier transcript
-        // as read-only context; read the doc before the new user row lands.
-        let seed_entries = crate::external_history::continues_in_graff(chat_id)
-            .then(|| handle.doc().read_entries())
-            .and_then(Result::ok);
+        // A different checkout cannot resume the old native session. Carry
+        // the transcript read-only rather than silently dropping its context.
+        let moved_checkout = self
+            .inner
+            .workspace()
+            .and_then(|workspace| workspace.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| {
+                chat.source_context
+                    .as_ref()
+                    .is_some_and(|source| !same_dir(&source.cwd, &request.cwd))
+                    || chat
+                        .harness_session_cwd
+                        .as_deref()
+                        .is_some_and(|cwd| !cwd.is_empty() && !same_dir(cwd, &request.cwd))
+            });
+        let imported = crate::external_history::continues_in_graff(chat_id);
         let user_id = message_id.unwrap_or_else(new_id);
+        let seed_entries = (imported || moved_checkout)
+            .then(|| handle.doc().read_entries())
+            .and_then(Result::ok)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .filter(|entry| entry.id != user_id)
+                    .collect::<Vec<_>>()
+            });
         self.inner.journal.record_pending_turn_origin(chat_id, &user_id, request.turn_origin, false);
         handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         self.inner.journal.record_confirmed_turn_origin(chat_id, &user_id, request.turn_origin);
@@ -748,8 +779,11 @@ impl SessionsEngine {
             && let Some(entries) = seed_entries
             && !entries.is_empty()
         {
-            request.prompt =
-                crate::external_history::seed_prompt(chat_id, &entries, &request.prompt);
+            request.prompt = if imported {
+                crate::external_history::seed_prompt(chat_id, &entries, &request.prompt)
+            } else {
+                crate::external_history::seed_checkout_prompt(&entries, &request.prompt)
+            };
         }
         lock(&self.inner.last_requests).insert(chat_id.to_string(), request.clone());
 
@@ -800,6 +834,7 @@ impl SessionsEngine {
         let controls = RunControls {
             origin: Some(harness_adapters::RunOrigin {
                 chat_id: chat_id.to_string(),
+                ..Default::default()
             }),
             request_input,
             steering: steer_rx,
@@ -1788,6 +1823,9 @@ impl Inner {
         {
             host.pause_queue_after_failure(chat_id);
         }
+        if status != SessionStatus::Working {
+            self.set_build_wait(chat_id, None);
+        }
         let now = Utc::now();
         let session = {
             let mut statuses = lock(&self.statuses);
@@ -1858,6 +1896,17 @@ impl Inner {
         // remote devices' sidebars show this run (staleness-checked client-side).
         if let Some(ws) = self.workspace() {
             ws.record_session(&session);
+        }
+    }
+
+    fn set_build_wait(&self, chat_id: &str, since: Option<i64>) {
+        match since {
+            Some(since) => {
+                let item = harness_proto::build_wait::build_wait_item(since);
+                self.set_tool_progress(chat_id, &item.tool_id, &item.output, item.state.as_deref());
+            }
+            None => self
+                .clear_tool_progress(chat_id, Some(harness_proto::build_wait::BUILD_WAIT_TOOL_ID)),
         }
     }
 
@@ -2139,6 +2188,7 @@ impl Inner {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
+            self.set_build_wait(chat_id, None);
         }
         drop(runs);
         if let Some(link) = self.browse_link.get() {
@@ -2683,7 +2733,7 @@ async fn drive_run(
     harness: Arc<dyn Harness>,
     mut request: RunRequest,
     doc: crate::doc_host::DocWriter,
-    controls: RunControls,
+    mut controls: RunControls,
     mut engine_rx: mpsc::UnboundedReceiver<AgentEvent>,
     mut image_rx: mpsc::Receiver<ShowImageRequest>,
     mut visual_rx: mpsc::Receiver<ShowVisualRequest>,
@@ -2724,6 +2774,20 @@ async fn drive_run(
     } else {
         Ok(())
     };
+    // Every run gets a private signal directory. The wrapper writes only while
+    // waiting for a real lock; retiring the run removes abandoned markers too.
+    let build_wait = match crate::build_wait::BuildWaitMonitor::new() {
+        Ok(monitor) => Some(monitor),
+        Err(error) => {
+            tracing::warn!(%error, "build queue status unavailable");
+            None
+        }
+    };
+    if let Some(origin) = controls.origin.as_mut() {
+        origin.build_wait_dir = build_wait
+            .as_ref()
+            .map(|monitor| monitor.path().to_path_buf());
+    }
     let started = match prepared {
         Ok(()) => {
             let mut wire_request = request;
@@ -2822,6 +2886,10 @@ async fn drive_run(
     // so the gate still catches real crashes. touch_session throttles at 10s.
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut build_wait_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+    build_wait_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut published_build_wait = None;
+    let mut model_work_in_flight = false;
     // PERSISTENT SESSION (harness runsBySession): a completed turn on a
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
@@ -3023,6 +3091,8 @@ async fn drive_run(
                 changed = cancel_rx.changed(), if !interrupted => {
                     let _ = changed;
                     interrupted = true;
+                    inner.set_build_wait(&chat_id, None);
+                    published_build_wait = None;
                     interrupt_deadline = Some(
                         tokio::time::Instant::now() + std::time::Duration::from_secs(3),
                     );
@@ -3036,6 +3106,20 @@ async fn drive_run(
                     error: None,
                     session_id: None,
                 },
+                _ = build_wait_poll.tick(), if build_wait.is_some() && idle_since.is_none() => {
+                    let working = lock(&inner.statuses).get(&chat_id)
+                        .is_some_and(|session| session.status == SessionStatus::Working);
+                    let since = if !interrupted && !model_work_in_flight && working {
+                        build_wait.as_ref().and_then(|monitor| monitor.since(Utc::now().timestamp()))
+                    } else {
+                        None
+                    };
+                    if published_build_wait != since {
+                        inner.set_build_wait(&chat_id, since);
+                        published_build_wait = since;
+                    }
+                    continue;
+                }
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
                     live_background.retain(|_, started| started.elapsed() < background_hold_max);
@@ -3832,6 +3916,25 @@ async fn drive_run(
             retry_request = None;
             event = runaway_chain_done(self_resumes, elapsed);
         }
+        // A queued background command must not mask real concurrent model
+        // work. Positive model output owns the status until a request/tool
+        // boundary, not until an arbitrary silence timeout. Empty heartbeats
+        // alone still establish no phase beyond the explicit queue marker.
+        match &event {
+            AgentEvent::ReasoningDelta { text } | AgentEvent::TextDelta { text }
+                if !text.is_empty() =>
+            {
+                model_work_in_flight = true;
+                if published_build_wait.take().is_some() {
+                    inner.set_build_wait(&chat_id, None);
+                }
+            }
+            AgentEvent::ToolCall { .. }
+            | AgentEvent::Usage { .. }
+            | AgentEvent::AssistantMessageCompleted { .. }
+            | AgentEvent::Done { .. } => model_work_in_flight = false,
+            _ => {}
+        }
         // Empty reasoning deltas are PURE heartbeats: redacted thinking and
         // tool-input-generation windows stream them with no text. They fold
         // to nothing, so journaling/publishing them is only noise (hundreds
@@ -3848,7 +3951,10 @@ async fn drive_run(
                 continue;
             }
             AgentEvent::ToolResult { id, .. } => inner.clear_tool_progress(&chat_id, Some(id)),
-            AgentEvent::Done { .. } => inner.clear_tool_progress(&chat_id, None),
+            AgentEvent::Done { .. } => {
+                inner.clear_tool_progress(&chat_id, None);
+                published_build_wait = None;
+            }
             _ => {}
         }
 

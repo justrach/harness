@@ -1,0 +1,28 @@
+{
+ "width": 1200, "height": 780, "dark": true, "scale": 2,
+ "devices": [{"id": "d", "name": "Studio"}],
+ "spaces": [{"id": "s", "deviceId": "d", "path": "/work/fieldnotes"}],
+ "chats": [{"id": "a", "deviceId": "d", "title": "Synthetic conversation", "archived": false, "spaceId": "s"}],
+ "open": "a",
+ "transcripts": {
+  "a": [
+   {"id": "u", "role": "user", "parts": [{"id": "p", "kind": "text", "text": "Keep this conversation open beside a new session."}]},
+   {"id": "a", "role": "assistant", "status": "complete", "parts": [{"id": "p", "kind": "text", "text": "The synthetic conversation stays visible."}]}
+  ]
+ },
+ "steps": [
+  {"snap": "chat"},
+  {"press": "cmd+d"},
+  {"expect": "The synthetic conversation stays visible."},
+  {"snap": "split"},
+  {"click": "The synthetic conversation stays visible."},
+  {"type": "Follow-up question"},
+  {"expect": "Follow-up question"},
+  {"expect": "Empty pane"},
+  {"snap": "focused-chat"},
+  {"press": "cmd+w"},
+  {"expectNot": "The synthetic conversation stays visible."},
+  {"expect": "New session in"},
+  {"snap": "closed-pane"}
+ ]
+}

@@ -8,11 +8,16 @@ import SwiftUI
 struct HarnessApp: App {
     /// APNs registration and notification taps (PushNotifications).
     @UIApplicationDelegateAdaptor(HarnessAppDelegate.self) private var appDelegate
-    @State private var model = AppModel()
+    @State private var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
         Perf.shared.startWatching()
+        PhoneSplit.migrateStored()
+        let model = AppModel()
+        _model = State(initialValue: model)
+        // A Watch message can launch the app with no window to restore from.
+        WatchBridge.shared.attach(model)
     }
 
     var body: some Scene {
@@ -80,6 +85,16 @@ struct RootView: View {
                                 await model.untilSessionsChange()
                             }
                         }
+                    }
+                    // First-run setup after a fresh sign-in (Settings replays it).
+                    .fullScreenCover(isPresented: Binding(
+                        get: { model.setupPresented },
+                        set: { model.setupPresented = $0 }
+                    )) {
+                        OnboardingView { model.setupPresented = false }
+                            .environment(model)
+                            .harnessAppearance()
+                            .tint(Theme.text)
                     }
             }
         }

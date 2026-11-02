@@ -34,6 +34,13 @@ pub enum HarnessError {
     ReauthRequired {
         provider: harness_proto::ReauthProvider,
     },
+    /// graff's typed `api_key_rejected` failure ([`harness_proto::KeyRejected`]):
+    /// the provider rejected the API key graff used, and the sign-in is fine.
+    /// The text always reads as [`harness_proto::run_errors::ProviderProblem::KeyRejected`]
+    /// ([`harness_proto::run_errors::key_rejected_message`]), so the chat gets
+    /// the "Update key" card rather than "Signed out".
+    #[error("{message}")]
+    KeyRejected { provider: String, message: String },
     /// A managed adapter install (npm) failed; carries npm's own output so
     /// the cause is diagnosable from the chat error alone.
     #[error("adapter install failed: {0}")]
@@ -103,9 +110,12 @@ pub struct RunControls {
 }
 
 /// See [`RunControls::origin`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunOrigin {
     pub chat_id: String,
+    /// Per-run directory for build-wrapper wait markers (`<pid>` files whose
+    /// contents are Unix seconds). Never inherited from the host process.
+    pub build_wait_dir: Option<std::path::PathBuf>,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.
@@ -241,6 +251,8 @@ mod model_context;
 pub mod opencode;
 pub mod pi;
 pub mod process;
+mod run_environment;
+pub(crate) use run_environment::apply_run_environment;
 mod scratch;
 pub mod shell_env;
 pub mod tui_bundle;

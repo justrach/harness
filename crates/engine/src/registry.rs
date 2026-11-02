@@ -17,7 +17,7 @@ use std::sync::{
 use serde::{Deserialize, Serialize};
 
 use harness_adapters::{Harness, HarnessError, mock::MockHarness};
-use harness_proto::{AgentEvent, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
+use harness_proto::{AgentEvent, Autonomy, DoneStatus, HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +120,14 @@ struct HarnessPrefsFile {
     #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "known_harnesses")]
     opted_in: Vec<HarnessId>,
     titles: TitleSettings,
+    /// The default autonomy stamped onto every run on this device. `None`
+    /// (every prefs file written before the setting existed) keeps today's
+    /// full access, so existing users see no change until they pick one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    autonomy: Option<Autonomy>,
     graff_draft_subagents: bool,
+    /// Hold off idle sleep while an agent works (see `keep_awake`).
+    keep_awake: bool,
     /// graff's automatic compaction point, percent of the context window.
     #[serde(skip_serializing_if = "Option::is_none")]
     graff_compact_at: Option<u8>,
@@ -194,6 +201,8 @@ pub struct HarnessRegistry {
     graff_draft_subagents: Arc<AtomicBool>,
     /// The spawn-time view of `graff_compact_at`; 0 = graff's default.
     graff_compact_at: Arc<AtomicU8>,
+    /// Live view of `keep_awake` for the engine's power-assertion task.
+    keep_awake: tokio::sync::watch::Sender<bool>,
     /// Where the prefs persist; `None` (tests, bare registries) skips writes.
     prefs_path: Mutex<Option<PathBuf>>,
 }
@@ -213,6 +222,7 @@ impl HarnessRegistry {
             prefs: Mutex::new(HarnessPrefsFile::default()),
             graff_draft_subagents: Arc::new(AtomicBool::new(false)),
             graff_compact_at: Arc::new(AtomicU8::new(0)),
+            keep_awake: tokio::sync::watch::Sender::new(false),
             prefs_path: Mutex::new(None),
         }
     }
@@ -242,6 +252,7 @@ impl HarnessRegistry {
         let compact_at = loaded.graff_compact_at.filter(|pct| valid_compact_at(*pct));
         self.graff_compact_at
             .store(compact_at.unwrap_or(0), Ordering::Relaxed);
+        self.keep_awake.send_replace(loaded.keep_awake);
         *self.prefs() = loaded;
         *self
             .prefs_path
@@ -383,6 +394,25 @@ impl HarnessRegistry {
         self.prefs().titles.clone()
     }
 
+    /// This device's default autonomy (full access until the user picks).
+    pub fn autonomy(&self) -> Autonomy {
+        self.prefs().autonomy.unwrap_or_default()
+    }
+
+    /// Whether the user ever picked an autonomy level (onboarding or
+    /// Settings); clients use it to tell a fresh choice from the fallback.
+    pub fn autonomy_chosen(&self) -> bool {
+        self.prefs().autonomy.is_some()
+    }
+
+    /// Persist the default autonomy. Applies to runs dispatched after the
+    /// change; a live runtime is replaced on its next send because its
+    /// baked sandbox no longer matches.
+    pub fn set_autonomy(&self, autonomy: Autonomy) {
+        self.prefs().autonomy = Some(autonomy);
+        self.persist_prefs();
+    }
+
     pub fn graff_draft_subagents(&self) -> bool {
         self.prefs().graff_draft_subagents
     }
@@ -391,6 +421,21 @@ impl HarnessRegistry {
         self.prefs().graff_draft_subagents = enabled;
         self.graff_draft_subagents.store(enabled, Ordering::Relaxed);
         self.persist_prefs();
+    }
+
+    pub fn keep_awake(&self) -> bool {
+        self.prefs().keep_awake
+    }
+
+    pub fn set_keep_awake(&self, enabled: bool) {
+        self.prefs().keep_awake = enabled;
+        self.keep_awake.send_replace(enabled);
+        self.persist_prefs();
+    }
+
+    /// The setting's live value, for the task that holds the assertion.
+    pub fn watch_keep_awake(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.keep_awake.subscribe()
     }
 
     pub fn graff_compact_at(&self) -> Option<u8> {
@@ -1525,6 +1570,38 @@ mod title_tests {
             .unwrap();
         reloaded.load_prefs(dir.path());
         assert_eq!(reloaded.title_settings(), TitleSettings::default());
+    }
+
+    #[test]
+    fn autonomy_defaults_to_full_access_and_persists() {
+        let prefs: HarnessPrefsFile = serde_json::from_str(r#"{"disabled":[]}"#).unwrap();
+        assert_eq!(prefs.autonomy, None);
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert_eq!(registry.autonomy(), Autonomy::FullAccess);
+        assert!(!registry.autonomy_chosen());
+        registry.set_autonomy(Autonomy::Workspace);
+        let reloaded = HarnessRegistry::new();
+        reloaded.load_prefs(dir.path());
+        assert_eq!(reloaded.autonomy(), Autonomy::Workspace);
+        assert!(reloaded.autonomy_chosen());
+    }
+
+    #[test]
+    fn keep_awake_is_off_by_default_and_persists_to_its_watchers() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = HarnessRegistry::new();
+        registry.load_prefs(dir.path());
+        assert!(!registry.keep_awake());
+        let watch = registry.watch_keep_awake();
+        registry.set_keep_awake(true);
+        assert!(*watch.borrow());
+        let reloaded = HarnessRegistry::new();
+        let reloaded_watch = reloaded.watch_keep_awake();
+        reloaded.load_prefs(dir.path());
+        assert!(reloaded.keep_awake());
+        assert!(*reloaded_watch.borrow());
     }
 
     #[test]

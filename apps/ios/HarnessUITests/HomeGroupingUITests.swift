@@ -57,9 +57,11 @@ final class HomeGroupingUITests: XCTestCase {
 
         group(by: "Project")
         app.terminate()
+        // A choice is not kept across launches: Home opens grouped by status.
+        app.launchArguments = ["-demo", "-sethomefilter", ""]
         app.launch()
         XCTAssertTrue(groupBy.waitForExistence(timeout: 10))
-        XCTAssertEqual(groupBy.value as? String, "Time")
+        XCTAssertEqual(groupBy.value as? String, "Status")
         XCTAssertFalse(headers("project:").firstMatch.exists)
     }
 

@@ -241,6 +241,7 @@ fn probe_binary_version(path: &Path) -> Result<Option<semver::Version>, ProbeTim
         use std::process::{Command, Stdio};
         let mut command = Command::new(path);
         command
+            .env_remove("HARNESS_BUILD_WAIT_DIR")
             .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -319,6 +320,7 @@ fn probe_binary_version(path: &Path) -> Result<Option<semver::Version>, ProbeTim
             };
             runtime.block_on(async {
                 let mut command = crate::process::Command::new(&path);
+                crate::apply_run_environment(&mut command, None);
                 command
                     .arg("--version")
                     .stdin(crate::process::Stdio::null())

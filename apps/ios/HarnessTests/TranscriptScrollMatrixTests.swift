@@ -187,6 +187,23 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         TranscriptLayoutProbe.sample()
     }
 
+    /// Wait until the visible rows stop changing: a slow machine may still be
+    /// measuring after a fixed pause, and a row settling later reads as the
+    /// next change moving it.
+    private func settleLayout(timeout: Duration = .seconds(3)) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        var previous = visibleLayout()
+        var stable = 0
+        while stable < 2, clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            let current = visibleLayout()
+            stable = current == previous ? stable + 1 : 0
+            previous = current
+        }
+    }
+
     /// Apply chunk `index` (0-based) of the corpus as the streaming reply.
     private func applyChunk(_ corpus: Corpus, index: Int) {
         let chars = Array(corpus.markdown)
@@ -459,6 +476,8 @@ final class TranscriptScrollMatrixTests: XCTestCase {
             applyChunk(corpus, index: chunk)
             await settle(80)
         }
+        // Record the rows once they have settled; the claim is about the final append.
+        await settleLayout()
         let viewportTop = table.superview!.convert(table.superview!.bounds, to: window).minY
         let anchors = table.visibleCells.compactMap { cell -> (String, CGFloat, CGFloat)? in
             guard let id = cell.accessibilityIdentifier else { return nil }
@@ -490,6 +509,41 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         XCTAssertEqual(afterRows.count, beforeRows.count + 1, "the closing fence adds one trailing paragraph")
         XCTAssertEqual(Array(afterRows.prefix(beforeRows.count).map(\.id)), beforeRows.map(\.id),
                        "appending below a reader must not evict/reindex existing history rows")
+    }
+
+    /// Rows scroll beneath the top safe area (the status bar and the fading
+    /// header). A row's height must not depend on how far it overlaps that
+    /// area: a row measured there kept the extra height until something
+    /// re-measured it, so scrolling under the status bar stalled and the next
+    /// streamed chunk shrank an unchanged history row.
+    func testRowHeightsDoNotDependOnTheTopSafeArea() async {
+        let corpus = Self.corpora.first { $0.name == "long-code" }!
+        await mount(corpus)
+        applyChunk(corpus, index: 0)
+        await settle(120)
+        await drag(by: -900)
+        await settle(120)
+        XCTAssertFalse(harness.scroll.pinned)
+        XCTAssertLessThan(table.convert(table.bounds, to: window).minY, window.safeAreaInsets.top,
+                          "precondition: rows scroll beneath the top safe area")
+        var heights: [String: CGFloat] = [:]
+        var failures: [String] = []
+        for step in 0..<40 {
+            table.setContentOffset(CGPoint(x: 0, y: table.contentOffset.y - 10), animated: false)
+            table.layoutIfNeeded()
+            try? await Task.sleep(for: .milliseconds(16))
+            for cell in table.visibleCells {
+                guard let id = cell.accessibilityIdentifier else { continue }
+                let top = table.convert(cell.frame, to: window).minY
+                guard let height = heights[id] else { heights[id] = cell.bounds.height; continue }
+                if abs(cell.bounds.height - height) > 0.5 {
+                    failures.append("step \(step) \(id): \(height) -> \(cell.bounds.height) at y=\(top)")
+                    heights[id] = cell.bounds.height
+                }
+            }
+        }
+        XCTAssertTrue(failures.isEmpty, "unchanged rows changed height while scrolling:\n"
+                      + failures.joined(separator: "\n"))
     }
 
     /// A structural (non-append) row change while reading history must not

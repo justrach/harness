@@ -18,6 +18,7 @@ use harness_sync::DocsStore;
 pub mod agent_accounts;
 pub mod auth;
 pub mod browse_link;
+mod build_wait;
 pub mod change_requests;
 pub mod chat2_host;
 pub mod codegraff_auth;
@@ -29,7 +30,9 @@ pub mod external_history;
 mod graff_logins;
 mod http_error;
 pub mod instance_lock;
+pub mod keep_awake;
 pub mod local_import;
+pub mod localhost_view;
 pub mod mcp_servers;
 mod model_catalogs;
 pub mod profile;
@@ -156,6 +159,8 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     /// iOS Simulators on this computer, watched and driven from other devices.
     pub simulators: simulators::Simulators,
+    /// Pages this computer serves on localhost, viewed from other devices.
+    pub localhost_view: localhost_view::LocalhostView,
     pub device_id: String,
     /// Local→synced profile import (account-scoped runtimes only).
     pub local_import: Option<local_import::LocalImporter>,
@@ -171,6 +176,9 @@ pub struct EngineCore {
     updater: std::sync::Mutex<Option<harness_update::Updater>>,
     /// The updater's token-change wake forwarder — owned so shutdown can end it.
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Holds the Mac awake while agents work (see [`keep_awake`]); owned so
+    /// shutdown releases the assertion.
+    keep_awake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -283,6 +291,7 @@ impl EngineCore {
             WorkspaceFiles::new(repos.clone(), workspace.clone(), device_id.clone());
         let terminals = Terminals::new();
         let simulators = simulators::Simulators::new(data_dir.join("tools"));
+        let localhost_view = localhost_view::LocalhostView::new(device_name.clone());
         let project_actions = ProjectActionsStore::open(profile.store_root())?;
         doc_host.set_project_action_runtime(project_actions.clone(), terminals.clone());
         let previews = harness_preview::PreviewService::new(
@@ -364,6 +373,7 @@ impl EngineCore {
             uploads,
             agent_accounts,
             simulators,
+            localhost_view,
             device_id,
             local_import,
             external_history,
@@ -372,6 +382,7 @@ impl EngineCore {
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
             updater_wake: std::sync::Mutex::new(None),
+            keep_awake: std::sync::Mutex::new(None),
             _instance_lock: lock,
         })
     }
@@ -430,6 +441,19 @@ impl EngineCore {
             .updater_wake
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// Start holding the machine awake while agents work, when the setting
+    /// says so.
+    fn start_keep_awake(&self) {
+        let task = keep_awake::spawn(
+            self.sessions.watch_sessions(),
+            self.registry.watch_keep_awake(),
+        );
+        *self
+            .keep_awake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 
     pub fn set_updater(&self, updater: harness_update::Updater) {
@@ -514,7 +538,8 @@ impl EngineCore {
         )
         .with_auth(self.auth())
         .with_previews(self.previews.clone())
-        .with_simulators(self.simulators.clone());
+        .with_simulators(self.simulators.clone())
+        .with_localhost_view(self.localhost_view.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
@@ -555,6 +580,7 @@ impl EngineCore {
         self.previews.shutdown().await;
         self.terminals.shutdown();
         self.simulators.shutdown().await;
+        self.localhost_view.shutdown().await;
         self.agent_accounts.shutdown();
         self.change_requests.shutdown();
         // Cancel + await every worker that can reach Edge before flushing: a
@@ -568,6 +594,15 @@ impl EngineCore {
         if let Some(wake) = wake {
             wake.abort();
             let _ = wake.await;
+        }
+        let keep_awake = self
+            .keep_awake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(keep_awake) = keep_awake {
+            keep_awake.abort();
+            let _ = keep_awake.await;
         }
         let updater = self
             .updater
@@ -886,6 +921,7 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
+        core.start_keep_awake();
         // Installed desktop bundles and managed servers use a public stable
         // release feed, so update checks also run for local-only, signed-out
         // workspaces.

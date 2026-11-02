@@ -1,0 +1,148 @@
+{
+    "name": "settings-archived-data",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        },
+        {
+            "id": "z0",
+            "deviceId": "scene-device",
+            "title": "Draft the changelog",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-20T10:00:00Z",
+            "createdAt": "2026-10-20T10:00:00Z"
+        },
+        {
+            "id": "z1",
+            "deviceId": "scene-device",
+            "title": "Benchmark the parser",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-12T08:30:00Z",
+            "createdAt": "2026-10-12T08:30:00Z"
+        },
+        {
+            "id": "z2",
+            "deviceId": "scene-device",
+            "title": "Old onboarding notes",
+            "archived": true,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-09-02T16:00:00Z",
+            "createdAt": "2026-09-02T16:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 18,
+            "y": 762
+        },
+        {
+            "do": "click",
+            "x": 100,
+            "y": 750
+        },
+        {
+            "do": "click",
+            "x": 60,
+            "y": 583
+        },
+        {
+            "do": "hover",
+            "x": 1150,
+            "y": 20
+        },
+        {
+            "do": "hover",
+            "x": 700,
+            "y": 331
+        },
+        {
+            "do": "click",
+            "x": 1036,
+            "y": 124
+        },
+        {
+            "do": "key",
+            "keys": "escape"
+        },
+        {
+            "do": "hover",
+            "x": 1040,
+            "y": 126
+        }
+    ]
+}

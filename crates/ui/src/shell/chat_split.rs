@@ -422,6 +422,41 @@ pub(super) struct ChatPanePress {
     zoomed: bool,
 }
 
+/// Label on the pane that takes your typing while the column is split.
+pub(super) const FOCUS_CUE_LABEL: &str = "Typing here";
+
+/// The focused pane's cue: an accent rule along its top edge and a small
+/// solid "Typing here" tag under the titlebar. Never intercepts the mouse.
+fn focus_cue(theme: &Theme) -> AnyElement {
+    div()
+        .absolute()
+        .top(px(Theme::TITLEBAR_HEIGHT - 2.0))
+        .left_0()
+        .right_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(div().w_full().h(px(2.0)).bg(theme.accent))
+        .child(
+            div()
+                .mt(px(4.0))
+                .h(px(20.0))
+                .px(px(8.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(5.0))
+                .rounded(px(10.0))
+                .bg(theme.accent_wash)
+                .text_size(crate::typography::ui_rems(11.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.accent)
+                .child(div().size(px(6.0)).rounded_full().bg(theme.accent))
+                .child(SharedString::from(FOCUS_CUE_LABEL)),
+        )
+        .into_any_element()
+}
+
 /// A live read-only transcript for one unfocused pane's chat.
 pub(super) struct PeerChatView {
     pub transcript: Entity<Transcript>,
@@ -516,8 +551,8 @@ impl Shell {
         // selection, folds, and scroll animation belong to it, not a new view.
         let incoming = target.as_ref().and_then(|id| self.peer_chat_views.remove(id));
         if let Some(id) = selected.as_ref() {
-            self.transcript.update(cx, |transcript, _| {
-                transcript.set_split_source(Some(id.clone()));
+            self.transcript.update(cx, |transcript, cx| {
+                transcript.set_split_source(Some(id.clone()), cx);
             });
         }
         self.state.update(cx, |s, cx| s.select_split_chat(target.clone(), cx));
@@ -532,7 +567,9 @@ impl Shell {
             let events = cx.subscribe(&transcript, Self::on_transcript_event);
             PeerChatView { transcript, _events: events }
         });
-        incoming.transcript.update(cx, |transcript, _| transcript.set_split_source(None));
+        incoming
+            .transcript
+            .update(cx, |transcript, cx| transcript.set_split_source(None, cx));
         let outgoing = PeerChatView {
             transcript: std::mem::replace(&mut self.transcript, incoming.transcript),
             _events: std::mem::replace(&mut self._transcript_events, incoming._events),
@@ -654,10 +691,9 @@ impl Shell {
         self.close_focused_chat_view(window, cx)
     }
 
-    /// The two close shortcuts share view/history handling, not their archive
-    /// policy: ⌘W (`may_archive`) follows the archive-on-close setting like
-    /// the ✕ buttons, and ⌘⌥W never archives. Include the final
-    /// session-to-canvas close in both.
+    /// The two close shortcuts share view/history handling. ⌘W supplies the
+    /// saved archive-on-close preference; ⌘⌥W never archives. Include the
+    /// final session-to-canvas close in both.
     pub(crate) fn close_chat_view_with_archive(
         &mut self,
         may_archive: bool,
@@ -673,7 +709,7 @@ impl Shell {
             && may_archive
             && let Some(chat_id) = closing
         {
-            self.archive_closed_session(chat_id, window, cx);
+            self.archive_closed_session_if_idle(chat_id, window, cx);
         }
         closed
     }
@@ -780,6 +816,19 @@ impl Shell {
         }
     }
 
+    /// Hidden panes keep receiving engine data, but do no presentation work.
+    pub(super) fn sync_chat_pane_visibility(&self, cx: &mut Context<Self>) {
+        let visible =
+            self.chat_split_active() && self.chat_split.as_ref().is_some_and(|split| !split.zoomed);
+        for peer in self.peer_chat_views.values() {
+            if peer.transcript.read(cx).background_pane_visible() != visible {
+                peer.transcript.update(cx, |transcript, cx| {
+                    transcript.set_background_pane_visible(visible, cx);
+                });
+            }
+        }
+    }
+
     /// Reconcile peer transcript views and their doc watches with the split.
     pub(super) fn sync_chat_panes(&mut self, cx: &mut Context<Self>) {
         // Invalidate before a temporarily changed layout/tab can be restored:
@@ -829,6 +878,7 @@ impl Shell {
                 },
             );
         }
+        self.sync_chat_pane_visibility(cx);
     }
 
     /// The focused pane's share of the conversation column width (1 unless
@@ -869,6 +919,7 @@ impl Shell {
                 children.push(
                     if horizontal { slot.flex_1().h_full() } else { slot.w_full().h(gpui::relative(share)) }
                         .child(body)
+                        .child(focus_cue(&theme))
                         .into_any_element(),
                 );
                 continue;
@@ -1105,8 +1156,9 @@ impl Shell {
                             ),
                     ),
             )
-            // Ghostty dims unfocused splits.
-            .child(div().flex_1().min_h_0().flex().flex_col().opacity(0.8).child(body))
+            // Unfocused panes stay live and readable (no dimming); the
+            // focused one carries the "Typing here" cue instead.
+            .child(div().flex_1().min_h_0().flex().flex_col().child(body))
             // Every visible pane takes dropped files, not just the focused
             // one; the drop focuses the pane it lands on (#488).
             .child(attachment_drop_veil(("chat-peer-pane-drop", ix), theme))

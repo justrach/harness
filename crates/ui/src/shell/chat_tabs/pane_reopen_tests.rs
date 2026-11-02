@@ -113,7 +113,7 @@ fn reopen_closed_pane_and_tab_archive_shortcut_matrix(cx: &mut gpui::TestAppCont
     for scope in ["pane", "tab", "last session"] {
         for preference in [false, true] {
             for cmd_w in [false, true] {
-                // ⌘W follows the archive-on-close setting; ⌘⌥W never archives.
+                // ⌘W follows the saved preference; ⌘⌥W never archives.
                 let archive = cmd_w && preference;
                 for completed in [false, true] {
                     let (_dir, window) = fixture(cx, false, None);
