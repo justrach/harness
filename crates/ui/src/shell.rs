@@ -2372,6 +2372,10 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::RevealAgent { part_id } => {
+                    this.transcript
+                        .update(cx, |t, cx| t.reveal_agent(part_id, cx));
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
