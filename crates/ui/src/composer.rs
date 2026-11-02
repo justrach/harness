@@ -12310,6 +12310,10 @@ mod cache_identity_tests;
 mod cache_lifecycle_tests;
 
 #[cfg(test)]
+#[path = "composer/cache_phase_tests.rs"]
+mod cache_phase_tests;
+
+#[cfg(test)]
 #[path = "composer/cache_state_tests.rs"]
 mod cache_state_tests;
 
