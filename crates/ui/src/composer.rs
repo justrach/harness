@@ -6177,7 +6177,7 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        probe_dictation();
+        probe_dictation(cx);
         cx.on_release(|this, cx| this.release_queue_previews(cx))
             .detach();
         let input = cx.new(|cx| {
@@ -6259,6 +6259,9 @@ impl Composer {
         });
         cx.observe_global::<crate::settings::SettingsStore>(|this, cx| {
             this.on_input_edited(cx);
+            // The shell draws the composer cached: settings it shows (send
+            // behavior, shortcuts) must redraw it.
+            cx.notify();
         })
         .detach();
         let current_key = state.read(cx).selected_chat.clone().unwrap_or_default();
@@ -10963,6 +10966,8 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::transcript::record_view_frame("composer");
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         if self.write_open {
             // The Write page renders the input (`render_write_page`); one
             // entity can't be drawn in two places.
@@ -12036,21 +12041,27 @@ pub fn set_scene_dictation_available(available: bool) {
     );
 }
 
-fn probe_dictation() {
+/// Find out once whether this device can dictate, then redraw the composer:
+/// the shell draws it cached, so a mic found later would otherwise wait for
+/// the composer's next unrelated change.
+fn probe_dictation(cx: &mut Context<Composer>) {
     #[cfg(feature = "ui-scenes")]
     if SCENE_DICTATION_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
         return;
     }
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    if cfg!(test) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if cfg!(test) || STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    STARTED.call_once(|| {
-        std::thread::spawn(|| {
-            let available = harness_adapters::DictationRuntime::detect().is_ok();
-            let _ = DICTATION_AVAILABLE.set(available);
-        });
-    });
+    cx.spawn(async move |composer, cx| {
+        let available = cx
+            .background_executor()
+            .spawn(async { harness_adapters::DictationRuntime::detect().is_ok() })
+            .await;
+        let _ = DICTATION_AVAILABLE.set(available);
+        composer.update(cx, |_, cx| cx.notify()).ok();
+    })
+    .detach();
 }
 
 impl Composer {

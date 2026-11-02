@@ -28,7 +28,7 @@
 //! transformations), so `menu-in`/`dialog-in` approximate their scale component
 //! with fade + translate; see the module report in ARCHITECTURE §4 follow-ups.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -711,6 +711,8 @@ struct FadeEntry {
     started: Instant,
     /// Frame counter at the last read (liveness stamp — see module notes).
     seen: u64,
+    /// The cached view that read it last (see [`HoverOwner`]).
+    owner: Option<EntityId>,
 }
 
 impl FadeEntry {
@@ -779,6 +781,7 @@ impl HoverFades {
         }
         let origin = if reduced { target } else { current };
         let seen = self.frame;
+        let owner = self.entries.get(key).and_then(|entry| entry.owner);
         self.entries.insert(
             key.to_string(),
             FadeEntry {
@@ -786,6 +789,7 @@ impl HoverFades {
                 target,
                 started: now,
                 seen,
+                owner,
             },
         );
     }
@@ -798,15 +802,33 @@ impl HoverFades {
 
     /// Hover progress (0..1) for `key` at `now`; stamps liveness.
     pub fn value_at(&mut self, key: &str, now: Instant) -> f32 {
+        self.value_for(key, now, None)
+    }
+
+    /// [`Self::value_at`], read while `owner` (a cached view) renders.
+    fn value_for(&mut self, key: &str, now: Instant, owner: Option<EntityId>) -> f32 {
         let frame = self.frame;
         let (duration, curve) = (self.duration(), self.spec.curve);
         match self.entries.get_mut(key) {
             Some(entry) => {
                 entry.seen = frame;
+                if owner.is_some() {
+                    entry.owner = owner;
+                }
                 entry.value(now, duration, curve)
             }
             None => 0.0,
         }
+    }
+
+    /// Whether a fade `owner` reads is mid-flight or held hovered at `now`:
+    /// the cached view must render again this frame, or its color freezes
+    /// (or, unread for a frame, the entry is pruned as unmounted).
+    pub fn owner_needs_frame(&self, owner: EntityId, now: Instant) -> bool {
+        let duration = self.duration();
+        self.entries.values().any(|entry| {
+            entry.owner == Some(owner) && (entry.target == 1.0 || !entry.settled(now, duration))
+        })
     }
 
     /// Once-per-frame bookkeeping: advance the frame counter, prune entries
@@ -874,7 +896,36 @@ pub fn reveal_listener(
 
 /// Hover progress (0..1) for `key` this frame.
 pub fn hover_t(key: &str) -> f32 {
-    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, Instant::now()))
+    let owner = HOVER_OWNER.with(Cell::get);
+    HOVER_FADES.with(|fades| fades.borrow_mut().value_for(key, Instant::now(), owner))
+}
+
+thread_local! {
+    static HOVER_OWNER: Cell<Option<EntityId>> = const { Cell::new(None) };
+}
+
+/// While alive, hover fades read on this thread belong to `owner`, a cached
+/// view. A frame that reuses the view reads none of them, so the window's
+/// root asks [`hover_needs_frame`] whether to notify it instead. Hold one
+/// across the view's render and anything it renders later (list rows).
+pub struct HoverOwner(Option<EntityId>);
+
+impl HoverOwner {
+    pub fn enter(owner: EntityId) -> Self {
+        Self(HOVER_OWNER.with(|current| current.replace(Some(owner))))
+    }
+}
+
+impl Drop for HoverOwner {
+    fn drop(&mut self) {
+        HOVER_OWNER.with(|current| current.set(self.0));
+    }
+}
+
+/// Whether a hover fade `owner` read is mid-flight or held: call after
+/// [`hover_fades_active`] in the same frame, and notify `owner` when true.
+pub fn hover_needs_frame(owner: EntityId) -> bool {
+    HOVER_FADES.with(|fades| fades.borrow().owner_needs_frame(owner, Instant::now()))
 }
 
 /// Record a hover flip for `key` (reduced motion snaps).
@@ -1402,6 +1453,28 @@ mod tests {
         let falling = fades.value_at("pill", ms(140));
         assert!(falling < after_flip, "fades back down");
         assert_eq!(fades.value_at("pill", ms(225)), 0.0, "lands at rest");
+    }
+
+    #[test]
+    fn a_hover_fade_needs_frames_only_for_the_view_that_reads_it() {
+        let mut fades = HoverFades::default();
+        let t0 = Instant::now();
+        let ms = |m: u64| t0 + Duration::from_millis(m);
+        let (owner, other) = (EntityId::from(1u64), EntityId::from(2u64));
+
+        fades.set_at("copy", true, false, t0);
+        fades.value_for("copy", t0, Some(owner));
+        assert!(fades.owner_needs_frame(owner, ms(75)), "fading in");
+        assert!(
+            !fades.owner_needs_frame(other, ms(75)),
+            "another view's fade"
+        );
+        assert!(fades.owner_needs_frame(owner, ms(400)), "held hovered");
+        // An unowned read (the shell's own) keeps the owner.
+        fades.value_at("copy", ms(400));
+        fades.set_at("copy", false, false, ms(400));
+        assert!(fades.owner_needs_frame(owner, ms(475)), "fading out");
+        assert!(!fades.owner_needs_frame(owner, ms(1000)), "settled at rest");
     }
 
     #[test]

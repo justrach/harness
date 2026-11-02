@@ -2447,9 +2447,28 @@ fn frame_stats_enabled() -> bool {
 
 const FRAME_STATS_WINDOW: usize = 240;
 
+thread_local! {
+    static RENDER_TOTALS: RefCell<HashMap<&'static str, u64>> = RefCell::default();
+}
+
+/// Renders of `view` ("transcript", "composer", "sidebar", "shell", or
+/// "transcript-row" for each row built) on this thread so far. Counted while
+/// `HARNESS_FRAME_STATS` is set, and always in tests: what a profile or a
+/// test reads to see what one keystroke or streamed chunk rebuilt.
+pub fn render_total(view: &str) -> u64 {
+    RENDER_TOTALS.with(|totals| totals.borrow().get(view).copied().unwrap_or_default())
+}
+
+fn count_render(view: &'static str) {
+    if cfg!(test) || frame_stats_enabled() {
+        RENDER_TOTALS.with(|totals| *totals.borrow_mut().entry(view).or_default() += 1);
+    }
+}
+
 /// Opt-in cadence counters complement per-row timings: inexpensive rows can
 /// still exhaust a battery when an unrelated animation rebuilds them at 120Hz.
 pub(crate) fn record_view_frame(view: &'static str) -> bool {
+    count_render(view);
     if !frame_stats_enabled() {
         return false;
     }
@@ -8230,6 +8249,9 @@ impl Transcript {
         let Some(row) = self.rows.get(ix).cloned() else {
             return gpui::Empty.into_any_element();
         };
+        count_render("transcript-row");
+        // Rows render while the list lays out, after `render` returned.
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
         let workspace_root = self.workspace_root(cx);
@@ -11100,6 +11122,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         self.pane_cadence.painted(cx.background_executor().now());
         if record_view_frame("transcript") {
             tracing::warn!(
