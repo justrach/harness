@@ -116,7 +116,41 @@ extension View {
     func avoidingOcclusions() -> some View {
         modifier(OcclusionAvoider())
     }
+
+    /// Report the side the system puts its vertical bar on (iPhone Duo's cover display), or nil (horizontal
+    /// bars, and every SDK before iOS 27.1).
+    func onVerticalBarEdgeChange(_ action: @escaping (HorizontalEdge?) -> Void) -> some View {
+        modifier(VerticalBarEdgeReader(action: action))
+    }
 }
+
+private struct VerticalBarEdgeReader: ViewModifier {
+    let action: (HorizontalEdge?) -> Void
+
+    func body(content: Content) -> some View {
+        #if HINGE_API
+        if #available(iOS 27.1, *) {
+            content.modifier(ToolbarVerticalEdgeReader(action: action))
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+#if HINGE_API
+@available(iOS 27.1, *)
+private struct ToolbarVerticalEdgeReader: ViewModifier {
+    let action: (HorizontalEdge?) -> Void
+    @Environment(\.toolbarVerticalEdge) private var edge
+
+    func body(content: Content) -> some View {
+        content.onChange(of: edge, initial: true) { _, edge in action(edge) }
+    }
+}
+#endif
 
 private struct FoldReader: ViewModifier {
     let action: (FoldSplit) -> Void

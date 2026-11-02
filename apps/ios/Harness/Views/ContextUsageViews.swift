@@ -48,8 +48,11 @@ struct ContextRing: View {
             }
             .buttonStyle(.plain)
             .modifier(RingSurface(glass: glass))
-            .popover(isPresented: $showCard) {
-                ContextCard(store: store).presentationCompactAdaptation(.popover)
+            // Above the chip, the arrow pointing down at it. Left free, the system put a card that
+            // didn't fit above beside the chip, squeezed into the width left of it.
+            .popover(isPresented: $showCard, arrowEdge: .bottom) {
+                ContextCard(store: store, available: PopoverFit.availableWidth())
+                    .presentationCompactAdaptation(.popover)
             }
             .accessibilityLabel(fraction.map { "Context \(Int(($0 * 100).rounded())) percent full" } ?? "Context")
             .accessibilityIdentifier("context-ring")
@@ -92,17 +95,69 @@ extension ContextWindow.SavedPart {
     }
 }
 
+/// How wide a popover may be: the window's safe width less a margin each side. The system clamps a wider
+/// popover to the screen and centers its content, cutting both edges off: the context card (398pt) lost its
+/// first and last letters on iPhone Duo's cover display, where the vertical bar leaves 382pt.
+enum PopoverFit {
+    static let margin: CGFloat = 16
+
+    static func availableWidth(windowWidth: CGFloat, leadingInset: CGFloat, trailingInset: CGFloat) -> CGFloat {
+        max(0, windowWidth - leadingInset - trailingInset - 2 * margin)
+    }
+
+    /// For the key window of the foreground scene; nil without one (the card keeps its own width).
+    @MainActor
+    static func availableWidth() -> CGFloat? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        guard let window = scene?.keyWindow ?? scene?.windows.first else { return nil }
+        return availableWidth(windowWidth: window.bounds.width, leadingInset: window.safeAreaInsets.left,
+                              trailingInset: window.safeAreaInsets.right)
+    }
+}
+
+/// The context card's width, bar segments and legend columns for the room it has.
+struct ContextCardLayout: Equatable {
+    static let idealSegmentWidth: CGFloat = 4
+    static let minimumSegmentWidth: CGFloat = 2
+    static let gap: CGFloat = 2
+    static let padding: CGFloat = 14
+    /// Below this card width the legend's two columns cut their labels, so it takes one.
+    static let twoColumnMinimum: CGFloat = 320
+
+    /// The card's width, padding included.
+    var width: CGFloat
+    var segmentWidth: CGFloat
+    var legendColumns: Int
+
+    static var idealWidth: CGFloat { barWidth(segmentWidth: idealSegmentWidth) + 2 * padding }
+
+    static func barWidth(segmentWidth: CGFloat) -> CGFloat {
+        CGFloat(ContextWindow.segments) * (segmentWidth + gap) - gap
+    }
+
+    /// The ideal 398pt card where it fits; narrower, the segments thin (the count stays) and the legend reflows
+    /// into one column. Never narrower than the thinnest segments allow.
+    static func fitting(_ available: CGFloat?) -> ContextCardLayout {
+        let floor = barWidth(segmentWidth: minimumSegmentWidth) + 2 * padding
+        let width = max(floor, min(idealWidth, available ?? idealWidth))
+        let segments = CGFloat(ContextWindow.segments)
+        let segment = min(idealSegmentWidth, (width - 2 * padding - (segments - 1) * gap) / segments)
+        return ContextCardLayout(width: width, segmentWidth: segment,
+                                 legendColumns: width >= twoColumnMinimum ? 2 : 1)
+    }
+}
+
 /// The card: the window's breakdown, the counts, and graff's savings.
 struct ContextCard: View {
     let store: SessionStore
+    /// The width the popover may take (PopoverFit); nil keeps the ideal width.
+    var available: CGFloat? = nil
     @State private var filled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private static let segmentWidth: CGFloat = 4
-    private static let gap: CGFloat = 2
-    private static var barWidth: CGFloat {
-        CGFloat(ContextWindow.segments) * (segmentWidth + gap) - gap
-    }
+    private var layout: ContextCardLayout { .fitting(available) }
+    private static let gap = ContextCardLayout.gap
 
     var body: some View {
         let usage = store.contextUsage
@@ -127,13 +182,14 @@ struct ContextCard: View {
                              history: ContextWindow.breakdown(usage: usage, transcript: store.entries)?.history ?? .chat)
             }
         }
-        .padding(14)
-        .frame(width: Self.barWidth + 28)
+        .padding(ContextCardLayout.padding)
+        .frame(width: layout.width)
         .background(Theme.surfaceDialog)
         .onAppear {
             // The bar fills left to right on open, then holds; reduced motion shows it full at once.
             if reduceMotion { filled = true } else { withAnimation(Motion.resize) { filled = true } }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("context-card")
     }
 
@@ -162,15 +218,15 @@ struct ContextCard: View {
             ForEach(colors.indices, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(index < lit ? colors[index] : Theme.textFaint.opacity(0.22))
-                    .frame(width: Self.segmentWidth, height: 16)
+                    .frame(width: layout.segmentWidth, height: 16)
             }
         }
         .accessibilityHidden(true)
     }
 
     private func legend(_ b: ContextWindow.Breakdown) -> some View {
-        let columns = [GridItem(.flexible(), spacing: 12, alignment: .leading),
-                       GridItem(.flexible(), spacing: 12, alignment: .leading)]
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .leading),
+                            count: layout.legendColumns)
         return LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
             ForEach(Array(b.items.enumerated()), id: \.offset) { _, item in
                 HStack(spacing: 6) {
@@ -199,7 +255,7 @@ struct ContextCard: View {
                     ForEach(0..<part.count, id: \.self) { _ in
                         RoundedRectangle(cornerRadius: 1.5)
                             .fill(filled ? part.part.color : Theme.textFaint.opacity(0.22))
-                            .frame(width: Self.segmentWidth, height: 8)
+                            .frame(width: layout.segmentWidth, height: 8)
                     }
                 }
             }

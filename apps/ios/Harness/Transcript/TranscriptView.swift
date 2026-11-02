@@ -23,6 +23,8 @@ struct TranscriptView: View {
     var inspectDiff: ((DiffSummary) -> Void)? = nil
     /// Open one tool call in the Inspect pane (flat Duo).
     var inspectTool: ((ToolItem) -> Void)? = nil
+    /// Row padding, and how far the transcript reaches past the safe area beside a vertical bar (CoverLayout).
+    var rowInsets: CoverLayout.RowInsets = .standard
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -53,7 +55,7 @@ struct TranscriptView: View {
             reduceMotion: reduceMotion,
             configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
                 ^ colorScheme.hashValue ^ duoChat.hashValue ^ (inspectDiff != nil).hashValue
-                ^ (inspectTool != nil).hashValue &* 31) { row in
+                ^ (inspectTool != nil).hashValue &* 31 ^ rowInsets.hashValue) { row in
                 AnyView(rowView(row, earlier: earlierErrors.contains(row.id))
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
@@ -69,6 +71,10 @@ struct TranscriptView: View {
                         return .handled
                     }))
             }
+            // Beside a vertical bar the table reaches into the bar's empty edge, so its scroll indicator
+            // sits in that gutter rather than over the text.
+            .padding(.leading, -rowInsets.bleedLeading)
+            .padding(.trailing, -rowInsets.bleedTrailing)
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.sessionPage(lifted: liftedPlane))
             .overlay(alignment: .bottom) {
@@ -198,7 +204,8 @@ struct TranscriptView: View {
             }
         }
         .padding(.top, row.topGap)
-        .padding(.horizontal, 20)
+        .padding(.leading, rowInsets.leading)
+        .padding(.trailing, rowInsets.trailing)
         .frame(maxWidth: Self.maxContentWidth)
         .frame(maxWidth: .infinity)
     }
