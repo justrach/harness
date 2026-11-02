@@ -22,7 +22,7 @@ members = [
 exclude = ["vendor/zui", "vendor/gpui-component", "tui"]
 
 [workspace.package]
-version = "0.2.164"
+version = "0.2.165"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
