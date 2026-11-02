@@ -33,6 +33,10 @@ name = "render-isolation-profile"
 required-features = ["resource-profile"]
 
 [[example]]
+name = "composer-cache-flicker"
+required-features = ["resource-profile"]
+
+[[example]]
 name = "ui-scenes"
 required-features = ["ui-scenes"]
 

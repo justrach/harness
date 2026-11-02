@@ -302,6 +302,10 @@ impl<V: View> IntoElement for ViewElement<V> {
 }
 
 struct ViewElementState {
+    // Ancestor replay can retain this state without rebasing its ranges.
+    // Only replay ranges that were recorded for the previous frame.
+    source_frame: u64,
+    layout_element_states: Option<Range<usize>>,
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
@@ -328,8 +332,14 @@ struct ViewElementCacheKey {
 
 /// What [`ViewElement::request_layout`] hands to prepaint: the element when
 /// it was rendered during layout, and, for a measured view rendered there,
-/// the entities that render read.
-type ViewLayoutState = (Option<AnyElement>, Option<FxHashSet<EntityId>>);
+/// the entities and element state that render/layout read.
+type ViewLayoutState = (Option<AnyElement>, Option<MeasuredViewLayout>);
+
+#[doc(hidden)]
+pub struct MeasuredViewLayout {
+    accessed_entities: FxHashSet<EntityId>,
+    element_states: Range<usize>,
+}
 
 impl<V: View> Element for ViewElement<V> {
     type RequestLayoutState = ViewLayoutState;
@@ -389,6 +399,7 @@ impl<V: View> Element for ViewElement<V> {
                         // Render now and lay the content out inside `style`;
                         // prepaint records the result for later frames.
                         let refreshing = mem::replace(&mut window.refreshing, true);
+                        let layout_start = window.element_state_index();
                         let ((layout_id, element), accessed) = cx.detect_accessed_entities(|cx| {
                             let mut element = self
                                 .view
@@ -401,7 +412,11 @@ impl<V: View> Element for ViewElement<V> {
                             (layout_id, element)
                         });
                         window.refreshing = refreshing;
-                        (layout_id, (Some(element), Some(accessed)))
+                        let measured = MeasuredViewLayout {
+                            accessed_entities: accessed,
+                            element_states: layout_start..window.element_state_index(),
+                        };
+                        (layout_id, (Some(element), Some(measured)))
                     }
                     Some(style) if !caching_disabled => {
                         let mut root_style = Style::default();
@@ -452,7 +467,7 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path.
             window.set_view_id(entity_id);
             window.with_rendered_view(entity_id, |window| {
-                if let Some(accessed) = measured_render.take() {
+                if let Some(measured) = measured_render.take() {
                     // A measured view rendered during layout: prepaint it and
                     // keep the result for the frames that reuse it.
                     let mut element = element.take().unwrap();
@@ -471,10 +486,12 @@ impl<V: View> Element for ViewElement<V> {
                                 cx.detect_accessed_entities(|cx| element.prepaint(window, cx));
                             let prepaint_end = window.prepaint_index();
                             window.refreshing = refreshing;
-                            accessed_entities.extend(accessed);
+                            accessed_entities.extend(measured.accessed_entities);
                             (
                                 Some(element),
                                 ViewElementState {
+                                    source_frame: window.drawing_frame_generation(),
+                                    layout_element_states: Some(measured.element_states),
                                     accessed_entities,
                                     prepaint_range: prepaint_start..prepaint_end,
                                     paint_range: PaintIndex::default()..PaintIndex::default(),
@@ -505,6 +522,7 @@ impl<V: View> Element for ViewElement<V> {
                         let text_style = window.text_style();
 
                         if let Some(mut element_state) = element_state
+                            && element_state.source_frame == window.rendered_frame_generation()
                             && element_state.cache_key.bounds == bounds
                             && element_state.cache_key.content_mask == content_mask
                             && element_state.cache_key.text_style == text_style
@@ -512,12 +530,19 @@ impl<V: View> Element for ViewElement<V> {
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
                         {
+                            // Measured views access animation clocks and other
+                            // element state before their prepaint replay range.
+                            // Keep those states alive on cache-only frames too.
+                            element_state.layout_element_states = element_state
+                                .layout_element_states
+                                .map(|range| window.reuse_element_states(range));
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(element_state.prepaint_range.clone());
                             cx.entities
                                 .extend_accessed(&element_state.accessed_entities);
                             let prepaint_end = window.prepaint_index();
                             element_state.prepaint_range = prepaint_start..prepaint_end;
+                            element_state.source_frame = window.drawing_frame_generation();
 
                             return (None, element_state);
                         }
@@ -542,6 +567,8 @@ impl<V: View> Element for ViewElement<V> {
                         (
                             Some(element),
                             ViewElementState {
+                                source_frame: window.drawing_frame_generation(),
+                                layout_element_states: None,
                                 accessed_entities,
                                 prepaint_range: prepaint_start..prepaint_end,
                                 paint_range: PaintIndex::default()..PaintIndex::default(),

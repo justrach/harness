@@ -116,6 +116,104 @@ fn assert_retry(handle: gpui::WindowHandle<Composer>, cx: &mut gpui::TestAppCont
 }
 
 #[gpui::test]
+fn cached_question_and_queue_entrances_settle(cx: &mut gpui::TestAppContext) {
+    struct ActivePane {
+        composer: Entity<Composer>,
+        cached: bool,
+    }
+    impl Render for ActivePane {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let content = if self.cached {
+                self.composer
+                    .clone()
+                    .cached_measured(gpui::StyleRefinement::default().w(px(800.0)))
+                    .into_any_element()
+            } else {
+                self.composer.clone().into_any_element()
+            };
+            div().size_full().child(content)
+        }
+    }
+    for question in [true, false] {
+        for cached in [false, true] {
+            let (_dir, original) = fixture(cx);
+            cx.update(|cx| crate::motion::set_reduced_motion(cx, false));
+            let composer = original
+                .update(cx, |composer, _, cx| {
+                    if !question {
+                        composer.wizard = None;
+                        composer
+                            .state
+                            .update(cx, |state, _| state.transcript.clear());
+                        composer.on_state_changed(cx);
+                        composer
+                            .input
+                            .update(cx, |input, cx| input.set_text("", cx));
+                    }
+                    composer.set_available_width(800.0, cx);
+                    composer.set_available_height(900.0, cx);
+                    cx.entity()
+                })
+                .unwrap();
+            let pane = cx.add_window(|_, _| ActivePane {
+                composer: composer.clone(),
+                cached,
+            });
+            cx.update_window(original.into(), |_, window, _| window.remove_window())
+                .unwrap();
+            cx.update_window(pane.into(), |_, window, _| {
+                window.resize(size(px(900.0), px(900.0)));
+            })
+            .unwrap();
+            crate::motion::FADE_TEST_SAMPLES.with_borrow_mut(|samples| *samples = Some(Vec::new()));
+            let target: gpui::ElementId = if question {
+                "composer-wizard"
+            } else {
+                "composer-queue"
+            }
+            .into();
+            let mut observed = 0;
+            let mut settled_observed = 0;
+            for frame in 0..90 {
+                // The entrance uses scheduler::Instant's wall clock, not the
+                // executor's virtual timer clock in this test environment.
+                std::thread::sleep(Duration::from_millis(16));
+                if frame % 10 == 0 {
+                    composer.update(cx, |_, cx| cx.notify());
+                }
+                pane.update(cx, |_, _, cx| cx.notify()).unwrap();
+                cx.update_window(pane.into(), |_, window, cx| {
+                    window.simulate_next_frame(cx);
+                    window.draw(cx).clear();
+                })
+                .unwrap();
+                crate::motion::FADE_TEST_SAMPLES.with_borrow_mut(|samples| {
+                    for (id, alpha) in samples.as_mut().unwrap().drain(..) {
+                        if id == target {
+                            observed += 1;
+                            if frame >= 20 {
+                                settled_observed += 1;
+                                assert!(
+                                    alpha >= 0.999,
+                                    "{target:?} entrance restarted: cached={cached}, frame={frame}, opacity={alpha}"
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+            crate::motion::FADE_TEST_SAMPLES.with_borrow_mut(|samples| *samples = None);
+            assert!(
+                observed > 0 && settled_observed >= 7,
+                "{target:?} did not render on the seven post-settle composer notifications"
+            );
+            cx.update_window(pane.into(), |_, window, _| window.remove_window())
+                .unwrap();
+        }
+    }
+}
+
+#[gpui::test]
 fn question_returns_after_queue_edit_without_another_state_notification(
     cx: &mut gpui::TestAppContext,
 ) {

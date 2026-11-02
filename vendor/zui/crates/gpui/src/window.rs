@@ -878,6 +878,7 @@ pub(crate) struct DeferredDraw {
 }
 
 pub(crate) struct Frame {
+    generation: u64,
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
@@ -928,6 +929,7 @@ pub(crate) struct PaintIndex {
 impl Frame {
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
+            generation: 0,
             focus: None,
             window_active: false,
             element_states: FxHashMap::default(),
@@ -2796,6 +2798,7 @@ impl Window {
         // This ensures that multiple test Apps have isolated arenas.
         let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
 
+        self.next_frame.generation = self.rendered_frame.generation.wrapping_add(1);
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -3298,6 +3301,30 @@ impl Window {
         let mut sorted_indices = (0..deferred_count).collect::<SmallVec<[_; 8]>>();
         sorted_indices.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
         sorted_indices
+    }
+
+    pub(crate) fn rendered_frame_generation(&self) -> u64 {
+        self.rendered_frame.generation
+    }
+
+    pub(crate) fn drawing_frame_generation(&self) -> u64 {
+        self.next_frame.generation
+    }
+
+    pub(crate) fn element_state_index(&self) -> usize {
+        self.next_frame.accessed_element_states.len()
+    }
+
+    /// Retain states accessed while laying out a measured cached view, before
+    /// the prepaint range that normally keeps a cached subtree's state alive.
+    pub(crate) fn reuse_element_states(&mut self, range: Range<usize>) -> Range<usize> {
+        let start = self.element_state_index();
+        self.next_frame.accessed_element_states.extend(
+            self.rendered_frame.accessed_element_states[range]
+                .iter()
+                .cloned(),
+        );
+        start..self.element_state_index()
     }
 
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
