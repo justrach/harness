@@ -95,6 +95,8 @@ mod titlebar_tests;
 #[cfg(test)]
 mod typing_tests;
 #[cfg(test)]
+mod view_cache_tests;
+#[cfg(test)]
 mod work_pane_tests;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};

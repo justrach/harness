@@ -306,6 +306,14 @@ struct ViewElementState {
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
+    /// The frame the ranges were recorded in. They index into that frame only, so they replay
+    /// only from the frame right after it: a cached ancestor that replayed this view's output
+    /// left them pointing into an older frame, and a prepaint that was rolled back left them
+    /// pointing into this one.
+    recorded_in: u64,
+    /// Element states a measured view's content accessed while it was laid out, before its
+    /// prepaint range starts (an entrance animation's clock, for one). A replay keeps them.
+    layout_element_states: Vec<(GlobalElementId, TypeId)>,
 }
 
 /// A measured view's style and the size its content was laid out at.
@@ -328,8 +336,15 @@ struct ViewElementCacheKey {
 
 /// What [`ViewElement::request_layout`] hands to prepaint: the element when
 /// it was rendered during layout, and, for a measured view rendered there,
-/// the entities that render read.
-type ViewLayoutState = (Option<AnyElement>, Option<FxHashSet<EntityId>>);
+/// what that render touched.
+type ViewLayoutState = (Option<AnyElement>, Option<MeasuredRender>);
+
+/// The entities and element states a measured view's render and layout accessed.
+#[doc(hidden)]
+pub struct MeasuredRender {
+    accessed_entities: FxHashSet<EntityId>,
+    element_states: Vec<(GlobalElementId, TypeId)>,
+}
 
 impl<V: View> Element for ViewElement<V> {
     type RequestLayoutState = ViewLayoutState;
@@ -389,6 +404,7 @@ impl<V: View> Element for ViewElement<V> {
                         // Render now and lay the content out inside `style`;
                         // prepaint records the result for later frames.
                         let refreshing = mem::replace(&mut window.refreshing, true);
+                        let states_start = window.element_states_index();
                         let ((layout_id, element), accessed) = cx.detect_accessed_entities(|cx| {
                             let mut element = self
                                 .view
@@ -401,7 +417,11 @@ impl<V: View> Element for ViewElement<V> {
                             (layout_id, element)
                         });
                         window.refreshing = refreshing;
-                        (layout_id, (Some(element), Some(accessed)))
+                        let render = MeasuredRender {
+                            accessed_entities: accessed,
+                            element_states: window.element_states_since(states_start),
+                        };
+                        (layout_id, (Some(element), Some(render)))
                     }
                     Some(style) if !caching_disabled => {
                         let mut root_style = Style::default();
@@ -452,7 +472,7 @@ impl<V: View> Element for ViewElement<V> {
             // Stateful path.
             window.set_view_id(entity_id);
             window.with_rendered_view(entity_id, |window| {
-                if let Some(accessed) = measured_render.take() {
+                if let Some(render) = measured_render.take() {
                     // A measured view rendered during layout: prepaint it and
                     // keep the result for the frames that reuse it.
                     let mut element = element.take().unwrap();
@@ -471,7 +491,7 @@ impl<V: View> Element for ViewElement<V> {
                                 cx.detect_accessed_entities(|cx| element.prepaint(window, cx));
                             let prepaint_end = window.prepaint_index();
                             window.refreshing = refreshing;
-                            accessed_entities.extend(accessed);
+                            accessed_entities.extend(render.accessed_entities);
                             (
                                 Some(element),
                                 ViewElementState {
@@ -483,6 +503,8 @@ impl<V: View> Element for ViewElement<V> {
                                         content_mask,
                                         text_style,
                                     },
+                                    recorded_in: window.drawing_frame_serial(),
+                                    layout_element_states: render.element_states,
                                 },
                             )
                         },
@@ -511,6 +533,7 @@ impl<V: View> Element for ViewElement<V> {
                             && !notified
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
+                            && window.recorded_in_rendered_frame(element_state.recorded_in)
                         {
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(element_state.prepaint_range.clone());
@@ -518,6 +541,9 @@ impl<V: View> Element for ViewElement<V> {
                                 .extend_accessed(&element_state.accessed_entities);
                             let prepaint_end = window.prepaint_index();
                             element_state.prepaint_range = prepaint_start..prepaint_end;
+                            element_state.recorded_in = window.drawing_frame_serial();
+                            // Outside the new range, so the next replay doesn't keep them twice.
+                            window.retain_element_states(&element_state.layout_element_states);
 
                             return (None, element_state);
                         }
@@ -550,6 +576,8 @@ impl<V: View> Element for ViewElement<V> {
                                     content_mask,
                                     text_style,
                                 },
+                                recorded_in: window.drawing_frame_serial(),
+                                layout_element_states: Vec::new(),
                             },
                         )
                     },

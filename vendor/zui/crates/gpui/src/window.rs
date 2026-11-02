@@ -1082,6 +1082,10 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    /// How many frames this window has drawn: `rendered_frame` is frame `frames_drawn`, and
+    /// `next_frame` the one after. Modified by Harness: cached views tag their replay ranges
+    /// with it, since those ranges index into the frame they were recorded in.
+    frames_drawn: u64,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1831,6 +1835,7 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            frames_drawn: 0,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2849,6 +2854,7 @@ impl Window {
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
+        self.frames_drawn += 1;
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
@@ -3309,6 +3315,38 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
         }
+    }
+
+    /// The serial of the frame being drawn; the rendered frame's is one less.
+    pub(crate) fn drawing_frame_serial(&self) -> u64 {
+        self.frames_drawn + 1
+    }
+
+    /// Whether ranges recorded while drawing frame `serial` index into the rendered frame.
+    pub(crate) fn recorded_in_rendered_frame(&self, serial: u64) -> bool {
+        serial == self.frames_drawn
+    }
+
+    /// Where the element states the frame being drawn has accessed so far end.
+    pub(crate) fn element_states_index(&self) -> usize {
+        self.next_frame.accessed_element_states.len()
+    }
+
+    /// The element states the frame being drawn has accessed since `start`.
+    pub(crate) fn element_states_since(&self, start: usize) -> Vec<(GlobalElementId, TypeId)> {
+        self.next_frame
+            .accessed_element_states
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    /// Keeps element states for the next frame without accessing them, as a reused cached
+    /// view does for the states its content accessed outside its replayed ranges.
+    pub(crate) fn retain_element_states(&mut self, keys: &[(GlobalElementId, TypeId)]) {
+        self.next_frame
+            .accessed_element_states
+            .extend(keys.iter().cloned());
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
