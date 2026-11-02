@@ -10963,6 +10963,7 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::transcript::record_view_frame("composer");
         if self.write_open {
             // The Write page renders the input (`render_write_page`); one
             // entity can't be drawn in two places.
