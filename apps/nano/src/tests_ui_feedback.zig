@@ -81,6 +81,52 @@ test "an authoritative echo replaces local feedback without duplicating or chang
     try testing.expectEqual(@as(usize, 1), prompts);
 }
 
+/// The open chat's transcript: its scroll box's offset and how far it goes.
+fn transcriptScroll(h: *Harness) struct { offset: f32, max: f32 } {
+    for (h.t.ctx.nodes.items) |n| if (n.style.follow_end and n.style.scroll) {
+        return .{ .offset = h.t.ctx.scroll.get(n.id) orelse 0, .max = h.t.ctx.scroll_max.get(n.id) orelse 0 };
+    };
+    return .{ .offset = -1, .max = -1 };
+}
+
+test "Enter on a prompt takes a chat read far up back to its end, and it follows the reply" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..30) |i| {
+        if (i > 0) try body.append(testing.allocator, ',');
+        try body.print(testing.allocator, "{{\"id\":\"m{d}\",\"role\":\"{s}\",\"status\":\"complete\",\"parts\":[{{\"id\":\"t\",\"kind\":\"text\",\"text\":\"Synthetic line {d}\\n\\nA second paragraph so the turn takes room.\"}}]}}", .{ i, if (i % 2 == 0) "user" else "assistant", i });
+    }
+    try body.appendSlice(testing.allocator, "]}");
+    try h.apply(body.items);
+    h.t.settle(1);
+    const start = transcriptScroll(&h);
+    try testing.expect(start.max > 400 and start.offset >= start.max - 1);
+    // Read far up.
+    h.t.moveTo(600, 300);
+    h.t.scroll(600, 300, 2000);
+    h.t.settle(1);
+    try testing.expect(transcriptScroll(&h).offset < start.max - 400);
+    h.a.view.focus_composer = true;
+    h.t.settle(1);
+    h.t.typeText("Synthetic prompt sent from far up");
+    h.t.key(.enter);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 1), h.a.pending_sends.items.len);
+    const sent = transcriptScroll(&h);
+    try testing.expect(sent.offset >= sent.max - 1);
+    const prompt = h.t.findText("Synthetic prompt sent from far up") orelse return error.PromptNotDrawn;
+    try testing.expect(prompt.y > 0 and prompt.y + prompt.h < 880);
+    // The reply grows under it, and the transcript stays at its end.
+    try h.apply("{\"upsert\":[{\"after\":\"m29\",\"entry\":{\"id\":\"reply\",\"role\":\"assistant\",\"status\":\"streaming\",\"parts\":[{\"id\":\"t\",\"kind\":\"text\",\"text\":\"Synthetic reply\\n\\nmore\\n\\nmore\\n\\nmore\\n\\nmore\\n\\nmore\"}]}}]}");
+    h.t.settle(1);
+    const after = transcriptScroll(&h);
+    try testing.expect(after.max > sent.max and after.offset >= after.max - 1);
+}
+
 test "a rejected send restores the draft and stops its local working state" {
     var h: Harness = undefined;
     try h.init();

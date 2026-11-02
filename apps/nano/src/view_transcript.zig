@@ -111,6 +111,13 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const scroll = c.open(st, null);
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
+    // Just sent: past the end, which layout clamps to it, and moving the
+    // offset there makes the box follow its end again (`follow_end`).
+    if (subagent == null and t == &a.transcript and a.view.stick_end) {
+        a.view.stick_end = false;
+        c.scroll.put(c.gpa, drawn.box, std.math.floatMax(f32)) catch {};
+        c.changed = true;
+    }
     var ticks: std.ArrayList(@import("view_rail.zig").Tick) = .empty;
     const body = ui.div(c).column().w(col);
     defer body.end();

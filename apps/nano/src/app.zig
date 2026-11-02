@@ -26,6 +26,9 @@ pub const uuid = @import("ids.zig").uuid;
 /// The window's own state, apart from the engine's.
 pub const View = struct {
     sidebar_open: bool = true,
+    /// A prompt was just sent: the open chat's transcript goes to its end
+    /// and follows the reply again, however far up it was read.
+    stick_end: bool = false,
     /// Effective slot width this frame, shared by chat, header and drop zones.
     sidebar_width: f32 = 256,
     /// Focus before a pointer press blurs a control in the sliding sidebar.
@@ -1101,6 +1104,7 @@ pub const App = struct {
         // Sent: the prompt is no one's draft any more.
         attachments.clear(a);
         a.composer.clear();
+        a.view.stick_end = true;
         if (a.selected == null) {
             a.tabs.setCurrent(chat_id);
             a.select(chat_id, null);
