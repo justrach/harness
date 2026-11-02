@@ -5245,6 +5245,11 @@ pub enum ComposerEvent {
         chat_id: String,
         message_id: String,
     },
+    /// An agent row in the footer chip's card was clicked: show that agent's
+    /// spawn chip (part `part_id`) in the transcript.
+    RevealAgent {
+        part_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11892,7 +11897,24 @@ impl Render for Composer {
         // Steps and subagents of the running turn (crate::agent_work).
         let agent_work = (session_chrome_opacity > 0.0)
             .then(|| {
-                crate::agent_work::footer_chip(self.state.clone(), &theme, cx.entity_id(), cx)
+                // A click on an agent in the chip's card takes the chat to it.
+                let composer = cx.weak_entity();
+                let reveal: crate::agent_work::RevealAgent = Rc::new(move |part_id, _, cx| {
+                    composer
+                        .update(cx, |_, cx| {
+                            cx.emit(ComposerEvent::RevealAgent {
+                                part_id: part_id.to_owned(),
+                            })
+                        })
+                        .ok();
+                });
+                crate::agent_work::footer_chip(
+                    self.state.clone(),
+                    &theme,
+                    cx.entity_id(),
+                    Some(reveal),
+                    cx,
+                )
             })
             .flatten();
         // Chat mode: say so while the selected model may bill API rates.

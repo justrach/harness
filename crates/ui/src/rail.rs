@@ -7,7 +7,9 @@
 //! in free functions with unit tests; rendering is an `impl Transcript`
 //! extension since the rail shares the transcript's rows and `ListState`.
 
-use gpui::{AnyElement, Context, EntityId, ListOffset, SharedString, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, EntityId, ListOffset, ListState, SharedString, div, prelude::*, px,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -436,6 +438,55 @@ impl GlideTimeline {
     }
 }
 
+/// End a glide with `target`'s top `inset` px below the viewport top. A
+/// laid-out target lands by pixels, so the rows above it stay painted; a
+/// negative `offset_in_item` anchor would leave them blank until the next
+/// scroll. Unmeasured, it anchors the row and the caller settles it.
+fn land_at(list: &ListState, target: usize, inset: f32) {
+    match list.bounds_for_item(target).filter(|_| inset != 0.0) {
+        Some(bounds) => {
+            list.scroll_by(bounds.top() - list.viewport_bounds().top() - px(inset));
+        }
+        None => list.scroll_to(ListOffset {
+            item_ix: target,
+            offset_in_item: px(-inset),
+        }),
+    }
+}
+
+/// After [`land_at`] anchored `target` below the viewport top (a negative
+/// offset in it), wait for the layout that measures the rows above, then
+/// express the same position from the row above, so those rows paint.
+async fn settle_anchor(this: gpui::WeakEntity<Transcript>, cx: &mut gpui::AsyncApp, target: usize) {
+    for _ in 0..SETTLE_FRAMES {
+        let settled = this.update(cx, |t, cx| {
+            let list = t.list_state().clone();
+            let top = list.logical_scroll_top();
+            if top.item_ix != target || top.offset_in_item >= px(0.0) {
+                return true;
+            }
+            // Laid out at this anchor: the leading overdraw measured the
+            // rows above it.
+            if list.bounds_for_item(target).is_none() {
+                return false;
+            }
+            list.scroll_by(px(-1.0));
+            list.scroll_by(px(1.0));
+            cx.notify();
+            true
+        });
+        if !matches!(settled, Ok(false)) {
+            return;
+        }
+        cx.background_executor()
+            .timer(Duration::from_millis(16))
+            .await;
+    }
+}
+
+/// Frames [`settle_anchor`] waits for a layout.
+const SETTLE_FRAMES: usize = 12;
+
 /// `HARNESS_SCROLL_TRACE=1` logs per-frame glide positions at `warn` level —
 /// the smoothness measurement knob (same family as `HARNESS_FRAME_STATS`).
 fn scroll_trace_enabled() -> bool {
@@ -467,12 +518,25 @@ impl Transcript {
     ///   measurement correcting the estimate just re-enters the timeline;
     /// - once the target row is measured the glide is pixel-exact.
     pub fn scroll_to_row(&mut self, target: usize, cx: &mut Context<Self>) {
+        self.scroll_to_row_at(target, 0.0, cx);
+    }
+
+    /// [`Self::scroll_to_row`], landing `target`'s top `inset` px below the
+    /// viewport top (an agent's chip revealed below the titlebar, not under
+    /// it). A measured target above the viewport glides pixel-exact, since
+    /// the item-space approach aims at the row's top, not above it.
+    pub fn scroll_to_row_at(&mut self, target: usize, inset: f32, cx: &mut Context<Self>) {
         self.begin_scroll_navigation();
         if motion::reduced_motion(cx) {
             self.list_state().scroll_to(ListOffset {
                 item_ix: target,
-                offset_in_item: px(0.0),
+                offset_in_item: px(-inset),
             });
+            if inset != 0.0 {
+                self.set_scroll_task(cx.spawn(async move |this, cx| {
+                    settle_anchor(this, cx, target).await;
+                }));
+            }
             cx.notify();
             return;
         }
@@ -493,10 +557,7 @@ impl Transcript {
                 let done = this.update(cx, |t, cx| {
                     let list = t.list_state().clone();
                     if raw >= 1.0 {
-                        list.scroll_to(ListOffset {
-                            item_ix: target,
-                            offset_in_item: px(0.0),
-                        });
+                        land_at(&list, target, inset);
                         cx.notify();
                         return true;
                     }
@@ -553,7 +614,9 @@ impl Transcript {
                         );
                     }
 
-                    if target < top.item_ix {
+                    if target < top.item_ix
+                        && (inset == 0.0 || list.bounds_for_item(target).is_none())
+                    {
                         // Above the viewport (unmeasured): progressive
                         // item-space anchoring within the eased timeline.
                         let next = here - frac * (here - target as f32);
@@ -591,7 +654,8 @@ impl Transcript {
                     match list.bounds_for_item(target) {
                         Some(bounds) => {
                             // Measured: pixel-exact step along the timeline.
-                            let delta = f32::from(bounds.top() - list.viewport_bounds().top());
+                            let delta =
+                                f32::from(bounds.top() - list.viewport_bounds().top()) - inset;
                             list.scroll_by(px(frac * delta));
                         }
                         None => {
@@ -609,19 +673,21 @@ impl Transcript {
                     false
                 });
                 match done {
-                    Ok(true) | Err(_) => return,
+                    Ok(true) => {
+                        settle_anchor(this.clone(), cx, target).await;
+                        return;
+                    }
+                    Err(_) => return,
                     Ok(false) => {}
                 }
             }
             // Timeline exhausted (shouldn't happen): land exactly.
             this.update(cx, |t, cx| {
-                t.list_state().scroll_to(ListOffset {
-                    item_ix: target,
-                    offset_in_item: px(0.0),
-                });
+                land_at(t.list_state(), target, inset);
                 cx.notify();
             })
             .ok();
+            settle_anchor(this, cx, target).await;
         }));
     }
 
