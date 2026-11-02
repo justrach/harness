@@ -1,12 +1,13 @@
-//! Captures the chat column split into two panes, offscreen, to show how the
-//! pane that takes your typing is marked.
+//! Captures the shell offscreen with made-up chats and saves the frame as a PNG.
+//! No window is shown (native CoreText shaping, headless Metal).
 //!
-//! Opens the shell offscreen (native CoreText shaping, headless Metal) with two
-//! made-up chats side by side and saves the frame as a PNG. No window is shown.
+//! - `split` (the default): the chat column split into two panes, to show how the
+//!   pane that takes your typing is marked.
+//! - `update-ready`: one chat with an update downloaded and waiting for a restart.
 //!
 //! ```sh
 //! cargo run --profile app-dev -p harness-ui --features resource-profile,appshots-fixture \
-//!   --example focus-cue-capture -- OUT.png
+//!   --example focus-cue-capture -- OUT.png [split|update-ready]
 //! ```
 
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
@@ -76,7 +77,8 @@ fn chat(id: &str, title: &str) -> harness_proto::Chat {
 fn main() -> anyhow::Result<()> {
     let out = std::env::args()
         .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("usage: focus-cue-capture OUT.png"))?;
+        .ok_or_else(|| anyhow::anyhow!("usage: focus-cue-capture OUT.png [split|update-ready]"))?;
+    let scene = std::env::args().nth(2).unwrap_or_else(|| "split".into());
     let data = tempfile::tempdir()?;
     let data_dir = data.path().to_path_buf();
     let native = gpui_platform::current_platform(true);
@@ -197,18 +199,31 @@ fn main() -> anyhow::Result<()> {
 
     load(&app, "parser cleanup");
     settle(&app, Duration::from_secs(2));
-    // Split: the new pane on the right takes the focus and opens the second chat.
-    app.update(|cx| {
-        window
-            .update(cx, |shell, window, cx| {
-                shell.fixture_onboarding_split(true, window, cx)
-            })
-            .unwrap();
-        state.update(cx, |state, cx| state.select_chat(Some("right".into()), cx));
-    });
-    settle(&app, Duration::from_millis(500));
-    load(&app, "release");
-    settle(&app, Duration::from_secs(2));
+    match scene.as_str() {
+        "update-ready" => {
+            // Downloaded, set to restart on its own once nothing is going on.
+            app.update(|cx| {
+                window
+                    .update(cx, |shell, _, cx| shell.fixture_app_update("ready", cx))
+                    .unwrap()
+            });
+            settle(&app, Duration::from_millis(800));
+        }
+        _ => {
+            // Split: the new pane on the right takes the focus and opens the second chat.
+            app.update(|cx| {
+                window
+                    .update(cx, |shell, window, cx| {
+                        shell.fixture_onboarding_split(true, window, cx)
+                    })
+                    .unwrap();
+                state.update(cx, |state, cx| state.select_chat(Some("right".into()), cx));
+            });
+            settle(&app, Duration::from_millis(500));
+            load(&app, "release");
+            settle(&app, Duration::from_secs(2));
+        }
+    }
     app.update(|cx| {
         window
             .update(cx, |_, window, _| window.render_to_image())
