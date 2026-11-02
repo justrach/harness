@@ -29,6 +29,10 @@ name = "macos-resource-profile"
 required-features = ["resource-profile"]
 
 [[example]]
+name = "render-isolation-profile"
+required-features = ["resource-profile"]
+
+[[example]]
 name = "ui-scenes"
 required-features = ["ui-scenes"]
 
@@ -161,6 +165,10 @@ name = "turn-work-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "agent-reveal-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "new-project-fixture"
 required-features = ["project-palette-fixture"]
 
@@ -228,7 +236,6 @@ rust-embed = "=8.7.2"
 libc.workspace = true
 objc = "0.2"
 wry = { version = "0.56", default-features = false, features = ["os-webview"] }
-raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }

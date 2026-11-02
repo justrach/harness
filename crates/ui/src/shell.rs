@@ -82,6 +82,8 @@ mod link_tests;
 mod project_icon;
 mod reauth;
 #[cfg(test)]
+mod render_isolation_tests;
+#[cfg(test)]
 mod sidebar_motion_tests;
 mod sidebar_pins;
 mod sidebar_search;
@@ -1944,6 +1946,11 @@ pub struct Shell {
     /// A newly selected transcript stays hidden until this matches its route,
     /// preventing one frame at the blank canvas's stale bottom clearance.
     bottom_stack_has_composer: std::rc::Rc<std::cell::Cell<bool>>,
+    /// What the cached transcript (opacity, bottom fade band) and composer
+    /// (opacity) were last painted with. A reused frame replays its paint
+    /// with these baked in, so a change must re-render the view.
+    transcript_paint: std::cell::Cell<Option<(f32, f32)>>,
+    composer_paint: std::cell::Cell<Option<f32>>,
     /// Shared route clock and measured prepaint geometry for the persistent composer.
     composer_dock: crate::composer_dock::SharedDock,
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
@@ -2372,6 +2379,10 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::RevealAgent { part_id } => {
+                    this.transcript
+                        .update(cx, |t, cx| t.reveal_agent(part_id, cx));
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -2467,9 +2478,13 @@ impl Shell {
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
-        // elapsed labels, menus); sibling animation/caret ticks do not.
+        // elapsed labels, menus); sibling animation/caret ticks do not. The
+        // transcript and the composer are cached views: neither redraws with
+        // the shell otherwise, and the composer's Send/Stop follows the
+        // session clock the shell's heartbeat ticks.
         let transcript_invalidation = cx.observe_self(|shell, cx| {
             shell.transcript.update(cx, |_, cx| cx.notify());
+            shell.composer.update(cx, |_, cx| cx.notify());
         });
         // The background graff updater publishes lifecycle notices on a
         // process-wide watch channel; each value lands on `graff_notice`.
@@ -2548,6 +2563,8 @@ impl Shell {
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
             bottom_stack_has_composer: std::rc::Rc::new(std::cell::Cell::new(false)),
+            transcript_paint: Default::default(),
+            composer_paint: Default::default(),
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
@@ -10920,6 +10937,11 @@ impl Shell {
             self.transcript
                 .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
         }
+        let transcript_opacity = if transcript_geometry_ready || departing_transcript {
+            dock_frame.transcript()
+        } else {
+            0.0
+        };
         let outlet: AnyElement = if has_selection || departing_transcript {
             div()
                 .relative()
@@ -10931,12 +10953,14 @@ impl Shell {
                         .top(px(8.0 * (1.0 - dock_frame.transcript())))
                         .size_full()
                         .when(departing_transcript, |el| el.w(px(transcript_width)))
-                        .opacity(if transcript_geometry_ready || departing_transcript {
-                            dock_frame.transcript()
-                        } else {
-                            0.0
-                        })
-                        .child(self.transcript.clone()),
+                        .opacity(transcript_opacity)
+                        // Cached: a keystroke in the composer or a caret
+                        // blink redraws without rebuilding every row.
+                        .child(
+                            self.transcript
+                                .clone()
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        ),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
@@ -11162,6 +11186,10 @@ impl Shell {
                     // status strip above it is empty air), zero at the
                     // underlay's bottom edge.
                     let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
+                    let paint = Some((transcript_opacity, bottom_band));
+                    if self.transcript_paint.replace(paint) != paint {
+                        self.transcript.update(cx, |_, cx| cx.notify());
+                    }
                     div().absolute().inset_0().bottom(px(term_h)).child(
                         crate::edge_fade::edge_faded(
                             Theme::TRANSCRIPT_FADE_BAND,
@@ -11220,6 +11248,11 @@ impl Shell {
                     .when(!write_open, |el| el.child(status))
                     .when(composer_shown, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
+                        if self.composer_paint.replace(Some(composer_opacity))
+                            != Some(composer_opacity)
+                        {
+                            self.composer.update(cx, |_, cx| cx.notify());
+                        }
                         el.child(crate::composer_dock::docked_composer(
                             div()
                                 .id("persistent-composer")
@@ -11227,7 +11260,11 @@ impl Shell {
                                 .w(px(composer_width))
                                 .opacity(composer_opacity)
                                 .mx_auto()
-                                .child(self.composer.clone())
+                                // Cached at its measured height: a streamed
+                                // chunk redraws the transcript, not this.
+                                .child(self.composer.clone().cached_measured(
+                                    gpui::StyleRefinement::default().w(px(composer_width)),
+                                ))
                                 .children(if has_selection {
                                     self.render_jump_to_bottom(cx)
                                         .or_else(|| self.render_turn_work_cue(cx))
@@ -14054,6 +14091,14 @@ impl Render for Shell {
             // left unread through a frame (a menu animating over a hovered
             // trigger) is pruned as unmounted.
             self.sidebar_pane.update(cx, |_, cx| cx.notify());
+        }
+        // The transcript and composer are cached too, but notified only for
+        // fades of their own: a hovered sidebar row must not rebuild them.
+        if motion::hover_needs_frame(self.transcript.entity_id()) {
+            self.transcript.update(cx, |_, cx| cx.notify());
+        }
+        if motion::hover_needs_frame(self.composer.entity_id()) {
+            self.composer.update(cx, |_, cx| cx.notify());
         }
         if self.motion_active.get() | hover_fading {
             window.request_animation_frame();

@@ -5,6 +5,10 @@
 #[cfg(target_os = "macos")]
 #[path = "../src/display_link.rs"]
 mod display_link;
+#[cfg(target_os = "macos")]
+#[path = "../src/frame_stats.rs"]
+#[allow(dead_code)]
+mod frame_stats;
 
 // Replace this one imported C symbol in the test executable. The production
 // implementation still creates real CoreVideo links and dispatch sources,
