@@ -5124,12 +5124,37 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::redo))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, _| {
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                let was_focused = this.focus_handle.is_focused(window);
                 // Capture runs before the clicked control handles the press, so
                 // another input can take focus normally during bubbling.
-                if event.button == MouseButton::Left && this.focus_handle.is_focused(window) {
+                if was_focused {
                     window.blur();
                 }
+                let input = cx.weak_entity();
+                // Markdown claims direct hits and whitespace anchors during
+                // bubbling. Resolve ownership afterwards, regardless of paint
+                // order, without clearing selections for unrelated controls.
+                window.defer(cx, move |window, cx| {
+                    if crate::markdown::selection::is_dragging() {
+                        input
+                            .update(cx, |input, cx| {
+                                let cursor = input.cursor_offset();
+                                input.selected_range = cursor..cursor;
+                                input.selection_reversed = false;
+                                // Copy is routed through the composer. Restore its
+                                // focus only if the click did not focus a control.
+                                if was_focused && window.focused(cx).is_none() {
+                                    window.focus(&input.focus_handle, cx);
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                });
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -16120,6 +16145,134 @@ mod tests {
             input.newline(&Newline, window, cx);
             assert!(input.content.ends_with("item\n"));
         });
+    }
+
+    #[gpui::test]
+    fn transcript_selection_replaces_composer_selection_and_copies_output(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::markdown::{parser, render, selection};
+
+        let _selection = selection::test_state_lock();
+        let _dir = composer_test_init(cx);
+        struct SelectionHost(Entity<ComposerInput>);
+        impl Render for SelectionHost {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(40.0))
+                    .child(render::selection_frame_reset())
+                    .child(render::render_tree(
+                        &parser::parse_full("Synthetic output text"),
+                        &render::RenderOptions::settled("selection-output".into()),
+                        Theme::of(cx),
+                        window,
+                        &|_| None,
+                    ))
+                    .child(self.0.clone())
+            }
+        }
+        let (host, cx) =
+            cx.add_window_view(|_, cx| SelectionHost(cx.new(|cx| ComposerInput::new("Draft", cx))));
+        let input = host.read_with(cx, |host, _| host.0.clone());
+        input.update(cx, |input, cx| input.set_text("Synthetic prompt", cx));
+        cx.update(|window, cx| {
+            let focus = input.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+            window.draw(cx).clear();
+        });
+        let (_, _, output) = render::selection_test_entries()
+            .into_iter()
+            .find(|(_, text, _)| text == "Synthetic output text")
+            .unwrap();
+        let output_position = output.origin + point(px(2.0), px(8.0));
+        let input_position = input.read_with(cx, |input, _| {
+            input.last_bounds.unwrap().origin + point(px(2.0), px(8.0))
+        });
+        for clicks in [2, 3, 1] {
+            // Reproduce the prompt-then-output gesture, without moving focus.
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                click_count: 3,
+                ..Default::default()
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                ..Default::default()
+            });
+            input.read_with(cx, |input, _| {
+                assert_eq!(input.selected_range, 0..input.content.len());
+            });
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: output_position,
+                click_count: clicks,
+                ..Default::default()
+            });
+            if clicks == 1 {
+                cx.simulate_event(MouseMoveEvent {
+                    position: point(output.right() + px(2.0), output_position.y),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                });
+            }
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: output_position,
+                ..Default::default()
+            });
+            let expected = if clicks == 2 {
+                "Synthetic"
+            } else {
+                "Synthetic output text"
+            };
+            assert_eq!(selection::selected_text().as_deref(), Some(expected));
+            input.read_with(cx, |input, _| assert!(input.selected_range.is_empty()));
+            cx.update(|window, cx| {
+                assert!(input.read(cx).focus_handle.is_focused(window));
+                window.dispatch_action(Box::new(Copy), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some(expected)
+                );
+            });
+            // Selecting the draft again must retire the output highlight too.
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                click_count: 2,
+                ..Default::default()
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                ..Default::default()
+            });
+            assert!(selection::selected_text().is_none());
+            input.read_with(cx, |input, _| {
+                assert_eq!(input.selected_range, 0..9);
+                assert_eq!(input.text(), "Synthetic prompt");
+            });
+            cx.update(|window, cx| window.dispatch_action(Box::new(Copy), cx));
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some("Synthetic")
+                );
+            });
+        }
     }
 
     #[gpui::test]
