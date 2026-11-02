@@ -8856,9 +8856,6 @@ impl Shell {
             // window above this column.)
             .children(chat_tabs)
             .children(pane_strip)
-            .when(self.sidebar_search.is_none(), |el| {
-                el.child(self.render_sidebar_quick_actions(theme, cx))
-            })
             .child(filter_row)
             .children(search_controls)
             .child(sidebar_lists)
@@ -8898,67 +8895,6 @@ impl Shell {
                 el.child(strip)
             })
             .child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
-            .into_any_element()
-    }
-
-    /// Top of the sidebar: one big "New chat" button and a search field that
-    /// opens the sidebar search in place. Solid controls, no glass.
-    /// Height the "New chat" and "Search chats" block adds above the list.
-    pub(crate) const SIDEBAR_QUICK_ACTIONS_HEIGHT: f32 =
-        Theme::SPACE_XS + (Theme::HIT_TARGET + 4.0) + Theme::SPACE_SM + Theme::HIT_TARGET + Theme::SPACE_SM;
-
-    fn render_sidebar_quick_actions(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let new_chat = div()
-            .id("sidebar-new-chat")
-            .debug_selector(|| "sidebar-new-chat".into())
-            .role(gpui::Role::Button)
-            .aria_label("New chat")
-            .h(px(Theme::HIT_TARGET + 4.0))
-            .px(px(Theme::SPACE_MD))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .rounded(px(Theme::PANEL_RADIUS))
-            .bg(theme.accent)
-            .text_color(theme.on_accent)
-            .text_size(crate::typography::ui_rems(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.accent_strong))
-            .on_click(cx.listener(|this, _, _, cx| this.open_new_session(cx)))
-            .child(icon(icons::PEN_NEW_SQUARE).size(px(16.0)).text_color(theme.on_accent))
-            .child(div().flex_1().child("New chat"));
-        let search = div()
-            .id("sidebar-search-field")
-            .debug_selector(|| "sidebar-search-field".into())
-            .role(gpui::Role::Button)
-            .aria_label("Search chats")
-            .h(px(Theme::HIT_TARGET))
-            .px(px(Theme::SPACE_MD))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .rounded(px(Theme::PANEL_RADIUS))
-            .bg(theme.surface_raised)
-            .text_color(theme.text_muted)
-            .text_size(crate::typography::ui_rems(12.0))
-            .cursor_pointer()
-            .hover(|el| el.bg(theme.surface_raised_hover))
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar_search(window, cx)))
-            .child(icon(icons::MAGNIFER).size(px(14.0)).text_color(theme.text_muted))
-            .child(div().flex_1().child("Search chats"));
-        div()
-            .flex_none()
-            .px(px(Theme::SPACE_SM))
-            .pt(px(Theme::SPACE_XS))
-            .pb(px(Theme::SPACE_SM))
-            .flex()
-            .flex_col()
-            .gap(px(Theme::SPACE_SM))
-            .child(new_chat)
-            .child(search)
             .into_any_element()
     }
 
