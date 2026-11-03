@@ -6,7 +6,7 @@ use harness_doc::MessageRole;
 
 const PREFIX: &str = "[Message from Harness chat ";
 const DEPTH: &str = "Relay depth: ";
-const MAX_DEPTH: u32 = 4;
+pub(super) const MAX_DEPTH: u32 = 4;
 const GUIDANCE: &str = ". Agent coordination, not a human request. Reply with Harness `send_message` \
     only for an actionable question, blocker, or final requested result; \
     otherwise do not reply. Do not send acknowledgements or progress updates.]";
@@ -19,12 +19,22 @@ fn current_metadata(header: &str) -> Option<(&str, &str)> {
     Some((sender, depth))
 }
 
+#[cfg(test)]
 pub(super) fn next_depth(messages: &[RenderedMessage]) -> anyhow::Result<u32> {
-    let depth = messages
+    checked_next(inbound_depth(messages))
+}
+
+/// The relay depth of the newest user message: 0 for a person's prompt.
+pub(super) fn inbound_depth(messages: &[RenderedMessage]) -> u32 {
+    messages
         .iter()
         .rev()
         .find(|message| message.role == MessageRole::User)
-        .map_or(0, |message| relay_depth(&message.text));
+        .map_or(0, |message| relay_depth(&message.text))
+}
+
+/// The depth to send at after receiving `depth`, or the chain-limit refusal.
+pub(super) fn checked_next(depth: u32) -> anyhow::Result<u32> {
     if depth >= MAX_DEPTH {
         anyhow::bail!(
             "peer reply chain limit reached; do not acknowledge or retry. \
@@ -35,7 +45,12 @@ pub(super) fn next_depth(messages: &[RenderedMessage]) -> anyhow::Result<u32> {
     Ok(depth + 1)
 }
 
-fn relay_depth(text: &str) -> u32 {
+/// A person's prompt: neither a peer envelope nor a room delivery.
+pub(super) fn is_human_prompt(text: &str) -> bool {
+    !text.starts_with(PREFIX) && !harness_proto::room_delivery::is_delivery(text)
+}
+
+pub(super) fn relay_depth(text: &str) -> u32 {
     if !text.starts_with(PREFIX) {
         return 0;
     }
