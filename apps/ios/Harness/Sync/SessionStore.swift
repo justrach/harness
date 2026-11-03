@@ -771,6 +771,9 @@ final class SessionStore {
         switch kind {
         case "text":
             return .text(id: id, text: m["text"]?.stringValue ?? "")
+        case "reasoning":
+            // The body lives in `reasoning`, never `text` (schema.rs DocPartJson).
+            return .reasoning(id: id, text: m["reasoning"]?.stringValue ?? "")
         case "visual":
             // Mobile shows only the bounded title; source is never read or executed.
             guard let title = m["title"]?.stringValue,
