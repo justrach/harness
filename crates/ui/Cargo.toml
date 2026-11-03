@@ -33,6 +33,10 @@ name = "render-isolation-profile"
 required-features = ["resource-profile"]
 
 [[example]]
+name = "composer-cache-flicker"
+required-features = ["resource-profile"]
+
+[[example]]
 name = "focus-cue-capture"
 required-features = ["resource-profile", "appshots-fixture"]
 

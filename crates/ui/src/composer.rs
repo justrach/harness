@@ -12373,8 +12373,28 @@ fn question_markdown(question: &str) -> crate::markdown::BlockTree {
 }
 
 #[cfg(test)]
+#[path = "composer/cache_identity_tests.rs"]
+mod cache_identity_tests;
+
+#[cfg(test)]
+#[path = "composer/cache_lifecycle_tests.rs"]
+mod cache_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "composer/cache_phase_tests.rs"]
+mod cache_phase_tests;
+
+#[cfg(test)]
+#[path = "composer/cache_state_tests.rs"]
+mod cache_state_tests;
+
+#[cfg(test)]
 #[path = "composer/fade_tests.rs"]
 mod fade_tests;
+
+#[cfg(test)]
+#[path = "composer/full_shell_cache_tests.rs"]
+mod full_shell_cache_tests;
 
 #[cfg(test)]
 #[path = "composer/prompt_history_tests.rs"]
