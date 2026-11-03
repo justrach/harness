@@ -68,7 +68,7 @@ fn tabList(c: *ui.Context, a: *App, k: theme.Colors) void {
         const title = if (id) |cid| (if (a.findChat(cid)) |ch| chatLabel(ch) else "Untitled session") else "New session";
         kit.ellipsisText(c, title, .{ .size = 12.5, .color = if (lit) k.text else k.muted }, width - 20 - 16 - 16 - 6);
     }
-    if (close) |i| a.closeTab(i) else if (show) |i| a.showTab(i);
+    if (close) |i| a.closeTabArchiving(i) else if (show) |i| a.showTab(i);
 }
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
@@ -734,6 +734,9 @@ pub const SearchRow = struct {
     inner: f32,
     branch: ?[]const u8 = null,
     pr: ?struct { @import("change_requests.zig").Summary, @import("change_requests.zig").Provenance } = null,
+    /// The sidebar search follows the lists' compact setting; the command
+    /// palette always shows the two-line row.
+    follow_compact: bool = false,
 };
 
 pub const SearchHit = struct { clicked: bool = false, pressed: bool = false };
@@ -741,7 +744,7 @@ pub const SearchHit = struct { clicked: bool = false, pressed: bool = false };
 pub fn searchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o: SearchRow) SearchHit {
     // The sidebar's own row (`render_chat_row`): compact, a result is one
     // line like the lists', its title lit where it matches.
-    if (a.settings.get(.sidebar_compact)) return compactSearchRow(c, a, k, ch, o);
+    if (o.follow_compact and a.settings.get(.sidebar_compact)) return compactSearchRow(c, a, k, ch, o);
     const meta: f32 = if (o.pr != null) 16 else if (o.branch != null) 14 else 0;
     const h: f32 = if (meta == 0) 45 else 47 + meta;
     var r = ui.div(c).column().wFull().h(h).px(8).py(6).gap(2).rounded(10).clip();
@@ -838,6 +841,33 @@ fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat
     }
     const it = r.interaction();
     return .{ .clicked = r.clicked(), .pressed = it.pressed and c.input.pressed };
+}
+
+/// The inline note (`sidebar-notice`): danger-edged, a click dismisses it;
+/// a timed one goes on its own.
+fn notice(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const v = &a.view;
+    if (v.sidebar_notice_len == 0) return;
+    if (v.sidebar_notice_until) |t| {
+        if (c.time >= t) {
+            v.sidebar_notice_len = 0;
+            v.sidebar_notice_until = null;
+            return;
+        }
+        c.frameIn(@floatCast(t - c.time));
+    }
+    const box = ui.div(c).column().wFull().px(8).pb(8);
+    defer box.end();
+    ui.key(c, "sidebar-notice");
+    const s = ui.div(c).column().wFull().px(8).py(4).rounded(6).border(k.danger).borderW(1);
+    defer s.end();
+    const w = ui.div(c).column().w(width - 16 - 16 - 2);
+    defer w.end();
+    ui.text(c, v.sidebar_notice[0..v.sidebar_notice_len], .{ .size = 11, .wrap = true, .color = k.danger });
+    if (s.clicked()) {
+        v.sidebar_notice_len = 0;
+        v.sidebar_notice_until = null;
+    }
 }
 
 fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void {
@@ -948,6 +978,7 @@ fn firstLine(s: []const u8) []const u8 {
 }
 
 fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
+    notice(c, a, k);
     // A running cloud sandbox is billed until it is turned off: always in
     // view, above the account badge.
     @import("view_sandbox_strip.zig").strip(c, a, k, 0);

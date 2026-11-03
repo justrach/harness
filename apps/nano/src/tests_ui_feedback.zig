@@ -278,3 +278,49 @@ test "a plain chat goes out with no project, on Auto (low), its config saying ch
     try testing.expect(std.mem.indexOf(u8, r, "\"cwd\":\"~\"") != null);
     try testing.expect(std.mem.indexOf(u8, r, "\"worktree\"") == null);
 }
+
+test "the first ⌘W asks; the answer is the default; only an idle chat is archived (archive_choice)" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Mutate":{},"QueueCommand":{},"WatchDocMessages":{},"WatchQueue":{}}
+    , .{});
+    a.engine.state = .connected;
+    var chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"idle","deviceId":"d","title":"Synthetic idle","archived":false},
+        \\ {"id":"busy","deviceId":"d","title":"Synthetic busy","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try a.chats.replace(chats.value);
+    var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"busy","status":"working","updatedAt":"2099-01-01T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try a.sessions.replace(sessions.value);
+    const archived = struct {
+        fn of(app: *App, id: []const u8) bool {
+            var buf: [96]u8 = undefined;
+            const want = std.fmt.bufPrint(&buf, "\"op\":\"setChatArchived\",\"chatId\":\"{s}\"", .{id}) catch return false;
+            for (app.engine.sent.items) |f| if (std.mem.indexOf(u8, f, want) != null) return true;
+            return false;
+        }
+    }.of;
+    // No choice yet: ⌘W asks and nothing closes.
+    a.openChat("idle", null);
+    a.closeByShortcut();
+    try testing.expect(a.view.close_choice);
+    try testing.expectEqualStrings("idle", a.selected.?);
+    // "Archive it": saved as the default, and this idle chat goes.
+    a.chooseCloseArchiving(true);
+    try testing.expect(!a.view.close_choice);
+    try testing.expect(a.settings.get(.archive_sessions_on_close) and a.settings.get(.archive_on_close_chosen));
+    try testing.expect(archived(&a, "idle"));
+    // Chosen: the next ⌘W doesn't ask; a working chat stays, with a note.
+    a.openChat("busy", null);
+    a.closeByShortcut();
+    try testing.expect(!a.view.close_choice);
+    try testing.expect(!archived(&a, "busy"));
+    try testing.expectEqualStrings(@import("archive_close.zig").running_notice, a.view.sidebar_notice[0..a.view.sidebar_notice_len]);
+}

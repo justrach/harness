@@ -192,7 +192,10 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             const w = ui.div(c).column().w(@max(set.inner_w - 2 - 2 * 20 - 14 - 40, 80)).gap(4);
             defer w.end();
             ui.text(c, "Archive sessions when closing tabs or panes", set.st(c, 13, .{ .weight = .medium, .color = k.text }));
-            ui.text(c, "Closing a session tab or pane with ⌘W or its ✕ button archives it if idle, unless it is still open in another tab or pane in this app. ⌥⌘W always closes without archiving. Running sessions and sessions waiting for input remain in the sidebar. Closing the app or a window does not archive sessions.", set.st(c, 12, .{ .wrap = true, .color = k.muted }));
+            // Both shortcuts as bound (`archive_on_close_copy`).
+            const b = @import("view.zig").closeBadges(c, a);
+            const copy = c.alloc().alloc(u8, 600) catch return;
+            ui.text(c, @import("archive_close.zig").settingsCopy(copy, b[0], b[1]), set.st(c, 12, .{ .wrap = true, .color = k.muted }));
         }
         if (set.toggle(c, k, a.settings.get(.archive_sessions_on_close), true)) {
             a.settings.toggle(.archive_sessions_on_close);

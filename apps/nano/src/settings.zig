@@ -95,6 +95,8 @@ pub const Prefs = struct {
     files_word_wrap: bool = false,
     files_show_all: bool = false,
     archive_sessions_on_close: bool = false,
+    /// What ⌘W does to a session was chosen (`archive_on_close_chosen`).
+    archive_on_close_chosen: bool = false,
     escape_stops_active_agent: bool = false,
     transcript_compact_mode: bool = true,
     pause_animations_in_background: bool = false,
@@ -124,6 +126,7 @@ pub const Flag = enum {
     files_word_wrap,
     files_show_all,
     archive_sessions_on_close,
+    archive_on_close_chosen,
     escape_stops_active_agent,
     transcript_compact_mode,
     pause_animations_in_background,
@@ -475,6 +478,9 @@ pub const Store = struct {
         s.write(comptime camel(@tagName(flag)), .{ .bool = on });
         // A choice made from here on is kept: the one-time switch is done.
         if (flag == .transcript_compact_mode) s.write(compact_default_key, .{ .bool = true });
+        // The switch and the first-close question both count as the choice
+        // (`set_archive_sessions_on_close`).
+        if (flag == .archive_sessions_on_close and !s.prefs.archive_on_close_chosen) s.set(.archive_on_close_chosen, true);
     }
 
     pub fn toggle(s: *Store, comptime flag: Flag) void {

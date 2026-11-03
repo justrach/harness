@@ -156,6 +156,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_context.zig").overlay(c, a, popup);
     @import("view_drag.zig").overlay(c, a, popup);
     @import("view_chat_menu.zig").overlays(c, a, popup);
+    closeChoice(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
     @import("view_palette.zig").overlay(c, a, popup);
     // First-run setup, over the whole window.
@@ -352,7 +353,14 @@ fn keys(c: *ui.Context, a: *App) void {
     if (a.selected != null and c.shortcut(.{ .key = 'e', .cmd = true })) @import("app_files.zig").toggle(a);
     if (a.selected != null and c.shortcut(.{ .key = 'r', .cmd = true })) @import("app_panels.zig").toggleHost(a);
     if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();
-    if (c.shortcut(.{ .key = 'w', .cmd = true })) a.closeFocused();
+    // The first ⌘W's question: Escape dismisses it, and nothing closes.
+    if (a.view.close_choice and c.shortcut(.{ .key = S.escape })) {
+        a.view.close_choice = false;
+        a.redraw();
+    }
+    if (c.shortcut(.{ .key = 'w', .cmd = true })) a.closeByShortcut();
+    // Close without archiving (⌥⌘W, rebindable): never asks, never archives.
+    if (closeOnlyPressed(c, a)) a.closeArchiving(false);
     if (c.shortcut(.{ .key = 'd', .cmd = true })) a.splitPane(.horizontal);
     if (c.shortcut(.{ .key = 'd', .cmd = true, .shift = true })) a.splitPane(.vertical);
     if (c.shortcut(.{ .key = '[', .cmd = true })) a.stepPane(false);
@@ -392,6 +400,80 @@ fn toggleSidebar(c: *ui.Context, a: *App, pointer: bool) void {
         }
     }
     a.redraw();
+}
+
+/// The close badges as the keys read (`close_shortcut_badges`): ⌘W, and
+/// the close-without-archiving shortcut as bound.
+pub fn closeBadges(c: *ui.Context, a: *App) [2][]const u8 {
+    const sc = @import("shortcuts.zig");
+    const close = c.alloc().alloc(u8, 32) catch return .{ "", "" };
+    const only = c.alloc().alloc(u8, 32) catch return .{ "", "" };
+    var combo: []const u8 = "mod-alt-w";
+    for (sc.all) |entry| if (std.mem.eql(u8, entry.key, "closeTabWithoutArchiving")) {
+        combo = a.settings.combo(entry);
+    };
+    return .{ sc.badge(close, "mod-w"), sc.badge(only, combo) };
+}
+
+/// The first ⌘W's question (`render_archive_choice_dialog`): ✕ dismisses,
+/// "Archive it" or "Just close it" saves the default and closes.
+fn closeChoice(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (!a.view.close_choice) return;
+    const ac = @import("archive_close.zig");
+    const menu = @import("view_chat_menu.zig");
+    const b = closeBadges(c, a);
+    const back = menu.scrim(c, k);
+    defer back.end();
+    const card = menu.dialog(c, k);
+    defer card.end();
+    {
+        ui.key(c, "archive-choice-dismiss");
+        const x = ui.div(c).row().absolute().offset(360 - 2 - 8 - 20, 8).size(20, 20).center().rounded(5).hover(k.ink(0.08));
+        defer x.end();
+        icons.icon(c, .close, 12, k.muted, 0);
+        if (x.clicked()) {
+            a.view.close_choice = false;
+            return a.redraw();
+        }
+    }
+    _ = c.leaf(.{ .height = .{ .px = 12 } }, .none, null);
+    const title = c.alloc().alloc(u8, 96) catch return;
+    ui.text(c, ac.choiceTitle(title, b[0]), .{ .size = 15, .line_height = kit.measured(15 * 1.618), .weight = .semibold, .wrap = true, .color = k.text });
+    _ = c.leaf(.{ .height = .{ .px = 6 } }, .none, null);
+    const body = c.alloc().alloc(u8, 480) catch return;
+    ui.text(c, ac.choiceBody(body, b[1]), .{ .size = 13, .line_height = 19, .wrap = true, .color = k.muted });
+    _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
+    const r = ui.div(c).row().wFull().gap(8).justifyEnd();
+    defer r.end();
+    var pick: ?bool = null;
+    {
+        ui.key(c, "archive-choice-archive");
+        const g = ui.div(c).row().px(12).py(6).rounded(8).hover(k.ink(0.06));
+        defer g.end();
+        ui.text(c, "Archive it", .{ .size = 13, .line_height = kit.measured(13 * 1.618), .color = if (g.hovered()) k.text else k.muted });
+        if (g.clicked()) pick = true;
+    }
+    {
+        ui.key(c, "archive-choice-close");
+        const p = ui.div(c).row().px(12).py(6).rounded(8).bg(k.solid);
+        defer p.end();
+        ui.text(c, "Just close it", .{ .size = 13, .line_height = kit.measured(13 * 1.618), .weight = .medium, .color = k.on_solid });
+        if (p.clicked()) pick = false;
+    }
+    if (pick) |archive| a.chooseCloseArchiving(archive);
+}
+
+/// The close-without-archiving shortcut as Settings › Shortcuts binds it.
+fn closeOnlyPressed(c: *ui.Context, a: *App) bool {
+    const sc = @import("shortcuts.zig");
+    const s = c.input.shortcut orelse return false;
+    var buf: [32]u8 = undefined;
+    const pressed = sc.fromShortcut(&buf, s) orelse return false;
+    for (sc.all) |entry| if (std.mem.eql(u8, entry.key, "closeTabWithoutArchiving")) {
+        if (!std.mem.eql(u8, pressed, a.settings.combo(entry))) return false;
+        return c.shortcut(s);
+    };
+    return false;
 }
 
 fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {

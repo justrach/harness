@@ -275,7 +275,7 @@ pub fn results(c: *ui.Context, a: *App, k: theme.Colors) bool {
         const device = deviceName(a, ch.device_id);
         const where = if (device) |d| c.print("{s} @ {s}", .{ project, d }) else project;
         const folder = if (ch.archived) c.print("Archived · {s}", .{where}) else where;
-        const hit = sidebar.searchRow(c, a, k, ch, .{ .folder = folder, .lit = i == s.cursor.active, .query = query, .inner = sidebar.width - 16 - 16 });
+        const hit = sidebar.searchRow(c, a, k, ch, .{ .folder = folder, .lit = i == s.cursor.active, .query = query, .inner = sidebar.width - 16 - 16, .follow_compact = true });
         if (hit.pressed) s.cursor.pick(i, ch.id);
         if (hit.clicked) chosen = i;
         if (s.reveal and i == s.cursor.active) revealRow(c, s.scroll_id, w);

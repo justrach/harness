@@ -29,7 +29,7 @@ fn windowItems(a: *App) [7]nanoui.MenuItem {
 }
 
 fn closeTab(a: *App, _: *Item) void {
-    a.closeFocused();
+    a.closeByShortcut();
     a.redraw();
 }
 

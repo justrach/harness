@@ -99,6 +99,13 @@ pub const View = struct {
     /// keys when next drawn.
     write_open: bool = false,
     write_focus: bool = false,
+    /// The first ⌘W's question is up (archive_close.zig).
+    close_choice: bool = false,
+    /// The sidebar's inline note (`sidebar_notice`) and when it goes; a
+    /// click dismisses it sooner.
+    sidebar_notice: [160]u8 = undefined,
+    sidebar_notice_len: usize = 0,
+    sidebar_notice_until: ?f64 = null,
     /// The rounded seam's hairline is the column's left border, which
     /// takes layout room in GPUI (`border_l_1`): 1 while it shows, else 0.
     seam_inset: f32 = 0,
@@ -804,6 +811,67 @@ pub const App = struct {
     pub fn focusToward(a: *App, d: tabs_mod.Direction) void {
         const s = a.tabs.layout() orelse return;
         if (s.toward(d)) |ix| a.focusPane(ix);
+    }
+
+    /// ⌘W (`close_chat_view_by_shortcut`): asks first until a choice is
+    /// made, then closes, archiving per Settings › Archived.
+    pub fn closeByShortcut(a: *App) void {
+        const ac = @import("archive_close.zig");
+        if (ac.asks(a.settings.get(.archive_on_close_chosen), a.settings.get(.archive_sessions_on_close), a.selected != null)) {
+            a.view.close_choice = true;
+            return a.redraw();
+        }
+        a.closeArchiving(a.settings.get(.archive_sessions_on_close));
+    }
+
+    /// The question's answer: saved as the default, then this close.
+    pub fn chooseCloseArchiving(a: *App, archive: bool) void {
+        if (!a.view.close_choice) return;
+        a.view.close_choice = false;
+        a.settings.set(.archive_sessions_on_close, archive);
+        a.closeArchiving(archive);
+    }
+
+    /// Closes the focused pane or tab, then archives the chat it showed if
+    /// `may_archive` and it's idle and shown nowhere else.
+    pub fn closeArchiving(a: *App, may_archive: bool) void {
+        a.view.close_choice = false;
+        const id = if (a.selected) |s| a.gpa.dupe(u8, s) catch null else null;
+        defer if (id) |x| a.gpa.free(x);
+        a.closeFocused();
+        if (id) |x| a.archiveClosed(x, may_archive);
+    }
+
+    /// A tab's ✕: archives per the setting, and never asks.
+    pub fn closeTabArchiving(a: *App, i: usize) void {
+        const tab_chat = if (i < a.tabs.items.items.len) a.tabs.items.items[i] else null;
+        const id = if (tab_chat) |s| a.gpa.dupe(u8, s) catch null else null;
+        defer if (id) |x| a.gpa.free(x);
+        a.closeTab(i);
+        if (id) |x| a.archiveClosed(x, a.settings.get(.archive_sessions_on_close));
+    }
+
+    fn archiveClosed(a: *App, id: []const u8, may_archive: bool) void {
+        const ac = @import("archive_close.zig");
+        const st = workspace.statusOf(a.sessions.items, id);
+        var sending = false;
+        for (a.pending_sends.items) |p| if (!p.rejected and std.mem.eql(u8, p.chat, id)) {
+            sending = true;
+        };
+        switch (ac.decide(may_archive, a.tabs.find(id) != null, sending or st == .working or st == .awaiting_input)) {
+            .archive => a.setArchived(id, true),
+            .running => a.setSidebarNotice(ac.running_notice, ac.notice_s),
+            .off, .still_open => {},
+        }
+    }
+
+    /// The sidebar's inline note, for `seconds` (null: until clicked).
+    pub fn setSidebarNotice(a: *App, text: []const u8, seconds: ?f64) void {
+        const n = @min(text.len, a.view.sidebar_notice.len);
+        @memcpy(a.view.sidebar_notice[0..n], text[0..n]);
+        a.view.sidebar_notice_len = n;
+        a.view.sidebar_notice_until = if (seconds) |s| a.now + s else null;
+        a.redraw();
     }
 
     /// ⌘W: the focused pane in a split, the next one's draft back; else

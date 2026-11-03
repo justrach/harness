@@ -20,6 +20,7 @@ test {
     _ = @import("app_queue.zig");
     _ = @import("chat_mode.zig");
     _ = @import("view_write.zig");
+    _ = @import("archive_close.zig");
     _ = @import("tabs.zig");
     _ = @import("tests_ui.zig");
     _ = @import("tests_ui_picker.zig");
