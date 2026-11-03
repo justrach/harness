@@ -1117,6 +1117,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
+            // GPUI entrance animations use wall time, not the executor's test
+            // clock. Keep startup animation frames out of the cache counts.
+            motion::set_reduced_motion(cx, true);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
             crate::history::init(
@@ -1164,7 +1167,7 @@ mod tests {
             shell.toggle_command_palette(window, cx);
         });
         cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
-        // Let the sidebar's open animation settle: a moving width re-renders it.
+        // Drain startup timers and focus effects before counting renders.
         for _ in 0..3 {
             cx.executor()
                 .advance_clock(std::time::Duration::from_secs(2));

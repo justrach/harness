@@ -478,7 +478,7 @@ final class TranscriptLayoutTests: XCTestCase {
     }
 
     private func findNativeEditor(_ view: UIView) -> UITextView? {
-        if let editor = view as? UITextView { return editor }
+        if let editor = view as? ComposerTextView { return editor }
         return view.subviews.lazy.compactMap { self.findNativeEditor($0) }.first
     }
 

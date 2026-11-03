@@ -450,6 +450,10 @@ fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppC
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     let sidebar_bottom = px(600.0);
+    // The titlebar already provides new-chat and search actions. No duplicate
+    // controls (or their click targets) should take space above the list.
+    assert!(cx.debug_bounds("sidebar-new-chat").is_none());
+    assert!(cx.debug_bounds("sidebar-search-field").is_none());
     // The project filter stays on screen, below the capped tab list.
     let filter = cx
         .debug_bounds("spaces-filter")
@@ -459,10 +463,7 @@ fn many_tabs_scroll_instead_of_hiding_the_project_filter(cx: &mut gpui::TestAppC
         "filter pushed off: {filter:?}"
     );
     assert!(
-        filter.top()
-            <= sidebar_bottom * MAX_SIDEBAR_SHARE
-                + px(40.0)
-                + px(Shell::SIDEBAR_QUICK_ACTIONS_HEIGHT),
+        filter.top() <= sidebar_bottom * MAX_SIDEBAR_SHARE + px(40.0),
         "{filter:?}"
     );
     // The active (last) tab was scrolled into view above the filter.

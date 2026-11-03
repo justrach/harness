@@ -112,6 +112,7 @@ struct HostLinkSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    @State private var contentHeight: CGFloat = 240
     @State private var opening: LocalhostPageTarget?
     @State private var servers: [LocalServer] = []
 
@@ -188,6 +189,9 @@ struct HostLinkSheet: View {
                     if canOpen { otherServers }
                 }
                 .padding(20)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                    contentHeight = height
+                }
             }
             .task(id: deviceId) {
                 guard canOpen, servers.isEmpty else { return }
@@ -203,7 +207,8 @@ struct HostLinkSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
+        // Allow for the grabber and inline navigation bar, keeping the content's bottom inset.
+        .presentationDetents([.height(contentHeight + 72), .large])
         .harnessAppearance()
     }
 

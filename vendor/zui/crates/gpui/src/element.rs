@@ -36,7 +36,6 @@ use crate::{
     FocusHandle, InspectorElementId, LayoutId, Pixels, Point, Size, Style, Window,
     util::FluentBuilder, window::with_element_arena,
 };
-use derive_more::{Deref, DerefMut};
 use std::{
     any::Any,
     fmt::{self, Debug, Display},
@@ -209,12 +208,63 @@ pub trait ParentElement {
 }
 
 /// A globally unique identifier for an element, used to track state across frames.
-#[derive(Deref, DerefMut, Clone, Default, Debug, Eq, PartialEq, Hash)]
-pub struct GlobalElementId(pub(crate) Arc<[ElementId]>);
+///
+/// Modified by Harness, after upstream Zed 1dd9bbfd71 ("gpui: Hash a GlobalElementId once, when
+/// it is built", Apache-2.0; see vendor/zui/NOTICE): the id path's hash is computed once, in
+/// [`GlobalElementId::new`]. Every element with an id is looked up in two frames' element-state
+/// maps, recorded as accessed, and moved again when the frame finishes, so hashing the whole path
+/// each time (every ancestor's id, names byte by byte) cost a tenth of a frame's draw.
+#[derive(Clone, Debug)]
+pub struct GlobalElementId {
+    ids: Arc<[ElementId]>,
+    hash: u64,
+}
+
+impl GlobalElementId {
+    /// The id of the element at the end of `path`, with the path's hash.
+    pub(crate) fn new(path: &[ElementId]) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = collections::FxHasher::default();
+        path.hash(&mut hasher);
+        Self {
+            ids: Arc::from(path),
+            hash: hasher.finish(),
+        }
+    }
+}
+
+impl Default for GlobalElementId {
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+impl std::ops::Deref for GlobalElementId {
+    type Target = [ElementId];
+
+    fn deref(&self) -> &[ElementId] {
+        &self.ids
+    }
+}
+
+impl PartialEq for GlobalElementId {
+    fn eq(&self, other: &Self) -> bool {
+        // A probe that misses never walks the path.
+        self.hash == other.hash && (Arc::ptr_eq(&self.ids, &other.ids) || self.ids == other.ids)
+    }
+}
+
+impl Eq for GlobalElementId {}
+
+impl std::hash::Hash for GlobalElementId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
 
 impl Display for GlobalElementId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, element_id) in self.0.iter().enumerate() {
+        for (i, element_id) in self.ids.iter().enumerate() {
             if i > 0 {
                 write!(f, ".")?;
             }
@@ -226,10 +276,8 @@ impl Display for GlobalElementId {
 
 impl GlobalElementId {
     pub(crate) fn accesskit_node_id(&self) -> accesskit::NodeId {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::hash::DefaultHasher::default();
-        self.hash(&mut hasher);
-        accesskit::NodeId(hasher.finish())
+        // Still a pure function of the path.
+        accesskit::NodeId(self.hash)
     }
 }
 
@@ -299,7 +347,7 @@ impl<E: Element> Drawable<E> {
             ElementDrawPhase::Start => {
                 let global_id = self.element.id().map(|element_id| {
                     window.element_id_stack.push(element_id);
-                    GlobalElementId(Arc::from(&*window.element_id_stack))
+                    GlobalElementId::new(&window.element_id_stack)
                 });
 
                 let inspector_id;
@@ -307,7 +355,7 @@ impl<E: Element> Drawable<E> {
                 {
                     inspector_id = self.element.source_location().map(|source| {
                         let path = crate::InspectorElementPath {
-                            global_id: GlobalElementId(Arc::from(&*window.element_id_stack)),
+                            global_id: GlobalElementId::new(&window.element_id_stack),
                             source_location: source,
                         };
                         window.build_inspector_element_id(path)
@@ -358,7 +406,7 @@ impl<E: Element> Drawable<E> {
             } => {
                 if let Some(element_id) = self.element.id() {
                     window.element_id_stack.push(element_id);
-                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                    debug_assert_eq!(&**global_id.as_ref().unwrap(), &*window.element_id_stack);
                 }
 
                 let bounds = window.layout_bounds(layout_id);
@@ -391,7 +439,7 @@ impl<E: Element> Drawable<E> {
                                     crate::window::a11y::debug::NodeDebugInfo {
                                         synthetic: false,
                                         view,
-                                        element_id: global_id.0.last().map(|id| format!("{id:?}")),
+                                        element_id: global_id.last().map(|id| format!("{id:?}")),
                                         source_location,
                                     },
                                 );
@@ -420,7 +468,7 @@ impl<E: Element> Drawable<E> {
                                 .view_type_names
                                 .get(&window.current_view())
                                 .copied(),
-                            element_id: global_id.0.last().map(|id| format!("{id:?}")),
+                            element_id: global_id.last().map(|id| format!("{id:?}")),
                             source_location: self.element.source_location(),
                         };
                         let mut builder = A11ySubtreeBuilder::new(
@@ -471,7 +519,7 @@ impl<E: Element> Drawable<E> {
             } => {
                 if let Some(element_id) = self.element.id() {
                     window.element_id_stack.push(element_id);
-                    debug_assert_eq!(&*global_id.as_ref().unwrap().0, &*window.element_id_stack);
+                    debug_assert_eq!(&**global_id.as_ref().unwrap(), &*window.element_id_stack);
                 }
 
                 window.next_frame.dispatch_tree.set_active_node(node_id);

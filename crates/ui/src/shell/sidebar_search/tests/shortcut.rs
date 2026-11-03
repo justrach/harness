@@ -1,6 +1,7 @@
 use super::*;
 
 mod edge_cases;
+mod removal;
 
 fn shortcut_fixture(
     cx: &mut gpui::TestAppContext,
