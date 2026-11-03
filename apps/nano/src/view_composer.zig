@@ -49,7 +49,7 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     a.view.composer_expanded = expanded;
     const p = ui.div(c).column().offset(0, lift);
     defer p.end();
-    pill(c, a, k, w, if (expanded) .expanded else .compact, 22);
+    pill(c, a, k, w, if (expanded) .expanded else .compact, radius);
     // The session footer, in the slot the 40 points under the pill keep
     // for it (`SESSION_FOOTER_HEIGHT`, 8 under the pill); drawn over that
     // padding so the queue tray's tuck needn't move it.
@@ -111,11 +111,15 @@ test "composer expansion uses GPUI's width threshold and collapse hysteresis" {
 
 pub const Shape = enum { compact, expanded };
 
+/// The pill's corners, docked or on a new chat (`COMPOSER_RADIUS`, 16
+/// since 0fe89ff0a).
+pub const radius: f32 = 16;
+
 /// `TEXTAREA_MIN`, and the expanded pill it gives (`COMPOSER_MIN_HEIGHT`).
 pub const textarea_min: f32 = 60;
 pub const expanded_min: f32 = textarea_min + 42 + 2;
 
-pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radius: f32) void {
+pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corner: f32) void {
     // `border_1` takes its point from inside the box in GPUI: the pill is
     // 49 tall compact (`COMPACT_TOTAL_HEIGHT`), 60 + 42 + 2 = 104 expanded
     // (`COMPOSER_MIN_HEIGHT`), its controls a point in from each edge.
@@ -123,7 +127,7 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radi
     // field's id is last frame's, which `keepFocus` keeps current.
     const focused = a.view.composer_id != 0 and c.focus == a.view.composer_id;
     const edge = if (focused) k.accent.alpha(0.55) else k.border;
-    const p = kit.shadowLg(ui.div(c).w(w).bg(k.pill()).border(edge).borderW(1).rounded(radius).p(1)).bg(k.pill()).clip();
+    const p = kit.shadowLg(ui.div(c).w(w).bg(k.pill()).border(edge).borderW(1).rounded(corner).p(1)).bg(k.pill()).clip();
     const box = if (shape == .compact) p.row().h(49).px(8 + 1).itemsCenter() else p.column();
     defer box.end();
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r;
@@ -324,6 +328,13 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     // known (an open chat's is: its own), a pulsing bar for its model
     // (`trigger_chip` loading, `chip_icon_loading`).
     const chat_harness = if (a.selected) |id| (if (a.findChat(id)) |ch| ch.harness != null else false) else false;
+    // The list failed and nothing names an agent: GPUI's `effective_harness`
+    // is none, so a muted terminal and no label, not a loader.
+    const unresolved = a.harnesses.items.len == 0 and !chat_harness and a.harnesses_failed;
+    if (unresolved) {
+        icons.icon(c, .terminal, 16, k.muted, 0);
+        return;
+    }
     if (a.harnesses.items.len == 0 and !chat_harness) {
         kit.snake(c, k);
     } else if (chipMaker(a)) |maker| {
@@ -335,7 +346,11 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
         const mark = icons.harnessMark(t.harness);
         icons.icon(c, mark.name, 16, mark.brand orelse k.muted, 0);
     }
-    if (a.models.items.len == 0 and t.model == null) return skeleton(c);
+    if (a.models.items.len == 0 and t.model == null) {
+        // A failed catalog has nothing to name: no label, no ghost bar.
+        const failed = if (a.view.model_picker.catalogs.get(t.harness)) |cat| cat.failed else false;
+        return if (failed) {} else skeleton(c);
+    }
     ui.text(c, a.modelLabel(t.model), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.text.alpha(0.9) });
     if (t.reasoning) |level| ui.text(c, rules.reasoningLabel(level), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.muted.alpha(0.7) });
 }

@@ -174,6 +174,11 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     // renderer's `SCENE_ACCOUNTS`.
     const accounts_page = @import("view_settings_accounts.zig");
     if (scene.get("accounts")) |v| accounts_page.scene_accounts = try json.Stringify.valueAlloc(gpa, v, .{});
+    // The scene's cloud sandboxes reach the shell too (the running strip),
+    // not just Settings › Accounts, as GPUI's renderer applies them at boot.
+    if (scene.get("accounts")) |v| if (v == .object) if (v.object.get("codegraffSandboxes")) |sb| {
+        @import("app_sandboxes.zig").apply(&a, sb);
+    };
     defer if (accounts_page.scene_accounts) |text| {
         gpa.free(text);
         accounts_page.scene_accounts = null;

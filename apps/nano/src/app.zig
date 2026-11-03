@@ -296,6 +296,8 @@ pub const App = struct {
     /// starts with another agent (`mock` against a test engine).
     new_harness: []u8 = &.{},
     new_model: ?[]u8 = null,
+    /// The agents' list failed (`Loadable::Error`): no longer loading.
+    harnesses_failed: bool = false,
     /// Where a new chat in a git project runs: a fresh worktree, GPUI's
     /// default (`CheckoutKind::NewWorktree`), unless the project's own
     /// checkout was picked.
@@ -951,8 +953,12 @@ pub const App = struct {
 
     fn onHarnesses(a: *App, _: u64, r: rpc.Reply) void {
         switch (r) {
-            .ok => |v| a.harnesses.replace(v) catch {},
-            .err => |e| a.setNotice(e),
+            .ok => |v| {
+                a.harnesses.replace(v) catch {};
+                a.harnesses_failed = false;
+            },
+            // The picker's to say (its retry row), not the composer's.
+            .err => a.harnesses_failed = true,
             else => {},
         }
         a.redraw();

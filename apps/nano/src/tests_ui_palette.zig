@@ -298,7 +298,14 @@ test "the sidebar search: the magnifier opens it focused; it finds names, the ar
     try testing.expect(h.a.view.search.include_archived);
     try h.expectSearch(&.{ "active", "archived" });
     try testing.expect(h.t.hasText("2 results"));
+    // Results are the sidebar's own rows: compact, one line each; expanded,
+    // with where each lives (`render_chat_row`).
+    try testing.expect(!h.t.containsText("Archived · project"));
+    h.a.settings.set(.sidebar_compact, false);
+    h.t.settle(1);
     try testing.expect(h.t.containsText("Archived · project"));
+    h.a.settings.set(.sidebar_compact, true);
+    h.t.settle(1);
     h.press(.{ .key = S.down });
     try testing.expectEqual(@as(usize, 1), h.a.view.search.cursor.active);
     h.press(.{ .key = S.enter });

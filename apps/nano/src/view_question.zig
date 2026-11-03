@@ -24,7 +24,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         .back => a.wizardBack(),
         .dismiss => a.wizardDismiss(),
     };
-    const box = kit.shadowLg(ui.div(c).column().w(w).bg(k.composer).border(k.border).borderW(1).rounded(26));
+    const box = kit.shadowLg(ui.div(c).column().w(w).bg(k.composer).border(k.border).borderW(1).rounded(@import("view_composer.zig").radius));
     defer box.end();
     {
         const body = ui.div(c).column().wFull().px(16).pt(16).pb(12);

@@ -329,9 +329,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     const panel = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(w).h(h).layer(5).column().p(1)
         .bg(k.composer).border(k.border).borderW(1).rounded(12).clip()));
     defer panel.end();
-    // The page at its own height while the window has room for it; in a
-    // shorter one it takes what there is and clips, as GPUI's `max_h`.
-    if (p.stage != null) return page(c, a, k, w - 2, open, h >= p.height);
+    if (p.stage != null) return page(c, a, k, w - 2, open);
     tabs(c, a, k, w - 2);
     search(c, a, k);
     modelList(c, a, k, w - 2, h - 2 - 39 - 36, open, exit);
@@ -524,18 +522,22 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
 /// The model's page (`preview_reasoning`): back to the models, the model
 /// and its route, its reasoning on a slider in the maker's colour, and
 /// "Use model".
-fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool, fit: bool) void {
+fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     const p = &a.view.model_picker;
     const st = p.stage.?;
     ui.key(c, "model-page");
-    const content = if (fit) ui.div(c).column().wFull() else ui.div(c).column().wFull().grow().h(0);
+    // The card wants its content's own height (`h_auto`), capped by the
+    // room there is (`max_h`): the controls are measured as laid out, not
+    // as the card stretched them, so a short window scrolls them instead.
+    var natural: f32 = 2;
+    var measured: u8 = 0;
+    const content = ui.div(c).column().wFull().grow().h(0);
     defer {
         content.end();
-        // The card is the content and its 1-point border either side.
-        if (fit) if (c.rects.get(c.node(content.index).id)) |r| if (@abs(r.h + 2 - p.height) > 0.5) {
-            p.height = r.h + 2;
+        if (measured == 2 and @abs(natural - p.height) > 0.5) {
+            p.height = natural;
             c.changed = true;
-        };
+        }
     }
     // A model the catalog dropped keeps its page, to say so on commit.
     const m: workspace.Model = staged(a) orelse .{ .id = st.model, .label = st.model };
@@ -543,8 +545,14 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool, fit: bool)
     const is_binary = models.binary(levels);
     const accent: ui.Color = if (models.brandHex(m, st.harness, k.dark)) |hx| ui.Color.hex(hx) else k.text;
     {
-        const body = if (fit) ui.div(c).column().wFull().p(16).gap(16) else ui.div(c).column().wFull().grow().h(0).p(16).gap(16).clip();
+        const body = ui.div(c).column().wFull().grow().h(0).clip();
         defer body.end();
+        const inner = ui.div(c).column().wFull().p(16).gap(16);
+        defer inner.end();
+        if (c.rects.get(c.node(inner.index).id)) |r| {
+            natural += r.h;
+            measured += 1;
+        }
         {
             ui.key(c, "model-page-back");
             const b = ui.div(c).row().gap(6).itemsCenter();
@@ -586,6 +594,10 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool, fit: bool)
     }
     const foot = ui.div(c).row().wFull().px(16).pb(12);
     defer foot.end();
+    if (c.rects.get(c.node(foot.index).id)) |r| {
+        natural += r.h;
+        measured += 1;
+    }
     ui.key(c, "model-use");
     var b = ui.div(c).row().wFull().px(12).py(6).center().rounded(8).bg(k.solid);
     if (b.hovered()) b = b.opacity(0.9);

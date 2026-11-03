@@ -33,9 +33,12 @@ pub const Catalog = struct {
     models: workspace.Models,
     loaded: bool = false,
     loading: bool = false,
+    /// The last ask failed (`Loadable::Error`): not loading any more.
+    failed: bool = false,
 
     fn reply(cat: *Catalog, _: u64, r: @import("rpc.zig").Reply) void {
         cat.loading = false;
+        cat.failed = r == .err;
         switch (r) {
             .ok => |v| {
                 cat.models.replace(v) catch return;

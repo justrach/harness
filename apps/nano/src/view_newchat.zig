@@ -80,7 +80,7 @@ pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     _ = c.leaf(.{ .height = .{ .px = 42 - 28 } }, .none, null);
     pickersAbove(c, a, k, w - 20);
     _ = c.leaf(.{ .height = .{ .px = 8 } }, .none, null);
-    composer.pill(c, a, k, w, .expanded, 26);
+    composer.pill(c, a, k, w, .expanded, composer.radius);
     // The footer, 8 under the pill: the model chip, then for a git
     // project the checkout and the ref a session starts from.
     _ = c.leaf(.{ .height = .{ .px = 8 } }, .none, null);

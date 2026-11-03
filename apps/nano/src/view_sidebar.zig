@@ -739,6 +739,9 @@ pub const SearchRow = struct {
 pub const SearchHit = struct { clicked: bool = false, pressed: bool = false };
 
 pub fn searchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o: SearchRow) SearchHit {
+    // The sidebar's own row (`render_chat_row`): compact, a result is one
+    // line like the lists', its title lit where it matches.
+    if (a.settings.get(.sidebar_compact)) return compactSearchRow(c, a, k, ch, o);
     const meta: f32 = if (o.pr != null) 16 else if (o.branch != null) 14 else 0;
     const h: f32 = if (meta == 0) 45 else 47 + meta;
     var r = ui.div(c).column().wFull().h(h).px(8).py(6).gap(2).rounded(10).clip();
@@ -783,6 +786,51 @@ pub fn searchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o
             kit.highlightText(c, k, b, .{ .size = 11, .line_height = 14, .color = subline }, room - 15, o.query);
         } else ui.spacer(c);
         if (o.pr) |pr| @import("view_change_requests.zig").badgeQuery(c, k, pr[0], pr[1], .sidebar, true, o.query);
+    }
+    if (archive) {
+        a.setArchived(ch.id, !ch.archived);
+        return .{};
+    }
+    const it = r.interaction();
+    return .{ .clicked = r.clicked(), .pressed = it.pressed and c.input.pressed };
+}
+
+/// A compact result: the status, the marks, the title with the query lit,
+/// and how long ago (the archive control and menu under the pointer).
+fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o: SearchRow) SearchHit {
+    const l = Look.of(a);
+    var r = ui.div(c).row().wFull().h(29).px(8).pt(6).pb(5).gap(4).itemsCenter().rounded(8).clip();
+    r = if (o.lit) r.bg(k.selected) else r.hover(k.hover);
+    defer r.end();
+    const hovered = r.hovered() and !@import("view_drag.zig").dragging(a);
+    const now = a.nowMs();
+    statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
+    marks(c, a, k, ch, l, o.lit or hovered);
+    const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
+    const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
+    const far = remote(a, ch);
+    const title_w = o.inner - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
+    const tc = if (o.lit or hovered) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.8);
+    {
+        const t = ui.div(c).row().grow().w(0).clip();
+        defer t.end();
+        kit.highlightText(c, k, chatLabel(ch), kit.style(c, 13, 17, .{ .color = tc }), @max(24, title_w), o.query);
+    }
+    var archive = false;
+    if (hovered) {
+        const b = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.10));
+        defer b.end();
+        if (b.clicked()) archive = true;
+        icons.icon(c, if (ch.archived) .@"archive-up-minimalistic" else .@"archive-minimalistic", 13, k.muted, 0);
+    } else if (far) {
+        const b = ui.div(c).row().size(18, 14).center();
+        defer b.end();
+        icons.icon(c, .@"remote-server", 13, k.muted.alpha(0.5), 0);
+    }
+    {
+        const tm = ui.div(c).row().pl(6);
+        defer tm.end();
+        if (!hovered) ui.text(c, time, .{ .size = 11, .color = k.subline });
     }
     if (archive) {
         a.setArchived(ch.id, !ch.archived);

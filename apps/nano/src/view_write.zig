@@ -157,7 +157,7 @@ fn column(c: *ui.Context, w: f32) ui.Div {
 fn dock(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const outer = column(c, w).pb(16).column();
     defer outer.end();
-    const box = @import("view_kit.zig").shadowLg(ui.div(c).column().wFull().rounded(22).border(k.border).borderW(1).bg(k.pill()));
+    const box = @import("view_kit.zig").shadowLg(ui.div(c).column().wFull().rounded(@import("view_composer.zig").radius).border(k.border).borderW(1).bg(k.pill()));
     defer box.end();
     const row = ui.div(c).row().wFull().h(48).px(8).gap(8).itemsCenter();
     defer row.end();
