@@ -260,6 +260,13 @@ pub mod methods {
     pub const SHUTDOWN_SIMULATOR: &str = "ShutdownSimulator";
     pub const WATCH_SIMULATOR_SCREEN: &str = "WatchSimulatorScreen";
     pub const SIMULATOR_INPUT: &str = "SimulatorInput";
+    // Pages the target device serves on localhost, rendered there by a
+    // headless browser (ControlRpc, relay-forwardable). WatchLocalhostPage
+    // streams JPEG frames; LocalhostPageInput sends taps, typing and
+    // navigation back; ListLocalhostServers lists what answers HTTP there.
+    pub const WATCH_LOCALHOST_PAGE: &str = "WatchLocalhostPage";
+    pub const LOCALHOST_PAGE_INPUT: &str = "LocalhostPageInput";
+    pub const LIST_LOCALHOST_SERVERS: &str = "ListLocalhostServers";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";

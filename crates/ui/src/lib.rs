@@ -38,6 +38,7 @@ mod composer_markdown;
 pub mod context_trajectory;
 pub mod context_usage;
 pub mod context_window;
+pub mod dial_panel;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
@@ -87,6 +88,7 @@ mod transcript_paint_check;
 pub mod typography;
 pub mod visuals;
 mod workspace_links;
+pub mod write_markdown;
 
 use std::path::PathBuf;
 

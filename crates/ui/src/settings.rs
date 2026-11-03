@@ -916,6 +916,8 @@ pub struct UiSettings {
     /// the narration between them) fold into one collapsed accordion, so only
     /// the reply text stays visible.
     pub transcript_compact_mode: bool,
+    /// The Write page's "Aa": the interface sans instead of the serif.
+    pub write_sans: bool,
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -1021,6 +1023,7 @@ impl Default for UiSettings {
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_harness: true,
             transcript_compact_mode: false,
+            write_sans: false,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -2623,6 +2626,7 @@ mod tests {
             transcript_width: 960.0,
             open_web_links_in_harness: false,
             transcript_compact_mode: true,
+            write_sans: true,
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,

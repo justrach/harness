@@ -78,9 +78,13 @@ mod codegraff_account;
 mod command_palette;
 mod files_panel;
 #[cfg(test)]
+mod frame_cap_tests;
+#[cfg(test)]
 mod link_tests;
 mod project_icon;
 mod reauth;
+#[cfg(test)]
+mod render_isolation_tests;
 #[cfg(test)]
 mod sidebar_motion_tests;
 mod sidebar_pins;
@@ -92,6 +96,8 @@ mod tabs;
 mod titlebar_tests;
 #[cfg(test)]
 mod typing_tests;
+#[cfg(test)]
+mod view_cache_tests;
 #[cfg(test)]
 mod work_pane_tests;
 
@@ -190,6 +196,10 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
             Box::new(SelectChatTab(chat_tabs::LAST_TAB_SLOT)),
         ),
         row("Jump to the message box", Box::new(FocusComposer)),
+        row(
+            "Write the message on a full page (and back)",
+            Box::new(crate::composer::ToggleWriteDocument),
+        ),
         row("Command palette", Box::new(ToggleCommandPalette)),
         row("Search sessions", Box::new(OpenSessionSearch)),
         row("Settings", Box::new(OpenSettings)),
@@ -1940,6 +1950,11 @@ pub struct Shell {
     /// A newly selected transcript stays hidden until this matches its route,
     /// preventing one frame at the blank canvas's stale bottom clearance.
     bottom_stack_has_composer: std::rc::Rc<std::cell::Cell<bool>>,
+    /// What the cached transcript (opacity, bottom fade band) and composer
+    /// (opacity) were last painted with. A reused frame replays its paint
+    /// with these baked in, so a change must re-render the view.
+    transcript_paint: std::cell::Cell<Option<(f32, f32)>>,
+    composer_paint: std::cell::Cell<Option<f32>>,
     /// Shared route clock and measured prepaint geometry for the persistent composer.
     composer_dock: crate::composer_dock::SharedDock,
     new_thread_artwork_ready: crate::new_thread_background_effects::Readiness,
@@ -2152,6 +2167,8 @@ pub struct Shell {
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
+    /// Restarted whenever closing a running session shows its temporary warning.
+    close_archive_notice_task: Option<Task<()>>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
     /// UpdateStatus stream says WHETHER one exists; this says how far the
     /// download/stage of it has come in this process.
@@ -2368,6 +2385,10 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::RevealAgent { part_id } => {
+                    this.transcript
+                        .update(cx, |t, cx| t.reveal_agent(part_id, cx));
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -2463,9 +2484,13 @@ impl Shell {
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
-        // elapsed labels, menus); sibling animation/caret ticks do not.
+        // elapsed labels, menus); sibling animation/caret ticks do not. The
+        // transcript and the composer are cached views: neither redraws with
+        // the shell otherwise, and the composer's Send/Stop follows the
+        // session clock the shell's heartbeat ticks.
         let transcript_invalidation = cx.observe_self(|shell, cx| {
             shell.transcript.update(cx, |_, cx| cx.notify());
+            shell.composer.update(cx, |_, cx| cx.notify());
         });
         // The background graff updater publishes lifecycle notices on a
         // process-wide watch channel; each value lands on `graff_notice`.
@@ -2544,6 +2569,8 @@ impl Shell {
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
             bottom_stack_has_composer: std::rc::Rc::new(std::cell::Cell::new(false)),
+            transcript_paint: Default::default(),
+            composer_paint: Default::default(),
             composer_dock: Default::default(),
             new_thread_artwork_ready: Default::default(),
             archived_open: true,
@@ -2661,6 +2688,7 @@ impl Shell {
             attention_sound_gate: Default::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
+            close_archive_notice_task: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
             auto_download_failed: None,
@@ -8894,6 +8922,7 @@ impl Shell {
             .when_some(self.render_cloud_sandbox_strip(theme, cx), |el, strip| {
                 el.child(strip)
             })
+            .when_some(self.render_sidebar_update_row(theme, cx), |el, row| el.child(row))
             .child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
             .into_any_element()
     }
@@ -10852,6 +10881,11 @@ impl Shell {
             self.transcript
                 .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
         }
+        let transcript_opacity = if transcript_geometry_ready || departing_transcript {
+            dock_frame.transcript()
+        } else {
+            0.0
+        };
         let outlet: AnyElement = if has_selection || departing_transcript {
             div()
                 .relative()
@@ -10863,12 +10897,14 @@ impl Shell {
                         .top(px(8.0 * (1.0 - dock_frame.transcript())))
                         .size_full()
                         .when(departing_transcript, |el| el.w(px(transcript_width)))
-                        .opacity(if transcript_geometry_ready || departing_transcript {
-                            dock_frame.transcript()
-                        } else {
-                            0.0
-                        })
-                        .child(self.transcript.clone()),
+                        .opacity(transcript_opacity)
+                        // Cached: a keystroke in the composer or a caret
+                        // blink redraws without rebuilding every row.
+                        .child(
+                            self.transcript
+                                .clone()
+                                .cached(gpui::StyleRefinement::default().size_full()),
+                        ),
                 )
                 // A departing transcript is visual history, not an active
                 // interaction surface bound to the newly blank route.
@@ -11007,6 +11043,21 @@ impl Shell {
 
         let status = self.render_status_strip(composer_width, cx);
         let drop_target = self.attachment_drop_target(None, cx);
+        // The Write page takes the pane: the draft on a page where the
+        // transcript was, its own Send in place of the composer.
+        let write_page = self.composer.read(cx).write_open().then(|| {
+            self.composer.update(cx, |composer, cx| {
+                composer.render_write_page(Theme::TITLEBAR_HEIGHT, window, cx)
+            })
+        });
+        let write_open = write_page.is_some();
+        let composer_shown = (has_spaces || no_project || has_appshots) && !write_open;
+        // The transcript steps aside while the page is up.
+        let outlet = if write_open {
+            Empty.into_any_element()
+        } else {
+            outlet
+        };
         // Attachment dropzone over the ENTIRE conversation column (transcript
         // + composer, not just the pill). OS images keep using the upload
         // pipeline; workspace files/directories and file tabs become the same
@@ -11052,7 +11103,7 @@ impl Shell {
             // The hero is deliberately outside the transcript EdgeFade below:
             // it must paint under the overlaid titlebar instead of becoming
             // fully transparent across the titlebar's inset band.
-            .children(new_thread_background_layer)
+            .children(new_thread_background_layer.filter(|_| !write_open))
             .child(
                 // Full-height underlay: the transcript viewport spans the
                 // whole column, scrolling UNDER the titlebar above and the
@@ -11079,6 +11130,10 @@ impl Shell {
                     // status strip above it is empty air), zero at the
                     // underlay's bottom edge.
                     let bottom_band = (stack_h - Theme::STATUS_STRIP_HEIGHT).max(1.0);
+                    let paint = Some((transcript_opacity, bottom_band));
+                    if self.transcript_paint.replace(paint) != paint {
+                        self.transcript.update(cx, |_, cx| cx.notify());
+                    }
                     div().absolute().inset_0().bottom(px(term_h)).child(
                         crate::edge_fade::edge_faded(
                             Theme::TRANSCRIPT_FADE_BAND,
@@ -11095,6 +11150,9 @@ impl Shell {
                     )
                 },
             )
+            .children(
+                write_page.map(|page| div().absolute().inset_0().bottom(px(term_h)).child(page)),
+            )
             // The glass chrome stack, floating over the transcript's bottom:
             // reserved status strip (h-6, the WorkingIndicator — the composer
             // below never shifts), composer, terminal dock. A paint-time
@@ -11105,7 +11163,7 @@ impl Shell {
             .child({
                 let measured = self.bottom_stack.clone();
                 let measured_has_composer = self.bottom_stack_has_composer.clone();
-                let contains_composer = (has_spaces || no_project || has_appshots) && has_selection;
+                let contains_composer = composer_shown && has_selection;
                 let composer = self.composer.clone();
                 div()
                     .flex_none()
@@ -11131,9 +11189,14 @@ impl Shell {
                         .absolute()
                         .inset_0(),
                     )
-                    .child(status)
-                    .when(has_spaces || no_project || has_appshots, |el| {
+                    .when(!write_open, |el| el.child(status))
+                    .when(composer_shown, |el| {
                         let composer_opacity = self.composer_dock.borrow().opacity();
+                        if self.composer_paint.replace(Some(composer_opacity))
+                            != Some(composer_opacity)
+                        {
+                            self.composer.update(cx, |_, cx| cx.notify());
+                        }
                         el.child(crate::composer_dock::docked_composer(
                             div()
                                 .id("persistent-composer")
@@ -11141,7 +11204,11 @@ impl Shell {
                                 .w(px(composer_width))
                                 .opacity(composer_opacity)
                                 .mx_auto()
-                                .child(self.composer.clone())
+                                // Cached at its measured height: a streamed
+                                // chunk redraws the transcript, not this.
+                                .child(self.composer.clone().cached_measured(
+                                    gpui::StyleRefinement::default().w(px(composer_width)),
+                                ))
                                 .children(if has_selection {
                                     self.render_jump_to_bottom(cx)
                                         .or_else(|| self.render_turn_work_cue(cx))
@@ -11185,92 +11252,12 @@ impl Shell {
         let changes = crate::turn_work::latest_turn_changes(transcript)?;
         let theme = Theme::of(cx).clone();
         let showing = self.active_changes(cx).is_some();
-        let card = div()
-            .id("turn-changes-card")
-            .debug_selector(|| "turn-changes-card".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("{}, show changes", changes.title()))
-            .h(px(44.0))
-            .px(px(Theme::SPACE_MD))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .rounded(px(Theme::PANEL_RADIUS))
-            .border_1()
-            .border_color(theme.border)
-            .bg(motion::hover_blend(
-                "turn-changes-card",
-                theme.surface_card,
-                theme.surface_raised_hover,
-            ))
-            .on_hover(motion::hover_listener("turn-changes-card"))
-            .shadow_sm()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.show_turn_changes(cx)))
-            .child(icon(icons::DOCUMENT).size(px(16.0)).text_color(theme.accent))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(changes.title())),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(changes.names())),
-                    ),
-            )
-            .when(changes.additions + changes.deletions > 0, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(SharedString::from(format!("+{}", changes.additions))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(SharedString::from(format!("-{}", changes.deletions))),
-                        ),
-                )
-            })
-            .child(
-                div()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .bg(if showing { theme.accent_wash } else { theme.surface_raised })
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if showing { theme.accent } else { theme.text_muted })
-                    .child(SharedString::from(if showing { "Showing" } else { "Review" })),
-            );
-        Some(
-            div()
-                .absolute()
-                .top(px(-52.0))
-                .left(px(Theme::SPACE_SM))
-                .right(px(Theme::SPACE_SM))
-                .child(card)
-                .into_any_element(),
-        )
+        Some(crate::turn_work::changes_cue(
+            &changes,
+            showing,
+            &theme,
+            cx.listener(|this, _, _, cx| this.show_turn_changes(cx)),
+        ))
     }
 
     /// Open the right pane on the working-tree Changes tab, reusing an open
@@ -13968,6 +13955,14 @@ impl Render for Shell {
             // left unread through a frame (a menu animating over a hovered
             // trigger) is pruned as unmounted.
             self.sidebar_pane.update(cx, |_, cx| cx.notify());
+        }
+        // The transcript and composer are cached too, but notified only for
+        // fades of their own: a hovered sidebar row must not rebuild them.
+        if motion::hover_needs_frame(self.transcript.entity_id()) {
+            self.transcript.update(cx, |_, cx| cx.notify());
+        }
+        if motion::hover_needs_frame(self.composer.entity_id()) {
+            self.composer.update(cx, |_, cx| cx.notify());
         }
         if self.motion_active.get() | hover_fading {
             window.request_animation_frame();

@@ -131,6 +131,7 @@ unsafe extern "C" fn display_link_output_callback(
     _flags_out: *mut i64,
     display_id: *mut c_void,
 ) -> i32 {
+    crate::frame_stats::link_tick();
     let display_id = display_id as usize as CGDirectDisplayID;
     let registry = lock_registry();
     if let Some(entry) = registry.displays.get(&display_id) {
@@ -281,6 +282,7 @@ impl WindowFrameSource {
             self.requested.clone(),
         )?;
         self.registration = Some((display_id, subscriber_id));
+        crate::frame_stats::link_start();
         // Only latch the request once a source can actually deliver it. A
         // failed start must allow the next invalidation to retry.
         self.requested.store(true, Ordering::Release);

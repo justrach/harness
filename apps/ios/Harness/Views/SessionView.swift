@@ -38,6 +38,9 @@ struct SessionView: View {
     @State private var windowMidX: CGFloat = 0
     /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
+    /// The side the system's vertical bar stands on (the Duo's cover display), and the content's safe area.
+    @State private var verticalBarEdge: HorizontalEdge?
+    @State private var contentSafeInsets = EdgeInsets()
     let chatId: String
 
     /// Reserve the back button and native bar margins. Anchor the rest to the
@@ -215,6 +218,18 @@ struct SessionView: View {
     }
 
     private var chat: Chat? { model.chat(id: chatId) }
+
+    /// The transcript's row padding: beside the cover display's vertical bar the text takes the width the bar's
+    /// column leaves (CoverLayout); everywhere else 20pt a side.
+    private var transcriptRowInsets: CoverLayout.RowInsets {
+        let compact = horizontalSizeClass == .compact
+        guard compact, !flatSplit, !paneChrome else { return .standard }
+        let edge = CoverLayout.barEdge(reported: verticalBarEdge, duo: duoChat, compactWidth: compact,
+                                       leadingInset: contentSafeInsets.leading,
+                                       trailingInset: contentSafeInsets.trailing)
+        return CoverLayout.rowInsets(barEdge: edge,
+                                     barInset: edge == .leading ? contentSafeInsets.leading : contentSafeInsets.trailing)
+    }
 
     /// iPhone Duo lying flat, this session alone on the screen: chat and Inspect split at the fold.
     private var flatSplit: Bool { (duoFlat || DuoChat.demoFlat) && splitScreen == nil }
@@ -409,7 +424,8 @@ struct SessionView: View {
                                })
                     .frame(maxHeight: .infinity)
                     .clipped()
-                    .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
+                // Below the transcript, not over it: no text runs under the chips.
+                runPill(chat: chat, store: store)
                 if typing {
                     DuoStatusStrip(model: inspectModel, activity: DuoStatusStrip.activity(inspectModel, running: running)) {
                         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
@@ -475,7 +491,10 @@ struct SessionView: View {
             }
                 .padding(.leading, 16)
                 .padding(.bottom, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("run-status-row")
         }
     }
 
@@ -503,7 +522,8 @@ struct SessionView: View {
                                    inspect.open = true
                                }
                            } : nil,
-                           inspectTool: flat ? { tool in withAnimation(Motion.collapse) { inspect.show(tool) } } : nil)
+                           inspectTool: flat ? { tool in withAnimation(Motion.collapse) { inspect.show(tool) } } : nil,
+                           rowInsets: transcriptRowInsets)
                 .sheet(item: $hostLink) { link in
                     let host = store.hostDeviceId ?? chat.deviceId
                     HostLinkSheet(link: link, deviceId: host, deviceName: model.deviceName(host))
@@ -515,13 +535,14 @@ struct SessionView: View {
                     }
                 }
                 .motionAnimation(Motion.fadeQuick, value: store.entries.isEmpty)
-                .overlay(alignment: .bottomLeading) { runPill(chat: chat, store: store) }
-                .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
                 .overlay(alignment: .leading) {
                     // Swipe in from the edge to go back; the pager owns the rest of the width.
                     if duoChat, horizontalSizeClass == .compact { EdgeSwipeBack { dismiss() } }
                 }
             VStack(spacing: 0) {
+                // A Duo's running turn: the pill row, in layout above the composer. It floated over the
+                // transcript, and text ran under and between the glass chips.
+                runPill(chat: chat, store: store)
                 // A Duo's running turn is the pill; the strip shows only sends and connection trouble there.
                 if duoChat ? (status == .errored || model.sendState(for: chat) != nil
                               || model.connectivity.state != .connected)
@@ -553,6 +574,7 @@ struct SessionView: View {
                 }
                 .padding(.bottom, 8)
             }
+            .motionAnimation(Motion.fadeQuick, value: pillShows(chat))
             .background {
                 LinearGradient(
                     stops: [
@@ -588,6 +610,8 @@ struct SessionView: View {
             }
         }
         .background(page.ignoresSafeArea())
+        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { contentSafeInsets = $0 }
+        .onVerticalBarEdgeChange { verticalBarEdge = $0 }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
             columnMinX = frame.minX
             // The fold is the window's middle; the side bar's column is outside this view's frame.

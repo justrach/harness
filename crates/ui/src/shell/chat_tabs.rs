@@ -797,7 +797,17 @@ impl Shell {
                     harness_proto::SessionStatus::Working | harness_proto::SessionStatus::AwaitingInput)
             });
         if running {
-            self.sidebar_notice = Some("Still running — closed without archiving".into());
+            let notice: SharedString = "Still running — closed without archiving".into();
+            self.sidebar_notice = Some(notice.clone());
+            self.close_archive_notice_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                let _ = this.update(cx, |shell, cx| {
+                    if shell.sidebar_notice.as_ref() == Some(&notice) {
+                        shell.sidebar_notice = None;
+                        cx.notify();
+                    }
+                });
+            }));
             cx.notify();
             return CloseArchive::Running;
         }
@@ -1225,6 +1235,305 @@ mod tests {
             "id": id, "deviceId": "local", "archived": false, "createdAt": chrono::Utc::now(),
         }))
         .unwrap()
+    }
+
+    fn running_notice_test_window(
+        cx: &mut gpui::TestAppContext,
+        path: &std::path::Path,
+    ) -> gpui::WindowHandle<Shell> {
+        let window = archive_test_window(cx, path);
+        window
+            .update(cx, |shell, _, cx| {
+                settings::set_archive_sessions_on_close(true, cx);
+                shell.state.update(cx, |state, _| {
+                    state.chats = ["keep", "closing"].map(archive_test_chat).into();
+                    state.selected_chat = Some("keep".into());
+                    state.sessions.push(harness_proto::Session {
+                        chat_id: "closing".into(),
+                        device_id: "local".into(),
+                        status: harness_proto::SessionStatus::Working,
+                        started_at: None,
+                        updated_at: chrono::Utc::now(),
+                        last_completed_turn: None,
+                        last_completed_peer_only: false,
+                    });
+                });
+            })
+            .unwrap();
+        window
+    }
+
+    #[gpui::test]
+    fn close_archive_running_notice_expires_without_clearing_newer_notices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = running_notice_test_window(cx, dir.path());
+        let show_notice = |cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |shell, window, cx| {
+                    assert_eq!(
+                        shell.archive_closed_session("closing".into(), window, cx),
+                        CloseArchive::Running
+                    );
+                    assert_eq!(
+                        shell.sidebar_notice.as_deref(),
+                        Some("Still running — closed without archiving")
+                    );
+                })
+                .unwrap();
+            cx.run_until_parked();
+        };
+        show_notice(cx);
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_some()))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(
+                    shell.sidebar_notice.is_none(),
+                    "warning expires after five seconds"
+                );
+                assert!(!shell.state.read(cx).chats[1].archived);
+                assert_eq!(
+                    shell.state.read(cx).sessions[0].status,
+                    harness_proto::SessionStatus::Working,
+                    "dismissing the warning must not stop the session"
+                );
+            })
+            .unwrap();
+
+        // Repeating the same warning starts a fresh five-second interval.
+        show_notice(cx);
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        show_notice(cx);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_some()))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_none()))
+            .unwrap();
+
+        // An unrelated error replacing the warning must remain visible.
+        show_notice(cx);
+        window
+            .update(cx, |shell, _, _| {
+                shell.sidebar_notice = Some("Archive request failed".into());
+            })
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.sidebar_notice.as_deref(),
+                    Some("Archive request failed")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn close_archive_notice_expires_at_five_seconds_for_all_active_states(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        for case in ["working", "waiting", "pending", "queued"] {
+            let window = running_notice_test_window(cx, dir.path());
+            window
+                .update(cx, |shell, window, cx| {
+                    shell.state.update(cx, |state, _| {
+                        let now = chrono::Utc::now();
+                        state.local_device_id = Some("local".into());
+                        if matches!(case, "pending" | "queued") {
+                            state.sessions.clear();
+                            if case == "queued" {
+                                state.chats[1].device_id = "remote".into();
+                                state.connectivity.state =
+                                    harness_proto::ConnectivityState::Offline;
+                            }
+                            state.begin_pending_send("closing", "synthetic-send", now);
+                            assert_eq!(state.send_queued("closing", now), case == "queued");
+                        } else {
+                            state.sessions[0].status = if case == "waiting" {
+                                harness_proto::SessionStatus::AwaitingInput
+                            } else {
+                                harness_proto::SessionStatus::Working
+                            };
+                            state.sessions[0].updated_at = now - chrono::Duration::hours(1);
+                        }
+                    });
+                    assert_eq!(
+                        shell.archive_closed_session("closing".into(), window, cx),
+                        CloseArchive::Running,
+                        "{case}"
+                    );
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(4999));
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, _, _| {
+                    assert!(
+                        shell.sidebar_notice.is_some(),
+                        "{case}: not before five seconds"
+                    );
+                })
+                .unwrap();
+            cx.executor().advance_clock(Duration::from_millis(1));
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, window, cx| {
+                    assert!(
+                        shell.sidebar_notice.is_none(),
+                        "{case}: expires at five seconds"
+                    );
+                    let state = shell.state.read(cx);
+                    assert!(!state.chats[1].archived, "{case}");
+                    if matches!(case, "pending" | "queued") {
+                        assert!(state.send_pending("closing", chrono::Utc::now()), "{case}");
+                    } else {
+                        assert_eq!(
+                            state.sessions[0].status,
+                            if case == "waiting" {
+                                harness_proto::SessionStatus::AwaitingInput
+                            } else {
+                                harness_proto::SessionStatus::Working
+                            },
+                            "{case}: session status is unchanged"
+                        );
+                    }
+                    window.remove_window();
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn close_archive_notice_can_be_dismissed_and_reshown_in_a_burst(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let window = running_notice_test_window(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                shell.archive_closed_session("closing".into(), window, cx);
+                // The sidebar's click-to-dismiss handler clears this field.
+                shell.sidebar_notice = None;
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(4));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(shell.sidebar_notice.is_none());
+                // Several closes in one update, before any timer task is polled.
+                for _ in 0..3 {
+                    assert_eq!(
+                        shell.archive_closed_session("closing".into(), window, cx),
+                        CloseArchive::Running
+                    );
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(
+                    shell.sidebar_notice.is_some(),
+                    "old timer cannot clear new warning"
+                );
+            })
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_millis(3999));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_some()))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_none()))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn close_archive_notice_timers_are_independent_between_windows(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        let first = running_notice_test_window(cx, dir.path());
+        let second = running_notice_test_window(cx, dir.path());
+        first
+            .update(cx, |shell, window, cx| {
+                assert_eq!(
+                    shell.archive_closed_session("closing".into(), window, cx),
+                    CloseArchive::Running
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        second
+            .update(cx, |shell, window, cx| {
+                assert_eq!(
+                    shell.archive_closed_session("closing".into(), window, cx),
+                    CloseArchive::Running
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        first
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_none()))
+            .unwrap();
+        second
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_some()))
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        second
+            .update(cx, |shell, _, _| assert!(shell.sidebar_notice.is_none()))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn close_archive_notice_timer_is_safe_when_its_window_closes(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_archive_test(cx, dir.path());
+        for timer_started in [false, true] {
+            let window = running_notice_test_window(cx, dir.path());
+            window
+                .update(cx, |shell, window, cx| {
+                    shell.archive_closed_session("closing".into(), window, cx);
+                })
+                .unwrap();
+            if timer_started {
+                cx.run_until_parked();
+            }
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(5));
+            cx.run_until_parked();
+            cx.update(|cx| assert!(window.read(cx).is_err()));
+        }
     }
 
     #[gpui::test]
