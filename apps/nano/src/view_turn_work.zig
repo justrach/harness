@@ -12,10 +12,35 @@ const turn_work = @import("turn_work.zig");
 const panels = @import("app_panels.zig");
 const App = @import("app.zig").App;
 
-/// The card's height, and how far above the composer's top it starts
-/// (`top(px(-52.0))`): 8 clear of the pill.
-pub const height: f32 = 44;
-pub const lift: f32 = 52;
+/// The card's least height (`min_h(44)`), and the gap it keeps over the
+/// pill: it grows upward from there as its names wrap (`bottom_full`,
+/// `mb(SPACE_SM)`).
+pub const min_height: f32 = 44;
+pub const gap: f32 = 8;
+
+const title_st: ui.TextStyle = .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium };
+const names_st: ui.TextStyle = .{ .size = 11, .line_height = 11 * 1.618, .wrap = true };
+const badge_st: ui.TextStyle = .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium };
+const mono: ui.TextStyle = .{ .size = 12, .mono = true };
+/// The border and `py(SPACE_SM)` above and below the content.
+const inset: f32 = 1 + 8;
+/// The Review pill: `py(4)` round its line, at least 24 (`min_h(24)`).
+const badge_h: f32 = @max(24, 2 * 4 + 11 * 1.618);
+
+/// What the names have once the glyph, the counts and the badge are in.
+fn namesRoom(c: *ui.Context, t: turn_work.TurnChanges, w: f32, on: bool) f32 {
+    var room = w - 2 * (12 + 1) - 16 - 8 - (8 + 2 * 8 + c.text.width(if (on) "Showing" else "Review", badge_st));
+    if (t.additions + t.deletions > 0) room -= 8 + c.text.width(c.print("+{d}", .{t.additions}), mono) + 6 + c.text.width(c.print("-{d}", .{t.deletions}), mono);
+    return @max(64, room);
+}
+
+/// The card's height at `w`: the title over the wrapped names, or the
+/// badge if taller, inside the inset; never under `min_height`.
+pub fn cardHeight(c: *ui.Context, a: *App, t: turn_work.TurnChanges, w: f32) f32 {
+    const lines = c.text.wrap(t.names(c.alloc()), names_st, namesRoom(c, t, w, showing(a))).len;
+    const words = 13 * 1.618 + @as(f32, @floatFromInt(@max(1, lines))) * 11 * 1.618;
+    return @max(min_height, 2 * inset + @max(words, badge_h));
+}
 
 /// Tailwind's `shadow-sm`, as GPUI's `shadow_sm`.
 const shadow_sm = [_]ui.Shadow{
@@ -50,7 +75,7 @@ fn show(a: *App) void {
 /// The card, `w` wide.
 pub fn card(c: *ui.Context, a: *App, k: theme.Colors, t: turn_work.TurnChanges, w: f32) void {
     ui.key(c, "turn-changes-card");
-    var b = ui.div(c).row().w(w).h(height).px(12 + 1).gap(8).itemsCenter().rounded(10).border(k.border).borderW(1).bg(k.card).shadows(&shadow_sm);
+    var b = ui.div(c).row().w(w).h(cardHeight(c, a, t, w)).px(12 + 1).py(inset).gap(8).itemsCenter().rounded(10).border(k.border).borderW(1).bg(k.card).shadows(&shadow_sm);
     if (b.hovered()) b = b.bg(k.raised);
     defer b.end();
     if (b.clicked()) show(a);
@@ -59,20 +84,21 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors, t: turn_work.TurnChanges, 
     const stats = t.additions + t.deletions > 0;
     const plus = c.print("+{d}", .{t.additions});
     const minus = c.print("-{d}", .{t.deletions});
-    const mono: ui.TextStyle = .{ .size = 12, .mono = true };
     const badge = if (on) "Showing" else "Review";
-    const badge_st: ui.TextStyle = .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium };
-    // What the words have once the glyph, the counts and the badge are in.
-    var room = w - 2 * 13 - 16 - 8 - (8 + 2 * 8 + c.text.width(badge, badge_st));
-    if (stats) room -= 8 + c.text.width(plus, mono) + 6 + c.text.width(minus, mono);
     {
-        const words = ui.div(c).column().grow().w(0).clip();
+        // The names wrap rather than cut off (75560f0fb).
+        const words = ui.div(c).column().w(namesRoom(c, t, w, on));
         defer words.end();
         // The frame keeps the words: not a buffer on this stack.
         const buf = c.alloc().alloc(u8, 32) catch return;
-        ui.text(c, t.title(buf), .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.text });
-        kit.ellipsisText(c, t.names(c.alloc()), .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted }, @max(0, room));
+        var st = title_st;
+        st.color = k.text;
+        ui.text(c, t.title(buf), st);
+        var ns = names_st;
+        ns.color = k.muted;
+        ui.text(c, t.names(c.alloc()), ns);
     }
+    ui.spacer(c);
     if (stats) {
         const counts = ui.div(c).row().gap(6).itemsCenter();
         defer counts.end();
@@ -82,7 +108,7 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors, t: turn_work.TurnChanges, 
         st.color = k.danger;
         ui.text(c, minus, st);
     }
-    const pill = ui.div(c).row().h(24).px(8).itemsCenter().rounded(6).bg(if (on) k.accent_wash else k.raised);
+    const pill = ui.div(c).row().h(badge_h).px(8).itemsCenter().rounded(6).bg(if (on) k.accent_wash else k.raised);
     defer pill.end();
     var st = badge_st;
     st.color = if (on) k.accent else k.muted;

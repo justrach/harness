@@ -60,11 +60,12 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
         footer_view.footer(c, a, k, w);
     }
     // The finished turn's "N files changed" card floats over the
-    // transcript's foot, 8 clear of the pill and 8 wider either side.
+    // transcript's foot, 8 clear of the pill and 8 wider either side,
+    // growing upward as its names wrap.
     const work = @import("view_turn_work.zig");
     if (work.changes(c, a)) |t| {
         ui.key(c, "turn-work-cue");
-        const cue = ui.div(c).row().absolute().offset(-8, -work.lift);
+        const cue = ui.div(c).row().absolute().offset(-8, -(work.cardHeight(c, a, t, w + 16) + work.gap));
         defer cue.end();
         work.card(c, a, k, t, w + 16);
     }
@@ -118,7 +119,11 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radi
     // `border_1` takes its point from inside the box in GPUI: the pill is
     // 49 tall compact (`COMPACT_TOTAL_HEIGHT`), 60 + 42 + 2 = 104 expanded
     // (`COMPOSER_MIN_HEIGHT`), its controls a point in from each edge.
-    const p = kit.shadowLg(ui.div(c).w(w).bg(k.pill()).border(k.border).borderW(1).rounded(radius).p(1)).bg(k.pill()).clip();
+    // The accent at 0.55 while the field has the keys (`pill_border`); the
+    // field's id is last frame's, which `keepFocus` keeps current.
+    const focused = a.view.composer_id != 0 and c.focus == a.view.composer_id;
+    const edge = if (focused) k.accent.alpha(0.55) else k.border;
+    const p = kit.shadowLg(ui.div(c).w(w).bg(k.pill()).border(edge).borderW(1).rounded(radius).p(1)).bg(k.pill()).clip();
     const box = if (shape == .compact) p.row().h(49).px(8 + 1).itemsCenter() else p.column();
     defer box.end();
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r;
@@ -215,9 +220,10 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .width = .fill,
         .bare = true,
         .size = 14,
-        // GPUI's composer: 22.75-point lines, its placeholder faint.
+        // GPUI's composer: 22.75-point lines; with mentions on, its
+        // placeholder is muted, not faint (`ComposerInput::render`).
         .line_height = 22.75,
-        .placeholder_color = k.faint,
+        .placeholder_color = k.muted,
         .multiline = true,
         .max_lines = if (shape == .compact) 1 else max_lines,
         .caret = message_caret,
@@ -306,6 +312,11 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     const chat_harness = if (a.selected) |id| (if (a.findChat(id)) |ch| ch.harness != null else false) else false;
     if (a.harnesses.items.len == 0 and !chat_harness) {
         kit.snake(c, k);
+    } else if (chipMaker(a)) |maker| {
+        // With the two-step picker, the model's maker names it, untinted
+        // (muted); the agent's mark only when no maker is known (pickers.rs
+        // `model_maker`/`maker_icon` over `model_chip_icon`).
+        icons.icon(c, maker, 16, k.muted, 0);
     } else {
         const mark = icons.harnessMark(t.harness);
         icons.icon(c, mark.name, 16, mark.brand orelse k.muted, 0);
@@ -313,6 +324,17 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.models.items.len == 0 and t.model == null) return skeleton(c);
     ui.text(c, a.modelLabel(t.model), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.text.alpha(0.9) });
     if (t.reasoning) |level| ui.text(c, rules.reasoningLabel(level), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.muted.alpha(0.7) });
+}
+
+/// The selected model's maker mark, or the catalog's first model's when
+/// none is picked, as the label resolves it.
+fn chipMaker(a: *App) ?icons.Name {
+    const mp = @import("model_picker.zig");
+    const t = a.target();
+    const list = mp.modelsFor(a, t.harness);
+    const id = t.model orelse (if (list.len > 0) list[0].id else return null);
+    for (list) |m| if (std.mem.eql(u8, m.id, id)) return mp.makerIcon(m);
+    return null;
 }
 
 /// A label still loading: a 56 by 11 bar whose opacity breathes between

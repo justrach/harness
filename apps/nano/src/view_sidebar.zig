@@ -24,7 +24,6 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     defer side.end();
     tabList(c, a, k);
     const search = @import("view_sidebar_search.zig");
-    if (!a.view.search.open) quickActions(c, a, k);
     filterRow(c, a, k);
     // The session search's field, and its results in the lists' place
     // while it filters (view_sidebar_search.zig).
@@ -70,32 +69,6 @@ fn tabList(c: *ui.Context, a: *App, k: theme.Colors) void {
         kit.ellipsisText(c, title, .{ .size = 12.5, .color = if (lit) k.text else k.muted }, width - 20 - 16 - 16 - 6);
     }
     if (close) |i| a.closeTab(i) else if (show) |i| a.showTab(i);
-}
-
-/// Top of the sidebar (`render_sidebar_quick_actions`): one big accent
-/// "New chat" button and a field that opens the session search in place.
-/// Solid controls, no glass; gone while the search is open.
-fn quickActions(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const box = ui.div(c).column().wFull().px(8).pt(4).pb(8).gap(8);
-    defer box.end();
-    {
-        ui.key(c, "sidebar-new-chat");
-        const on = k.onAccent();
-        var b = ui.div(c).row().wFull().h(36).px(12).gap(8).itemsCenter().rounded(10).bg(k.accent);
-        if (b.hovered()) b = b.bg(k.accent.mix(k.background, 0.12));
-        defer b.end();
-        if (b.clicked()) a.replaceCurrent(null);
-        icons.icon(c, .@"pen-new-square", 16, on, 0);
-        ui.text(c, "New chat", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = on });
-    }
-    {
-        ui.key(c, "sidebar-search-field");
-        const s = ui.div(c).row().wFull().h(32).px(12).gap(8).itemsCenter().rounded(10).bg(k.raised);
-        defer s.end();
-        if (s.clicked()) @import("view_sidebar_search.zig").toggle(a);
-        icons.icon(c, .magnifer, 14, k.muted, 0);
-        ui.text(c, "Search chats", .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted });
-    }
 }
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {

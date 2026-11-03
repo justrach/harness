@@ -388,13 +388,17 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (!a.view.sidebar_open and !a.view.settings_open) @import("view_sandbox_strip.zig").chip(c, a, k);
     const bar = ui.div(c).fixed().offset(cluster_x, 4 + (34 - 24) / 2).row().itemsCenter().layer(3);
     defer bar.end();
+    // One 2-point rhythm between every pair (shell.rs `TITLEBAR_CONTROL_GAP`,
+    // `TITLEBAR_GROUP_GAP`).
     if (kit.iconButton(c, k, .@"sidebar-minimalistic-left", .{})) toggleSidebar(c, a, true);
-    _ = c.leaf(.{ .width = .{ .px = 8 } }, .none, null);
+    _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
     if (kit.iconButton(c, k, .@"arrow-left", .{ .disabled = !a.tabs.canStep(-1) })) a.showTab(a.tabs.active - 1);
     _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
     if (kit.iconButton(c, k, .@"arrow-right", .{ .disabled = !a.tabs.canStep(1) })) a.showTab(a.tabs.active + 1);
-    if (a.selected != null) {
-        _ = c.leaf(.{ .width = .{ .px = 8 } }, .none, null);
+    // On a new-chat canvas too, so it never shifts when the first prompt
+    // makes the draft a session (`titlebar_plus_alpha`); not in Settings.
+    if (!a.view.settings_open) {
+        _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
         if (kit.iconButton(c, k, .plus, .{})) a.newTab();
     }
 }

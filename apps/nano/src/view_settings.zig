@@ -304,6 +304,8 @@ fn notifications(c: *ui.Context, a: *App, k: theme.Colors) void {
         switchRow(c, a, k, .sound_completion_enabled, .check, "Task completed", "Play a sound when an agent finishes a run.", false, sound);
         switchRow(c, a, k, .sound_input_enabled, .@"chat-round-line", "Input required", "Play a sound when an agent needs your response.", false, sound);
         switchRow(c, a, k, .sound_attention_enabled, .@"danger-triangle", "Errors and disconnections", "Play a sound when a run fails or the connection remains unavailable.", false, sound);
+        // Its own switch, not under Session sounds (`attach_sound_enabled`).
+        switchRow(c, a, k, .attach_sound_enabled, .paperclip, "Attaching files", "Play a soft sound when you paste, drop or pick a file or image.", false, true);
         switchRow(c, a, k, .notifications_enabled, .bell, "Desktop notifications", "Show a system banner on the same events, so pings reach you while Harness is in the background.", false, true);
         switchRow(c, a, k, .notifications_background_only, .monitor, "Only when in the background", "Skip the banner while a Harness window is focused.", false, desktop);
     }

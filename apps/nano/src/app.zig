@@ -88,8 +88,9 @@ pub const View = struct {
     /// A press in a peer, including its message/control descendants.
     pane_press: ?struct { tab: usize, pane: usize } = null,
     /// The composer takes the keys when next drawn; its field's id as last
-    /// drawn, for keeping them when it moves.
-    focus_composer: bool = false,
+    /// drawn, for keeping them when it moves. True at launch: the window
+    /// opens with the composer focused, as GPUI's does.
+    focus_composer: bool = true,
     composer_id: u64 = 0,
     /// Stable compact-capacity decision, with the GPUI composer's hysteresis.
     composer_expanded: bool = false,

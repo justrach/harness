@@ -121,7 +121,7 @@ test "an empty sidebar matches GPUI without a Sessions disclosure" {
     }
 }
 
-test "By status, the default: Needs you above Today above Earlier, with New chat and Search chats on top" {
+test "By status, the default: Needs you above Today above Earlier, under the project filter alone" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -161,14 +161,13 @@ test "By status, the default: Needs you above Today above Earlier, with New chat
     try testing.expect(needs.y < (h.t.findText("Has a question") orelse return error.NoRow).y);
     try testing.expect(today.y < (h.t.findText("Fresh one") orelse return error.NoRow).y);
     try testing.expect(earlier.y < (h.t.findText("Last week's") orelse return error.NoRow).y);
-    // The top block: New chat over Search chats, both above the lists.
-    const new_chat = h.t.findText("New chat") orelse return error.NoNewChat;
-    const field = h.t.findText("Search chats") orelse return error.NoSearch;
-    try testing.expect(new_chat.y < field.y and field.y < needs.y);
-    try h.t.clickText("Search chats");
-    h.t.settle(1);
-    try testing.expect(h.a.view.search.open);
+    // GPUI dropped the full-width New chat and Search chats rows (shell.rs,
+    // 78e69e483): the title bar's + and the filter row's search cover both,
+    // and the filter sits right under the tabs.
+    try testing.expect(!h.t.hasText("New chat"));
     try testing.expect(!h.t.hasText("Search chats"));
+    const filter = h.t.findText("All projects") orelse return error.NoFilter;
+    try testing.expect(filter.y < needs.y and filter.y < 38 + 26 + 10 + 40);
 }
 
 test "file tool badges preserve Harness identity colors and reuse their cached SVGs" {

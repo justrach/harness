@@ -115,8 +115,8 @@ test "⌘K opens the palette with its actions and chats; typing narrows it; ↓ 
     // "a": New chat, New project ("Open settings" hasn't one), the theme, both chats.
     try testing.expect(!h.t.hasText("Open settings"));
     h.typed("lpha");
-    // Only the sidebar's New chat is left.
-    try testing.expectEqual(@as(usize, 1), h.count("New chat"));
+    // The palette's New chat is filtered out, and the sidebar has none.
+    try testing.expectEqual(@as(usize, 0), h.count("New chat"));
     try testing.expect(!h.t.hasText("Switch to light theme"));
     // Return answers the query as typed: Alpha is the only result.
     h.press(.{ .key = S.enter });

@@ -17,7 +17,8 @@ const App = @import("app.zig").App;
 /// `PICKER_WIDTH` and `DETAIL_WIDTH`.
 pub const menu_width: f32 = 356;
 const detail_width: f32 = 276;
-/// `preferred_height`: the list, then the model's page (no cost row).
+/// The list's height; the model's page fits its content (`h_auto`,
+/// 4c9766def), measured as drawn, from this first guess.
 const list_height: f32 = 480;
 const stage_height: f32 = 330;
 
@@ -328,7 +329,9 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     const panel = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(w).h(h).layer(5).column().p(1)
         .bg(k.composer).border(k.border).borderW(1).rounded(12).clip()));
     defer panel.end();
-    if (p.stage != null) return page(c, a, k, w - 2, open);
+    // The page at its own height while the window has room for it; in a
+    // shorter one it takes what there is and clips, as GPUI's `max_h`.
+    if (p.stage != null) return page(c, a, k, w - 2, open, h >= p.height);
     tabs(c, a, k, w - 2);
     search(c, a, k);
     modelList(c, a, k, w - 2, h - 2 - 39 - 36, open, exit);
@@ -521,16 +524,26 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
 /// The model's page (`preview_reasoning`): back to the models, the model
 /// and its route, its reasoning on a slider in the maker's colour, and
 /// "Use model".
-fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
+fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool, fit: bool) void {
     const p = &a.view.model_picker;
     const st = p.stage.?;
+    ui.key(c, "model-page");
+    const content = if (fit) ui.div(c).column().wFull() else ui.div(c).column().wFull().grow().h(0);
+    defer {
+        content.end();
+        // The card is the content and its 1-point border either side.
+        if (fit) if (c.rects.get(c.node(content.index).id)) |r| if (@abs(r.h + 2 - p.height) > 0.5) {
+            p.height = r.h + 2;
+            c.changed = true;
+        };
+    }
     // A model the catalog dropped keeps its page, to say so on commit.
     const m: workspace.Model = staged(a) orelse .{ .id = st.model, .label = st.model };
     const levels = levelsOf(a, st.harness, m);
     const is_binary = models.binary(levels);
     const accent: ui.Color = if (models.brandHex(m, st.harness, k.dark)) |hx| ui.Color.hex(hx) else k.text;
     {
-        const body = ui.div(c).column().wFull().grow().h(0).p(16).gap(16).clip();
+        const body = if (fit) ui.div(c).column().wFull().p(16).gap(16) else ui.div(c).column().wFull().grow().h(0).p(16).gap(16).clip();
         defer body.end();
         {
             ui.key(c, "model-page-back");
@@ -546,8 +559,9 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             icons.icon(c, models.modelIcon(m), 20, k.text, 20);
             const words = ui.div(c).column().gap(4);
             defer words.end();
-            kit.ellipsisText(c, m.label, .{ .size = 16, .line_height = 16 * 1.4, .weight = .semibold, .color = k.text }, w - 32 - 32);
-            ui.text(c, c.print("via {s}", .{models.providerInfo(models.route(m)).name}), .{ .size = 11, .color = k.muted });
+            // GPUI's own line height, φ, everywhere on this page.
+            kit.ellipsisText(c, m.label, .{ .size = 16, .line_height = 16 * 1.618, .weight = .semibold, .color = k.text }, w - 32 - 32);
+            ui.text(c, c.print("via {s}", .{models.providerInfo(models.route(m)).name}), .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted });
         }
         {
             const r = ui.div(c).row().wFull().itemsCenter();
@@ -562,13 +576,13 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             slider(c, a, k, accent, levels.len, w - 32 - 28, open);
             const ends = ui.div(c).row().wFull();
             defer ends.end();
-            ui.text(c, if (is_binary) "Off" else "Faster", .{ .size = 11, .color = k.muted });
+            ui.text(c, if (is_binary) "Off" else "Faster", .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted });
             ui.spacer(c);
-            ui.text(c, if (is_binary) "On" else "Deeper", .{ .size = 11, .color = k.muted });
+            ui.text(c, if (is_binary) "On" else "Deeper", .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted });
         } else {
-            ui.text(c, "This model has no adjustable reasoning level.", .{ .size = 12, .wrap = true, .color = k.muted });
+            ui.text(c, "This model has no adjustable reasoning level.", .{ .size = 12, .line_height = 12 * 1.618, .wrap = true, .color = k.muted });
         }
-        if (st.error_text) |e| ui.text(c, e, .{ .size = 12, .wrap = true, .color = k.danger });
+        if (st.error_text) |e| ui.text(c, e, .{ .size = 12, .line_height = 12 * 1.618, .wrap = true, .color = k.danger });
     }
     const foot = ui.div(c).row().wFull().px(16).pb(12);
     defer foot.end();
