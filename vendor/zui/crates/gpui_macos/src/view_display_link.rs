@@ -27,10 +27,20 @@ use objc::{
 /// `CAFrameRateRange`: three `float`s.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CAFrameRateRange {
-    minimum: f32,
-    maximum: f32,
-    preferred: f32,
+pub(crate) struct CAFrameRateRange {
+    pub minimum: f32,
+    pub maximum: f32,
+    pub preferred: f32,
+}
+
+impl From<FrameRateRange> for CAFrameRateRange {
+    fn from(range: FrameRateRange) -> Self {
+        Self {
+            minimum: range.minimum,
+            maximum: range.maximum,
+            preferred: range.preferred,
+        }
+    }
 }
 
 unsafe impl Encode for CAFrameRateRange {
@@ -41,7 +51,7 @@ unsafe impl Encode for CAFrameRateRange {
 
 #[link(name = "Foundation", kind = "framework")]
 unsafe extern "C" {
-    static NSRunLoopCommonModes: id;
+    pub(crate) static NSRunLoopCommonModes: id;
 }
 
 /// A window view's `CADisplayLink`, scheduled on the main run loop in common
@@ -100,11 +110,7 @@ impl ViewDisplayLink {
                 }
                 FramePacing::Running(range) => {
                     if self.range != Some(range) {
-                        let ca_range = CAFrameRateRange {
-                            minimum: range.minimum,
-                            maximum: range.maximum,
-                            preferred: range.preferred,
-                        };
+                        let ca_range = CAFrameRateRange::from(range);
                         let _: () = msg_send![self.link, setPreferredFrameRateRange: ca_range];
                         self.range = Some(range);
                     }

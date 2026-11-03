@@ -878,7 +878,6 @@ pub(crate) struct DeferredDraw {
 }
 
 pub(crate) struct Frame {
-    generation: u64,
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
@@ -929,7 +928,6 @@ pub(crate) struct PaintIndex {
 impl Frame {
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
-            generation: 0,
             focus: None,
             window_active: false,
             element_states: FxHashMap::default(),
@@ -1084,6 +1082,10 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    /// How many frames this window has drawn: `rendered_frame` is frame `frames_drawn`, and
+    /// `next_frame` the one after. Modified by Harness: cached views tag their replay ranges
+    /// with it, since those ranges index into the frame they were recorded in.
+    frames_drawn: u64,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1149,11 +1151,47 @@ pub(crate) fn throttled_frame_is_due(elapsed: Duration, min_interval: Duration) 
     elapsed + slack >= min_interval
 }
 
+/// Modified by Harness: how long after the last input a focused window's animation frames keep
+/// the display's full rate. Scrolls, drags and typing, and the springs and glides they start,
+/// run at full rate; ambient motion after that (spinners, status glyphs) is held to
+/// [`AMBIENT_FRAME_INTERVAL`].
+pub const AMBIENT_AFTER_INPUT: Duration = Duration::from_secs(1);
+
+/// Modified by Harness: ambient animation's cap in a focused window, 60 Hz. On a 240 Hz display
+/// a spinner otherwise redraws the whole window 240 times a second.
+pub const AMBIENT_FRAME_INTERVAL: Duration = Duration::from_micros(16667);
+
+/// The cap on a window's next frame, or `None` for the display's full rate. Only frames that
+/// animations asked for are capped (`animation_driven`): an inactive window's at 30 Hz, a hot
+/// machine's at 60 Hz, and a focused window's at 60 Hz once nothing has been typed, clicked or
+/// scrolled for [`AMBIENT_AFTER_INPUT`]. Pure.
+#[doc(hidden)]
+pub fn frame_interval_cap(
+    animation_driven: bool,
+    active: bool,
+    thermal_pressure: bool,
+    since_input: Option<Duration>,
+) -> Option<Duration> {
+    if !animation_driven {
+        None
+    } else if !active {
+        Some(Duration::from_micros(33333))
+    } else if thermal_pressure {
+        Some(Duration::from_micros(16667))
+    } else if since_input.is_none_or(|elapsed| elapsed >= AMBIENT_AFTER_INPUT) {
+        Some(AMBIENT_FRAME_INTERVAL)
+    } else {
+        None
+    }
+}
+
 /// Tracks input event timestamps to determine if input is arriving at a high rate.
 /// Used for selective VRR (Variable Refresh Rate) optimization.
 #[derive(Clone, Debug)]
 pub(crate) struct InputRateTracker {
     timestamps: Vec<Instant>,
+    /// The last input that changed something (Modified by Harness).
+    last_input: Option<Instant>,
     window: Duration,
     inputs_per_second: u32,
     sustain_until: Instant,
@@ -1164,6 +1202,7 @@ impl Default for InputRateTracker {
     fn default() -> Self {
         Self {
             timestamps: Vec::new(),
+            last_input: None,
             window: Duration::from_millis(100),
             inputs_per_second: 60,
             sustain_until: Instant::now(),
@@ -1175,6 +1214,7 @@ impl Default for InputRateTracker {
 impl InputRateTracker {
     pub fn record_input(&mut self) {
         let now = Instant::now();
+        self.last_input = Some(now);
         self.timestamps.push(now);
         self.prune_old_timestamps(now);
 
@@ -1186,6 +1226,11 @@ impl InputRateTracker {
 
     pub fn is_high_rate(&self) -> bool {
         Instant::now() < self.sustain_until
+    }
+
+    /// How long ago the last input that changed something arrived, if any has.
+    pub fn since_last_input(&self, now: Instant) -> Option<Duration> {
+        self.last_input.map(|at| now.saturating_duration_since(at))
     }
 
     fn prune_old_timestamps(&mut self, now: Instant) {
@@ -1561,21 +1606,21 @@ impl Window {
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
                     .log_err();
 
-                // Throttle frame rate based on conditions:
-                // - Thermal pressure (Serious/Critical): cap to ~60fps
-                // - Inactive window (not focused): cap to ~30fps to save energy
-                let min_frame_interval = if !request_frame_options.force_render
-                    && !request_frame_options.require_presentation
-                    && next_frame_callbacks.borrow().is_empty()
-                {
-                    None
-                } else if !active.get() {
-                    Some(Duration::from_micros(33333))
-                } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
-                    Some(Duration::from_micros(16667))
-                } else {
-                    None
-                };
+                // Throttle animation frames: an inactive window to ~30fps, thermal pressure
+                // and a focused window's ambient motion (no input for a second) to ~60fps.
+                let min_frame_interval = frame_interval_cap(
+                    request_frame_options.force_render
+                        || request_frame_options.require_presentation
+                        || !next_frame_callbacks.borrow().is_empty(),
+                    active.get(),
+                    matches!(
+                        thermal_state,
+                        Some(ThermalState::Critical | ThermalState::Serious)
+                    ),
+                    input_rate_tracker
+                        .borrow()
+                        .since_last_input(Instant::now()),
+                );
 
                 if min_frame_interval != reported_frame_interval_cap {
                     reported_frame_interval_cap = min_frame_interval;
@@ -1833,6 +1878,7 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            frames_drawn: 0,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2594,7 +2640,7 @@ impl Window {
         f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
     ) -> R {
         self.with_id(element_id, |this| {
-            let global_id = GlobalElementId(Arc::from(&*this.element_id_stack));
+            let global_id = GlobalElementId::new(&this.element_id_stack);
 
             f(&global_id, this)
         })
@@ -2798,7 +2844,6 @@ impl Window {
         // This ensures that multiple test Apps have isolated arenas.
         let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
 
-        self.next_frame.generation = self.rendered_frame.generation.wrapping_add(1);
         self.invalidate_entities();
         cx.entities.clear_accessed();
         debug_assert!(self.rendered_entity_stack.is_empty());
@@ -2852,6 +2897,7 @@ impl Window {
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
+        self.frames_drawn += 1;
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
@@ -3303,30 +3349,6 @@ impl Window {
         sorted_indices
     }
 
-    pub(crate) fn rendered_frame_generation(&self) -> u64 {
-        self.rendered_frame.generation
-    }
-
-    pub(crate) fn drawing_frame_generation(&self) -> u64 {
-        self.next_frame.generation
-    }
-
-    pub(crate) fn element_state_index(&self) -> usize {
-        self.next_frame.accessed_element_states.len()
-    }
-
-    /// Retain states accessed while laying out a measured cached view, before
-    /// the prepaint range that normally keeps a cached subtree's state alive.
-    pub(crate) fn reuse_element_states(&mut self, range: Range<usize>) -> Range<usize> {
-        let start = self.element_state_index();
-        self.next_frame.accessed_element_states.extend(
-            self.rendered_frame.accessed_element_states[range]
-                .iter()
-                .cloned(),
-        );
-        start..self.element_state_index()
-    }
-
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
         PrepaintStateIndex {
             hitboxes_index: self.next_frame.hitboxes.len(),
@@ -3336,6 +3358,38 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
         }
+    }
+
+    /// The serial of the frame being drawn; the rendered frame's is one less.
+    pub(crate) fn drawing_frame_serial(&self) -> u64 {
+        self.frames_drawn + 1
+    }
+
+    /// Whether ranges recorded while drawing frame `serial` index into the rendered frame.
+    pub(crate) fn recorded_in_rendered_frame(&self, serial: u64) -> bool {
+        serial == self.frames_drawn
+    }
+
+    /// Where the element states the frame being drawn has accessed so far end.
+    pub(crate) fn element_states_index(&self) -> usize {
+        self.next_frame.accessed_element_states.len()
+    }
+
+    /// The element states the frame being drawn has accessed since `start`.
+    pub(crate) fn element_states_since(&self, start: usize) -> Vec<(GlobalElementId, TypeId)> {
+        self.next_frame
+            .accessed_element_states
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    /// Keeps element states for the next frame without accessing them, as a reused cached
+    /// view does for the states its content accessed outside its replayed ranges.
+    pub(crate) fn retain_element_states(&mut self, keys: &[(GlobalElementId, TypeId)]) {
+        self.next_frame
+            .accessed_element_states
+            .extend(keys.iter().cloned());
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {

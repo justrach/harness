@@ -78,6 +78,8 @@ mod codegraff_account;
 mod command_palette;
 mod files_panel;
 #[cfg(test)]
+mod frame_cap_tests;
+#[cfg(test)]
 mod link_tests;
 mod project_icon;
 mod reauth;
@@ -94,6 +96,8 @@ mod tabs;
 mod titlebar_tests;
 #[cfg(test)]
 mod typing_tests;
+#[cfg(test)]
+mod view_cache_tests;
 #[cfg(test)]
 mod work_pane_tests;
 
@@ -2163,6 +2167,8 @@ pub struct Shell {
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
+    /// Restarted whenever closing a running session shows its temporary warning.
+    close_archive_notice_task: Option<Task<()>>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
     /// UpdateStatus stream says WHETHER one exists; this says how far the
     /// download/stage of it has come in this process.
@@ -2682,6 +2688,7 @@ impl Shell {
             attention_sound_gate: Default::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
+            close_archive_notice_task: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
             auto_download_failed: None,
@@ -4084,13 +4091,20 @@ impl Shell {
             &file,
             window,
             move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                if matches!(
+                    event,
+                    FilesEvent::OpenFile(_)
+                        | FilesEvent::OpenFileAtAnchor { .. }
+                        | FilesEvent::RevealFile(_)
+                ) && !this.accepts_file_navigation(&event_panel_key, &source, cx)
                 {
                     return;
                 }
                 match event {
                     FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::OpenFileAtAnchor { path, anchor } => {
+                        this.add_file_surface_at_anchor(path.clone(), anchor.clone(), window, cx)
+                    }
                     FilesEvent::RevealFile(path) => {
                         this.add_files_surface(window, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
@@ -4134,6 +4148,30 @@ impl Shell {
             RightSurface::File(id),
         );
         self.set_right_active(RightSurface::File(id), cx);
+    }
+
+    fn add_file_surface_at_anchor(
+        &mut self,
+        path: String,
+        anchor: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_chat.is_empty() {
+            return;
+        }
+        self.add_file_surface(path.clone(), window, cx);
+        let lookup = (self.panel_key(cx), path.clone());
+        if let Some(file) = self
+            .file_surface_keys
+            .get(&lookup)
+            .and_then(|id| self.file_surfaces.get(id))
+            .cloned()
+        {
+            file.update(cx, |file, cx| {
+                file.navigate_markdown_anchor(path, anchor, cx)
+            });
+        }
     }
 
     fn open_workspace_file_link(
@@ -8918,6 +8956,7 @@ impl Shell {
             .when_some(self.render_cloud_sandbox_strip(theme, cx), |el, strip| {
                 el.child(strip)
             })
+            .when_some(self.render_sidebar_update_row(theme, cx), |el, row| el.child(row))
             .child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
             .into_any_element()
     }
@@ -11308,92 +11347,12 @@ impl Shell {
         let changes = crate::turn_work::latest_turn_changes(transcript)?;
         let theme = Theme::of(cx).clone();
         let showing = self.active_changes(cx).is_some();
-        let card = div()
-            .id("turn-changes-card")
-            .debug_selector(|| "turn-changes-card".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("{}, show changes", changes.title()))
-            .h(px(44.0))
-            .px(px(Theme::SPACE_MD))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .rounded(px(Theme::PANEL_RADIUS))
-            .border_1()
-            .border_color(theme.border)
-            .bg(motion::hover_blend(
-                "turn-changes-card",
-                theme.surface_card,
-                theme.surface_raised_hover,
-            ))
-            .on_hover(motion::hover_listener("turn-changes-card"))
-            .shadow_sm()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.show_turn_changes(cx)))
-            .child(icon(icons::DOCUMENT).size(px(16.0)).text_color(theme.accent))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(changes.title())),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(changes.names())),
-                    ),
-            )
-            .when(changes.additions + changes.deletions > 0, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(SharedString::from(format!("+{}", changes.additions))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(SharedString::from(format!("-{}", changes.deletions))),
-                        ),
-                )
-            })
-            .child(
-                div()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .bg(if showing { theme.accent_wash } else { theme.surface_raised })
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if showing { theme.accent } else { theme.text_muted })
-                    .child(SharedString::from(if showing { "Showing" } else { "Review" })),
-            );
-        Some(
-            div()
-                .absolute()
-                .top(px(-52.0))
-                .left(px(Theme::SPACE_SM))
-                .right(px(Theme::SPACE_SM))
-                .child(card)
-                .into_any_element(),
-        )
+        Some(crate::turn_work::changes_cue(
+            &changes,
+            showing,
+            &theme,
+            cx.listener(|this, _, _, cx| this.show_turn_changes(cx)),
+        ))
     }
 
     /// Open the right pane on the working-tree Changes tab, reusing an open
@@ -13807,7 +13766,7 @@ impl Render for Shell {
                 );
                 // A side-by-side chat split gives the focused column its
                 // share; the peers take the rest (`render_chat_split`).
-                let main_target_width = split_total_width * self.focused_chat_pane_share();
+                let main_target_width = self.focused_chat_pane_width(split_total_width);
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -13904,7 +13863,7 @@ impl Render for Shell {
                 } else {
                     main
                 };
-                let main = self.render_chat_split(main, split_total_width, cx);
+                let main = self.render_chat_split(main, cx);
                 // Drag a sidebar session onto the chat area to split it open.
                 let drop_zones = self.render_split_drop_zones(&Theme::of(cx).clone(), cx);
                 let main = if drop_zones.is_empty() {
