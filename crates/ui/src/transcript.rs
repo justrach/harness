@@ -2844,11 +2844,12 @@ pub fn chips_height(count: usize) -> f32 {
 /// [`crate::changes::body_height`]. The chip's own [`CHIP_HEIGHT`] is already
 /// counted by [`chips_height`].
 pub fn detail_height(detail: &ToolDetail) -> f32 {
-    detail_height_with_ui_size(detail, 16.0)
+    detail_height_with_thought_line_height(detail, OUTPUT_LINE_HEIGHT)
 }
 
-/// Thinking follows interface zoom; code output and diffs retain pixel sizes.
-fn detail_height_with_ui_size(detail: &ToolDetail, ui_size: f32) -> f32 {
+/// Use the window's pixel-snapped thinking metric, just like GPUI layout.
+/// Multiplying unsnapped rems accumulates a rounding error on every line.
+fn detail_height_with_thought_line_height(detail: &ToolDetail, line_height: f32) -> f32 {
     let body = match detail {
         ToolDetail::Output {
             lines,
@@ -2862,8 +2863,6 @@ fn detail_height_with_ui_size(detail: &ToolDetail, ui_size: f32) -> f32 {
             truncated_by,
         } => {
             let rows = lines.len() + usize::from(*truncated_by > 0);
-            let line_height =
-                f32::from(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT).to_pixels(px(ui_size)));
             rows as f32 * line_height + OUTPUT_BODY_PAD
         }
         ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
@@ -8532,6 +8531,9 @@ impl Transcript {
                 *worked_secs,
                 *compact_shell,
                 &theme,
+                window.pixel_snap(
+                    crate::typography::ui_rems(OUTPUT_LINE_HEIGHT).to_pixels(window.rem_size()),
+                ),
                 cx,
             ),
             RowKind::InputChip { header, resolved } => {
@@ -8984,6 +8986,7 @@ impl Transcript {
         worked_secs: Option<i64>,
         compact_shell: bool,
         theme: &Theme,
+        thought_line_height: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
@@ -9200,8 +9203,9 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
-        let ui_size = crate::typography::font_size(cx).pixels();
-        let detail_height = |detail: &ToolDetail| detail_height_with_ui_size(detail, ui_size);
+        let detail_height = |detail: &ToolDetail| {
+            detail_height_with_thought_line_height(detail, f32::from(thought_line_height))
+        };
         let base_row_height = if collapses {
             TOOL_TREE_ROW_HEIGHT
         } else {
@@ -12425,6 +12429,7 @@ mod tests {
                 None,
                 false,
                 &Theme::dark(),
+                px(OUTPUT_LINE_HEIGHT),
                 cx,
             );
             let reveal = &this.tool_group_reveals[&row.id];
@@ -13037,6 +13042,7 @@ mod tests {
                     None,
                     false,
                     &Theme::dark(),
+                    px(OUTPUT_LINE_HEIGHT),
                     cx,
                 );
                 assert_eq!(this.folds[&row.id].open, Some(true));
@@ -13077,6 +13083,7 @@ mod tests {
                     None,
                     false,
                     &Theme::dark(),
+                    px(OUTPUT_LINE_HEIGHT),
                     cx,
                 );
                 let reveal = &this.tool_group_reveals[&row.id];
