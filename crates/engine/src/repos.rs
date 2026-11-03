@@ -327,6 +327,40 @@ impl Repos {
         Ok(entries)
     }
 
+    /// The destination's original reflog entry must prove a fresh branch,
+    /// created during this context from the start point the agent requested.
+    /// A reused/reset branch or an unavailable creation record is not proof.
+    pub(crate) async fn branch_created_since(
+        &self,
+        path: &Path,
+        branch: &str,
+        start: &str,
+        since: i64,
+    ) -> Result<bool, EngineError> {
+        let reference = format!("refs/heads/{branch}");
+        let log = self
+            .git(
+                &[
+                    "reflog",
+                    "show",
+                    "--date=unix",
+                    "--format=%gd%x09%gs",
+                    &reference,
+                ],
+                Some(path),
+            )
+            .await?;
+        let Some((selector, subject)) = log.lines().last().and_then(|line| line.split_once('\t'))
+        else {
+            return Ok(false);
+        };
+        let at = selector
+            .rsplit_once("@{")
+            .and_then(|(_, at)| at.strip_suffix('}'))
+            .and_then(|at| at.parse::<i64>().ok());
+        Ok(at.is_some_and(|at| at >= since) && subject == format!("branch: Created from {start}"))
+    }
+
     /// Capture the complete source identity after dispatch or an owned checkout change.
     pub(crate) async fn capture_source_context(
         &self,
@@ -3009,21 +3043,193 @@ tmpfs /run tmpfs rw 0 0
     }
 
     async fn fixture_git(cwd: &Path, args: &[&str]) {
-        let output = tokio::process::Command::new("git")
+        fixture_git_with_date(cwd, args, None).await;
+    }
+
+    async fn fixture_git_with_date(cwd: &Path, args: &[&str], at: Option<i64>) {
+        let mut command = tokio::process::Command::new("git");
+        command
             .args(args)
             .current_dir(cwd)
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@test")
             .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@test")
-            .output()
-            .await
-            .expect("git spawns");
+            .env("GIT_COMMITTER_EMAIL", "test@test");
+        if let Some(at) = at {
+            command.env("GIT_COMMITTER_DATE", format!("{at} +0000"));
+        }
+        let output = command.output().await.expect("git spawns");
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    async fn branch_creation_fixture() -> (tempfile::TempDir, Repos, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir(&root).expect("repo dir");
+        fixture_git(&root, &["init", "-q", "-b", "main"]).await;
+        fixture_git(&root, &["config", "core.logAllRefUpdates", "true"]).await;
+        fixture_git(&root, &["commit", "-q", "--allow-empty", "-m", "initial"]).await;
+        let data = tmp.path().join("data");
+        let repos = Repos::with_worktrees_root(&data, "device", data.join("worktrees"));
+        (tmp, repos, root)
+    }
+
+    #[tokio::test]
+    async fn branch_created_since_requires_exact_start_and_fresh_creation_time() {
+        const CREATED_AT: i64 = 1_700_000_000;
+        let (_tmp, repos, root) = branch_creation_fixture().await;
+        for (branch, start) in [("fresh/from-head", "HEAD"), ("fresh/from-main", "main")] {
+            fixture_git_with_date(&root, &["branch", branch, start], Some(CREATED_AT)).await;
+        }
+        let sha = repos
+            .head_sha(&root)
+            .await
+            .unwrap()
+            .expect("initial commit");
+        // Equivalent revisions are not equivalent creation evidence. The
+        // original subject must match the requested start point literally.
+        for (branch, start, since, expected) in [
+            ("fresh/from-head", "HEAD", CREATED_AT - 1, true),
+            ("fresh/from-head", "HEAD", CREATED_AT, true),
+            ("fresh/from-head", "HEAD", CREATED_AT + 1, false),
+            ("fresh/from-head", "main", CREATED_AT, false),
+            ("fresh/from-head", "HEAD~0", CREATED_AT, false),
+            ("fresh/from-head", sha.as_str(), CREATED_AT, false),
+            ("fresh/from-head", "", CREATED_AT, false),
+            ("fresh/from-main", "main", CREATED_AT, true),
+            ("fresh/from-main", "HEAD", CREATED_AT, false),
+            ("fresh/from-main", "refs/heads/main", CREATED_AT, false),
+        ] {
+            assert_eq!(
+                repos
+                    .branch_created_since(&root, branch, start, since)
+                    .await
+                    .unwrap(),
+                expected,
+                "branch={branch}, start={start:?}, since={since}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn branch_created_since_does_not_treat_resets_as_creation() {
+        const CONTEXT_AT: i64 = 1_700_000_000;
+        let (_tmp, repos, root) = branch_creation_fixture().await;
+        for branch in ["reused/forced", "reused/checkout"] {
+            fixture_git_with_date(&root, &["branch", branch, "HEAD"], Some(CONTEXT_AT - 1)).await;
+        }
+        fixture_git(&root, &["commit", "-q", "--allow-empty", "-m", "next"]).await;
+        for (branch, args) in [
+            ("reused/forced", ["branch", "-f", "reused/forced", "HEAD"]),
+            (
+                "reused/checkout",
+                ["checkout", "-B", "reused/checkout", "HEAD"],
+            ),
+        ] {
+            fixture_git_with_date(&root, &args, Some(CONTEXT_AT)).await;
+            let log = repos
+                .git(
+                    &[
+                        "reflog",
+                        "show",
+                        "--format=%gs",
+                        &format!("refs/heads/{branch}"),
+                    ],
+                    Some(&root),
+                )
+                .await
+                .unwrap();
+            assert_eq!(log.lines().count(), 2, "reset must append evidence: {log}");
+            assert!(
+                !repos
+                    .branch_created_since(&root, branch, "HEAD", CONTEXT_AT)
+                    .await
+                    .unwrap(),
+                "a recent reset must not renew {branch}'s stale creation"
+            );
+            assert!(
+                repos
+                    .branch_created_since(&root, branch, "HEAD", CONTEXT_AT - 1)
+                    .await
+                    .unwrap(),
+                "the original creation record remains available for {branch}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn branch_created_since_requires_available_nonempty_creation_evidence() {
+        const CREATED_AT: i64 = 1_700_000_000;
+        let (_tmp, repos, root) = branch_creation_fixture().await;
+        for branch in ["missing", "empty", "disabled"] {
+            if branch == "disabled" {
+                fixture_git(&root, &["config", "core.logAllRefUpdates", "false"]).await;
+            }
+            fixture_git_with_date(&root, &["branch", branch, "HEAD"], Some(CREATED_AT)).await;
+            let log = root.join(".git/logs/refs/heads").join(branch);
+            match branch {
+                "missing" => std::fs::remove_file(&log).unwrap(),
+                "empty" => std::fs::write(&log, "").unwrap(),
+                "disabled" => assert!(!log.exists()),
+                _ => unreachable!(),
+            }
+            assert!(
+                !repos
+                    .branch_created_since(&root, branch, "HEAD", CREATED_AT)
+                    .await
+                    .unwrap(),
+                "{branch}: an existing branch without creation evidence is not fresh"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn branch_creation_evidence_is_shared_but_head_reflogs_are_worktree_local() {
+        const CREATED_AT: i64 = 1_700_000_000;
+        let (tmp, repos, root) = branch_creation_fixture().await;
+        let linked = tmp.path().join("linked");
+        fixture_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &linked.to_string_lossy(),
+            ],
+        )
+        .await;
+        fixture_git_with_date(
+            &linked,
+            &["checkout", "-q", "-b", "linked/fresh", "HEAD"],
+            Some(CREATED_AT),
+        )
+        .await;
+
+        for checkout in [&root, &linked] {
+            assert!(
+                repos
+                    .branch_created_since(checkout, "linked/fresh", "HEAD", CREATED_AT)
+                    .await
+                    .unwrap()
+            );
+        }
+        for (checkout, expected) in [(&root, false), (&linked, true)] {
+            let log = repos.head_reflog(checkout).await.unwrap();
+            assert_eq!(
+                log.iter()
+                    .any(|(_, subject)| subject.ends_with(" to linked/fresh")),
+                expected,
+                "HEAD checkout evidence must stay local to {}",
+                checkout.display()
+            );
+        }
+        assert_eq!(repos.current_branch(&root).await.unwrap(), "main");
+        assert_eq!(repos.current_branch(&linked).await.unwrap(), "linked/fresh");
     }
 
     #[tokio::test]
