@@ -1730,7 +1730,7 @@ fn anchor_owner(reg: &[RegEntry]) -> u64 {
 }
 
 fn selection_scope(key: &str) -> &str {
-    if key.starts_with("md-preview-") {
+    if key.starts_with("md-preview-") || key.starts_with("composer-question-") {
         key.split_once('|').map_or("", |(scope, _)| scope)
     } else {
         ""
