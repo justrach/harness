@@ -171,9 +171,20 @@ impl Render for QueueGhost {
 }
 
 /// One line of a queued message: the newlines that make it a paragraph in the
-/// composer make it three rows here, and the row is one line tall.
+/// composer make it three rows here, and the row is one line tall. Project
+/// selected invocations to their labels only here, so queue editing and delivery
+/// retain the canonical links and their command/skill identity.
 fn one_line(text: &str) -> SharedString {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut visible = String::new();
+    let mut at = 0;
+    for (range, invocation) in harness_proto::invocation::invocation_links(text) {
+        visible.push_str(&text[at..range.start]);
+        visible.push(invocation.prefix());
+        visible.push_str(invocation.name());
+        at = range.end;
+    }
+    visible.push_str(&text[at..]);
+    let flat = visible.split_whitespace().collect::<Vec<_>>().join(" ");
     SharedString::from(flat)
 }
 
@@ -2010,6 +2021,60 @@ mod tests {
             "fix the test then ship it"
         );
         assert_eq!(one_line("  spaced   out  ").as_ref(), "spaced out");
+    }
+
+    #[test]
+    fn queue_rows_show_invocation_labels_without_changing_editable_text() {
+        use harness_proto::invocation::Invocation;
+
+        let goal = Invocation::Command {
+            name: "goal".into(),
+        };
+        let skill = Invocation::Skill {
+            name: "review-changes".into(),
+            path: "/repo/SKILL.md".into(),
+            command: None,
+        };
+        for (raw, expected) in [
+            (
+                format!("{} write unit tests\ncheck invalid inputs", goal.link()),
+                "/goal write unit tests check invalid inputs",
+            ),
+            (
+                format!("café {} then {}", goal.link(), skill.link()),
+                "café /goal then $review-changes",
+            ),
+        ] {
+            for paths in [vec![], vec!["/tmp/image.png".to_string()]] {
+                for text in [
+                    raw.clone(),
+                    crate::attachments::with_attachments(&raw, &paths),
+                ] {
+                    let editable = queue_visible_text(&text, &paths);
+                    assert_eq!(one_line(&editable).as_ref(), expected);
+                    assert_eq!(
+                        editable, raw,
+                        "editing must retain selected invocation identity"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn queue_rows_preserve_literal_invocation_syntax() {
+        let link = harness_proto::invocation::Invocation::Command {
+            name: "goal".into(),
+        }
+        .link();
+        for text in [
+            "/goal write unit tests".to_string(),
+            "[example](https://example.com)".to_string(),
+            "[/goal](harness-invoke:bad)".to_string(),
+            format!("`{link}`"),
+        ] {
+            assert_eq!(one_line(&text).as_ref(), text);
+        }
     }
 
     #[test]
