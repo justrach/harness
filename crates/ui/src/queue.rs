@@ -229,9 +229,20 @@ impl Render for QueueGhost {
 }
 
 /// One line of a queued message: the newlines that make it a paragraph in the
-/// composer make it three rows here, and the row is one line tall.
+/// composer make it three rows here, and the row is one line tall. Project
+/// selected invocations to their labels only here, so queue editing and delivery
+/// retain the canonical links and their command/skill identity.
 fn one_line(text: &str) -> SharedString {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut visible = String::new();
+    let mut at = 0;
+    for (range, invocation) in harness_proto::invocation::invocation_links(text) {
+        visible.push_str(&text[at..range.start]);
+        visible.push(invocation.prefix());
+        visible.push_str(invocation.name());
+        at = range.end;
+    }
+    visible.push_str(&text[at..]);
+    let flat = visible.split_whitespace().collect::<Vec<_>>().join(" ");
     SharedString::from(flat)
 }
 
@@ -2348,6 +2359,240 @@ mod tests {
             "fix the test then ship it"
         );
         assert_eq!(one_line("  spaced   out  ").as_ref(), "spaced out");
+    }
+
+    #[test]
+    fn queue_rows_show_invocation_labels_without_changing_editable_text() {
+        use harness_proto::invocation::Invocation;
+
+        let goal = Invocation::Command {
+            name: "goal".into(),
+        };
+        let skill = Invocation::Skill {
+            name: "review-changes".into(),
+            path: "/repo/SKILL.md".into(),
+            command: None,
+        };
+        for (raw, expected) in [
+            (
+                format!("{} write unit tests\ncheck invalid inputs", goal.link()),
+                "/goal write unit tests check invalid inputs",
+            ),
+            (
+                format!("café {} then {}", goal.link(), skill.link()),
+                "café /goal then $review-changes",
+            ),
+        ] {
+            for paths in [vec![], vec!["/tmp/image.png".to_string()]] {
+                for text in [
+                    raw.clone(),
+                    crate::attachments::with_attachments(&raw, &paths),
+                ] {
+                    let editable = queue_visible_text(&text, &paths);
+                    assert_eq!(one_line(&editable).as_ref(), expected);
+                    assert_eq!(
+                        editable, raw,
+                        "editing must retain selected invocation identity"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn queue_rows_preserve_literal_invocation_syntax() {
+        let link = harness_proto::invocation::Invocation::Command {
+            name: "goal".into(),
+        }
+        .link();
+        for text in [
+            "/goal write unit tests".to_string(),
+            "[example](https://example.com)".to_string(),
+            "[/goal](harness-invoke:bad)".to_string(),
+            format!("`{link}`"),
+        ] {
+            assert_eq!(one_line(&text).as_ref(), text);
+        }
+    }
+
+    #[test]
+    fn queue_rows_preserve_unicode_and_escaped_invocation_names() {
+        use harness_proto::invocation::Invocation;
+
+        for name in [
+            "réviser",
+            "检查",
+            "cafe\u{301}",
+            "review[ui]",
+            "review`ui",
+            "a\\b",
+        ] {
+            for invocation in [
+                Invocation::Command { name: name.into() },
+                Invocation::Skill {
+                    name: name.into(),
+                    path: "/demo folder/技能/SKILL.md".into(),
+                    command: None,
+                },
+            ] {
+                let raw = format!("前 {} 後", invocation.link());
+                assert_eq!(
+                    one_line(&raw).as_ref(),
+                    format!("前 {}{name} 後", invocation.prefix()),
+                    "{invocation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn queue_rows_keep_selected_skill_labels_instead_of_provider_prompt_text() {
+        use harness_proto::invocation::{Invocation, SkillCommand};
+
+        for path in [
+            "/demo/SKILL.md",
+            "opencode-skill:review",
+            "harness-skill:review",
+        ] {
+            let invocation = Invocation::Skill {
+                name: "review-changes".into(),
+                path: path.into(),
+                command: Some(SkillCommand {
+                    name: "native-review".into(),
+                    harness: harness_proto::HarnessId::Opencode,
+                }),
+            };
+            let raw = format!("{} inspect the demo", invocation.link());
+            assert_eq!(one_line(&raw).as_ref(), "$review-changes inspect the demo");
+            assert_eq!(queue_visible_text(&raw, &[]), raw);
+        }
+    }
+
+    #[test]
+    fn queue_rows_decode_adjacent_repeated_and_mixed_literal_references() {
+        use harness_proto::invocation::Invocation;
+
+        let command = Invocation::Command {
+            name: "goal".into(),
+        }
+        .link();
+        let skill = Invocation::Skill {
+            name: "review".into(),
+            path: "/demo/SKILL.md".into(),
+            command: None,
+        }
+        .link();
+        assert_eq!(
+            one_line(&format!("{command}{skill}{command}")).as_ref(),
+            "/goal$review/goal"
+        );
+        assert_eq!(one_line(&command.repeat(64)).as_ref(), "/goal".repeat(64));
+        assert_eq!(
+            one_line(&format!("({command}), `{skill}`; {skill}!")).as_ref(),
+            format!("(/goal), `{skill}`; $review!")
+        );
+        assert_eq!(
+            one_line(&format!("\n {command}\t\r\n{skill}\u{a0}done \n")).as_ref(),
+            "/goal $review done"
+        );
+    }
+
+    #[test]
+    fn queue_rows_do_not_activate_code_escaped_or_image_alt_references() {
+        let link = harness_proto::invocation::Invocation::Command {
+            name: "goal".into(),
+        }
+        .link();
+        for raw in [
+            format!("``{link}``"),
+            format!("```markdown\n{link}\n```"),
+            format!("    {link}"),
+            format!(" \t{link}"),
+            format!("\\{link}"),
+            format!("![{link}](demo.png)"),
+        ] {
+            let expected = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(one_line(&raw).as_ref(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn queue_rows_leave_noncanonical_or_invalid_payloads_literal() {
+        use harness_proto::invocation::Invocation;
+
+        let link = Invocation::Command {
+            name: "goal".into(),
+        }
+        .link();
+        let mut invalid = vec![
+            link.replace("[/goal]", "[/different]"),
+            link.replace("harness-invoke:", "https://example.com/"),
+            "[/goal](harness-invoke:7)".into(),
+            "[/goal](harness-invoke:zz)".into(),
+            "[/goal](harness-invoke:éé)".into(),
+            "[/goal](harness-invoke:7b7d)".into(),
+        ];
+        for invocation in [
+            Invocation::Command { name: "".into() },
+            Invocation::Command {
+                name: "two words".into(),
+            },
+            Invocation::Skill {
+                name: "review".into(),
+                path: "".into(),
+                command: None,
+            },
+        ] {
+            invalid.push(invocation.link());
+        }
+        for raw in invalid {
+            assert_eq!(one_line(&raw).as_ref(), raw, "{raw}");
+        }
+    }
+
+    #[test]
+    fn queue_rows_hide_invocation_and_appshot_metadata_together() {
+        let shot = crate::appshots::tests::shot();
+        let paths = vec!["/demo/image.png".to_string()];
+        let raw = format!(
+            "{} inspect the demo",
+            harness_proto::invocation::Invocation::Command {
+                name: "goal".into(),
+            }
+            .link()
+        );
+        let body = crate::appshots::with_appshots(
+            &raw,
+            &[shot.clone()],
+            &std::collections::HashMap::from([(shot.screenshot.id.clone(), paths[0].clone())]),
+        );
+        for text in [
+            body.clone(),
+            crate::attachments::with_attachments(&body, &paths),
+        ] {
+            let editable = queue_visible_text(&text, &paths);
+            assert_eq!(editable, raw);
+            assert_eq!(one_line(&editable).as_ref(), "/goal inspect the demo");
+        }
+    }
+
+    #[test]
+    fn queue_rows_do_not_strip_mismatched_attachment_trailers() {
+        let invocation = harness_proto::invocation::Invocation::Command {
+            name: "goal".into(),
+        };
+        let raw = format!("{} inspect the demo", invocation.link());
+        let trailer_paths = vec!["/demo/first.png".to_string()];
+        let stored_paths = vec!["/demo/second.png".to_string()];
+        let legacy = crate::attachments::with_attachments(&raw, &trailer_paths);
+        let editable = queue_visible_text(&legacy, &stored_paths);
+        assert_eq!(editable, legacy);
+        let expected =
+            crate::attachments::with_attachments("/goal inspect the demo", &trailer_paths);
+        assert_eq!(
+            one_line(&editable).as_ref(),
+            expected.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
     }
 
     #[test]
