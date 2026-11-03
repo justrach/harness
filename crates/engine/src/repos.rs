@@ -327,6 +327,40 @@ impl Repos {
         Ok(entries)
     }
 
+    /// The destination's original reflog entry must prove a fresh branch,
+    /// created during this context from the start point the agent requested.
+    /// A reused/reset branch or an unavailable creation record is not proof.
+    pub(crate) async fn branch_created_since(
+        &self,
+        path: &Path,
+        branch: &str,
+        start: &str,
+        since: i64,
+    ) -> Result<bool, EngineError> {
+        let reference = format!("refs/heads/{branch}");
+        let log = self
+            .git(
+                &[
+                    "reflog",
+                    "show",
+                    "--date=unix",
+                    "--format=%gd%x09%gs",
+                    &reference,
+                ],
+                Some(path),
+            )
+            .await?;
+        let Some((selector, subject)) = log.lines().last().and_then(|line| line.split_once('\t'))
+        else {
+            return Ok(false);
+        };
+        let at = selector
+            .rsplit_once("@{")
+            .and_then(|(_, at)| at.strip_suffix('}'))
+            .and_then(|at| at.parse::<i64>().ok());
+        Ok(at.is_some_and(|at| at >= since) && subject == format!("branch: Created from {start}"))
+    }
+
     /// Capture the complete source identity after dispatch or an owned checkout change.
     pub(crate) async fn capture_source_context(
         &self,

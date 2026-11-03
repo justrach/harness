@@ -442,6 +442,122 @@ async fn the_chats_own_branch_rename_does_not_ask() {
     core.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_chats_own_new_branch_does_not_ask() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cwd) = test_repo(tmp.path());
+    let data = tmp.path().join("data");
+    let (core, prompts) = engine(&data);
+    create_chat(&core, &cwd);
+    send(&core, "m1", "establish alpha", &cwd);
+    wait_turn(&core, &prompts, 1).await;
+
+    send(
+        &core,
+        "m2",
+        "shell: git switch -c feature/example && git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m 'task; work'",
+        &cwd,
+    );
+    wait_turn(&core, &prompts, 2).await;
+    assert_eq!(git(&repo, &["branch", "--show-current"]), "feature/example");
+
+    send(&core, "m3", "follow-up", &cwd);
+    wait_for(
+        || prompts.lock().unwrap().len() == 3 || open_question(&core).is_some(),
+        "the follow-up to dispatch or ask",
+    )
+    .await;
+    assert!(
+        open_question(&core).is_none(),
+        "the chat's own fresh branch must not require redundant consent"
+    );
+    wait_turn(&core, &prompts, 3).await;
+    assert_eq!(prompts.lock().unwrap()[2], "follow-up", "no drift note");
+    assert_eq!(context_branch(&core), "feature/example");
+    let chat = core.workspace.chat(CHAT).unwrap().unwrap();
+    assert_eq!(chat.branch.as_deref(), Some("feature/example"));
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owned_branch_creation_from_an_explicit_base_survives_restart() {
+    for operation in ["git switch --create", "git checkout -q -b"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, cwd) = test_repo(tmp.path());
+        git(&repo, &["branch", "base"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "advance alpha"]);
+        let base_sha = git(&repo, &["rev-parse", "base"]);
+        assert_ne!(base_sha, git(&repo, &["rev-parse", "HEAD"]));
+        let data = tmp.path().join("data");
+        let (core, prompts) = engine(&data);
+        create_chat(&core, &cwd);
+        send(&core, "m1", "establish alpha", &cwd);
+        wait_turn(&core, &prompts, 1).await;
+        send(
+            &core,
+            "m2",
+            &format!("shell: {operation} feature/example base; git status --short"),
+            &cwd,
+        );
+        wait_turn(&core, &prompts, 2).await;
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]), base_sha);
+        core.shutdown().await;
+        drop(core);
+
+        let (core, prompts) = engine(&data);
+        send(&core, "m3", "follow-up after restart", &cwd);
+        wait_for(
+            || prompts.lock().unwrap().len() == 1 || open_question(&core).is_some(),
+            "the restored follow-up to dispatch or ask",
+        )
+        .await;
+        assert!(open_question(&core).is_none(), "{operation}");
+        wait_turn(&core, &prompts, 1).await;
+        assert_eq!(prompts.lock().unwrap()[0], "follow-up after restart");
+        let chat = core.workspace.chat(CHAT).unwrap().unwrap();
+        let context = chat.source_context.unwrap();
+        assert_eq!(context.branch, "feature/example");
+        assert_eq!(context.head_sha.as_deref(), Some(base_sha.as_str()));
+        assert_eq!(chat.branch.as_deref(), Some("feature/example"));
+        core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn branch_creation_does_not_approve_unrelated_or_unproven_switches() {
+    for (command, outside_creation) in [
+        ("echo git switch -c feature/example", true),
+        ("git switch -c feature/example missing-base", true),
+        ("git switch -C feature/example", false),
+        ("git checkout -B feature/example", false),
+        (
+            "git switch -c feature/example && git switch alpha && git switch feature/example",
+            false,
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, cwd) = test_repo(tmp.path());
+        let (core, prompts) = engine(&tmp.path().join("data"));
+        create_chat(&core, &cwd);
+        send(&core, "m1", "establish alpha", &cwd);
+        wait_turn(&core, &prompts, 1).await;
+        send(&core, "m2", &format!("shell: {command}"), &cwd);
+        wait_turn(&core, &prompts, 2).await;
+        if outside_creation {
+            git(&repo, &["switch", "-c", "feature/example"]);
+        }
+        send(&core, "m3", "follow-up", &cwd);
+        let (_, question) = wait_question(&core).await;
+        assert_eq!(
+            question.options[0], "Continue on feature/example",
+            "{command}"
+        );
+        assert_eq!(prompts.lock().unwrap().len(), 2, "{command}");
+        assert_eq!(context_branch(&core), "alpha", "context is not accepted");
+        core.shutdown().await;
+    }
+}
+
 fn test_repo(root: &Path) -> (std::path::PathBuf, String) {
     let repo = root.canonicalize().unwrap().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
