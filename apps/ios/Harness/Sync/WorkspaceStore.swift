@@ -689,6 +689,22 @@ final class WorkspaceStore {
                                             params: ["pct": pct.map { $0 as Any } ?? NSNull()])
     }
 
+    /// GetAutonomy on the target device: how much its agents may do without asking.
+    func autonomy(deviceId: String) async throws -> AutonomySetting {
+        try await relay(for: deviceId).call(method: "GetAutonomy", params: [:])
+    }
+
+    /// SetAutonomy; answers with the level the device kept.
+    func setAutonomy(deviceId: String, _ autonomy: Autonomy) async throws -> AutonomySetting {
+        try await relay(for: deviceId).call(method: "SetAutonomy", params: ["autonomy": autonomy.rawValue])
+    }
+
+    /// SetHarnessEnabled: switch an agent on or off on that computer (Settings → Agents there).
+    func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws {
+        let _: JSONValue = try await relay(for: deviceId).call(method: "SetHarnessEnabled",
+                                                               params: ["harness": harness, "enabled": enabled])
+    }
+
     /// CodegraffSandboxes on the target device: the cloud sandboxes and sizes of
     /// the Codegraff account its engine is signed in with (nil while signed out).
     func codegraffSandboxes(deviceId: String) async throws -> CodegraffSandboxes? {
@@ -768,6 +784,26 @@ final class WorkspaceStore {
         let _: Ok = try await relay(for: deviceId).call(method: "SimulatorInput",
                                                         params: ["simulatorId": simulatorId,
                                                                  "input": input.params])
+    }
+
+    // MARK: Localhost pages (a page the computer serves, rendered there and streamed here)
+
+    func watchLocalhostPage(deviceId: String, watch: LocalhostWatch) async throws
+        -> AsyncThrowingStream<LocalhostPageEvent, Error> {
+        try await relay(for: deviceId).stream(method: "WatchLocalhostPage", params: watch.params)
+    }
+
+    func localhostPageInput(deviceId: String, viewId: String, input: LocalhostPageInput) async throws {
+        struct Ok: Decodable {}
+        let _: Ok = try await relay(for: deviceId).call(method: "LocalhostPageInput",
+                                                        params: ["viewId": viewId, "input": input.params],
+                                                        timeoutSeconds: 25, retry: false)
+    }
+
+    func listLocalhostServers(deviceId: String) async throws -> [LocalServer] {
+        let list: LocalServerList = try await relay(for: deviceId).call(method: "ListLocalhostServers",
+                                                                        params: [:], timeoutSeconds: 20)
+        return list.servers
     }
 
     /// ListRefs on the target device — branches with current/worktree markers
@@ -1045,3 +1081,4 @@ final class WorkspaceStore {
 }
 
 extension WorkspaceStore: SimulatorHost {}
+extension WorkspaceStore: LocalhostPageHost {}

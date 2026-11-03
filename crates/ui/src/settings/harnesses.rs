@@ -148,7 +148,18 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
+/// `GetKeepAwake` reply: the device's setting, and whether its engine can
+/// hold a sleep assertion at all.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+struct KeepAwake {
+    enabled: bool,
+    supported: bool,
+}
+
 pub struct HarnessesPage {
+    keep_awake: Loadable<KeepAwake>,
+    keep_awake_task: Option<Task<()>>,
+    keep_awake_saving: bool,
     graff_draft_subagents: Loadable<bool>,
     graff_draft_subagents_task: Option<Task<()>>,
     graff_draft_subagents_saving: bool,
@@ -231,6 +242,9 @@ impl SignInPhase {
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
+            keep_awake: Loadable::Idle,
+            keep_awake_task: None,
+            keep_awake_saving: false,
             graff_draft_subagents: Loadable::Idle,
             graff_draft_subagents_task: None,
             graff_draft_subagents_saving: false,
@@ -282,6 +296,9 @@ impl HarnessesPage {
         }
         self.cancel_sign_in(cx);
         self.title_task = None;
+        self.keep_awake_task = None;
+        self.keep_awake = Loadable::Idle;
+        self.keep_awake_saving = false;
         self.graff_draft_subagents_task = None;
         self.graff_draft_subagents = Loadable::Idle;
         self.graff_draft_subagents_saving = false;
@@ -312,6 +329,7 @@ impl HarnessesPage {
         };
         let params = self.with_target(serde_json::json!({}));
         self.load_titles(None, cx);
+        self.load_keep_awake(None, cx);
         self.load_graff_draft_subagents(None, cx);
         self.load_graff_compact_at(None, cx);
         self.harnesses = Loadable::Loading;
@@ -329,6 +347,80 @@ impl HarnessesPage {
             })
             .ok();
         }));
+    }
+
+    fn load_keep_awake(&mut self, save: Option<bool>, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let saving = save.is_some();
+        let method = if saving {
+            methods::SET_KEEP_AWAKE
+        } else {
+            methods::GET_KEEP_AWAKE
+        };
+        let params = self.with_target(serde_json::json!({ "enabled": save }));
+        self.keep_awake_saving = saving;
+        if !saving {
+            self.keep_awake = Loadable::Loading;
+        }
+        self.keep_awake_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(method, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<KeepAwake>(value).map_err(|e| e.to_string())
+                });
+            this.update(cx, |page, cx| {
+                match result {
+                    Ok(keep_awake) => {
+                        page.keep_awake = Loadable::Ready(keep_awake);
+                        page.error = None;
+                    }
+                    Err(error) if saving => page.error = Some(error),
+                    Err(error) => page.keep_awake = Loadable::Error(error),
+                }
+                page.keep_awake_saving = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Hidden until the device answers, and on devices whose engine can't
+    /// hold a sleep assertion (or predates the setting).
+    fn render_keep_awake(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Loadable::Ready(KeepAwake {
+            enabled,
+            supported: true,
+        }) = self.keep_awake
+        else {
+            return None;
+        };
+        let saving = self.keep_awake_saving;
+        Some(
+            widgets::section_card(theme)
+                .mt(px(20.0))
+                .p(px(16.0))
+                .child(
+                    div().flex().items_center().justify_between().gap(px(12.0))
+                        .child(div().flex_1().min_w_0().flex().flex_col()
+                            .child(widgets::row_title(theme, "Keep this Mac awake while agents work"))
+                            .child(widgets::page_subtitle(theme,
+                                "The Mac won't go to sleep while any chat is working, and can sleep again once they're all done. The display can still turn off, and closing a laptop's lid still puts it to sleep.")))
+                        .child(widgets::toggle_switch(theme, enabled)
+                            .id("keep-awake-toggle")
+                            .when(saving, |el| el.opacity(0.35))
+                            .when(!saving, |el| {
+                                el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                                    this.load_keep_awake(Some(!enabled), cx);
+                                }))
+                            })))
+                .into_any_element(),
+        )
     }
 
     fn load_graff_draft_subagents(&mut self, save: Option<bool>, cx: &mut Context<Self>) {
@@ -1575,6 +1667,7 @@ impl Render for HarnessesPage {
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
         let screen_access = self.render_screen_access(&theme, cx);
+        let keep_awake = self.render_keep_awake(&theme, cx);
         let graff_draft_subagents = self.render_graff_draft_subagents(&theme, cx);
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1615,6 +1708,7 @@ impl Render for HarnessesPage {
                             // Above the agent list: a missing grant silently
                             // breaks screenshots for every agent below.
                             .children(screen_access)
+                            .children(keep_awake)
                             .child(body)
                             .child(graff_draft_subagents)
                             .child(titles),

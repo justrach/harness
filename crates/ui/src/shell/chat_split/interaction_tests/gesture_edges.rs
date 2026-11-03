@@ -57,8 +57,10 @@ fn with_layout(
             }
             shell.sync_chat_panes(cx);
         });
-        // Let initial transcript preparation settle before replacing the new
-        // peer's fixture snapshot and promoting a source pane.
+        // Let preparation and the peer's 100ms passive-update budget settle
+        // before replacing its fixture snapshot and promoting a source pane.
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(100));
         draw(cx);
         shell.update(cx, |shell, cx| {
             if count == 3 {
@@ -79,6 +81,10 @@ fn with_layout(
             SplitAxis::Vertical => gpui::size(px(960.0), px(320.0 * count as f32)),
         };
         cx.simulate_resize(size);
+        // Finish fixture delivery before measuring gesture hit targets. No
+        // clocks advance during the gestures: direct input remains immediate.
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(100));
         draw(cx);
         run(shell, cx);
     });

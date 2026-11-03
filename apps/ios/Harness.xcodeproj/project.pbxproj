@@ -11,6 +11,8 @@
 		A1000000000000000000B002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P004 /* Markdown */; };
 		AB9C174743381D5C067EE245 /* HarnessWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		D2E2115BBF69BED0B4439FC4 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DB88999CE90755C33D472091 /* Foundation.framework */; };
+		A4000000000000000000B001 /* HarnessWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = A4000000000000000000PR01 /* HarnessWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A5000000000000000000B001 /* HarnessWatchWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A5000000000000000000PR01 /* HarnessWatchWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -35,6 +37,20 @@
 			remoteGlobalIDString = A1000000000000000000T001;
 			remoteInfo = Harness;
 		};
+		A4000000000000000000X001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000PJ01 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A4000000000000000000T001;
+			remoteInfo = HarnessWatch;
+		};
+		A5000000000000000000X001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1000000000000000000PJ01 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A5000000000000000000T001;
+			remoteInfo = HarnessWatchWidgets;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -49,6 +65,28 @@
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A4000000000000000000CP01 /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				A4000000000000000000B001 /* HarnessWatch.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A5000000000000000000CP01 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A5000000000000000000B001 /* HarnessWatchWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
@@ -57,6 +95,8 @@
 		A3000000000000000000PR01 /* HarnessUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HarnessUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = HarnessWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		DB88999CE90755C33D472091 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		A4000000000000000000PR01 /* HarnessWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HarnessWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A5000000000000000000PR01 /* HarnessWatchWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = HarnessWatchWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -89,6 +129,46 @@
 			);
 			target = A1000000000000000000T001 /* Harness */;
 		};
+		A4000000000000000000E001 /* Exceptions for "HarnessWatch" folder in "HarnessWatch" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A4000000000000000000T001 /* HarnessWatch */;
+		};
+		A4000000000000000000E002 /* Exceptions for "HarnessWatch" folder in "Harness" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Shared/HarnessMarkShape.swift,
+				Shared/WatchLink.swift,
+			);
+			target = A1000000000000000000T001 /* Harness */;
+		};
+		A4000000000000000000E003 /* Exceptions for "HarnessWatch" folder in "HarnessWatchWidgets" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Shared/HarnessMarkShape.swift,
+				Shared/WatchLink.swift,
+			);
+			target = A5000000000000000000T001 /* HarnessWatchWidgets */;
+		};
+		A5000000000000000000E001 /* Exceptions for "HarnessWatchWidgets" folder in "HarnessWatchWidgets" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A5000000000000000000T001 /* HarnessWatchWidgets */;
+		};
+		A4000000000000000000E004 /* Exceptions for "Harness" folder in "HarnessWatch" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Fonts/Geist-Medium.ttf,
+				Fonts/Geist-SemiBold.ttf,
+				Fonts/Geist.ttf,
+				Fonts/GeistMono.ttf,
+			);
+			target = A4000000000000000000T001 /* HarnessWatch */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -106,6 +186,7 @@
 			exceptions = (
 				A100000000000000000000E1 /* Exceptions for "Harness" folder in "Harness" target */,
 				13F0799F6C34AAD8E1B2B457 /* Exceptions for "Harness" folder in "HarnessWidgets" target */,
+				A4000000000000000000E004 /* Exceptions for "Harness" folder in "HarnessWatch" target */,
 			);
 			path = Harness;
 			sourceTree = "<group>";
@@ -122,6 +203,24 @@
 			exceptions = (
 			);
 			path = HarnessUITests;
+			sourceTree = "<group>";
+		};
+		A4000000000000000000G001 /* HarnessWatch */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A4000000000000000000E001 /* Exceptions for "HarnessWatch" folder in "HarnessWatch" target */,
+				A4000000000000000000E002 /* Exceptions for "HarnessWatch" folder in "Harness" target */,
+				A4000000000000000000E003 /* Exceptions for "HarnessWatch" folder in "HarnessWatchWidgets" target */,
+			);
+			path = HarnessWatch;
+			sourceTree = "<group>";
+		};
+		A5000000000000000000G001 /* HarnessWatchWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A5000000000000000000E001 /* Exceptions for "HarnessWatchWidgets" folder in "HarnessWatchWidgets" target */,
+			);
+			path = HarnessWatchWidgets;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -141,6 +240,20 @@
 			buildActionMask = 2147483647;
 			files = (
 				D2E2115BBF69BED0B4439FC4 /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A4000000000000000000F001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A5000000000000000000F001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -168,6 +281,8 @@
 			children = (
 				A1000000000000000000G001 /* Harness */,
 				17E920BF97A87A03629DE7D2 /* HarnessWidgets */,
+				A4000000000000000000G001 /* HarnessWatch */,
+				A5000000000000000000G001 /* HarnessWatchWidgets */,
 				A2000000000000000000G001 /* HarnessTests */,
 				A3000000000000000000G001 /* HarnessUITests */,
 				A1000000000000000000G002 /* Products */,
@@ -182,6 +297,8 @@
 				A2000000000000000000PR01 /* HarnessTests.xctest */,
 				A3000000000000000000PR01 /* HarnessUITests.xctest */,
 				C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */,
+				A4000000000000000000PR01 /* HarnessWatch.app */,
+				A5000000000000000000PR01 /* HarnessWatchWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -197,11 +314,13 @@
 				A1000000000000000000F001 /* Frameworks */,
 				A1000000000000000000R001 /* Resources */,
 				7AD294EB90B0F10E8EE7C274 /* Embed Foundation Extensions */,
+				A4000000000000000000CP01 /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				66484FC759CF30648D991A9A /* PBXTargetDependency */,
+				A4000000000000000000D001 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				A1000000000000000000G001 /* Harness */,
@@ -273,6 +392,48 @@
 			productReference = C99B889A3F9FE78185F10F4E /* HarnessWidgets.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		A4000000000000000000T001 /* HarnessWatch */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A4000000000000000000C001 /* Build configuration list for PBXNativeTarget "HarnessWatch" */;
+			buildPhases = (
+				A4000000000000000000S001 /* Sources */,
+				A4000000000000000000F001 /* Frameworks */,
+				A4000000000000000000R001 /* Resources */,
+				A5000000000000000000CP01 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A5000000000000000000D001 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A4000000000000000000G001 /* HarnessWatch */,
+			);
+			name = HarnessWatch;
+			productName = HarnessWatch;
+			productReference = A4000000000000000000PR01 /* HarnessWatch.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A5000000000000000000T001 /* HarnessWatchWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A5000000000000000000C001 /* Build configuration list for PBXNativeTarget "HarnessWatchWidgets" */;
+			buildPhases = (
+				A5000000000000000000S001 /* Sources */,
+				A5000000000000000000F001 /* Frameworks */,
+				A5000000000000000000R001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A5000000000000000000G001 /* HarnessWatchWidgets */,
+			);
+			name = HarnessWatchWidgets;
+			productName = HarnessWatchWidgets;
+			productReference = A5000000000000000000PR01 /* HarnessWatchWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -310,6 +471,8 @@
 				A2000000000000000000T001 /* HarnessTests */,
 				A3000000000000000000T001 /* HarnessUITests */,
 				AEBE4543C72514F058D31F39 /* HarnessWidgets */,
+				A4000000000000000000T001 /* HarnessWatch */,
+				A5000000000000000000T001 /* HarnessWatchWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -323,6 +486,20 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		A76E61AC0E6A7644E3989A64 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A4000000000000000000R001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A5000000000000000000R001 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -360,6 +537,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A4000000000000000000S001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A5000000000000000000S001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -378,6 +569,16 @@
 			isa = PBXTargetDependency;
 			target = A1000000000000000000T001 /* Harness */;
 			targetProxy = A3000000000000000000X001 /* PBXContainerItemProxy */;
+		};
+		A4000000000000000000D001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A4000000000000000000T001 /* HarnessWatch */;
+			targetProxy = A4000000000000000000X001 /* PBXContainerItemProxy */;
+		};
+		A5000000000000000000D001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A5000000000000000000T001 /* HarnessWatchWidgets */;
+			targetProxy = A5000000000000000000X001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -620,6 +821,112 @@
 			};
 			name = Debug;
 		};
+		A4000000000000000000BC03 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = WWP9DLJ27P;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HarnessWatch/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID).watchkitapp";
+				PRODUCT_NAME = HarnessWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		A4000000000000000000BC04 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = WWP9DLJ27P;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HarnessWatch/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID).watchkitapp";
+				PRODUCT_NAME = HarnessWatch;
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		A5000000000000000000BC03 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = WWP9DLJ27P;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HarnessWatchWidgets/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID).watchkitapp.widgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		A5000000000000000000BC04 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = WWP9DLJ27P;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = HarnessWatchWidgets/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(HARNESS_APP_BUNDLE_ID).watchkitapp.widgets";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "watchos watchsimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -664,6 +971,24 @@
 			buildConfigurations = (
 				A3000000000000000000BC03 /* Debug */,
 				A3000000000000000000BC04 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A4000000000000000000C001 /* Build configuration list for PBXNativeTarget "HarnessWatch" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A4000000000000000000BC03 /* Debug */,
+				A4000000000000000000BC04 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A5000000000000000000C001 /* Build configuration list for PBXNativeTarget "HarnessWatchWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A5000000000000000000BC03 /* Debug */,
+				A5000000000000000000BC04 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

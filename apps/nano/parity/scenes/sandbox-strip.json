@@ -1,0 +1,125 @@
+{
+    "name": "sandbox-strip",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        }
+    ],
+    "accounts": {
+        "codegraffSandboxes": {
+            "enabled": true,
+            "sandboxes": [
+                {
+                    "id": "sbx-1",
+                    "provider": "fleet",
+                    "name": "Cloud sandbox",
+                    "state": "running",
+                    "tier": "personal",
+                    "expiresAt": "2027-01-14T18:00:00Z",
+                    "harness": true,
+                    "deviceName": "fieldnotes-cloud",
+                    "keepRunning": false,
+                    "cpu": 2,
+                    "memoryGiB": 4,
+                    "diskGiB": 40,
+                    "pricePerHourMicroUsd": 100000
+                },
+                {
+                    "id": "tmp-1",
+                    "provider": "daytona",
+                    "name": null,
+                    "state": "paused",
+                    "tier": "ephemeral",
+                    "harness": false,
+                    "cpu": 1,
+                    "memoryGiB": 2,
+                    "diskGiB": 10,
+                    "pricePerHourMicroUsd": 50000
+                }
+            ],
+            "sizes": [
+                {
+                    "id": "standard",
+                    "cpu": 2,
+                    "memoryGiB": 4,
+                    "diskGiB": 40,
+                    "pricePerHourMicroUsd": 100000,
+                    "default": true
+                },
+                {
+                    "id": "large",
+                    "cpu": 4,
+                    "memoryGiB": 8,
+                    "diskGiB": 80,
+                    "pricePerHourMicroUsd": 200000,
+                    "default": false
+                }
+            ]
+        }
+    },
+    "steps": [
+        {
+            "do": "hover",
+            "x": 120,
+            "y": 198
+        },
+        {
+            "do": "wait",
+            "ms": 200
+        },
+        {
+            "do": "click",
+            "x": 231,
+            "y": 198
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        }
+    ]
+}

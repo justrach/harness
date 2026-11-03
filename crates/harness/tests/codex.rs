@@ -433,6 +433,10 @@ async fn approvals_round_trip_as_input_requests() {
     };
     let mut req = request("scenario:approve");
     req.auto_approve = false;
+    // Full access (the engine's default autonomy) keeps the wire policy at
+    // "never"; these are the stray approvals that still round-trip. A
+    // restricted sandbox would ask "on-request" instead.
+    req.sandbox = SandboxLevel::DangerFullAccess;
     let events = run_to_end(&harness(), req, controls).await;
 
     let asked = asked.lock().unwrap();

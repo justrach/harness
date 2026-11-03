@@ -1,0 +1,423 @@
+{
+  "comment": "WatchDocMessages frames (crates/doc/src/transcript_delta.rs): each case applies its frames in order to an empty transcript. `expect` is the transcript after the last frame, as each entry's id, role and the text of its text and reasoning parts; `desyncAt` is the index of the frame that must be refused (the client then resubscribes for a reset). Runners: crates/doc/tests/desktop_transcript_vectors.rs (apply_transcript_frame) and apps/nano/src/parity.zig (Transcript.apply).",
+  "cases": [
+    {
+      "name": "a reset, an upsert after its anchor, streamed text",
+      "frames": [
+        {
+          "reset": [
+            {
+              "id": "u1",
+              "role": "user",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "p1",
+                  "text": "Add rate limiting"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            }
+          ]
+        },
+        {
+          "upsert": [
+            {
+              "after": "u1",
+              "entry": {
+                "id": "a1",
+                "role": "assistant",
+                "parts": [
+                  {
+                    "kind": "text",
+                    "id": "t1",
+                    "text": "Hel"
+                  }
+                ],
+                "createdAt": 1,
+                "deviceId": "dev-a",
+                "status": "streaming"
+              }
+            }
+          ],
+          "append": [],
+          "remove": [],
+          "count": 2
+        },
+        {
+          "upsert": [],
+          "append": [
+            {
+              "entry": "a1",
+              "part": "t1",
+              "text": "lo",
+              "len": 5
+            }
+          ],
+          "remove": [],
+          "count": 2
+        }
+      ],
+      "expect": [
+        {
+          "id": "u1",
+          "role": "user",
+          "texts": [
+            "Add rate limiting"
+          ]
+        },
+        {
+          "id": "a1",
+          "role": "assistant",
+          "texts": [
+            "Hello"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "reasoning streams like text",
+      "frames": [
+        {
+          "reset": [
+            {
+              "id": "a1",
+              "role": "assistant",
+              "parts": [
+                {
+                  "kind": "reasoning",
+                  "id": "r1",
+                  "text": "Thinking"
+                },
+                {
+                  "kind": "text",
+                  "id": "t1",
+                  "text": ""
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a",
+              "status": "streaming"
+            }
+          ]
+        },
+        {
+          "upsert": [],
+          "append": [
+            {
+              "entry": "a1",
+              "part": "r1",
+              "text": " hard",
+              "len": 13
+            },
+            {
+              "entry": "a1",
+              "part": "t1",
+              "text": "Done",
+              "len": 4
+            }
+          ],
+          "remove": [],
+          "count": 1
+        }
+      ],
+      "expect": [
+        {
+          "id": "a1",
+          "role": "assistant",
+          "texts": [
+            "Thinking hard",
+            "Done"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an upsert after null goes first; one with a known id replaces it",
+      "frames": [
+        {
+          "reset": [
+            {
+              "id": "u1",
+              "role": "user",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "p1",
+                  "text": "Add rate limiting"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            }
+          ]
+        },
+        {
+          "upsert": [
+            {
+              "after": null,
+              "entry": {
+                "id": "s0",
+                "role": "system",
+                "parts": [
+                  {
+                    "kind": "text",
+                    "id": "x",
+                    "text": "started"
+                  }
+                ],
+                "createdAt": 1,
+                "deviceId": "dev-a"
+              }
+            }
+          ],
+          "append": [],
+          "remove": [],
+          "count": 2
+        },
+        {
+          "upsert": [
+            {
+              "after": "s0",
+              "entry": {
+                "id": "u1",
+                "role": "user",
+                "parts": [
+                  {
+                    "kind": "text",
+                    "id": "p1",
+                    "text": "Add rate limiting, please"
+                  }
+                ],
+                "createdAt": 1,
+                "deviceId": "dev-a"
+              }
+            }
+          ],
+          "append": [],
+          "remove": [],
+          "count": 2
+        }
+      ],
+      "expect": [
+        {
+          "id": "s0",
+          "role": "system",
+          "texts": [
+            "started"
+          ]
+        },
+        {
+          "id": "u1",
+          "role": "user",
+          "texts": [
+            "Add rate limiting, please"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "remove drops entries; a reset replaces everything",
+      "frames": [
+        {
+          "reset": [
+            {
+              "id": "u1",
+              "role": "user",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "p1",
+                  "text": "Add rate limiting"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            },
+            {
+              "id": "a1",
+              "role": "assistant",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "t1",
+                  "text": "x"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            }
+          ]
+        },
+        {
+          "upsert": [],
+          "append": [],
+          "remove": [
+            "a1"
+          ],
+          "count": 1
+        },
+        {
+          "reset": [
+            {
+              "id": "a2",
+              "role": "assistant",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "t2",
+                  "text": "fresh"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            }
+          ]
+        }
+      ],
+      "expect": [
+        {
+          "id": "a2",
+          "role": "assistant",
+          "texts": [
+            "fresh"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an append whose length doesn't add up",
+      "frames": [
+        {
+          "reset": [
+            {
+              "id": "a1",
+              "role": "assistant",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "t1",
+                  "text": "ab"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            }
+          ]
+        },
+        {
+          "upsert": [],
+          "append": [
+            {
+              "entry": "a1",
+              "part": "t1",
+              "text": "c",
+              "len": 9
+            }
+          ],
+          "remove": [],
+          "count": 1
+        }
+      ],
+      "desyncAt": 1
+    },
+    {
+      "name": "an upsert after a missing anchor",
+      "frames": [
+        {
+          "reset": []
+        },
+        {
+          "upsert": [
+            {
+              "after": "nope",
+              "entry": {
+                "id": "u1",
+                "role": "user",
+                "parts": [
+                  {
+                    "kind": "text",
+                    "id": "p1",
+                    "text": "Add rate limiting"
+                  }
+                ],
+                "createdAt": 1,
+                "deviceId": "dev-a"
+              }
+            }
+          ],
+          "append": [],
+          "remove": [],
+          "count": 1
+        }
+      ],
+      "desyncAt": 1
+    },
+    {
+      "name": "a count that doesn't match",
+      "frames": [
+        {
+          "reset": [
+            {
+              "id": "u1",
+              "role": "user",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "p1",
+                  "text": "Add rate limiting"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            }
+          ]
+        },
+        {
+          "upsert": [],
+          "append": [],
+          "remove": [],
+          "count": 3
+        }
+      ],
+      "desyncAt": 1
+    },
+    {
+      "name": "an append to a part that isn't there",
+      "frames": [
+        {
+          "reset": [
+            {
+              "id": "u1",
+              "role": "user",
+              "parts": [
+                {
+                  "kind": "text",
+                  "id": "p1",
+                  "text": "Add rate limiting"
+                }
+              ],
+              "createdAt": 1,
+              "deviceId": "dev-a"
+            }
+          ]
+        },
+        {
+          "upsert": [],
+          "append": [
+            {
+              "entry": "u1",
+              "part": "zz",
+              "text": "x",
+              "len": 1
+            }
+          ],
+          "remove": [],
+          "count": 1
+        }
+      ],
+      "desyncAt": 1
+    }
+  ]
+}

@@ -214,6 +214,16 @@ pub struct ModelOptionRecord {
     pub default_choice: String,
 }
 
+/// The device's default autonomy (`GetAutonomy` / `SetAutonomy`):
+/// `autonomy` is "read-only", "workspace" or "full-access"; `chosen` is
+/// false until someone picked one (onboarding offers the choice then).
+#[derive(Debug, Clone, PartialEq, Deserialize, uniffi::Record)]
+pub struct AutonomyRecord {
+    pub autonomy: String,
+    #[serde(default)]
+    pub chosen: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfoRecord {
@@ -345,6 +355,27 @@ impl Relay {
             device_id,
             "SetGraffCompactAt",
             json!({ "pct": pct }),
+            CALL_TIMEOUT,
+        )
+        .await
+    }
+
+    /// `GetAutonomy`: what the device's runs may do without asking.
+    pub async fn autonomy(&self, device_id: &str) -> Result<AutonomyRecord, RelayError> {
+        self.call_as(device_id, "GetAutonomy", json!({}), CALL_TIMEOUT)
+            .await
+    }
+
+    /// `SetAutonomy`: answers with the value the device kept.
+    pub async fn set_autonomy(
+        &self,
+        device_id: &str,
+        autonomy: &str,
+    ) -> Result<AutonomyRecord, RelayError> {
+        self.call_as(
+            device_id,
+            "SetAutonomy",
+            json!({ "autonomy": autonomy }),
             CALL_TIMEOUT,
         )
         .await

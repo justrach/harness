@@ -1,0 +1,13 @@
+{
+ "width": 1100, "height": 760, "dark": false, "scale": 2,
+ "devices": [{"id": "d", "name": "Studio"}],
+ "spaces": [{"id": "s", "deviceId": "d", "path": "/work/fieldnotes", "gitDetected": true}],
+ "chats": [{"id": "a", "deviceId": "d", "title": "Tidy the release notes", "archived": false, "spaceId": "s", "lastMessageAt": "2026-10-24T00:00:00Z"}],
+ "open": "a",
+ "steps": [
+  {"press": "cmd+d"}, {"snap": "two"},
+  {"press": "cmd+d"}, {"expect": "Tour this project"}, {"snap": "three"},
+  {"press": "cmd+d"}, {"snap": "four"},
+  {"composer": " "}, {"expectNot": "Plan a launch"}, {"snap": "typed-space"}
+ ]
+}

@@ -1,0 +1,139 @@
+{
+ "name": "chat-transcript",
+ "appearance": "dark",
+ "width": 1200,
+ "height": 780,
+ "spaces": [
+  {
+   "id": "s",
+   "deviceId": "scene-device",
+   "path": "/work/fieldnotes",
+   "gitDetected": true,
+   "createdAt": "2026-09-24T14:41:22.685Z"
+  }
+ ],
+ "chats": [
+  {
+   "id": "a",
+   "deviceId": "scene-device",
+   "title": "Tidy the release notes",
+   "archived": false,
+   "spaceId": "s",
+   "cwd": "/work/fieldnotes",
+   "config": {
+    "harness": "claude-code",
+    "model": "sonnet",
+    "reasoning": null,
+    "modelOptions": {},
+    "sandbox": "workspace-write"
+   },
+   "lastMessagePreview": null,
+   "lastMessageAt": "2026-10-24T00:00:00Z",
+   "createdAt": "2026-10-24T00:00:00Z",
+   "branch": "docs/release-notes"
+  },
+  {
+   "id": "b",
+   "deviceId": "scene-device",
+   "title": "Sketch the onboarding flow",
+   "archived": false,
+   "spaceId": "s",
+   "cwd": "/work/fieldnotes",
+   "config": {
+    "harness": "graff",
+    "model": null,
+    "reasoning": null,
+    "modelOptions": {},
+    "sandbox": "workspace-write"
+   },
+   "lastMessagePreview": null,
+   "lastMessageAt": "2026-10-23T00:00:00Z",
+   "createdAt": "2026-10-23T00:00:00Z"
+  }
+ ],
+ "selectedChat": "a",
+ "transcript": [
+  {
+   "id": "u1",
+   "role": "user",
+   "parts": [
+    {
+     "kind": "text",
+     "id": "t0",
+     "text": "Tidy the release notes for 0.4 and list what changed in the parser."
+    }
+   ],
+   "createdAt": 1793000000000,
+   "deviceId": "scene-device"
+  },
+  {
+   "id": "a1",
+   "role": "assistant",
+   "parts": [
+    {
+     "kind": "tool",
+     "id": "c1",
+     "call": {
+      "kind": "exec",
+      "command": "git log --oneline v0.3..HEAD"
+     },
+     "resolved": true,
+     "output": "12 commits"
+    },
+    {
+     "kind": "tool",
+     "id": "c2",
+     "call": {
+      "kind": "readFile",
+      "path": "docs/CHANGELOG.md"
+     },
+     "resolved": true
+    },
+    {
+     "kind": "text",
+     "id": "t1",
+     "text": "I read the changelog and the twelve commits since **v0.3**. Three parser changes stand out:\n\n- Nested lists keep their indentation.\n- Fenced code blocks accept a `title` attribute.\n- Tables with empty cells no longer shift columns.\n\nThe new heading for the section:\n\n```md\n## Parser\n- Nested lists keep their indentation\n```\n\nShall I write it into `docs/CHANGELOG.md`?"
+    }
+   ],
+   "createdAt": 1793000001000,
+   "deviceId": "scene-device",
+   "status": "complete"
+  },
+  {
+   "id": "u2",
+   "role": "user",
+   "parts": [
+    {
+     "kind": "text",
+     "id": "t2",
+     "text": "Yes, go ahead."
+    }
+   ],
+   "createdAt": 1793000002000,
+   "deviceId": "scene-device"
+  },
+  {
+   "id": "a2",
+   "role": "assistant",
+   "parts": [
+    {
+     "kind": "tool",
+     "id": "c3",
+     "call": {
+      "kind": "editFile",
+      "path": "docs/CHANGELOG.md"
+     },
+     "resolved": true
+    },
+    {
+     "kind": "text",
+     "id": "t3",
+     "text": "Done: the **Parser** section is in `docs/CHANGELOG.md`, under 0.4."
+    }
+   ],
+   "createdAt": 1793000003000,
+   "deviceId": "scene-device",
+   "status": "complete"
+  }
+ ]
+}

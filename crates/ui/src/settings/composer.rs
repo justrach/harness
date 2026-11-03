@@ -30,6 +30,13 @@ pub type ModelOptions = serde_json::Map<String, serde_json::Value>;
 pub struct RememberedModel {
     pub id: String,
     pub label: String,
+    /// graff only: the picker also listed `claude-agent/<same model>` when
+    /// this `anthropic/<model>` was picked, so Anthropic was chosen over
+    /// Claude Agent on purpose and a new chat keeps it. Absent (false) for a
+    /// pick made before Claude Agent was listed: a new chat then moves to
+    /// Claude Agent once it is (`pickers::claude_agent_twin`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chose_over_claude_agent: bool,
 }
 
 /// One starred model in the picker (t3code client-settings `favorites`,
@@ -124,9 +131,27 @@ impl ComposerDefaults {
 
     /// Remember a pick (harness `saveDefaults({ harness, modelByHarness })`).
     pub fn remember_model(&mut self, harness: HarnessId, id: String, label: String) {
+        self.remember_pick(harness, id, label, false);
+    }
+
+    /// [`Self::remember_model`], noting whether the pick was Anthropic chosen
+    /// while Claude Agent offered the same model.
+    pub fn remember_pick(
+        &mut self,
+        harness: HarnessId,
+        id: String,
+        label: String,
+        chose_over_claude_agent: bool,
+    ) {
         self.harness = Some(harness);
-        self.model_by_harness
-            .insert(harness, RememberedModel { id, label });
+        self.model_by_harness.insert(
+            harness,
+            RememberedModel {
+                id,
+                label,
+                chose_over_claude_agent,
+            },
+        );
     }
 
     /// The remembered option picks for one model, if any.
@@ -193,6 +218,32 @@ impl ComposerDefaults {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembered_picks_from_older_files_did_not_choose_over_claude_agent() {
+        let old: ComposerDefaults = serde_json::from_str(
+            r#"{"modelByHarness":{"graff":{"id":"anthropic/claude-opus-5-5","label":"Opus"}}}"#,
+        )
+        .unwrap();
+        assert!(
+            !old.model_for(HarnessId::Graff)
+                .unwrap()
+                .chose_over_claude_agent
+        );
+        // Written only when set, so older builds read the file unchanged.
+        let mut defaults = ComposerDefaults::default();
+        defaults.remember_model(HarnessId::Graff, "a".into(), "A".into());
+        let json = serde_json::to_string(&defaults).unwrap();
+        assert!(!json.contains("choseOverClaudeAgent"), "{json}");
+        defaults.remember_pick(HarnessId::Graff, "a".into(), "A".into(), true);
+        let back: ComposerDefaults =
+            serde_json::from_str(&serde_json::to_string(&defaults).unwrap()).unwrap();
+        assert!(
+            back.model_for(HarnessId::Graff)
+                .unwrap()
+                .chose_over_claude_agent
+        );
+    }
 
     #[test]
     fn round_trip() {

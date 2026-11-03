@@ -11,8 +11,8 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, Hsla, SharedString, Subscription, Task, Window,
-    div, prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, Focusable, Hsla, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use std::time::Duration;
 
@@ -201,6 +201,18 @@ pub fn openai_login(snapshot: &AgentAccountsSnapshot) -> (bool, Option<String>) 
     }
 }
 
+/// Whether a reload of graff's sign-ins changed which providers are signed
+/// in (the model list follows them).
+fn graff_sign_ins_changed(before: &[GraffLoginProvider], after: &[GraffLoginProvider]) -> bool {
+    let signed_in = |rows: &[GraffLoginProvider]| -> std::collections::BTreeSet<String> {
+        rows.iter()
+            .filter(|row| row.signed_in)
+            .map(|row| row.id.clone())
+            .collect()
+    };
+    signed_in(before) != signed_in(after)
+}
+
 /// A graff provider's display name for the sign-in dialog title.
 fn graff_provider_name(id: Option<&str>) -> &'static str {
     if id == Some("chatgpt-new") {
@@ -212,6 +224,62 @@ fn graff_provider_name(id: Option<&str>) -> &'static str {
         .map(|(_, name)| *name)
         .unwrap_or("graff")
 }
+
+/// graff's Claude Agent: Claude through the user's own Claude Code login, so
+/// it spends their Claude plan. Leads the "graff providers" card.
+const CLAUDE_AGENT_ID: &str = "claude-agent";
+
+/// One "graff providers" row: (provider id — `None` for the shared Codex
+/// login —, name, status line, signed in).
+type GraffEntry<'a> = (Option<&'a str>, &'a str, String, bool);
+
+/// A graff provider row's status line. Pure.
+fn graff_provider_status(provider: &GraffLoginProvider) -> String {
+    let claude_agent = provider.id == CLAUDE_AGENT_ID;
+    match (provider.signed_in, &provider.account) {
+        (true, Some(account)) if claude_agent => {
+            format!("Signed in as {account} · your Claude plan")
+        }
+        (true, None) if claude_agent => "Uses your Claude Code login · your Claude plan".into(),
+        (false, _) if claude_agent => "Use your Claude plan through Claude Code".into(),
+        (true, Some(account)) => format!("Signed in as {account}"),
+        (true, None) => "Signed in on this device".into(),
+        (false, _) => "Not signed in".into(),
+    }
+}
+
+/// The "graff providers" rows in display order: Claude Agent first, then
+/// the engine's order with the legacy shared Codex login (`codex`) right
+/// after the first of them. ChatGPT has its own section above. Pure.
+fn graff_provider_entries<'a>(
+    providers: &'a [GraffLoginProvider],
+    codex: GraffEntry<'a>,
+) -> Vec<GraffEntry<'a>> {
+    let (claude_agent, rest): (Vec<_>, Vec<_>) = providers
+        .iter()
+        .filter(|p| p.id != "chatgpt-new")
+        .partition(|p| p.id == CLAUDE_AGENT_ID);
+    let entry = |p: &'a GraffLoginProvider| -> GraffEntry<'a> {
+        (
+            Some(p.id.as_str()),
+            p.name.as_str(),
+            graff_provider_status(p),
+            p.signed_in,
+        )
+    };
+    let mut entries: Vec<GraffEntry<'a>> = rest.into_iter().map(entry).collect();
+    entries.insert(entries.len().min(1), codex);
+    claude_agent.into_iter().map(entry).chain(entries).collect()
+}
+
+/// What "Update key" shows: graff keeps API keys on the computer it runs on
+/// (its keychain, a `<PROVIDER>_API_KEY` variable, or the key the metered
+/// Console sign-in minted), and the error names which one it used.
+pub const KEY_REJECTED_NOTICE: &str = "graff's API key for this provider was rejected. Your \
+     sign-in is not affected. Replace the key on this computer with `graff key set <provider> \
+     <key>`, or remove it (or its <PROVIDER>_API_KEY variable) so graff uses the sign-in; or, if \
+     it came from the Console sign-in, run `graff login console` again. The error says which key \
+     it used.";
 
 /// Where OpenAI API keys are made: the other way to use graff's ChatGPT
 /// models when plan usage is off.
@@ -332,6 +400,21 @@ impl LoginFlow {
     }
 }
 
+/// The engine's replies to the page's calls, for headless scenes
+/// (examples/ui-scenes.rs `accounts`): `snapshot` (ListAgentAccounts),
+/// `codegraffUsage`, `codegraffJobs`, `graffLogins`, `codegraffSandboxes`,
+/// and `loginStart` (StartAgentLogin, for the add-account dialog).
+#[cfg(feature = "ui-scenes")]
+pub static SCENE_ACCOUNTS: std::sync::Mutex<Option<serde_json::Value>> =
+    std::sync::Mutex::new(None);
+
+/// A scene's `loginStart`: what StartAgentLogin answers in it.
+#[cfg(feature = "ui-scenes")]
+fn scene_login_start() -> Option<AgentLoginStart> {
+    let fixture = SCENE_ACCOUNTS.lock().ok()?.clone()?;
+    serde_json::from_value(fixture.get("loginStart")?.clone()).ok()
+}
+
 pub struct AccountsPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
@@ -377,7 +460,12 @@ pub struct AccountsPage {
     login_url_copied: bool,
     copy_task: Option<Task<()>>,
     error: Option<SharedString>,
+    /// A failed run's "Update key": the provider rejected graff's API key, so
+    /// the page says where keys live (Harness doesn't edit them) until dismissed.
+    key_notice: Option<SharedString>,
     code_input: Entity<ComposerInput>,
+    /// The code field takes the keys on the paste step's first frame.
+    focus_code: bool,
     load_task: Option<Task<()>>,
     codegraff_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
@@ -428,7 +516,9 @@ impl AccountsPage {
             login_url_copied: false,
             copy_task: None,
             error: None,
+            key_notice: None,
             code_input,
+            focus_code: false,
             load_task: None,
             codegraff_task: None,
             action_task: None,
@@ -477,6 +567,8 @@ impl AccountsPage {
         // Another device's sign-ins: never show the last device's rows.
         self.graff_logins = Loadable::Idle;
         self.error = None;
+        // The notice was about the last device's key.
+        self.key_notice = None;
         self.load(force_usage_for(LoadTrigger::Mount), cx);
     }
 
@@ -659,6 +751,12 @@ impl AccountsPage {
     }
 
     fn load(&mut self, force_usage: bool, cx: &mut Context<Self>) {
+        #[cfg(feature = "ui-scenes")]
+        if let Some(fixture) = SCENE_ACCOUNTS.lock().ok().and_then(|f| f.clone()) {
+            self.load_scene(&fixture, cx);
+            cx.notify();
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.snapshot = Loadable::Error("Engine not connected".into());
             return;
@@ -689,6 +787,32 @@ impl AccountsPage {
         cx.notify();
     }
 
+    /// A headless scene's replies in place of the engine's
+    /// (`SCENE_ACCOUNTS`): each read as its call's would be.
+    #[cfg(feature = "ui-scenes")]
+    fn load_scene(&mut self, fixture: &serde_json::Value, cx: &mut Context<Self>) {
+        fn read<T: serde::de::DeserializeOwned>(
+            fixture: &serde_json::Value,
+            key: &str,
+        ) -> Loadable<T> {
+            match serde_json::from_value(
+                fixture.get(key).cloned().unwrap_or(serde_json::Value::Null),
+            ) {
+                Ok(value) => Loadable::Ready(value),
+                Err(err) => Loadable::Error(err.to_string()),
+            }
+        }
+        self.snapshot = read(fixture, "snapshot");
+        self.codegraff_usage = read(fixture, "codegraffUsage");
+        self.codegraff_jobs = read(fixture, "codegraffJobs");
+        self.graff_logins = read(fixture, "graffLogins");
+        if let Some(sandboxes) = fixture.get("codegraffSandboxes") {
+            self.state.update(cx, |state, cx| {
+                state.apply_cloud_sandboxes_value(sandboxes, cx)
+            });
+        }
+    }
+
     fn load_graff_logins(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.graff_logins = Loadable::Error("Engine not connected".into());
@@ -706,17 +830,34 @@ impl AccountsPage {
                 .call(methods::LIST_GRAFF_LOGINS, params)
                 .await;
             this.update(cx, |page, cx| {
-                page.graff_logins = match result {
+                let next = match result {
                     Ok(value) => match serde_json::from_value::<Vec<GraffLoginProvider>>(value) {
                         Ok(rows) => Loadable::Ready(rows),
                         Err(err) => Loadable::Error(err.to_string()),
                     },
                     Err(err) => Loadable::Error(err.to_string()),
                 };
+                page.set_graff_logins(next, cx);
                 cx.notify();
             })
             .ok();
         }));
+    }
+
+    /// Show a reloaded sign-in list. A provider signed in or out (Claude
+    /// Agent opted in, say) changes graff's model list, so the composers
+    /// reload theirs: a new chat must see `claude-agent/` rows to prefer them.
+    fn set_graff_logins(
+        &mut self,
+        next: Loadable<Vec<GraffLoginProvider>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let (Loadable::Ready(before), Loadable::Ready(after)) = (&self.graff_logins, &next)
+            && graff_sign_ins_changed(before, after)
+        {
+            crate::pickers::bump_graff_models(cx);
+        }
+        self.graff_logins = next;
     }
 
     fn load_codegraff_usage(&mut self, cx: &mut Context<Self>) {
@@ -1372,6 +1513,7 @@ impl AccountsPage {
         cx: &mut Context<Self>,
     ) {
         self.set_target_device(target, cx);
+        self.key_notice = None;
         if let Some(harness) = harness.filter(|harness| {
             PROVIDERS
                 .iter()
@@ -1380,6 +1522,22 @@ impl AccountsPage {
             self.start_login(harness, cx);
         }
         cx.notify();
+    }
+
+    /// A failed run's "Update key" (the provider rejected the API key graff
+    /// used; the sign-in is fine): `target`'s Accounts, with where to replace
+    /// or remove the key. Never starts a sign-in: signing in again doesn't fix
+    /// a bad key, and graff would keep preferring it.
+    pub(crate) fn update_key(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        self.set_target_device(target, cx);
+        self.key_notice = Some(KEY_REJECTED_NOTICE.into());
+        cx.notify();
+    }
+
+    /// The "Update key" notice, for the shell's tests.
+    #[cfg(test)]
+    pub(crate) fn key_notice(&self) -> Option<&str> {
+        self.key_notice.as_deref()
     }
 
     /// The device whose logins are shown (`None`: this one), and the flow's
@@ -1414,7 +1572,7 @@ impl AccountsPage {
                     serde_json::from_value::<Vec<GraffLoginProvider>>(value)
                         .map_err(|e| harness_rpc::RpcError::Failed(e.to_string()))
                 }) {
-                    Ok(rows) => page.graff_logins = Loadable::Ready(rows),
+                    Ok(rows) => page.set_graff_logins(Loadable::Ready(rows), cx),
                     Err(err) => page.error = Some(format!("Sign out failed: {err}").into()),
                 }
                 cx.notify();
@@ -1431,6 +1589,32 @@ impl AccountsPage {
         reauthenticate: bool,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "ui-scenes")]
+        if let Some(start) = scene_login_start() {
+            // A scene's `loginStart`: the dialog as the engine's reply would open it.
+            self.error = None;
+            self.code_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            self.login = Some(match start.mode {
+                AgentLoginMode::PasteCode | AgentLoginMode::RelayBrowser => LoginFlow::PasteCode {
+                    harness,
+                    provider,
+                    start,
+                    submitting: false,
+                    error: None,
+                },
+                _ => LoginFlow::Browser {
+                    harness,
+                    provider,
+                    reauthenticate,
+                    start,
+                    message: None,
+                    error: None,
+                },
+            });
+            cx.notify();
+            return;
+        }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.error = Some("Engine not connected".into());
             cx.notify();
@@ -1493,6 +1677,7 @@ impl AccountsPage {
                                 let relayed = start.mode == AgentLoginMode::RelayBrowser;
                                 page.code_input
                                     .update(cx, |input, cx| input.set_text("", cx));
+                                page.focus_code = true;
                                 page.login = Some(LoginFlow::PasteCode {
                                     harness,
                                     provider,
@@ -2188,22 +2373,8 @@ impl AccountsPage {
                     .snapshot
                     .ready()
                     .is_some_and(|snapshot| openai_login(snapshot).0);
-                // (provider id — `None` for the shared Codex login —, name,
-                // status line, signed in)
-                let mut entries: Vec<(Option<&str>, &str, String, bool)> = providers
-                    .iter()
-                    .filter(|p| p.id != "chatgpt-new")
-                    .map(|p| {
-                        let status = match (p.signed_in, &p.account) {
-                            (true, Some(account)) => format!("Signed in as {account}"),
-                            (true, None) => "Signed in on this device".to_string(),
-                            (false, _) => "Not signed in".to_string(),
-                        };
-                        (Some(p.id.as_str()), p.name.as_str(), status, p.signed_in)
-                    })
-                    .collect();
-                entries.insert(
-                    entries.len().min(1),
+                let entries = graff_provider_entries(
+                    providers,
                     (None, "ChatGPT (old Codex)", openai, openai_signed_in),
                 );
                 div()
@@ -2235,12 +2406,21 @@ impl AccountsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let initial: SharedString = name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
-            .into();
+        // Claude Agent wears the Claude mark; the rest show their initial.
+        let avatar: AnyElement = if provider == Some(CLAUDE_AGENT_ID) {
+            crate::icons::icon(crate::icons::CLAUDE_MARK)
+                .size(px(16.0))
+                .text_color(crate::icons::claude_brand())
+                .into_any_element()
+        } else {
+            let initial: SharedString = name
+                .chars()
+                .next()
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_else(|| "?".into())
+                .into();
+            initial.into_any_element()
+        };
         let busy = provider.is_some() && self.busy_graff.as_deref() == provider;
         let actions = provider.map(str::to_string).map(|id| {
             let sign_out_id = id.clone();
@@ -2314,7 +2494,7 @@ impl AccountsPage {
                     .text_size(crate::typography::ui_rems(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
-                    .child(initial),
+                    .child(avatar),
             )
             .child(
                 div()
@@ -2652,7 +2832,11 @@ impl AccountsPage {
             } => {
                 let submitting = *submitting;
                 let relayed = start.mode == AgentLoginMode::RelayBrowser;
-                let body = if provider.as_deref() == Some("anthropic") {
+                let body = if provider.as_deref() == Some("claude-agent") {
+                    "Claude Code isn't signed in on this device yet. A browser window opened: \
+                     sign in to your Claude account, then paste the code Anthropic shows you \
+                     below. Claude Code keeps the login, and graff's Claude Agent uses it."
+                } else if provider.as_deref() == Some("anthropic") {
                     "A browser window opened. Sign in to your Anthropic Console account and \
                      pick a workspace, then paste the code Anthropic shows you below. graff \
                      will run Claude models on that workspace's API credits."
@@ -2747,6 +2931,11 @@ impl AccountsPage {
                             "Finish signing in to Cursor in your browser. This mints a \
                          harness-named API key you can revoke any time from Cursor's \
                          dashboard — it is separate from `cursor-agent login`."
+                                .into()
+                        }
+                        HarnessId::Graff if provider.as_deref() == Some("claude-agent") => {
+                            "Checking that Claude Code is signed in on this device. graff uses \
+                         that login; nothing is copied into Harness."
                                 .into()
                         }
                         HarnessId::Graff => format!(
@@ -2978,6 +3167,11 @@ impl Render for AccountsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
+        if std::mem::take(&mut self.focus_code)
+            && matches!(self.login, Some(LoginFlow::PasteCode { .. }))
+        {
+            window.focus(&self.code_input.focus_handle(cx), cx);
+        }
         let dialog = self.render_login_dialog(window.viewport_size(), cx);
         let refreshing = matches!(self.snapshot, Loadable::Loading);
         let account_count = self
@@ -3255,6 +3449,17 @@ impl Render for AccountsPage {
                                         })),
                                 )
                             })
+                            .when_some(self.key_notice.clone(), |el, message| {
+                                el.child(
+                                    widgets::warning_strip(&theme, message)
+                                        .id("accounts-key-notice")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.key_notice = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
                             .when(show_browse, |el| el.child(self.browse.clone()))
                             .child(self.render_codegraff_section(&theme, now, cx))
                             .child(self.render_chatgpt_section(&theme, cx))
@@ -3286,6 +3491,87 @@ impl Render for AccountsPage {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    fn graff_row(id: &str, name: &str, signed_in: bool) -> GraffLoginProvider {
+        GraffLoginProvider {
+            id: id.into(),
+            name: name.into(),
+            signed_in,
+            account: None,
+            plan_usage: None,
+        }
+    }
+
+    #[test]
+    fn graff_providers_lead_with_claude_agent() {
+        let providers: Vec<_> = GRAFF_LOGIN_PROVIDERS
+            .iter()
+            .map(|(id, name)| graff_row(id, name, false))
+            .collect();
+        let codex = (None, "ChatGPT (old Codex)", "codex".to_string(), false);
+        let order: Vec<_> = graff_provider_entries(&providers, codex)
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "Claude Agent",
+                "xAI",
+                "ChatGPT (old Codex)",
+                "Kimi",
+                "Z.AI",
+                "Anthropic Console",
+            ]
+        );
+        // Without Claude Agent the card keeps the engine's order.
+        let without: Vec<_> = providers
+            .iter()
+            .filter(|p| p.id != CLAUDE_AGENT_ID)
+            .cloned()
+            .collect();
+        let codex = (None, "ChatGPT (old Codex)", "codex".to_string(), false);
+        let order: Vec<_> = graff_provider_entries(&without, codex)
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "xAI",
+                "ChatGPT (old Codex)",
+                "Kimi",
+                "Z.AI",
+                "Anthropic Console"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_agent_status_names_the_claude_plan() {
+        let mut agent = graff_row(CLAUDE_AGENT_ID, "Claude Agent", false);
+        assert_eq!(
+            graff_provider_status(&agent),
+            "Use your Claude plan through Claude Code"
+        );
+        agent.signed_in = true;
+        assert_eq!(
+            graff_provider_status(&agent),
+            "Uses your Claude Code login · your Claude plan"
+        );
+        agent.account = Some("a@b.c".into());
+        assert_eq!(
+            graff_provider_status(&agent),
+            "Signed in as a@b.c · your Claude plan"
+        );
+        // Other providers keep the generic lines.
+        let xai = graff_row("xai", "xAI", true);
+        assert_eq!(graff_provider_status(&xai), "Signed in on this device");
+        assert_eq!(
+            graff_provider_status(&graff_row("kimi", "Kimi", false)),
+            "Not signed in"
+        );
+    }
 
     #[test]
     fn chatgpt_row_is_ready_only_with_plan_usage() {

@@ -25,6 +25,7 @@ extension ChangeRequestSummary {
 /// VoiceOver while narrow surfaces render only the stable numeric identity.
 struct PullRequestBadge: View {
     @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
     let summary: ChangeRequestSummary
     var surface: PullRequestBadgeSurface = .sessionRow
 
@@ -37,17 +38,17 @@ struct PullRequestBadge: View {
         } label: {
             HStack(spacing: composer ? 6 : 0) {
                 if composer {
-                    LineIconView(.pullRequest, size: 14, color: summary.state.badgeColor.opacity(0.9))
+                    LineIconView(.pullRequest, size: 14,
+                                 color: TintedChipStyle.text(summary.state.badgeColor, dark: colorScheme == .dark))
                 }
                 Text("#\(summary.number)")
                     .font(Theme.mono(composer ? 12 : 10, weight: .medium))
                     .lineLimit(1)
             }
-            .foregroundStyle(summary.state.badgeColor.opacity(0.9))
-            .padding(.horizontal, composer ? 12 : 5)
-            .frame(height: composer ? 40 : 18)
-            .background(summary.state.badgeColor.opacity(0.09), in: badgeShape)
-            .overlay(badgeShape.strokeBorder(summary.state.badgeColor.opacity(0.13), lineWidth: 1))
+            .padding(.horizontal, composer ? 12 : 6)
+            .frame(height: composer ? 40 : 20)
+            // A soft tint of the state's hue under darker text in that hue (DESIGN.md "Status and tag chips").
+            .tintedChip(summary.state.badgeColor, in: badgeShape)
             .contentShape(badgeShape)
         }
         .buttonStyle(.plain)

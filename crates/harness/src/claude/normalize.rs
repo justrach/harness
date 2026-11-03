@@ -575,6 +575,9 @@ impl Normalizer {
 
     /// One `system` frame: init, workflow progress, and agent tasks settling.
     fn normalize_system(&mut self, f: super::wire::SystemFrame) -> Vec<AgentEvent> {
+        if f.subtype == "compact_boundary" {
+            return compact_boundary(&f);
+        }
         // A background subagent's completion arrives as an UNTAGGED
         // `task_notification` carrying the spawning tool's id — the
         // wire's only terminal signal for it (live-verified 2.1.228:
@@ -1943,6 +1946,63 @@ mod tests {
                 ..
             })
         ));
+    }
+}
+
+/// `compact_boundary`: Claude Code summarized the older turns (readable,
+/// client-side). A resolved chip with the context size it started from.
+fn compact_boundary(f: &super::wire::SystemFrame) -> Vec<AgentEvent> {
+    let id = format!(
+        "claude-compaction-{}",
+        f.uuid
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or("boundary")
+    );
+    let mut meta = harness_proto::CompactionMeta::new(harness_proto::CompactionKind::Summary);
+    if let Some(compact) = &f.compact_metadata {
+        meta.tokens_before = compact.pre_tokens;
+        meta.trigger = compact.trigger.clone();
+    }
+    vec![
+        AgentEvent::ToolCall {
+            id: id.clone(),
+            call: meta.call(),
+        },
+        AgentEvent::ToolResult {
+            id,
+            is_error: false,
+            output: None,
+            diff: None,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    #[test]
+    fn a_compact_boundary_is_a_resolved_summary_chip() {
+        let frame: super::super::wire::SystemFrame = serde_json::from_value(serde_json::json!({
+            "subtype": "compact_boundary", "uuid": "u1", "session_id": "s",
+            "compact_metadata": {"trigger": "auto", "pre_tokens": 167_000}
+        }))
+        .unwrap();
+        let events = compact_boundary(&frame);
+        let [
+            AgentEvent::ToolCall { id, call },
+            AgentEvent::ToolResult { id: done, .. },
+        ] = &events[..]
+        else {
+            panic!("{events:?}")
+        };
+        assert_eq!(id, "claude-compaction-u1");
+        assert_eq!(done, id);
+        let meta = call.compaction().unwrap();
+        assert_eq!(meta.kind, harness_proto::CompactionKind::Summary);
+        assert_eq!(meta.tokens_before, Some(167_000));
+        assert_eq!(meta.trigger.as_deref(), Some("auto"));
     }
 }
 

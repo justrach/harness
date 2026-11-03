@@ -4,8 +4,8 @@
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, Focusable, SharedString, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 use std::time::Duration;
 
@@ -17,6 +17,8 @@ use crate::popover;
 use crate::settings::{self, widgets};
 use crate::state::AppState;
 use crate::theme::Theme;
+
+mod updates;
 
 /// A device that pinged within this window shows a presence dot (engines
 /// heartbeat every 15s; 70s tolerates a couple of missed beats).
@@ -157,6 +159,8 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 struct RenameDialog {
     device_id: String,
     input: Entity<ComposerInput>,
+    /// The field takes the keys on the dialog's first frame.
+    focus_pending: bool,
     _events: Subscription,
 }
 
@@ -175,13 +179,17 @@ pub struct DevicesPage {
     checking: Option<Option<harness_update::UpdateStatus>>,
     check_task: Option<Task<()>>,
     desktop_update: bool,
+    remote_update: updates::RemoteUpdate,
     _observe: Subscription,
     _observe_phase: Subscription,
 }
 
 impl DevicesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&state, |_, _, cx| cx.notify());
+        let observe = cx.observe(&state, |page: &mut Self, _, cx| {
+            page.reconcile_remote_update(cx);
+            cx.notify();
+        });
         let observe_phase = cx.observe_global::<SharedUpdatePhase>(|_, cx| cx.notify());
         Self {
             state,
@@ -195,6 +203,7 @@ impl DevicesPage {
             checking: None,
             check_task: None,
             desktop_update: harness_update::detect_install().supports_desktop_update(),
+            remote_update: updates::RemoteUpdate::default(),
             _observe: observe,
             _observe_phase: observe_phase,
         }
@@ -391,6 +400,7 @@ impl DevicesPage {
         self.rename = Some(RenameDialog {
             device_id,
             input,
+            focus_pending: true,
             _events: events,
         });
         cx.notify();
@@ -463,13 +473,27 @@ impl DevicesPage {
         cx.notify();
     }
 
+    /// Escape closes the Rename dialog (the shell routes it here while
+    /// Settings → Devices is open). False when no dialog was open.
+    pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.rename.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     fn render_rename_dialog(
         &mut self,
-        viewport: gpui::Size<gpui::Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let viewport = window.viewport_size();
         let theme = Theme::of(cx).for_popup();
-        let dialog = self.rename.as_ref()?;
+        let dialog = self.rename.as_mut()?;
+        if std::mem::take(&mut dialog.focus_pending) {
+            window.focus(&dialog.input.focus_handle(cx), cx);
+        }
         let input = dialog.input.clone();
         let card = popover::dialog_card(&theme)
             .child(popover::dialog_title(&theme, "Rename device"))
@@ -556,7 +580,7 @@ impl Render for DevicesPage {
         };
         let copied = self.copied.clone();
         let confirm_remove = self.confirm_remove.clone();
-        let dialog = self.render_rename_dialog(window.viewport_size(), cx);
+        let dialog = self.render_rename_dialog(window, cx);
         let emerald = theme.success; // emerald-400
         let count = devices.len();
 
@@ -572,6 +596,8 @@ impl Render for DevicesPage {
                 let rename_name = device.name.clone();
                 let remove_id = device.id.clone();
                 let confirming_remove = confirm_remove.as_deref() == Some(device.id.as_str());
+                let update_controls =
+                    self.render_remote_update(&device, is_local, online, &theme, cx);
                 let platform_icon = match device.platform.as_str() {
                     "macos" | "darwin" => crate::icons::LAPTOP,
                     "web" => crate::icons::GLOBAL,
@@ -663,7 +689,7 @@ impl Render for DevicesPage {
                         .into_any_element(),
                 );
 
-                widgets::card_row(&theme, ix == 0)
+                let row = widgets::card_row(&theme, ix == 0)
                     .child(tile)
                     .child(
                         div()
@@ -736,7 +762,10 @@ impl Render for DevicesPage {
                                     "Remove"
                                 })),
                         )
-                    })
+                    });
+                div()
+                    .child(row)
+                    .children(update_controls)
                     .into_any_element()
             })
             .collect();
@@ -816,6 +845,7 @@ mod tests {
                 update_available: available,
                 checked_at: Some(now.timestamp_millis() - 120_000),
                 error: error.map(Into::into),
+                host: None,
             }
         };
         let up_to_date = status(Some("0.2.92"), false, None);
@@ -860,6 +890,7 @@ mod tests {
             update_available: true,
             checked_at: Some(now.timestamp_millis()),
             error: None,
+            host: None,
         };
         let summary =
             |phase: UpdatePhase, desktop| update_summary(Some(&newer), desktop, &phase, false, now);
@@ -932,6 +963,19 @@ mod tests {
             format_last_seen(Some(now - TimeDelta::days(2)), now),
             "2d ago"
         );
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_rename_dialog(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| crate::state::AppState::new());
+        let page = cx.new(|cx| DevicesPage::new(state, cx));
+        page.update(cx, |page, cx| {
+            assert!(!page.dismiss_on_escape(cx), "nothing open, nothing closed");
+            page.open_rename("d2".into(), "Laptop".into(), cx);
+            assert!(page.rename.as_ref().is_some_and(|d| d.focus_pending));
+            assert!(page.dismiss_on_escape(cx));
+            assert!(page.rename.is_none());
+        });
     }
 
     #[test]

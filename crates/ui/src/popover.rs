@@ -330,8 +330,20 @@ pub const MENU_GAP: f32 = 2.0;
 /// The four-pixel inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
 pub const CARD_INSET: f32 = 4.0;
+/// Concentric corners: an element inset by `border + padding` inside a
+/// surface rounded at `outer` is rounded at `outer - border - padding`, so
+/// both curves share one center. Never below zero.
+pub const fn nested_radius(outer: f32, border: f32, padding: f32) -> f32 {
+    let inner = outer - border - padding;
+    if inner > 0.0 { inner } else { 0.0 }
+}
+/// The surface radius that keeps an inner element's `inner` corners
+/// concentric at `border + padding` in: the inverse of [`nested_radius`].
+pub const fn outer_radius(inner: f32, border: f32, padding: f32) -> f32 {
+    inner + border + padding
+}
 /// Concentric corners: rows sit inside both the card's 1px border and padding.
-pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - 1.0 - CARD_INSET;
+pub const MENU_ITEM_RADIUS: f32 = nested_radius(CARD_RADIUS, 1.0, CARD_INSET);
 pub const PALETTE_ITEM_RADIUS: f32 = 14.0 - CARD_INSET;
 
 pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
@@ -892,16 +904,7 @@ fn modal_with(
 /// listener — `fade_key` must be unique app-wide and stable across frames
 /// (the id string is a good choice).
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
-    let row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(8.0))
-        .py(px(6.0))
-        .rounded(px(MENU_ITEM_RADIUS))
-        .text_size(crate::typography::ui_rems(13.0))
-        .cursor_pointer();
+    let row = menu_row_base();
     if active {
         row.bg(crate::theme::card_selected_bg())
             .text_color(theme.text)
@@ -924,6 +927,30 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
             .on_hover(motion::hover_listener(fade_key));
         row
     }
+}
+
+/// A row whose only highlight is the caller-owned mouse/keyboard cursor.
+/// No independent hover wash can linger on a second row after a key press.
+pub fn menu_cursor_row(theme: &Theme, highlighted: bool) -> gpui::Div {
+    menu_row_base()
+        .text_color(theme.text.opacity(0.9))
+        .when(highlighted, |row| {
+            row.bg(crate::theme::card_selected_bg())
+                .text_color(theme.text)
+        })
+}
+
+fn menu_row_base() -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(MENU_ITEM_RADIUS))
+        .text_size(crate::typography::ui_rems(13.0))
+        .cursor_pointer()
 }
 
 /// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
@@ -1713,12 +1740,18 @@ impl MenuScrollbarState {
         })
     }
 
-    /// The press ended anywhere: drop the drag; the rail stays armed only
-    /// while the list is still hovered. Returns whether anything changed.
+    /// The press ended anywhere: drop the drag. Only a captured scrollbar
+    /// press restarts the linger; unrelated mouse-up-out events do not.
+    /// Returns whether the hover treatment changed.
     pub fn end_press(&mut self) -> bool {
-        self.grab = None;
-        // Releasing a drag lingers like a stopped scroll.
-        self.last_scroll_at = Some(Instant::now());
+        self.end_press_at(Instant::now())
+    }
+
+    fn end_press_at(&mut self, now: Instant) -> bool {
+        if self.grab.take().is_some() {
+            // Releasing a drag lingers like a stopped scroll.
+            self.last_scroll_at = Some(now);
+        }
         if !self.list_hovered && self.bar_hovered {
             self.bar_hovered = false;
             true
@@ -2276,6 +2309,53 @@ mod tests {
         assert_eq!(
             bar.drag_target_in(&metrics, track_top, pointer(146.0)),
             Some(0.5)
+        );
+    }
+
+    #[test]
+    fn scrollbar_release_without_a_drag_does_not_start_a_countdown() {
+        let mut bar = MenuScrollbarState::default();
+        let now = Instant::now();
+        assert!(!bar.end_press_at(now));
+        assert_eq!(bar.last_scroll_at, None);
+        assert_eq!(bar.arm_hide_timer_at(now), None);
+    }
+
+    #[test]
+    fn scrollbar_release_outside_the_rail_preserves_the_scroll_deadline() {
+        let mut bar = MenuScrollbarState::default();
+        let t0 = Instant::now();
+        bar.note_scroll_offset_at(0.0, t0);
+        bar.note_scroll_offset_at(600.0, t0);
+        bar.arm_hide_timer_at(t0);
+        let pending = bar.hide_wake_at;
+        // Opening a dialog delivers mouse-up-out to the visible rail, but
+        // no scrollbar press was captured. It must not restart the linger.
+        let clicked = t0 + Duration::from_millis(800);
+        assert!(!bar.end_press_at(clicked));
+        assert_eq!(bar.last_scroll_at, Some(t0));
+        assert_eq!(bar.hide_wake_at, pending);
+        let hidden =
+            t0 + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + MENU_SCROLLBAR_FADE_MS + 1);
+        assert!(!bar.scroll_countdown(hidden));
+        assert_eq!(bar.arm_hide_timer_at(hidden), None);
+    }
+
+    #[test]
+    fn scrollbar_release_after_a_drag_restarts_the_linger() {
+        let mut bar = MenuScrollbarState::default();
+        let t0 = Instant::now();
+        bar.note_scroll_offset_at(0.0, t0);
+        bar.note_scroll_offset_at(600.0, t0);
+        let metrics = MenuScrollbarMetrics::from_viewport(300.0, 600.0, 600.0).unwrap();
+        bar.begin_press_in(&metrics, px(0.0), px(100.0));
+        let released = t0 + Duration::from_secs(2);
+        bar.end_press_at(released);
+        assert!(bar.grab.is_none());
+        assert_eq!(bar.last_scroll_at, Some(released));
+        assert_eq!(
+            bar.arm_hide_timer_at(released),
+            Some(Duration::from_millis(MENU_SCROLLBAR_LINGER_MS))
         );
     }
 

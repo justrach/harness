@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
                             "questions": [
                                 {
                                     "id": "approach", "header": "Agent question",
-                                    "question": "Which approach should we use to keep the agent question readable when the session pane becomes narrow?",
+                                    "question": "**Which approach** should keep the question readable when the pane is narrow? Today `QuestionPanel` does this:\n\n- wraps the **question** to the pane\n- keeps each option on its own line",
                                     "options": ["Wrap the question and its options to fit the session pane.", "Keep the existing behavior and review another approach."],
                                     "multiSelect": false
                                 },

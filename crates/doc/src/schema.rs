@@ -2343,14 +2343,14 @@ mod tests {
                 diff_stats,
                 ..
             } => {
-                // One-liner chips: the fold drops outputs entirely (journal
-                // only), so even a direct apply_sidecar_refs call has no
-                // output to key — diff stats still get their ref (this test
-                // calls apply_sidecar_refs directly; the live fold no longer
-                // does).
+                // One-liner chips: the fold drops output text (journal only)
+                // but keeps its size, for the context card's split. With no
+                // output text there is nothing to key, so even a direct
+                // apply_sidecar_refs call stamps no output ref — diff stats
+                // still get theirs (the live fold calls neither).
                 assert_eq!(output.as_deref(), None);
                 assert_eq!(output_ref.as_deref(), None);
-                assert_eq!(*output_bytes, None);
+                assert_eq!(*output_bytes, Some("total 0\nmore lines".len() as u64));
                 assert!(diff.is_none(), "no inline diff text in the doc");
                 assert_eq!(diff_ref.as_deref(), Some("chat-2/t1.diff"));
                 let stats = diff_stats.as_ref().expect("stats survive");

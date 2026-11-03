@@ -4,7 +4,7 @@
 #
 #   scripts/ios-walkthrough.sh                     # fresh install on an iPhone 17 Pro simulator
 #   scripts/ios-walkthrough.sh --device "iPhone 17"
-#   scripts/ios-walkthrough.sh --args "-rollout.stackedSplitDrag on"
+#   scripts/ios-walkthrough.sh --args "-phoneSplit sideBySide"
 #   scripts/ios-walkthrough.sh --keep-install      # keep the app's settings from the last run
 #   scripts/ios-walkthrough.sh --open              # open the contact sheet when done
 #

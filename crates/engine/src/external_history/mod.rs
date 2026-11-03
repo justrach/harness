@@ -438,6 +438,25 @@ const SEED_CONVERSATION_CHARS: usize = 60_000;
 /// message stays raw in the doc, but the agent gets the earlier conversation
 /// as read-only context so it continues rather than restarts.
 pub fn seed_prompt(chat_id: &str, entries: &[SessionMessageEntry], prompt: &str) -> String {
+    seed_conversation(
+        entries,
+        prompt,
+        &format!(
+            "This conversation started in {} and continues here in graff. The earlier conversation is below as read-only context; don't redo work it shows as finished.",
+            source_label(chat_id),
+        ),
+    )
+}
+
+pub(crate) fn seed_checkout_prompt(entries: &[SessionMessageEntry], prompt: &str) -> String {
+    seed_conversation(
+        entries,
+        prompt,
+        "This conversation is continuing in a different checkout. Earlier messages are read-only context, not evidence that their files or uncommitted edits exist here. Inspect this checkout before continuing; don't redo finished work.",
+    )
+}
+
+fn seed_conversation(entries: &[SessionMessageEntry], prompt: &str, introduction: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     for entry in entries {
         let role = match entry.role {
@@ -485,10 +504,8 @@ pub fn seed_prompt(chat_id: &str, entries: &[SessionMessageEntry], prompt: &str)
     }
     block.push_str(&kept.join("\n"));
     format!(
-        "This conversation started in {} and continues here in graff. The earlier conversation is below as read-only context; don't redo work it shows as finished.\n\n<earlier-conversation>\n{}\n</earlier-conversation>\n\n{}",
-        source_label(chat_id),
-        block,
-        prompt
+        "{}\n\n<earlier-conversation>\n{}\n</earlier-conversation>\n\n{}",
+        introduction, block, prompt
     )
 }
 

@@ -6,10 +6,46 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use gpui::{App, Global, Rems, SharedString, Window, px, rems};
+use gpui::{App, FontFeatures, Global, Rems, SharedString, Styled, Window, px, rems};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::settings::{self, SavePolicy};
+
+/// OpenType `tnum`: every digit takes the same advance, so a count that
+/// changes (a token meter, a timer, a percentage) does not shift the text
+/// around it. Geist ships proportional digits by default.
+pub fn tabular_figures() -> FontFeatures {
+    FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// `font-variant-numeric: tabular-nums` for gpui elements.
+pub trait TabularNums: Styled + Sized {
+    fn tabular_nums(self) -> Self {
+        self.font_features(tabular_figures())
+    }
+}
+
+impl<T: Styled> TabularNums for T {}
+
+/// Geist's cap height centers about 1 px below its line box's center at
+/// 11 to 15 px, so a glyph centered on the line box (a dot, a check, a
+/// spinner) reads high next to the label. Nudge such glyphs down by this to
+/// center them on the letters instead of on the box (optical alignment).
+pub const CAP_CENTER_NUDGE: f32 = 1.0;
+
+/// The type scale for compact surfaces: cards, popovers, the composer
+/// footer. Three sizes and two weights; hierarchy beyond that comes from
+/// color (`text`, `text_muted`, `text_faint`), not from another size.
+/// Card titles, step and agent titles, counters.
+pub const TEXT_TITLE: f32 = 13.0;
+/// Rows, legends, status lines, chips, tags, footer chips.
+pub const TEXT_BODY: f32 = 12.0;
+/// Footnotes and captions.
+pub const TEXT_CAPTION: f32 = 11.0;
+/// Body text.
+pub const WEIGHT_REGULAR: gpui::FontWeight = gpui::FontWeight::NORMAL;
+/// Titles and the one number a card is about. The only other weight.
+pub const WEIGHT_STRONG: gpui::FontWeight = gpui::FontWeight::MEDIUM;
 
 /// A bundled, virtual, or device-local interface font choice.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]

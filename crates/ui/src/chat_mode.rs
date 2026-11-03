@@ -180,6 +180,7 @@ mod tests {
             options: vec![],
             maker: None,
             billing: None,
+            context: None,
         }
     }
 

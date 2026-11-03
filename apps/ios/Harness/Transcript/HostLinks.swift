@@ -2,7 +2,8 @@
 // file paths (POSIX, Windows drives, file://, workspace-relative) and loopback
 // web servers (`http://localhost:5173`). Handing those to the system does
 // nothing on a phone, so the transcript opens a sheet instead: it names the
-// host, previews images the host is willing to serve, and copies the target.
+// host, previews images the host is willing to serve, copies the target, and
+// opens a loopback page on the phone through the host (LocalhostPageView).
 
 import SwiftUI
 
@@ -61,8 +62,14 @@ struct HostLink: Identifiable, Hashable {
 
     static func isLoopback(_ host: String) -> Bool {
         let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        return host == "localhost" || host.hasSuffix(".localhost")
-            || host == "0.0.0.0" || host == "::1" || host.hasPrefix("127.")
+        return host == "0.0.0.0" || host == "::" || LocalhostPages.isLoopbackHost(host)
+    }
+
+    /// The address the host's browser opens for this link, when it is a page
+    /// the phone can open through the host (`WatchLocalhostPage`).
+    var pageURL: String? {
+        guard case .loopback(let url) = kind else { return nil }
+        return LocalhostPages.pageURL(url.absoluteString)
     }
 
     /// The POSIX path to read an image preview from: absolute paths as-is,
@@ -102,8 +109,11 @@ struct HostLinkSheet: View {
     let deviceId: String
     let deviceName: String
 
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    @State private var opening: LocalhostPageTarget?
+    @State private var servers: [LocalServer] = []
 
     private var title: String {
         switch link.kind {
@@ -118,8 +128,17 @@ struct HostLinkSheet: View {
             return "This link points at a file on \(deviceName), so your phone can't open it. "
                 + "Open it on that computer, or copy the path."
         case .loopback:
+            if canOpen {
+                return "This page is served by \(deviceName) itself. Open it here and \(deviceName) shows it "
+                    + "in a browser of its own, streaming the page to your phone and your taps back."
+            }
             return "This page is served by \(deviceName) itself and only opens in a browser on that computer."
         }
+    }
+
+    /// A loopback page on a known computer opens through that computer.
+    private var canOpen: Bool {
+        link.pageURL != nil && !deviceId.isEmpty
     }
 
     var body: some View {
@@ -141,6 +160,20 @@ struct HostLinkSheet: View {
                     if let path = link.imagePath, !deviceId.isEmpty {
                         HostImagePreview(deviceId: deviceId, path: path)
                     }
+                    if canOpen, let url = link.pageURL {
+                        Button {
+                            opening = LocalhostPageTarget(url: url, deviceId: deviceId, deviceName: deviceName)
+                        } label: {
+                            Label("Open on this phone", systemImage: "iphone")
+                                .font(Theme.sans(16, weight: .semibold))
+                                .foregroundStyle(Theme.bg)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.text)
+                        .controlSize(.large)
+                        .accessibilityIdentifier("host-link-open")
+                    }
                     Button {
                         UIPasteboard.general.string = link.copyText
                         copied = true
@@ -152,9 +185,15 @@ struct HostLinkSheet: View {
                     .buttonStyle(.bordered)
                     .controlSize(.large)
                     .accessibilityIdentifier("host-link-copy")
+                    if canOpen { otherServers }
                 }
                 .padding(20)
             }
+            .task(id: deviceId) {
+                guard canOpen, servers.isEmpty else { return }
+                servers = (try? await model.localhostPageHost().listLocalhostServers(deviceId: deviceId)) ?? []
+            }
+            .fullScreenCover(item: $opening) { LocalhostPageView(target: $0) }
             .background(Theme.bg)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
@@ -166,6 +205,44 @@ struct HostLinkSheet: View {
         }
         .presentationDetents([.medium, .large])
         .harnessAppearance()
+    }
+
+    /// The computer's other servers, each opening the same way.
+    @ViewBuilder private var otherServers: some View {
+        let linkPort = link.pageURL.flatMap { URLComponents(string: $0)?.port }
+        let others = servers.filter { $0.port != linkPort }
+        if !others.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Also running on \(deviceName)")
+                    .font(Theme.sans(13, weight: .semibold))
+                    .foregroundStyle(Theme.textFaint)
+                ForEach(others) { server in
+                    Button {
+                        opening = LocalhostPageTarget(url: server.url, deviceId: deviceId, deviceName: deviceName)
+                    } label: {
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(verbatim: "localhost:\(server.port)")
+                                    .font(Theme.mono(14))
+                                    .foregroundStyle(Theme.text)
+                                Text([server.name, server.folder].compactMap { $0 }.joined(separator: " · "))
+                                    .font(Theme.sans(12))
+                                    .foregroundStyle(Theme.textMuted)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.textFaint)
+                        }
+                        .padding(12)
+                        .background(ink(0.035), in: RoundedRectangle(cornerRadius: Theme.panelRadius))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("host-server-\(server.port)")
+                }
+            }
+            .padding(.top, 8)
+        }
     }
 
     private var isFile: Bool {

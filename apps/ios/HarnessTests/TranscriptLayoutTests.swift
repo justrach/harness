@@ -316,6 +316,37 @@ final class TranscriptLayoutTests: XCTestCase {
         XCTAssertEqual(rendered["next-block"], 1)
     }
 
+    /// A TestFlight crash: rows shrank while the table had a layout pending,
+    /// and `performBatchUpdates` lays that out first, asking for cells by the
+    /// old row count against the new, shorter rows ("Index out of range").
+    func testShrinkingRowsWithALayoutPendingAsksOnlyForRowsThatExist() async {
+        await mount(turns: 0)
+        let table = harness.scroll.nativeScrollView as! TranscriptTableView
+        func rows(_ count: Int) -> [TranscriptRow] {
+            (0..<count).map { i in
+                TranscriptRow(id: "row-\(i)", version: 1, turnStart: false,
+                    kind: .markdown(block: .paragraph([InlineRun(text: "Row \(i)", style: .plain)]), streaming: false),
+                    entryId: "reply-\(i)", timestamp: nil, partKey: "reply-\(i)#t0")
+            }
+        }
+        func input(_ rows: [TranscriptRow]) -> NativeTranscriptTable {
+            NativeTranscriptTable(rows: rows, scroll: harness.scroll, runwayID: nil,
+                expansionHeight: 0, bottomSpacing: 24, reduceMotion: true, configurationID: 0) { row in
+                    AnyView(Text(row.id).frame(height: 60))
+                }
+        }
+        table.update(input(rows(60)))
+        table.layoutIfNeeded()
+        await settle()
+        // Scroll to the top without laying out: the top rows wait for cells.
+        table.contentOffset = CGPoint(x: 0, y: -table.adjustedContentInset.top)
+        table.staleCellRequests = 0
+        table.update(input(rows(5)))
+        table.layoutIfNeeded()
+        XCTAssertEqual(table.staleCellRequests, 0, "the table asked for rows past the end of its rows")
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 5)
+    }
+
     func testRealKeyboardAndComposerMoveWithPinnedTranscript() async {
         await mount(turns: 600, useEditor: true)
         let editor = findNativeEditor(window)!
@@ -447,7 +478,7 @@ final class TranscriptLayoutTests: XCTestCase {
     }
 
     private func findNativeEditor(_ view: UIView) -> UITextView? {
-        if let editor = view as? UITextView { return editor }
+        if let editor = view as? ComposerTextView { return editor }
         return view.subviews.lazy.compactMap { self.findNativeEditor($0) }.first
     }
 

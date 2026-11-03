@@ -13,12 +13,16 @@
 //! - [`loaders`] — harness pulse loader, gradient spinner, boot splash.
 
 mod agent_message;
+pub mod agent_work;
+pub mod turn_work;
+pub mod annotate;
 pub mod app_menus;
 pub mod appearance;
 pub mod appshots;
 pub mod attachments;
 pub mod badges;
 pub mod browser;
+mod build_wait;
 pub mod change_requests;
 pub mod changes;
 pub(crate) mod chat_mode;
@@ -31,7 +35,9 @@ pub mod comments;
 pub mod composer;
 mod composer_dock;
 mod composer_markdown;
-mod context_usage;
+pub mod context_trajectory;
+pub mod context_usage;
+pub mod context_window;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
@@ -50,6 +56,7 @@ mod new_thread_background_mask;
 mod notice;
 pub mod notify;
 pub mod perf_stats;
+mod sidebar_motion;
 
 /// Tests that stand up real native platform pieces (CoreText via
 /// `current_platform`, the macOS dispatcher behind `background_executor`)
@@ -80,6 +87,7 @@ mod transcript_paint_check;
 pub mod typography;
 pub mod visuals;
 mod workspace_links;
+pub mod write_markdown;
 
 use std::path::PathBuf;
 

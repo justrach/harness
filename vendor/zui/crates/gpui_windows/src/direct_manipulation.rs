@@ -1,5 +1,11 @@
+// Modified by Harness: an active touchpad gesture keeps asking for frames, since frames no
+// longer run at every vsync. Adapted from longbridge/gpui-fast 124f79b; see
+// `frame_schedule.rs` and vendor/zui/NOTICE.
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use gpui::*;
@@ -11,6 +17,7 @@ use windows::Win32::{
     UI::{Input::Pointer::*, WindowsAndMessaging::*},
 };
 
+use crate::frame_schedule::{self, FrameRequest};
 use crate::*;
 
 /// Default viewport size in pixels. The actual content size doesn't matter
@@ -26,10 +33,13 @@ pub(crate) struct DirectManipulationHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    frame_request: Arc<FrameRequest>,
+    /// When a touchpad contact landed whose gesture hasn't started yet.
+    contact_at: Cell<Option<Instant>>,
 }
 
 impl DirectManipulationHandler {
-    pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
+    pub fn new(window: HWND, scale_factor: f32, frame_request: Arc<FrameRequest>) -> Result<Self> {
         unsafe {
             let manager: IDirectManipulationManager =
                 CoCreateInstance(&DirectManipulationManager, None, CLSCTX_INPROC_SERVER)?;
@@ -71,6 +81,7 @@ impl DirectManipulationHandler {
                     window,
                     Rc::clone(&scale_factor),
                     Rc::clone(&pending_events),
+                    Arc::clone(&frame_request),
                 )
                 .into();
 
@@ -86,6 +97,8 @@ impl DirectManipulationHandler {
                 window,
                 scale_factor,
                 pending_events,
+                frame_request,
+                contact_at: Cell::new(None),
             })
         }
     }
@@ -101,14 +114,30 @@ impl DirectManipulationHandler {
             if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
             {
                 self.viewport.SetContact(pointer_id).log_err();
+                self.contact_at.set(Some(Instant::now()));
+                self.frame_request.request();
             }
         }
     }
 
-    pub fn update(&self) {
-        unsafe {
+    /// Runs Direct Manipulation for this frame. Returns whether it needs the next frame too:
+    /// while a gesture or its inertia runs, and shortly after a touchpad contact.
+    pub fn update(&self) -> bool {
+        let running = unsafe {
             self.update_manager.Update(None).log_err();
+            self.viewport.GetStatus().is_ok_and(|status| {
+                status == DIRECTMANIPULATION_RUNNING || status == DIRECTMANIPULATION_INERTIA
+            })
+        };
+        if running {
+            self.contact_at.set(None);
         }
+        let since_contact = self.contact_at.get().map(|at| at.elapsed());
+        let wants_frame = frame_schedule::manipulation_wants_frame(running, since_contact);
+        if !wants_frame {
+            self.contact_at.set(None);
+        }
+        wants_frame
     }
 
     pub fn drain_events(&self) -> Vec<PlatformInput> {
@@ -143,6 +172,7 @@ struct DirectManipulationEventHandler {
     last_y_offset: Cell<f32>,
     scroll_phase: Cell<TouchPhase>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    frame_request: Arc<FrameRequest>,
 }
 
 impl DirectManipulationEventHandler {
@@ -150,6 +180,7 @@ impl DirectManipulationEventHandler {
         window: HWND,
         scale_factor: Rc<Cell<f32>>,
         pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+        frame_request: Arc<FrameRequest>,
     ) -> Self {
         Self {
             window,
@@ -160,6 +191,7 @@ impl DirectManipulationEventHandler {
             last_y_offset: Cell::new(0.0),
             scroll_phase: Cell::new(TouchPhase::Started),
             pending_events,
+            frame_request,
         }
     }
 
@@ -213,6 +245,8 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         if current == previous {
             return Ok(());
         }
+        // A gesture started, ended or went into inertia: deliver its events next frame.
+        self.frame_request.request();
 
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {

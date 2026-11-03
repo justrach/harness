@@ -55,6 +55,10 @@ final class AppModel {
     }
 
     var phase: Phase = .signedOut
+    /// `restore()` has read the saved account (or is waiting to): a second
+    /// call, from the window or from a Watch message on a background launch,
+    /// changes nothing.
+    @ObservationIgnored private var restoreStarted = false
     /// The edge rejected the stored sign-in (it was revoked or spent). The app keeps everything it has
     /// and asks for a fresh sign-in, instead of redialing a dead credential behind "connecting".
     var sessionExpired = false
@@ -122,6 +126,7 @@ final class AppModel {
 
     func restore() {
         if demo != nil { return }
+        guard !restoreStarted else { return }
         // After a restart iOS can launch the app in the background before the first unlock, when the
         // Keychain, the saved account and the cached docs can't be read yet. Read then, a sign-in that is
         // there looks absent and the phone opens signed out. Wait for the unlock instead.
@@ -129,6 +134,7 @@ final class AppModel {
             restoreAfterUnlock()
             return
         }
+        restoreStarted = true
         DocDisk.prune(keep: 80)
         let args = ProcessInfo.processInfo.arguments
         // Debug-rig config overrides (cfprefsd caching defeats external
@@ -174,6 +180,8 @@ final class AppModel {
             override("-setnewsessionharness") { UserDefaults.standard.set($0, forKey: "newSessionHarness") }
             override("-setnewsessionmodel") { UserDefaults.standard.set($0, forKey: "newSessionModel") }
             override("-setnewsessionreasoning") { UserDefaults.standard.set($0, forKey: "newSessionReasoning") }
+            // Pinned sessions for the pinned row: comma-separated chat ids.
+            override("-pin") { demoPinnedSessionIds = $0.split(separator: ",").map(String.init) }
             if args.contains("-no-projects") {
                 demo?.spaces = []
                 demo?.chats = []
@@ -215,6 +223,10 @@ final class AppModel {
                 } else if spec.hasPrefix("space:") {
                     launchRoute = .space(String(spec.dropFirst("space:".count)))
                 }
+            }
+            // Rig: a draft already typed in the opened session (fold-transition recordings).
+            if let ix = args.firstIndex(of: "-demo-draft"), ix + 1 < args.count, case .chat(let id)? = launchRoute {
+                DraftStore.save(args[ix + 1], for: DraftStore.chatKey(id))
             }
             if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {
                 launchSheet = args[ix + 1]
@@ -265,6 +277,7 @@ final class AppModel {
             let refresh = Keychain.read(key: "codegraffRefreshToken")
             let access = Keychain.read(key: "codegraffAccessToken")
             if refresh == .unavailable || access == .unavailable {
+                restoreStarted = false
                 restoreAfterUnlock()
                 return
             }
@@ -409,6 +422,7 @@ final class AppModel {
             foregrounded()
             return
         }
+        Onboarding.signedInFresh()
         connect(url: url, mode: .codegraff, userId: storedUserId, orgId: org.organizationId,
                 tokens: scoped, devBearer: nil)
     }
@@ -437,6 +451,8 @@ final class AppModel {
         demoPinnedSessionIds = []
         DraftStore.persistsToDisk = false
         phase = .ready
+        setupPresented = args.contains("-setup-flow")
+        WatchBridge.shared.modelReady()
     }
 
     func signOut() {
@@ -449,6 +465,7 @@ final class AppModel {
         // A new instance, so a reply still in flight lands in the old one.
         folderListings = FolderListingCache()
         config = nil
+        CrashReports.shared.connect(nil)
         demo = nil
         demoPinnedSessionIds = []
         DraftStore.wipeAll()
@@ -518,7 +535,10 @@ final class AppModel {
         store.start()
         startConnectivity()
         phase = .ready
+        setupPresented = Onboarding.isPending
         PushNotifications.shared.signedIn(model: self)
+        WatchBridge.shared.modelReady()
+        CrashReports.shared.connect(config)
     }
 
     /// The live sign-in, for the edge calls notifications make (none in demo mode).
@@ -898,9 +918,6 @@ final class AppModel {
                                    roomGen: 2))
             return id
         }
-        // The first session started from the phone is when "tell me when it's
-        // done" makes sense: ask for notification permission then.
-        PushNotifications.shared.askAfterFirstSession()
         if let space {
             return workspace?.createChat(space: space, config: chatConfig, branch: branch, cwd: cwd)
         }
@@ -939,6 +956,21 @@ final class AppModel {
         if let localSimulatorEngine { return localSimulatorEngine }
         #endif
         if demo != nil { return demoSimulators }
+        guard let workspace else { throw RelayError.notConnected }
+        return workspace
+    }
+
+    /// Demo mode's made-up localhost page (a link's "Open on this phone" offline).
+    @ObservationIgnored private lazy var demoLocalhostPages = DemoLocalhostPages()
+
+    /// Where a localhost page view sends its calls: the computer's engine over
+    /// its relay, or demo mode's made-up page. Debug builds launched with
+    /// `-simulator-engine <port>` talk to that engine on this Mac directly.
+    func localhostPageHost() throws -> any LocalhostPageHost {
+        #if DEBUG
+        if let localSimulatorEngine { return localSimulatorEngine }
+        #endif
+        if demo != nil { return demoLocalhostPages }
         guard let workspace else { throw RelayError.notConnected }
         return workspace
     }
@@ -1007,6 +1039,35 @@ final class AppModel {
         guard let workspace else { throw RelayError.notConnected }
         return try await workspace.setGraffCompactAt(deviceId: deviceId, pct: pct)
     }
+
+    /// Demo mode's autonomy, so the setup and Settings round-trip without a computer.
+    @ObservationIgnored private var demoAutonomy = AutonomySetting(autonomy: .fullAccess, chosen: false)
+
+    /// How much agents on one computer may do without asking (Settings → Autonomy, setup step 3).
+    func autonomy(deviceId: String) async throws -> AutonomySetting {
+        if demo != nil { return demoAutonomy }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.autonomy(deviceId: deviceId)
+    }
+
+    func setAutonomy(deviceId: String, _ autonomy: Autonomy) async throws -> AutonomySetting {
+        if demo != nil {
+            demoAutonomy = AutonomySetting(autonomy: autonomy, chosen: true)
+            return demoAutonomy
+        }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.setAutonomy(deviceId: deviceId, autonomy)
+    }
+
+    /// Switch an agent on for one computer (the setup's optional extras).
+    func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws {
+        if demo != nil { return }
+        guard let workspace else { throw RelayError.notConnected }
+        try await workspace.setHarnessEnabled(deviceId: deviceId, harness: harness, enabled: enabled)
+    }
+
+    /// The first-run setup is on screen (after a fresh sign-in, or `-setup-flow` in demo mode).
+    var setupPresented = false
 
     /// Folder listings the New space browser has loaded, per computer and
     /// path, kept across presentations of the sheet (#420).
@@ -1183,6 +1244,9 @@ final class AppModel {
         refreshSignInIfDue()
         kickAllRooms()
         probeEdgeHealth()
+        CrashReports.shared.uploadPending()
+        // A recording waiting on the speech permission can ask now.
+        WatchBridge.shared.modelReady()
     }
 
     /// Background hook: stop scheduling status wake-ups; iOS suspends the app anyway, and `foregrounded()`

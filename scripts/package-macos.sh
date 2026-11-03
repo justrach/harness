@@ -34,9 +34,11 @@ if [[ -n "${HARNESS_BINARY:-}" ]]; then
   [[ -x "$HARNESS_BINARY" ]] || { echo "HARNESS_BINARY is not executable" >&2; exit 1; }
   BUILD_BINARY="$HARNESS_BINARY"
 else
-  cargo build --release -p harness
+  # PROFILE=release for a quicker local package; `dist` is what ships.
+  PROFILE="${PROFILE:-dist}"
+  cargo build --profile "$PROFILE" -p harness
   TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
-  BUILD_BINARY="$TARGET_DIR/release/harness"
+  BUILD_BINARY="$TARGET_DIR/$PROFILE/harness"
 fi
 
 rm -rf "$APP" "$DMG" "$APP_TARBALL"

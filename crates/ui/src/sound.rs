@@ -1,8 +1,8 @@
 //! Session notification sounds — the herdr approach (state-transition chimes
 //! played through the platform's own audio CLI, zero Rust audio deps):
 //!
-//! - embedded completion, input-request, attention and Appshot chimes;
-//! - macOS Appshots use a preloaded native player; other cues write to a
+//! - embedded completion, input-request, attention, Appshot and attach cues;
+//! - macOS Appshot and attach cues use a preloaded native player; other cues write to a
 //!   temp file and use the system player on a
 //!   background thread: `afplay` (macOS), PowerShell `Media.SoundPlayer`
 //!   (Windows), first of `paplay`/`pw-play`/`aplay`/`ffplay`/`mpv` (Linux —
@@ -15,7 +15,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const DISABLE_ENV: &str = "HARNESS_DISABLE_SOUND";
@@ -24,6 +24,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 static SOUND_APPSHOT: &[u8] = include_bytes!("../assets/sounds/appshot.wav");
 
+static SOUND_ATTACH: &[u8] = include_bytes!("../assets/sounds/attach.wav");
 static SOUND_DONE: &[u8] = include_bytes!("../assets/sounds/done.wav");
 static SOUND_REQUEST: &[u8] = include_bytes!("../assets/sounds/request.wav");
 static SOUND_ATTENTION: &[u8] = include_bytes!("../assets/sounds/attention.wav");
@@ -127,7 +128,7 @@ pub fn play_appshot() {
         return;
     }
     #[cfg(target_os = "macos")]
-    if macos_appshot::play() {
+    if macos_cue::APPSHOT.play() {
         return;
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -138,12 +139,47 @@ pub fn play_appshot() {
 pub fn prepare_appshot() {
     #[cfg(target_os = "macos")]
     if std::env::var_os(DISABLE_ENV).is_none() {
-        macos_appshot::sender();
+        macos_cue::APPSHOT.sender();
     }
 }
 
+static ATTACH_SOUND_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// The Notifications page's "Attaching files" switch.
+pub fn set_attach_sound_enabled(enabled: bool) {
+    ATTACH_SOUND_ENABLED.store(enabled, Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    if enabled && std::env::var_os(DISABLE_ENV).is_none() {
+        macos_cue::ATTACH.sender();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Attach cues requested on this thread, for tests.
+    pub(crate) static ATTACH_CUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A file or image landed in the composer: a soft thump and two rising notes.
+pub fn play_attach() {
+    if !ATTACH_SOUND_ENABLED.load(Ordering::Relaxed) || std::env::var_os(DISABLE_ENV).is_some() {
+        return;
+    }
+    #[cfg(test)]
+    {
+        ATTACH_CUES.with(|n| n.set(n.get() + 1));
+        return;
+    }
+    #[cfg(all(not(test), target_os = "macos"))]
+    if macos_cue::ATTACH.play() {
+        return;
+    }
+    #[allow(unreachable_code)]
+    play_in_background(SOUND_ATTACH);
+}
+
 #[cfg(target_os = "macos")]
-mod macos_appshot {
+mod macos_cue {
     use objc::rc::{StrongPtr, autoreleasepool};
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
@@ -152,88 +188,123 @@ mod macos_appshot {
     #[link(name = "AVFoundation", kind = "framework")]
     unsafe extern "C" {}
 
-    // Keep native objects on one worker. A bounded mailbox avoids a backlog of
-    // stale confirmations when captures arrive in a burst.
-    pub(super) fn sender() -> Option<&'static mpsc::SyncSender<()>> {
-        static SENDER: OnceLock<Option<mpsc::SyncSender<()>>> = OnceLock::new();
-        SENDER
-            .get_or_init(|| {
-                let (tx, rx) = mpsc::sync_channel(1);
-                std::thread::Builder::new()
-                    .name("appshot-audio".into())
-                    .spawn(move || {
-                        let player = autoreleasepool(load);
-                        while rx.recv().is_ok() {
-                            if std::env::var_os(super::DISABLE_ENV).is_some() {
-                                continue;
-                            }
-                            let started = std::time::Instant::now();
-                            let played = player.as_ref().is_some_and(|player| {
-                                autoreleasepool(|| unsafe {
-                                    // Pause preserves prepared audio resources; stop would discard them.
-                                    let _: () = msg_send![**player, pause];
-                                    let _: () = msg_send![**player, setCurrentTime: 0.0_f64];
-                                    let played: bool = msg_send![**player, play];
-                                    played
-                                })
-                            });
-                            tracing::debug!(
-                                elapsed_ms = started.elapsed().as_millis(),
-                                played,
-                                "Appshot native playback requested"
-                            );
-                            if !played {
-                                super::play_in_background(super::SOUND_APPSHOT);
-                            }
-                        }
-                    })
-                    .ok()
-                    .map(|_| tx)
-            })
-            .as_ref()
+    /// One short cue kept decoded on its own worker, so it starts at once.
+    pub(super) struct Cue {
+        name: &'static str,
+        bytes: &'static [u8],
+        sender: OnceLock<Option<mpsc::SyncSender<()>>>,
     }
 
-    fn load() -> Option<StrongPtr> {
-        let player = decode()?;
-        let ready: bool = unsafe { msg_send![*player, prepareToPlay] };
-        if !ready {
-            tracing::warn!("Could not prepare native Appshot audio; using system player");
-            return None;
+    pub(super) static APPSHOT: Cue = Cue::new("appshot", super::SOUND_APPSHOT);
+    pub(super) static ATTACH: Cue = Cue::new("attach", super::SOUND_ATTACH);
+
+    impl Cue {
+        const fn new(name: &'static str, bytes: &'static [u8]) -> Self {
+            Self {
+                name,
+                bytes,
+                sender: OnceLock::new(),
+            }
         }
-        Some(player)
-    }
 
-    fn decode() -> Option<StrongPtr> {
-        unsafe {
-            let data: *mut Object = msg_send![class!(NSData),
-                dataWithBytes: super::SOUND_APPSHOT.as_ptr()
-                length: super::SOUND_APPSHOT.len()];
-            let allocated: *mut Object = msg_send![class!(AVAudioPlayer), alloc];
-            let mut error: *mut Object = std::ptr::null_mut();
-            let player: *mut Object = msg_send![allocated, initWithData: data error: &mut error];
-            if player.is_null() {
-                tracing::warn!("Could not decode native Appshot audio; using system player");
+        // Keep native objects on one worker. A bounded mailbox avoids a backlog
+        // of stale cues when they arrive in a burst.
+        pub(super) fn sender(&'static self) -> Option<&'static mpsc::SyncSender<()>> {
+            self.sender
+                .get_or_init(|| {
+                    let (tx, rx) = mpsc::sync_channel(1);
+                    std::thread::Builder::new()
+                        .name(format!("{}-audio", self.name))
+                        .spawn(move || {
+                            let player = autoreleasepool(|| self.load());
+                            while rx.recv().is_ok() {
+                                if std::env::var_os(super::DISABLE_ENV).is_some() {
+                                    continue;
+                                }
+                                let started = std::time::Instant::now();
+                                let played = player.as_ref().is_some_and(|player| {
+                                    autoreleasepool(|| unsafe {
+                                        // Pause preserves prepared audio resources; stop would discard them.
+                                        let _: () = msg_send![**player, pause];
+                                        let _: () = msg_send![**player, setCurrentTime: 0.0_f64];
+                                        let played: bool = msg_send![**player, play];
+                                        played
+                                    })
+                                });
+                                tracing::debug!(
+                                    cue = self.name,
+                                    elapsed_ms = started.elapsed().as_millis(),
+                                    played,
+                                    "native cue playback requested"
+                                );
+                                if !played {
+                                    super::play_in_background(self.bytes);
+                                }
+                            }
+                        })
+                        .ok()
+                        .map(|_| tx)
+                })
+                .as_ref()
+        }
+
+        fn load(&self) -> Option<StrongPtr> {
+            let player = self.decode()?;
+            let ready: bool = unsafe { msg_send![*player, prepareToPlay] };
+            if !ready {
+                tracing::warn!(
+                    cue = self.name,
+                    "Could not prepare native cue audio; using system player"
+                );
                 return None;
             }
-            Some(StrongPtr::new(player))
+            Some(player)
+        }
+
+        fn decode(&self) -> Option<StrongPtr> {
+            unsafe {
+                let data: *mut Object = msg_send![class!(NSData),
+                    dataWithBytes: self.bytes.as_ptr()
+                    length: self.bytes.len()];
+                let allocated: *mut Object = msg_send![class!(AVAudioPlayer), alloc];
+                let mut error: *mut Object = std::ptr::null_mut();
+                let player: *mut Object =
+                    msg_send![allocated, initWithData: data error: &mut error];
+                if player.is_null() {
+                    tracing::warn!(
+                        cue = self.name,
+                        "Could not decode native cue audio; using system player"
+                    );
+                    return None;
+                }
+                Some(StrongPtr::new(player))
+            }
+        }
+
+        pub(super) fn play(&'static self) -> bool {
+            match self.sender().map(|tx| tx.try_send(())) {
+                Some(Ok(()) | Err(mpsc::TrySendError::Full(()))) => true,
+                _ => false,
+            }
         }
     }
 
     #[test]
-    fn embedded_appshot_decodes_natively_without_playback() {
-        autoreleasepool(|| {
-            let player = decode().expect("embedded Appshot should decode in AVAudioPlayer");
-            let duration: f64 = unsafe { msg_send![*player, duration] };
-            let playing: bool = unsafe { msg_send![*player, isPlaying] };
-            assert!((duration - 0.67).abs() < 0.001);
-            assert!(!playing);
-        });
-    }
-
-    pub(super) fn play() -> bool {
-        match sender().map(|tx| tx.try_send(())) {
-            Some(Ok(()) | Err(mpsc::TrySendError::Full(()))) => true,
-            _ => false,
+    fn embedded_cues_decode_natively_without_playback() {
+        for (cue, seconds) in [(&APPSHOT, 0.67), (&ATTACH, 0.42)] {
+            autoreleasepool(|| {
+                let player = cue
+                    .decode()
+                    .expect("embedded cue should decode in AVAudioPlayer");
+                let duration: f64 = unsafe { msg_send![*player, duration] };
+                let playing: bool = unsafe { msg_send![*player, isPlaying] };
+                assert!(
+                    (duration - seconds).abs() < 0.001,
+                    "{}: {duration}",
+                    cue.name
+                );
+                assert!(!playing);
+            });
         }
     }
 }

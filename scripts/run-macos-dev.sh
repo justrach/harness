@@ -26,8 +26,8 @@ cd "$ROOT"
 # `app-dev` optimizes the workspace crates so the bundle renders at release-
 # like cost; HARNESS_DEV_PROFILE=dev trades that for the fastest rebuilds.
 PROFILE="${HARNESS_DEV_PROFILE:-app-dev}"
-cargo build -p harness --profile "$PROFILE"
-TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+"$ROOT/scripts/heavy-build.sh" cargo build -p harness --profile "$PROFILE"
+TARGET_DIR="$("$ROOT/scripts/heavy-build.sh" cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 [[ "$PROFILE" == "dev" ]] && PROFILE_DIR=debug || PROFILE_DIR="$PROFILE"
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
@@ -89,6 +89,11 @@ OPEN_ENV=(
 )
 if [[ -n "${HARNESS_OPEN_ROUTE:-}" ]]; then
   OPEN_ENV+=(--env "HARNESS_OPEN_ROUTE=$HARNESS_OPEN_ROUTE")
+fi
+# Show an inert, ready-state titlebar update button for manual layout testing.
+# No download is staged and clicking it cannot install or restart anything.
+if [[ "${HARNESS_DEV_APP_UPDATE:-}" == "1" ]]; then
+  OPEN_ENV+=(--env "HARNESS_DEV_APP_UPDATE=1")
 fi
 # Preview the graff "updated" card, e.g. HARNESS_DEV_GRAFF_NOTICE=0.0.302.23..0.0.302.25
 if [[ -n "${HARNESS_DEV_GRAFF_NOTICE:-}" ]]; then

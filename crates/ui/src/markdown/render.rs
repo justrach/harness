@@ -8,6 +8,10 @@
 //! chunk opacity veil over the text runs (see [`super::veil`]) — opacity only,
 //! zero translate, applied after layout-relevant properties are fixed.
 
+#[cfg(test)]
+#[path = "render/selection_geometry_tests.rs"]
+mod selection_geometry_tests;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1295,7 +1299,6 @@ pub(super) fn flat_text_presented_element_with_key(
     // from the text's own layout handle. Pure paint — never in layout. The
     // same paint pass re-registers the frame-scoped window mouse listeners
     // that drive text selection (round 18; see markdown/selection.rs).
-    let inline_flow = selection_key.is_some();
     let sel_key = selection_key.unwrap_or_else(|| format!("{}:{ix}", opts.row_key).into());
     let link_selection_key = sel_key.clone();
     let code_ranges = flat.code_ranges.clone();
@@ -1348,7 +1351,7 @@ pub(super) fn flat_text_presented_element_with_key(
                     text: flat_text.clone(),
                     layout: layout.clone(),
                     atomic_bounds: None,
-                    clip_bounds: inline_flow.then(|| window.content_mask().bounds),
+                    clip_bounds: Some(window.content_mask().bounds),
                     offsets: offsets.clone(),
                     owner: PAINT_OWNER.get(),
                 })
@@ -1454,7 +1457,7 @@ fn paint_text_selection_with_wash(
             text: text.clone(),
             layout: layout.clone(),
             atomic_bounds: None,
-            clip_bounds: None,
+            clip_bounds: Some(window.content_mask().bounds),
             offsets: None,
             owner: PAINT_OWNER.get(),
         })
@@ -1498,7 +1501,8 @@ struct RegEntry {
     layout: gpui::TextLayout,
     /// Equations select atomically and copy their original LaTeX.
     atomic_bounds: Option<Bounds<gpui::Pixels>>,
-    /// Scrolled text keeps shaped glyph indices but only its visible hit area.
+    /// Paint-time clip: collapsed prompts and scrolled text retain their full
+    /// layout, but only their visible hit area may handle pointer events.
     clip_bounds: Option<Bounds<gpui::Pixels>>,
     offsets: Option<super::link_presentation::OffsetMap>,
     /// The transcript that painted it ([`selection_owner_reset`]); 0 for
@@ -1521,6 +1525,7 @@ impl RegEntry {
                 self.text.len()
             };
         }
+        let position = visible_selection_position(position, self.bounds());
         let (Ok(ix) | Err(ix)) = self.layout.index_for_position(position);
         self.offsets.as_ref().map_or(ix, |map| map.original(ix))
     }
@@ -1572,10 +1577,46 @@ pub(super) fn equation_selection(
     .size_full()
 }
 
+/// Keep the head on a visible line even when a drag leaves the element. Stay
+/// just inside both edges: TextLayout can resolve an exact line boundary to
+/// the preceding (possibly clipped) line. Within the band, preserve x for
+/// visual-line gutters; beyond it, select through the visible start or end.
+fn visible_selection_position(
+    mut position: gpui::Point<gpui::Pixels>,
+    bounds: gpui::Bounds<gpui::Pixels>,
+) -> gpui::Point<gpui::Pixels> {
+    if position.y < bounds.top() {
+        position.x = bounds.left();
+    } else if position.y >= bounds.bottom() {
+        position.x = bounds.right();
+    }
+    position.y = position
+        .y
+        .max(px(f32::from(bounds.top()).next_up()))
+        .min(px(f32::from(bounds.bottom()).next_down()));
+    position
+}
+
 thread_local! {
     static REGISTRY: RefCell<Vec<RegEntry>> = const { RefCell::new(Vec::new()) };
     /// The transcript painting right now, so its entries carry it.
     static PAINT_OWNER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Locate a synthetic fixture's text without depending on theme or wrap geometry.
+#[cfg(feature = "appshots-fixture")]
+pub fn fixture_selection_position(
+    text: &str,
+    byte_index: usize,
+) -> Option<gpui::Point<gpui::Pixels>> {
+    REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .iter()
+            .find(|entry| entry.text.as_ref() == text)
+            .and_then(|entry| entry.layout.position_for_index(byte_index))
+            .map(|position| position + point(px(0.1), px(8.0)))
+    })
 }
 
 /// Every text element registered this frame: `(key, text, bounds)`.
@@ -1679,6 +1720,9 @@ pub(crate) fn release_selection_owner(owner: u64) {
 
 /// The transcript the drag's anchor was painted by.
 fn anchor_owner(reg: &[RegEntry]) -> u64 {
+    if let Some(owner) = super::selection::anchor_owner() {
+        return owner;
+    }
     let anchor = super::selection::anchor_key().unwrap_or_default();
     reg.iter()
         .find(|e| *e.key == *anchor)
@@ -1713,7 +1757,8 @@ pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
 
 /// `(element index, byte offset)` for a window position: the registered
 /// element whose vertical band contains it, else the nearest by vertical
-/// distance (a drag past the gutter or between blocks clamps sensibly).
+/// distance, then horizontal distance. Table cells can share a vertical band;
+/// the cell under the pointer must win over the first cell in document order.
 fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
     REGISTRY.with(|r| {
         let reg = r.borrow();
@@ -1726,6 +1771,9 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
                 continue;
             }
             let b = entry.bounds();
+            if b.is_empty() {
+                continue;
+            }
             let dy = if position.y < b.top() {
                 f32::from(b.top() - position.y)
             } else if position.y > b.bottom() {
@@ -1740,11 +1788,12 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
             } else {
                 0.0
             };
-            // Preserve vertical-band clamping, then distinguish inline
-            // fragments on that same visual line by horizontal proximity.
-            let distance = (dy, dx);
-            if best.is_none_or(|(_, d)| distance < d) {
-                best = Some((ei, distance));
+            if best.is_none_or(|(_, distance)| (dy, dx) < distance) {
+                best = Some((ei, (dy, dx)));
+            }
+            if b.contains(&position) {
+                best = Some((ei, (0.0, 0.0)));
+                break;
             }
         }
         let (ei, _) = best?;
@@ -1763,7 +1812,8 @@ pub(crate) fn begin_drag_in_whitespace(owner: u64, position: gpui::Point<gpui::P
             .iter()
             .filter_map(|entry| {
                 let bounds = entry.bounds();
-                if entry.owner != owner
+                if bounds.is_empty()
+                    || entry.owner != owner
                     || !selection_scope(&entry.key).is_empty()
                     || position.y < bounds.top()
                     || position.y >= bounds.bottom()
@@ -1785,8 +1835,8 @@ pub(crate) fn begin_drag_in_whitespace(owner: u64, position: gpui::Point<gpui::P
         };
         // Preserve the layout's visual-line boundary, including soft wraps;
         // whitespace after a line is its END, not its final character.
-        let ix = entry.index_at(position);
-        super::selection::begin(&entry.key, ix);
+        super::selection::begin(&entry.key, entry.index_at(position));
+        super::selection::set_anchor_owner(&entry.key, entry.owner);
         true
     })
 }
@@ -1843,23 +1893,24 @@ fn register_selection_listeners(
     let visible_mask = window.content_mask().bounds;
     {
         let (key, text, layout) = (key.clone(), text.clone(), layout.clone());
+        let bounds = atomic_bounds
+            .unwrap_or_else(|| layout.bounds())
+            .intersect(&visible_mask);
+        let owner = PAINT_OWNER.get();
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _cx| {
             if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                 return;
             }
-            if atomic_bounds
-                .unwrap_or_else(|| layout.bounds())
-                .intersect(&visible_mask)
-                .contains(&e.position)
-            {
+            if bounds.contains(&e.position) {
+                let position = visible_selection_position(e.position, bounds);
                 let ix = if let Some(bounds) = atomic_bounds {
-                    if e.position.x < bounds.center().x {
+                    if position.x < bounds.center().x {
                         0
                     } else {
                         text.len()
                     }
                 } else {
-                    let (Ok(ix) | Err(ix)) = layout.index_for_position(e.position);
+                    let (Ok(ix) | Err(ix)) = layout.index_for_position(position);
                     offsets.as_ref().map_or(ix, |map| map.original(ix))
                 };
                 match e.click_count {
@@ -1893,6 +1944,7 @@ fn register_selection_listeners(
                     }
                     _ => super::selection::begin(&key, ix),
                 }
+                super::selection::set_anchor_owner(&key, owner);
                 window.refresh();
             } else if super::selection::clear_if_owner(&key) {
                 window.refresh();
@@ -1916,8 +1968,8 @@ fn register_selection_listeners(
     }
     {
         let key = key.clone();
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, _cx| {
-            if phase != DispatchPhase::Bubble {
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, _cx| {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                 return;
             }
             if let Some(_text) = super::selection::end_drag(&key) {
@@ -2211,7 +2263,7 @@ fn sole_workspace_file_link(runs: &[InlineRun], workspace_root: &str) -> Option<
             _ => {}
         }
     }
-    crate::workspace_links::resolve_workspace_file_link(target?, workspace_root)
+    crate::workspace_links::resolve_markdown_file_link(target?, workspace_root)
         .map(|link| link.path)
 }
 

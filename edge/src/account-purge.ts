@@ -13,8 +13,9 @@
  *
  * A pass wipes the registry (which hands back the chat, session and device ids
  * it lists), those rooms, the rooms named after the person (workspace docs,
- * vault, previews), their agent rooms, and R2: tool outputs under the
- * person's prefix and the backups the wiped rooms name. Rooms wipe themselves
+ * vault, previews), their agent rooms, the crash reports their phones sent,
+ * and R2: tool outputs under the person's prefix and the backups the wiped
+ * rooms name. Rooms wipe themselves
  * through their own `POST /purge` (purge.ts); chat, session and device rooms
  * only when this person owns them.
  *
@@ -23,6 +24,7 @@
  * retried with backoff.
  */
 import { personalOrgId } from "./auth";
+import { deleteCrashReports } from "./crash-reports";
 import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
 import { PURGE_PATH } from "./purge";
 import { AUTH_ORG_HEADER, roomStore } from "./room-actor";
@@ -38,6 +40,7 @@ const RETRY_MS = 30_000;
 type Target =
   | { t: "registry"; org: string }
   | { t: "rooms" }
+  | { t: "crashes" }
   | { t: "object"; ns: ObjectNs; name: string; workspace?: boolean }
   | { t: "room"; id: string }
   | { t: "r2"; key: string }
@@ -64,6 +67,8 @@ const keyOf = (t: Target): string => {
       return `registry|${t.org}`;
     case "rooms":
       return "rooms";
+    case "crashes":
+      return "crashes";
     case "object":
       return `object|${t.ns}|${t.name}`;
     case "room":
@@ -111,7 +116,11 @@ export class AccountPurge implements DurableObject {
   /** The targets every pass starts from. */
   private async seed(job: Job): Promise<void> {
     const u = job.userId;
-    const targets: Target[] = [{ t: "rooms" }, { t: "object", ns: "VAULT_ROOMS", name: `vault1/${u}` }];
+    const targets: Target[] = [
+      { t: "rooms" },
+      { t: "crashes" },
+      { t: "object", ns: "VAULT_ROOMS", name: `vault1/${u}` }
+    ];
     for (const org of job.orgs) {
       targets.push(
         { t: "registry", org },
@@ -229,6 +238,9 @@ export class AccountPurge implements DurableObject {
         await this.enqueue([...ids].map((id): Target => ({ t: "room", id })), true);
         return true;
       }
+      case "crashes":
+        if (this.env.HYPERDRIVE) await deleteCrashReports(this.env, job.userId);
+        return true;
       case "object": {
         const res = await this.purgeObject(this.env[target.ns], target.name, job.userId, target.workspace);
         if (typeof res.backup === "string") await this.enqueue([{ t: "r2", key: res.backup }]);

@@ -7,6 +7,17 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
+    /// Opens straight onto Crash reports (the `-sheet crashreports` rig).
+    @State private var showCrashReports: Bool
+    /// The first-run setup, opened again from Agents.
+    @State private var replaySetup = false
+    /// Screenshot rig: `-demo -open-autonomy` opens on Agents > Autonomy.
+    @State private var showAutonomy = ProcessInfo.processInfo.arguments.contains("-demo")
+        && ProcessInfo.processInfo.arguments.contains("-open-autonomy")
+
+    init(openCrashReports: Bool = false) {
+        _showCrashReports = State(initialValue: openCrashReports)
+    }
 
     /// "Codegraff · System", or the two variant names when light and dark
     /// come from different families.
@@ -54,11 +65,20 @@ struct SettingsView: View {
 
                 Section("Agents") {
                     NavigationLink {
+                        AutonomyView()
+                    } label: {
+                        Text("Autonomy")
+                    }
+                    .accessibilityIdentifier("settings-autonomy")
+                    NavigationLink {
                         CompactionView()
                     } label: {
                         Text("Graff compaction")
                     }
                     .accessibilityIdentifier("settings-compaction")
+                    Button("Replay setup") { replaySetup = true }
+                        .foregroundStyle(Theme.text)
+                        .accessibilityIdentifier("settings-replay-setup")
                 }
                 .harnessListRow()
 
@@ -94,22 +114,23 @@ struct SettingsView: View {
                     .harnessListRow()
                 }
 
-                // iPad already shows the list beside the open session; a phone can too, when there is room.
-                if UIDevice.current.userInterfaceIdiom == .phone {
-                    Section {
-                        Picker("Split view", selection: $phoneSplitRaw) {
-                            ForEach(PhoneSplit.allCases) { mode in
-                                Text(mode.label).tag(mode.rawValue)
-                            }
+                // Shown on every device: the choice applies whenever the window is narrow (a phone, iPhone Duo's
+                // outer display, a narrow iPad window). Wide windows always show the list beside the session.
+                Section {
+                    // Through `stored`, so a value saved before Stacked was removed shows as Auto, not blank.
+                    Picker("Split view", selection: Binding(get: { PhoneSplit.stored(phoneSplitRaw).rawValue },
+                                                            set: { phoneSplitRaw = $0 })) {
+                        ForEach(PhoneSplit.allCases) { mode in
+                            Text(mode.label).tag(mode.rawValue)
                         }
-                        .accessibilityIdentifier("settings-phone-split")
-                    } header: {
-                        Text("Layout")
-                    } footer: {
-                        Text("Shows the session list and the open session together when there is room. Auto does it side by side whenever the screen is wide enough, such as in landscape. Side by side and Stacked pick a shape. Off keeps the single screen.")
                     }
-                    .harnessListRow()
+                    .accessibilityIdentifier("settings-phone-split")
+                } header: {
+                    Text("Layout")
+                } footer: {
+                    Text("For narrow windows, such as a phone or iPhone Duo's outer display. Shows the session list beside the open session when the window is wide enough, such as in landscape. Off keeps the single screen. Wide windows always show the list beside the session.")
                 }
+                .harnessListRow()
 
                 Section("Diagnostics") {
                     NavigationLink {
@@ -124,6 +145,12 @@ struct SettingsView: View {
                         LabeledContent("Performance", value: Perf.shared.startupMs.map { "Started in \($0) ms" } ?? "")
                     }
                     .accessibilityIdentifier("settings-performance")
+                    NavigationLink {
+                        CrashReportsView()
+                    } label: {
+                        Text("Crash reports")
+                    }
+                    .accessibilityIdentifier("settings-crash-reports")
                 }
                 .harnessListRow()
 
@@ -137,6 +164,14 @@ struct SettingsView: View {
             }
             .harnessGroupedList()
             .navigationTitle("Settings")
+            .navigationDestination(isPresented: $showCrashReports) { CrashReportsView() }
+            .navigationDestination(isPresented: $showAutonomy) { AutonomyView() }
+            .fullScreenCover(isPresented: $replaySetup) {
+                OnboardingView { replaySetup = false }
+                    .environment(model)
+                    .harnessAppearance()
+                    .tint(Theme.text)
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

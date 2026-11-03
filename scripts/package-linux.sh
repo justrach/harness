@@ -5,13 +5,14 @@
 # that drops them into ~/.local (XDG) paths.
 #
 # Usage: scripts/package-linux.sh
-# Env:   PROFILE=debug for a fast unoptimized package (CI smoke); default release.
+# Env:   PROFILE=debug for a fast unoptimized package (CI smoke), release for an
+#        optimized one without fat LTO; default dist (what ships).
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
-PROFILE="${PROFILE:-release}"
+PROFILE="${PROFILE:-dist}"
 ARCH="$(uname -m)"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
 OUT_DIR="$ROOT/target/package"
@@ -19,12 +20,12 @@ STAGE="$OUT_DIR/harness-$VERSION-linux-$ARCH"
 TARBALL="$STAGE.tar.gz"
 
 cd "$ROOT"
-if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p harness
-  BIN="$ROOT/target/release/harness"
-else
+if [[ "$PROFILE" == "debug" ]]; then
   cargo build -p harness
   BIN="$ROOT/target/debug/harness"
+else
+  cargo build --profile "$PROFILE" -p harness
+  BIN="$ROOT/target/$PROFILE/harness"
 fi
 
 rm -rf "$STAGE" "$TARBALL"

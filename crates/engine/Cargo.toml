@@ -48,6 +48,8 @@ tempfile.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # The browse pairing key lives in the login Keychain, not a file.
 security-framework = "3"
+# Keep-awake holds an IOKit power assertion named by CFStrings.
+core-foundation = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }

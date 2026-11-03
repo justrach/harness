@@ -1,0 +1,35 @@
+{
+  "comment": "The notes block an annotated image adds to the prompt (crates/ui annotate.rs `prompt_block`). Boxes are numbered like their pins, in drawing order, with their pixel box in the flattened file as x,y,w,h rounded to whole pixels; a box with no note says (no note). Text marks follow under 'Text on the image:' and empty ones are left out. Notes are trimmed and folded to one line, and double quotes in text marks become single quotes. The desktop checks it in harness-ui (`the_prompt_format_matches_the_parity_vectors`); a phone port of annotate should run the same cases.",
+  "cases": [
+    {
+      "case": "no marks, no block",
+      "name": "shot-annotated.png",
+      "marks": [],
+      "prompt": null
+    },
+    {
+      "case": "one box with a note",
+      "name": "shot-annotated.png",
+      "marks": [{ "kind": "box", "x": 120, "y": 80, "w": 300, "h": 140, "text": "tighten this" }],
+      "prompt": "Annotations on shot-annotated.png (boxes are x,y,w,h in image pixels):\n1. [box 120,80,300,140] tighten this"
+    },
+    {
+      "case": "fractions round, empty notes say so, notes fold to one line",
+      "name": "ui-annotated.png",
+      "marks": [
+        { "kind": "box", "x": 10.4, "y": 10.6, "w": 99.5, "h": 50.2, "text": "" },
+        { "kind": "box", "x": 0, "y": 0, "w": 8, "h": 8, "text": "  two\n lines  " }
+      ],
+      "prompt": "Annotations on ui-annotated.png (boxes are x,y,w,h in image pixels):\n1. [box 10,11,100,50] (no note)\n2. [box 0,0,8,8] two lines"
+    },
+    {
+      "case": "text marks after boxes, quotes softened",
+      "name": "a-annotated.png",
+      "marks": [
+        { "kind": "text", "x": 500, "y": 30, "text": "say \"hi\"" },
+        { "kind": "box", "x": 40, "y": 400, "w": 200, "h": 60, "text": "move up" }
+      ],
+      "prompt": "Annotations on a-annotated.png (boxes are x,y,w,h in image pixels):\n1. [box 40,400,200,60] move up\nText on the image:\n- [text 500,30] \"say 'hi'\""
+    }
+  ]
+}
