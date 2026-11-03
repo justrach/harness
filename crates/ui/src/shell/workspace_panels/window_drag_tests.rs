@@ -378,28 +378,22 @@ fn window_tab_drag_ignores_hover_moves_without_the_initiating_left_button(cx: &m
 }
 
 #[gpui::test]
-fn window_tab_drag_release_in_boundary_buffer_cancels_armed_and_unarmed_drags(
-    cx: &mut TestAppContext,
-) {
+fn window_tab_drag_release_just_inside_boundary_cancels(cx: &mut TestAppContext) {
     let (_dir, source, mut visual) = setup(cx);
     let before = tabs(source, cx);
-    for arm_first in [false, true] {
-        pickup(source, &mut visual);
-        let width = visual.update(|window, _| window.viewport_size().width);
-        if arm_first {
-            visual.simulate_mouse_move(
-                point(width + px(32.0), px(200.0)),
-                Some(MouseButton::Left),
-                Default::default(),
-            );
-        }
-        let buffer = point(width + px(12.0), px(200.0));
-        visual.simulate_mouse_move(buffer, Some(MouseButton::Left), Default::default());
-        visual.simulate_mouse_up(buffer, MouseButton::Left, Default::default());
-        assert_eq!(tabs(source, cx), before);
-        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
-        assert_drag_cleared(source, &mut visual);
-    }
+    pickup(source, &mut visual);
+    let width = visual.update(|window, _| window.viewport_size().width);
+    visual.simulate_mouse_move(
+        point(width + px(32.0), px(200.0)),
+        Some(MouseButton::Left),
+        Default::default(),
+    );
+    let inside = point(width - px(1.0), px(200.0));
+    visual.simulate_mouse_move(inside, Some(MouseButton::Left), Default::default());
+    visual.simulate_mouse_up(inside, MouseButton::Left, Default::default());
+    assert_eq!(tabs(source, cx), before);
+    assert_eq!(cx.update(|cx| cx.windows().len()), 1);
+    assert_drag_cleared(source, &mut visual);
 }
 
 #[gpui::test]
@@ -491,7 +485,7 @@ fn window_tab_drag_internal_panel_body_drop_reaches_the_existing_transfer_handle
     assert_drag_cleared(source, &mut visual);
 }
 
-fn release_outside(cx: &mut TestAppContext, edge: PanelEdge) {
+fn release_outside_at(cx: &mut TestAppContext, edge: PanelEdge, distance: f32, arm_first: bool) {
     let (_dir, source, mut visual) = setup(cx);
     let source_state = source
         .read_with(cx, |shell, _| shell.state.entity_id())
@@ -500,15 +494,21 @@ fn release_outside(cx: &mut TestAppContext, edge: PanelEdge) {
         .read_with(cx, |shell, _| shell.chat_tabs[shell.chat_tab].id.clone())
         .unwrap();
     pickup(source, &mut visual);
-    let outside = visual.update(|window, _| {
-        let size = window.viewport_size();
-        match edge {
-            PanelEdge::Left => point(px(-32.0), px(200.0)),
-            PanelEdge::Right => point(size.width + px(32.0), px(200.0)),
-            PanelEdge::Top => point(px(400.0), px(-32.0)),
-            PanelEdge::Bottom => point(px(400.0), size.height + px(32.0)),
-        }
-    });
+    let edge_point = |size: gpui::Size<Pixels>, distance: f32| match edge {
+        PanelEdge::Left => point(px(-distance), px(200.0)),
+        PanelEdge::Right => point(size.width + px(distance), px(200.0)),
+        PanelEdge::Top => point(px(400.0), px(-distance)),
+        PanelEdge::Bottom => point(px(400.0), size.height + px(distance)),
+    };
+    let size = visual.update(|window, _| window.viewport_size());
+    if arm_first {
+        visual.simulate_mouse_move(
+            edge_point(size, 32.0),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+    }
+    let outside = edge_point(size, distance);
     visual.simulate_mouse_move(outside, Some(MouseButton::Left), Default::default());
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
     visual.simulate_mouse_up(outside, MouseButton::Left, Default::default());
@@ -554,19 +554,19 @@ fn release_outside(cx: &mut TestAppContext, edge: PanelEdge) {
 
 #[gpui::test]
 fn window_tab_drag_left_release_creates_exactly_one_independent_window(cx: &mut TestAppContext) {
-    release_outside(cx, PanelEdge::Left);
+    release_outside_at(cx, PanelEdge::Left, 32.0, false);
 }
 #[gpui::test]
 fn window_tab_drag_right_release_creates_exactly_one_independent_window(cx: &mut TestAppContext) {
-    release_outside(cx, PanelEdge::Right);
+    release_outside_at(cx, PanelEdge::Right, 32.0, false);
 }
 #[gpui::test]
 fn window_tab_drag_top_release_creates_exactly_one_independent_window(cx: &mut TestAppContext) {
-    release_outside(cx, PanelEdge::Top);
+    release_outside_at(cx, PanelEdge::Top, 32.0, false);
 }
 #[gpui::test]
 fn window_tab_drag_bottom_release_creates_exactly_one_independent_window(cx: &mut TestAppContext) {
-    release_outside(cx, PanelEdge::Bottom);
+    release_outside_at(cx, PanelEdge::Bottom, 32.0, false);
 }
 
 #[gpui::test]
@@ -738,4 +738,29 @@ fn window_tab_drag_keeps_destination_metadata_title_at_its_resting_baseline(
         (resting_title.top() - after_drag.top() - px(6.5)).abs() < px(0.5),
         "normal metadata hover must resume after the drag"
     );
+}
+
+#[gpui::test]
+fn window_tab_drag_just_outside_left_creates_a_window(cx: &mut TestAppContext) {
+    release_outside_at(cx, PanelEdge::Left, 1.0, false);
+}
+
+#[gpui::test]
+fn window_tab_drag_just_outside_right_creates_a_window(cx: &mut TestAppContext) {
+    release_outside_at(cx, PanelEdge::Right, 1.0, false);
+}
+
+#[gpui::test]
+fn window_tab_drag_just_outside_top_creates_a_window(cx: &mut TestAppContext) {
+    release_outside_at(cx, PanelEdge::Top, 1.0, false);
+}
+
+#[gpui::test]
+fn window_tab_drag_just_outside_bottom_creates_a_window(cx: &mut TestAppContext) {
+    release_outside_at(cx, PanelEdge::Bottom, 1.0, false);
+}
+
+#[gpui::test]
+fn window_tab_drag_returning_to_outer_buffer_still_creates_a_window(cx: &mut TestAppContext) {
+    release_outside_at(cx, PanelEdge::Right, 12.0, true);
 }

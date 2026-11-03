@@ -26,6 +26,7 @@ actions!(
         Hide,
         HideOthers,
         ShowAll,
+        NewWindow,
         Minimize,
         Zoom,
         CloseTab,
@@ -65,9 +66,15 @@ pub fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    // Window verbs route to the active window. harness is single-window, so a
-    // global handler suffices where zed registers these per-workspace
-    // (crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
+    cx.on_action(|_: &NewWindow, cx| {
+        // Native menu and key dispatch can hold the current window's lease.
+        cx.defer(|cx| {
+            if let Err(error) = crate::open_new_workspace_window(cx) {
+                tracing::error!(%error, "could not open a new workspace window");
+            }
+        });
+    });
+    // Window verbs route to the active window.
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(close_tab);
@@ -286,6 +293,7 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
     )];
     let primary = if macos { "cmd" } else { "ctrl" };
     bindings.extend([
+        KeyBinding::new(&format!("{primary}-n"), NewWindow, None),
         KeyBinding::new(&format!("{primary}-="), IncreaseFontSize, None),
         KeyBinding::new(&format!("{primary}-+"), IncreaseFontSize, None),
         KeyBinding::new(&format!("{primary}--"), DecreaseFontSize, None),
@@ -340,6 +348,7 @@ pub fn app_menus() -> Vec<Menu> {
 
     let mut menus = vec![
         Menu::new("Harness").items(app_items),
+        Menu::new("File").items([MenuItem::action("New Window", NewWindow)]),
         // Standard clipboard verbs tied to the composer's existing actions via
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused
@@ -398,6 +407,20 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn native_file_menu_offers_new_window() {
+        let menus = app_menus();
+        let file = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "File")
+            .expect("File menu must let people open a new window");
+        assert!(file.items.iter().any(|item| matches!(
+            item,
+            MenuItem::Action { name, .. }
+                if name.as_ref() == "New Window" && !item.is_disabled()
+        )));
     }
 
     #[test]
@@ -532,6 +555,7 @@ mod tests {
         assert_eq!(find(&macos, CloseTab.name()), Some(combo("cmd-w")));
         assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));
+        assert_eq!(find(&macos, NewWindow.name()), Some(combo("cmd-n")));
 
         let other = app_key_bindings(false);
         assert_eq!(
@@ -541,6 +565,7 @@ mod tests {
         assert_eq!(find(&other, Quit.name()), None);
         // Off macOS the same close-the-innermost-thing action needs a key too.
         assert_eq!(find(&other, CloseTab.name()), Some(combo("ctrl-shift-w")));
+        assert_eq!(find(&other, NewWindow.name()), Some(combo("ctrl-n")));
 
         // Text size: the browser zoom keys, Cmd on macOS and Ctrl elsewhere.
         let all = |bindings: &[KeyBinding], name: &str| -> Vec<Keystroke> {

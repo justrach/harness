@@ -530,9 +530,12 @@ impl Shell {
         let Some(mut drag) = self.workspace_panels.window_drag.take() else {
             return;
         };
-        let valid = drag.armed
-            && beyond_window(pointer, window.viewport_size(), DETACH_DISTANCE)
-            && !drag.over_existing_window;
+        // Pickup already crossed GPUI's drag threshold. The preview expands
+        // after a further deliberate exit, but every release outside the actual
+        // window is a detach: requiring that extra distance here silently loses
+        // drops near an edge (especially when it is close to the display edge).
+        let valid =
+            beyond_window(pointer, window.viewport_size(), 0.0) && !drag.over_existing_window;
         let preview = drag.preview.take();
         let returning_tab = drag.payload.tab.clone();
         self.clear_window_tab_drag(cx);

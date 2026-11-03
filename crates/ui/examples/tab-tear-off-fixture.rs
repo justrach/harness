@@ -607,6 +607,7 @@ fn main() -> anyhow::Result<()> {
         };
         let source = shell::Shell::fixture_open_workspace_window(state.clone(), boot.clone(), record, cx).unwrap();
         state.update(cx, |_,cx| cx.notify());
+        cx.set_menus(app_menus::app_menus());
         cx.activate(true);
         cx.spawn(async move |cx| {
             let result = exercise(source, state, boot, origin, &output, cx)

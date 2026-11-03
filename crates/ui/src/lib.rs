@@ -631,6 +631,31 @@ fn open_main_window(
     open_workspace_window(state, boot, record, cx).expect("failed to open window")
 }
 
+/// Start an empty workspace while retaining the existing engine and catalogs.
+/// Unlike Dock reopen, New Window must never restore a saved window's tabs.
+fn open_new_workspace_window(cx: &mut App) -> Result<gpui::WindowHandle<shell::Shell>, String> {
+    let source = frontmost_workspace_window(cx)
+        .and_then(|handle| handle.read_with(cx, |shell, _| shell.window_runtime()).ok());
+    let (source, boot) = source
+        .or_else(|| {
+            cx.try_global::<ReopenState>()
+                .map(|reopen| (reopen.state.clone(), reopen.boot.clone()))
+        })
+        .ok_or_else(|| "The Harness runtime is not available yet.".to_string())?;
+    let state = cx.new(|cx| state::AppState::for_window(&source, cx));
+    let record = settings::SavedWorkspaceWindow {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_tabs_version: 2,
+        ..Default::default()
+    };
+    let handle = open_workspace_window(state, boot, record, cx)?;
+    handle
+        .update(cx, |_, window, _| window.activate_window())
+        .map_err(|error| error.to_string())?;
+    cx.activate(true);
+    Ok(handle)
+}
+
 /// Prepare an independently navigable native window around an already shared
 /// engine connection. The caller adopts live tab resources after this succeeds.
 pub(crate) fn open_workspace_window(

@@ -141,6 +141,10 @@ impl Shell {
         &self.window_id
     }
 
+    pub(crate) fn window_runtime(&self) -> (Entity<AppState>, EngineBootConfig) {
+        (self.state.clone(), self.boot.clone())
+    }
+
     pub(crate) fn open_window_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
         self.state
             .update(cx, |state, cx| state.open_deep_link(url, cx));
@@ -280,6 +284,148 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_new_window_is_empty(
+        window: gpui::WindowHandle<Shell>,
+        runtime: &Entity<AppState>,
+        cx: &mut gpui::TestAppContext,
+    ) -> String {
+        window
+            .update(cx, |shell, _, cx| {
+                let state = shell.state.clone();
+                shell.on_state_changed(&state, cx);
+                shell.ensure_workspace_sessions(cx);
+                shell.sync_panel_workspace(cx);
+                assert!(shell.state.read(cx).is_window_fork());
+                assert_ne!(shell.state.entity_id(), runtime.entity_id());
+                assert_eq!(
+                    AppState::runtime_owner(&shell.state, cx).entity_id(),
+                    runtime.entity_id()
+                );
+                assert!(shell.state.read(cx).selected_chat.is_none());
+                assert_eq!(shell.chat_tabs.len(), 1);
+                assert!(shell.chat_tabs[0].selected.is_none());
+                assert!(shell.composer.read(cx).input.read(cx).text().is_empty());
+                let layout = shell.panel_layout(cx).unwrap();
+                assert_eq!(layout.panels.len(), 1);
+                assert!(layout.panels[0].tabs.iter().all(|tab| matches!(
+                    tab,
+                    workspace_panels::PanelTab::Draft(_) | workspace_panels::PanelTab::New(_)
+                )));
+                shell.window_id.clone()
+            })
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn new_window_menu_and_shortcut_preserve_source_tabs_and_unsent_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, source) = chat_tabs::navigation_tests::fixture(cx, true, Some(true));
+        let (runtime, source_id, source_tabs) = source
+            .update(cx, |shell, window, cx| {
+                shell.boot_restored = true;
+                shell.state.update(cx, |state, _| {
+                    state.chats_synced = true;
+                    state.spaces_synced = true;
+                });
+                shell.composer.update(cx, |composer, cx| {
+                    composer.current_key = "current".into();
+                    composer.input.update(cx, |input, cx| {
+                        input.set_text("Keep this unsent source draft", cx)
+                    });
+                });
+                shell.save_window_record(cx);
+                window.activate_window();
+                (
+                    shell.state.clone(),
+                    shell.window_id.clone(),
+                    shell.settings.chat_tabs.clone(),
+                )
+            })
+            .unwrap();
+        let mut created_ids = std::collections::HashSet::new();
+        for expected_windows in [2, 3] {
+            if expected_windows == 2 {
+                cx.dispatch_action(source.into(), crate::app_menus::NewWindow);
+            } else {
+                source
+                    .update(cx, |shell, window, cx| {
+                        window.focus(&shell.composer.focus_handle(cx), cx);
+                    })
+                    .unwrap();
+                cx.update_window(source.into(), |_, window, cx| window.draw(cx).clear())
+                    .unwrap();
+                cx.simulate_keystrokes(source.into(), &platform_combo("mod-n"));
+            }
+            cx.run_until_parked();
+            let windows = cx.update(|cx| cx.windows());
+            assert_eq!(windows.len(), expected_windows);
+            for window in windows {
+                let Some(window) = window.downcast::<Shell>() else {
+                    panic!("New Window must create a workspace Shell");
+                };
+                if window == source {
+                    continue;
+                }
+                let id = assert_new_window_is_empty(window, &runtime, cx);
+                assert_ne!(id, source_id);
+                created_ids.insert(id);
+            }
+        }
+        assert_eq!(created_ids.len(), 2);
+        source
+            .read_with(cx, |shell, cx| {
+                assert_eq!(shell.settings.chat_tabs, source_tabs);
+                assert_eq!(
+                    shell.state.read(cx).selected_chat.as_deref(),
+                    Some("current")
+                );
+                assert_eq!(
+                    shell.composer.read(cx).input.read(cx).text(),
+                    "Keep this unsent source draft"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn new_window_action_without_windows_uses_retained_runtime_and_starts_empty(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, source) = chat_tabs::navigation_tests::fixture(cx, true, Some(true));
+        let runtime = source
+            .update(cx, |shell, window, cx| {
+                shell.boot_restored = true;
+                shell.state.update(cx, |state, _| {
+                    state.chats_synced = true;
+                    state.spaces_synced = true;
+                });
+                shell.save_window_record(cx);
+                cx.set_global(crate::ReopenState {
+                    state: shell.state.clone(),
+                    boot: shell.boot.clone(),
+                });
+                window.remove_window();
+                shell.state.clone()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(cx.windows().is_empty());
+            assert!(
+                settings::current(cx)
+                    .restorable_workspace_windows()
+                    .iter()
+                    .any(|record| !record.chat_tabs.is_empty())
+            );
+            cx.dispatch_action(&crate::app_menus::NewWindow);
+        });
+        cx.run_until_parked();
+        let windows = cx.update(|cx| cx.windows());
+        assert_eq!(windows.len(), 1);
+        assert_new_window_is_empty(windows[0].downcast::<Shell>().unwrap(), &runtime, cx);
+    }
 
     #[gpui::test]
     fn attachment_sound_opt_out_refreshes_a_peer_windows_cached_controls(

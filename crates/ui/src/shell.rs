@@ -201,6 +201,7 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
         row("Grow the pane down", Box::new(ResizeChatPaneDown)),
         row("Make all panes the same size", Box::new(EqualizeChatPanes)),
         row("Zoom the pane (and back)", Box::new(ToggleChatPaneZoom)),
+        row("New window", Box::new(crate::app_menus::NewWindow)),
         row("Open workspace", Box::new(NewChatTab)),
         row("Reopen closed chat or workspace", Box::new(ReopenClosedChatTab)),
         row("Next workspace", Box::new(NextChatTab)),

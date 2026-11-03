@@ -338,10 +338,16 @@ pub(super) async fn exercise(
     move_pointer(source, outside, cx)?;
     let release_preview = expanded_preview(source, cx).await?;
     capture_preview(release_preview, output, "drag-release-preview", cx).await?;
+    // Releasing back near the outside edge must still detach the tab. The
+    // preview's expansion threshold must not become a silent no-drop zone.
+    let release_point = source.update(cx, |_, window, _| {
+        point(window.viewport_size().width + px(12.), outside.y)
+    })?;
+    move_pointer(source, release_point, cx)?;
     dispatch(
         source,
         PlatformInput::MouseUp(gpui::MouseUpEvent {
-            position: outside,
+            position: release_point,
             button: MouseButton::Left,
             click_count: 1,
             ..Default::default()
