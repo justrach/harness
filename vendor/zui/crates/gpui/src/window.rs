@@ -1151,11 +1151,47 @@ pub(crate) fn throttled_frame_is_due(elapsed: Duration, min_interval: Duration) 
     elapsed + slack >= min_interval
 }
 
+/// Modified by Harness: how long after the last input a focused window's animation frames keep
+/// the display's full rate. Scrolls, drags and typing, and the springs and glides they start,
+/// run at full rate; ambient motion after that (spinners, status glyphs) is held to
+/// [`AMBIENT_FRAME_INTERVAL`].
+pub const AMBIENT_AFTER_INPUT: Duration = Duration::from_secs(1);
+
+/// Modified by Harness: ambient animation's cap in a focused window, 60 Hz. On a 240 Hz display
+/// a spinner otherwise redraws the whole window 240 times a second.
+pub const AMBIENT_FRAME_INTERVAL: Duration = Duration::from_micros(16667);
+
+/// The cap on a window's next frame, or `None` for the display's full rate. Only frames that
+/// animations asked for are capped (`animation_driven`): an inactive window's at 30 Hz, a hot
+/// machine's at 60 Hz, and a focused window's at 60 Hz once nothing has been typed, clicked or
+/// scrolled for [`AMBIENT_AFTER_INPUT`]. Pure.
+#[doc(hidden)]
+pub fn frame_interval_cap(
+    animation_driven: bool,
+    active: bool,
+    thermal_pressure: bool,
+    since_input: Option<Duration>,
+) -> Option<Duration> {
+    if !animation_driven {
+        None
+    } else if !active {
+        Some(Duration::from_micros(33333))
+    } else if thermal_pressure {
+        Some(Duration::from_micros(16667))
+    } else if since_input.is_none_or(|elapsed| elapsed >= AMBIENT_AFTER_INPUT) {
+        Some(AMBIENT_FRAME_INTERVAL)
+    } else {
+        None
+    }
+}
+
 /// Tracks input event timestamps to determine if input is arriving at a high rate.
 /// Used for selective VRR (Variable Refresh Rate) optimization.
 #[derive(Clone, Debug)]
 pub(crate) struct InputRateTracker {
     timestamps: Vec<Instant>,
+    /// The last input that changed something (Modified by Harness).
+    last_input: Option<Instant>,
     window: Duration,
     inputs_per_second: u32,
     sustain_until: Instant,
@@ -1166,6 +1202,7 @@ impl Default for InputRateTracker {
     fn default() -> Self {
         Self {
             timestamps: Vec::new(),
+            last_input: None,
             window: Duration::from_millis(100),
             inputs_per_second: 60,
             sustain_until: Instant::now(),
@@ -1177,6 +1214,7 @@ impl Default for InputRateTracker {
 impl InputRateTracker {
     pub fn record_input(&mut self) {
         let now = Instant::now();
+        self.last_input = Some(now);
         self.timestamps.push(now);
         self.prune_old_timestamps(now);
 
@@ -1188,6 +1226,11 @@ impl InputRateTracker {
 
     pub fn is_high_rate(&self) -> bool {
         Instant::now() < self.sustain_until
+    }
+
+    /// How long ago the last input that changed something arrived, if any has.
+    pub fn since_last_input(&self, now: Instant) -> Option<Duration> {
+        self.last_input.map(|at| now.saturating_duration_since(at))
     }
 
     fn prune_old_timestamps(&mut self, now: Instant) {
@@ -1563,21 +1606,21 @@ impl Window {
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
                     .log_err();
 
-                // Throttle frame rate based on conditions:
-                // - Thermal pressure (Serious/Critical): cap to ~60fps
-                // - Inactive window (not focused): cap to ~30fps to save energy
-                let min_frame_interval = if !request_frame_options.force_render
-                    && !request_frame_options.require_presentation
-                    && next_frame_callbacks.borrow().is_empty()
-                {
-                    None
-                } else if !active.get() {
-                    Some(Duration::from_micros(33333))
-                } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
-                    Some(Duration::from_micros(16667))
-                } else {
-                    None
-                };
+                // Throttle animation frames: an inactive window to ~30fps, thermal pressure
+                // and a focused window's ambient motion (no input for a second) to ~60fps.
+                let min_frame_interval = frame_interval_cap(
+                    request_frame_options.force_render
+                        || request_frame_options.require_presentation
+                        || !next_frame_callbacks.borrow().is_empty(),
+                    active.get(),
+                    matches!(
+                        thermal_state,
+                        Some(ThermalState::Critical | ThermalState::Serious)
+                    ),
+                    input_rate_tracker
+                        .borrow()
+                        .since_last_input(Instant::now()),
+                );
 
                 if min_frame_interval != reported_frame_interval_cap {
                     reported_frame_interval_cap = min_frame_interval;
@@ -2597,7 +2640,7 @@ impl Window {
         f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
     ) -> R {
         self.with_id(element_id, |this| {
-            let global_id = GlobalElementId(Arc::from(&*this.element_id_stack));
+            let global_id = GlobalElementId::new(&this.element_id_stack);
 
             f(&global_id, this)
         })
