@@ -427,6 +427,22 @@ pub(super) struct DividerDrag {
     start: Vec<f32>,
 }
 
+/// The pane and navigation context that actually received a mouse press.
+/// Slot/button alone can accidentally match a different session after navigation.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ChatPanePress {
+    pane: usize,
+    button: gpui::MouseButton,
+    tab: uuid::Uuid,
+    selected: Option<String>,
+    panes: Vec<Option<String>>,
+    // Empty panes share a `None` session ID but may target different projects.
+    projects: Vec<Option<String>>,
+    focus: usize,
+    axis: SplitAxis,
+    zoomed: bool,
+}
+
 /// The name screen readers give the pane that takes your typing while the column is split.
 pub(super) const FOCUS_CUE_LABEL: &str = "Typing here";
 
@@ -462,6 +478,43 @@ pub(super) fn existing_chat_selection(selected: Option<String>, state: &AppState
 }
 
 impl Shell {
+    fn pane_press_context(
+        &self,
+        pane: usize,
+        button: gpui::MouseButton,
+        cx: &App,
+    ) -> Option<ChatPanePress> {
+        let split = self.chat_split.as_ref()?;
+        if !matches!(self.route, Route::Chat)
+            || split.zoomed
+            || pane == split.focus
+            || pane >= split.panes.len()
+        {
+            return None;
+        }
+        Some(ChatPanePress {
+            pane,
+            button,
+            tab: self.chat_tab_id,
+            selected: self.state.read(cx).selected_chat.clone(),
+            panes: split.panes.clone(),
+            projects: split.projects.clone(),
+            focus: split.focus,
+            axis: split.axis,
+            zoomed: split.zoomed,
+        })
+    }
+
+    fn clear_pane_press(&mut self, pane: usize) {
+        if self
+            .chat_pane_press
+            .as_ref()
+            .is_some_and(|press| press.pane == pane)
+        {
+            self.chat_pane_press = None;
+        }
+    }
+
     fn chat_split_active(&self) -> bool {
         matches!(self.route, Route::Chat) && self.chat_split.is_some()
     }
@@ -493,6 +546,7 @@ impl Shell {
         let Some(target) = split.focus_pane(ix, selected.clone()) else {
             return false;
         };
+        self.chat_pane_press = None;
         let target = existing_chat_selection(target, self.state.read(cx));
         // Each pane keeps its own workspace and composer picks: park the
         // live ones in the pane being left and bring the target pane's back.
@@ -603,6 +657,7 @@ impl Shell {
     pub(super) fn toggle_chat_pane_zoom(&mut self, cx: &mut Context<Self>) {
         if let Some(split) = self.chat_split.as_mut() {
             split.zoomed = !split.zoomed;
+            self.chat_pane_press = None;
             cx.notify();
         }
     }
@@ -784,6 +839,15 @@ impl Shell {
 
     /// Reconcile peer transcript views and their doc watches with the split.
     pub(super) fn sync_chat_panes(&mut self, cx: &mut Context<Self>) {
+        // Invalidate before a temporarily changed layout/tab can be restored:
+        // returning to the same slot must not revive a canceled gesture.
+        if self.chat_pane_press.as_ref().is_some_and(|press| {
+            self.pane_press_context(press.pane, press.button, cx)
+                .as_ref()
+                != Some(press)
+        }) {
+            self.chat_pane_press = None;
+        }
         self.persist_chat_layout(cx);
         let wanted: Vec<String> = self
             .chat_split
@@ -1132,31 +1196,49 @@ impl Shell {
             // Every mouse button activates, and a text selection is no veto.
             // But a release here is not a new interaction if its press began
             // elsewhere (for example, selecting in the active pane across us).
-            .capture_any_mouse_down(cx.listener(move |this, event: &gpui::MouseDownEvent, _, _| {
-                this.chat_pane_press = Some((ix, event.button));
-            }))
+            .capture_any_mouse_down(cx.listener(
+                move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    this.chat_pane_press = this.pane_press_context(ix, event.button, cx);
+                },
+            ))
             .on_mouse_down_out(cx.listener(move |this, _, _, _| {
-                if this.chat_pane_press.is_some_and(|(pane, _)| pane == ix) {
-                    this.chat_pane_press = None;
-                }
+                this.clear_pane_press(ix);
             }))
+            // A release ends the claim even outside the origin/window. Without
+            // this, an overlay's later unmatched release can revive the press.
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, _| {
+                    this.clear_pane_press(ix);
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, _, _, _| {
+                    this.clear_pane_press(ix);
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Middle,
+                cx.listener(move |this, _, _, _| {
+                    this.clear_pane_press(ix);
+                }),
+            )
             .capture_any_mouse_up(cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
-                if this.chat_pane_press.take() != Some((ix, event.button)) || cx.has_active_drag() {
+                let Some(press) = this.chat_pane_press.take() else {
+                    return;
+                };
+                if this.pane_press_context(ix, event.button, cx).as_ref() != Some(&press)
+                    || cx.has_active_drag()
+                {
                     return;
                 }
-                let tab = this.chat_tab;
-                let selected = this.state.read(cx).selected_chat.clone();
-                let pane = this.chat_split.as_ref().and_then(|split| split.panes.get(ix)).cloned();
                 let shell = cx.entity();
                 cx.defer(move |cx| {
                     shell.update(cx, |this, cx| {
                         // A link/control may itself navigate or close the pane.
                         // Do not apply an old pane index to the resulting layout.
-                        if this.chat_tab == tab
-                            && matches!(this.route, Route::Chat)
-                            && this.state.read(cx).selected_chat == selected
-                            && this.chat_split.as_ref().and_then(|split| split.panes.get(ix)).cloned() == pane
-                        {
+                        if this.pane_press_context(ix, press.button, cx).as_ref() == Some(&press) {
                             this.select_chat_pane(ix, cx);
                         }
                     });

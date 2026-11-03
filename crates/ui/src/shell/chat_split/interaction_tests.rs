@@ -13,10 +13,39 @@ mod link_owner;
 /// tool controls, without booting an engine or rendering unrelated chrome.
 struct InteractionPanes(Entity<Shell>);
 
+/// Opt-in coverage of the production split root, dividers and cached peers.
+struct ProductionSplitLayout(bool);
+impl gpui::Global for ProductionSplitLayout {}
+
 impl Render for InteractionPanes {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
+            if cx
+                .try_global::<ProductionSplitLayout>()
+                .is_some_and(|layout| layout.0)
+            {
+                let main = div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .pt(px(Theme::TITLEBAR_HEIGHT))
+                    .child(div().flex_1().min_h_0().child(shell.transcript.clone()));
+                let width = shell.chat_split.as_ref().map_or(960.0, |split| {
+                    if split.axis == SplitAxis::Horizontal {
+                        480.0 * split.panes.len() as f32
+                    } else {
+                        960.0
+                    }
+                });
+                // The panes size themselves to the row they're given (#737).
+                return div()
+                    .w(px(width))
+                    .h_full()
+                    .flex()
+                    .child(shell.render_chat_split(main.into_any_element(), cx))
+                    .into_any_element();
+            }
             let Some(split) = shell.chat_split.as_ref() else {
                 // The split closed: one ordinary transcript pane remains.
                 return div()
@@ -26,7 +55,8 @@ impl Render for InteractionPanes {
                     .flex()
                     .flex_col()
                     .pt(px(Theme::TITLEBAR_HEIGHT))
-                    .child(div().flex_1().min_h_0().child(shell.transcript.clone()));
+                    .child(div().flex_1().min_h_0().child(shell.transcript.clone()))
+                    .into_any_element();
             };
             let (focus, len, axis) = (split.focus, split.panes.len(), split.axis);
             div()
@@ -66,6 +96,7 @@ impl Render for InteractionPanes {
                         })
                         .child(pane)
                 }))
+                .into_any_element()
         })
     }
 }
