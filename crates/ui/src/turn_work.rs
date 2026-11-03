@@ -88,8 +88,8 @@ pub fn latest_turn_changes(entries: &[SessionMessageEntry]) -> Option<TurnChange
             paths.extend(path);
         }
         for stat in &stats {
-            changes.additions += stat.additions;
-            changes.deletions += stat.deletions;
+            changes.additions = changes.additions.saturating_add(stat.additions);
+            changes.deletions = changes.deletions.saturating_add(stat.deletions);
         }
         for path in paths {
             if !changes.files.contains(&path) {
@@ -196,6 +196,29 @@ mod tests {
             ),
         ];
         assert_eq!(latest_turn_changes(&entries), None);
+    }
+
+    #[test]
+    fn line_count_totals_saturate_instead_of_overflowing() {
+        let edit_with_counts = |id: &str, count: u64| {
+            serde_json::from_value(serde_json::json!({
+                "kind": "tool", "id": id, "resolved": true,
+                "call": {"kind": "editFile", "path": "src/example.rs"},
+                "diffStats": [{"path": "src/example.rs", "additions": count, "deletions": count}]
+            }))
+            .expect("synthetic edit with counts")
+        };
+        let entries = vec![entry(
+            MessageRole::Assistant,
+            vec![
+                edit_with_counts("large", u64::MAX),
+                edit_with_counts("extra", 1),
+            ],
+        )];
+        let changes = latest_turn_changes(&entries).expect("changed file");
+        assert_eq!(changes.additions, u64::MAX);
+        assert_eq!(changes.deletions, u64::MAX);
+        assert_eq!(changes.files, vec!["src/example.rs"]);
     }
 
     #[test]

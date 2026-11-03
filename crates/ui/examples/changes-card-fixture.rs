@@ -1,5 +1,5 @@
 //! Capture the production changes cue at narrow and normal widths, using synthetic data only.
-//! cargo run -p harness-ui --features appshots-fixture --example changes-card-fixture -- OUT_DIR
+//! cargo run -p harness-ui --features appshots-fixture --example changes-card-fixture -- OUT_DIR [edges]
 use gpui::{
     Bounds, Context, Render, Window, WindowBounds, WindowOptions, div, point, prelude::*, px, size,
 };
@@ -11,7 +11,9 @@ use harness_ui::{
 };
 use std::{path::PathBuf, time::Duration};
 
-struct Fixture;
+struct Fixture {
+    edges: bool,
+}
 
 impl Render for Fixture {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -26,47 +28,69 @@ impl Render for Fixture {
             .gap(px(24.0))
             .p(px(20.0))
             .children(
-                [176.0, 260.0, 500.0]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, width)| {
-                        let changes = TurnChanges {
-                            files: if index == 0 {
-                                vec!["example.md".into()]
-                            } else {
-                                vec![
-                                    "src/lexer.rs".into(),
-                                    "src/parser.rs".into(),
-                                    "src/empty_input.rs".into(),
-                                ]
-                            },
-                            additions: if index == 0 { 0 } else { 12345 },
-                            deletions: if index == 0 { 0 } else { 6789 },
-                        };
-                        div()
-                            .id(("fixture-cue", index))
-                            .relative()
-                            .w(px(width))
-                            .h(px(44.0))
-                            .rounded(px(12.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.surface_card)
-                            .child(
-                                div()
-                                    .p(px(10.0))
-                                    .text_size(px(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child("Composer"),
-                            )
-                            .child(changes_cue(&changes, index == 2, theme, |_, _, _| {}))
-                    }),
+                (if self.edges {
+                    [120.0, 176.0, 260.0]
+                } else {
+                    [176.0, 260.0, 500.0]
+                })
+                .into_iter()
+                .enumerate()
+                .map(|(index, width)| {
+                    let changes = TurnChanges {
+                        files: if self.edges {
+                            vec![
+                                "src/very_long_synthetic_filename_without_spaces.rs".into(),
+                                "src/日本語_😀_résumé.md".into(),
+                            ]
+                        } else if index == 0 {
+                            vec!["example.md".into()]
+                        } else {
+                            vec![
+                                "src/lexer.rs".into(),
+                                "src/parser.rs".into(),
+                                "src/empty_input.rs".into(),
+                            ]
+                        },
+                        additions: if self.edges {
+                            999_999_999_999_999_999
+                        } else if index == 0 {
+                            0
+                        } else {
+                            12345
+                        },
+                        deletions: if self.edges {
+                            999_999_999_999_999_999
+                        } else if index == 0 {
+                            0
+                        } else {
+                            6789
+                        },
+                    };
+                    div()
+                        .id(("fixture-cue", index))
+                        .relative()
+                        .w(px(width))
+                        .h(px(44.0))
+                        .rounded(px(12.0))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.surface_card)
+                        .child(
+                            div()
+                                .p(px(10.0))
+                                .text_size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .child("Composer"),
+                        )
+                        .child(changes_cue(&changes, index == 2, theme, |_, _, _| {}))
+                }),
             )
     }
 }
 
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
+    let edges = std::env::args().nth(2).as_deref() == Some("edges");
     std::fs::create_dir_all(&output)?;
     gpui_platform::application()
         .with_assets(icons::Assets)
@@ -83,7 +107,7 @@ fn main() -> anyhow::Result<()> {
                         focus: false,
                         ..Default::default()
                     },
-                    |_, cx| cx.new(|_| Fixture),
+                    |_, cx| cx.new(|_| Fixture { edges }),
                 )
                 .unwrap();
             let window: gpui::AnyWindowHandle = window.into();
@@ -97,7 +121,11 @@ fn main() -> anyhow::Result<()> {
                         window
                             .render_to_image()
                             .unwrap()
-                            .save(output.join("changes-card.png"))
+                            .save(output.join(if edges {
+                                "changes-card-edges.png"
+                            } else {
+                                "changes-card.png"
+                            }))
                             .unwrap();
                         window.remove_window();
                     })
