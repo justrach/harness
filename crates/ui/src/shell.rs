@@ -11311,92 +11311,12 @@ impl Shell {
         let changes = crate::turn_work::latest_turn_changes(transcript)?;
         let theme = Theme::of(cx).clone();
         let showing = self.active_changes(cx).is_some();
-        let card = div()
-            .id("turn-changes-card")
-            .debug_selector(|| "turn-changes-card".into())
-            .role(gpui::Role::Button)
-            .aria_label(format!("{}, show changes", changes.title()))
-            .h(px(44.0))
-            .px(px(Theme::SPACE_MD))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .rounded(px(Theme::PANEL_RADIUS))
-            .border_1()
-            .border_color(theme.border)
-            .bg(motion::hover_blend(
-                "turn-changes-card",
-                theme.surface_card,
-                theme.surface_raised_hover,
-            ))
-            .on_hover(motion::hover_listener("turn-changes-card"))
-            .shadow_sm()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.show_turn_changes(cx)))
-            .child(icon(icons::DOCUMENT).size(px(16.0)).text_color(theme.accent))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(changes.title())),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(changes.names())),
-                    ),
-            )
-            .when(changes.additions + changes.deletions > 0, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .child(
-                            div()
-                                .text_color(theme.success)
-                                .child(SharedString::from(format!("+{}", changes.additions))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.danger)
-                                .child(SharedString::from(format!("-{}", changes.deletions))),
-                        ),
-                )
-            })
-            .child(
-                div()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .bg(if showing { theme.accent_wash } else { theme.surface_raised })
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if showing { theme.accent } else { theme.text_muted })
-                    .child(SharedString::from(if showing { "Showing" } else { "Review" })),
-            );
-        Some(
-            div()
-                .absolute()
-                .top(px(-52.0))
-                .left(px(Theme::SPACE_SM))
-                .right(px(Theme::SPACE_SM))
-                .child(card)
-                .into_any_element(),
-        )
+        Some(crate::turn_work::changes_cue(
+            &changes,
+            showing,
+            &theme,
+            cx.listener(|this, _, _, cx| this.show_turn_changes(cx)),
+        ))
     }
 
     /// Open the right pane on the working-tree Changes tab, reusing an open
