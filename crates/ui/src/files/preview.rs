@@ -4554,9 +4554,14 @@ mod markdown_buffer_tests {
             let _ = window.draw(cx);
         })
         .unwrap();
-        cx.simulate_keystrokes(window.into(), "cmd-z");
+        let (undo, redo) = if cfg!(target_os = "macos") {
+            ("cmd-z", "cmd-shift-z")
+        } else {
+            ("ctrl-z", "ctrl-y")
+        };
+        cx.simulate_keystrokes(window.into(), undo);
         editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), source));
-        cx.simulate_keystrokes(window.into(), "cmd-shift-z");
+        cx.simulate_keystrokes(window.into(), redo);
         editor.read_with(cx, |editor, _| assert_eq!(editor.value().as_ref(), checked));
         window
             .update(cx, |surface, window, cx| {
