@@ -119,6 +119,29 @@ struct ArchivedSection: View {
             }
             .tint(Theme.surfaceRaised)
         }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            hideButton(chat)
+        }
+        .contextMenu {
+            Button("Unarchive", systemImage: "arrow.up.bin") {
+                withAnimation(Motion.resort) { model.unarchive(chatId: chat.id) }
+            }
+            if !model.hiddenArchivedIds.contains(chat.id) {
+                hideButton(chat)
+            }
+        }
+    }
+
+    /// Hide from this shelf (desktop Chat history's Hide): the session stays
+    /// archived on every device, and search still finds it.
+    private func hideButton(_ chat: Chat) -> some View {
+        Button {
+            withAnimation(Motion.resort) { model.hideArchived(chatId: chat.id) }
+        } label: {
+            Label("Hide", systemImage: "eye.slash")
+        }
+        .tint(Theme.textMuted)
+        .accessibilityIdentifier("archived-hide")
     }
 
     private func showMore(remaining: Int) -> some View {

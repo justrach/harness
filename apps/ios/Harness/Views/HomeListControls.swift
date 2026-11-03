@@ -10,8 +10,19 @@ enum HomeListControls {
     /// The project pill when no project is chosen. "All" alone didn't say all of what.
     static let allProjectsTitle = "All projects"
 
-    /// The project pill's text: the chosen project's name, or All projects.
-    static func scopeTitle(projectName: String?) -> String {
+    /// The saved filter value for sessions outside any project. Space ids are
+    /// never empty or start with "~", so it can't collide with one; "" stays All.
+    static let projectlessFilter = "~projectless"
+    static let projectlessTitle = "No project"
+
+    /// Sessions with no project (desktop `sidebar_chats` with `Some("")`).
+    static func projectless(_ chats: [Chat]) -> [Chat] {
+        chats.filter { $0.spaceId == nil }
+    }
+
+    /// The project pill's text: the chosen project's name, No project, or All projects.
+    static func scopeTitle(projectName: String?, projectless: Bool = false) -> String {
+        if projectless { return projectlessTitle }
         guard let projectName, !projectName.isEmpty else { return allProjectsTitle }
         return projectName
     }

@@ -780,6 +780,7 @@ struct ComposerView: View {
         attachmentDraft.error = nil
         let (staged, failed) = StagedAttachment.stage(images: images)
         attachments.append(contentsOf: staged)
+        AttachSound.play(added: staged.count)
         uploadError = StagedAttachment.failureMessage(failed)
     }
 
