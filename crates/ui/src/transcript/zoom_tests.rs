@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "zoom_edge_tests.rs"]
+mod edge_cases;
+
 #[gpui::test]
 fn thinking_text_matches_output_at_every_zoom_size(cx: &mut gpui::TestAppContext) {
     let _selection = crate::markdown::selection::test_state_lock();
@@ -65,7 +68,12 @@ fn thinking_text_matches_output_at_every_zoom_size(cx: &mut gpui::TestAppContext
         cx.set_global(Theme::dark());
     });
     let (_, cx) = cx.add_window_view(|_, _| Thinking);
-    for size in crate::typography::UiFontSize::ALL {
+    let sizes = crate::typography::UiFontSize::ALL;
+    for size in sizes
+        .into_iter()
+        .chain(sizes.into_iter().rev())
+        .chain([crate::typography::UiFontSize::default()])
+    {
         cx.update(|window, cx| {
             window.set_rem_size(px(size.pixels()));
             window.refresh();
@@ -109,15 +117,14 @@ fn thinking_fold_height_scales_without_resizing_code_output() {
         truncated_by: 0,
     };
     for size in crate::typography::UiFontSize::ALL {
-        let expected = DETAIL_SEPARATOR
-            + OUTPUT_BODY_PAD
-            + rows as f32 * OUTPUT_LINE_HEIGHT * size.pixels() / 16.0;
+        let line_height = OUTPUT_LINE_HEIGHT * size.pixels() / 16.0;
+        let expected = DETAIL_SEPARATOR + OUTPUT_BODY_PAD + rows as f32 * line_height;
         assert_eq!(
-            detail_height_with_ui_size(&thought, size.pixels()),
+            detail_height_with_thought_line_height(&thought, line_height),
             expected
         );
         assert_eq!(
-            detail_height_with_ui_size(&output, size.pixels()),
+            detail_height_with_thought_line_height(&output, line_height),
             detail_height(&output),
             "code output keeps its independent pixel size"
         );
