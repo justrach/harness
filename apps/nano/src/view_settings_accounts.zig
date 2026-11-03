@@ -23,6 +23,7 @@ const rows = @import("view_settings_accounts_rows.zig");
 const login = @import("view_settings_accounts_login.zig");
 const graff = @import("view_settings_accounts_graff.zig");
 const cloud = @import("view_settings_accounts_sandboxes.zig");
+const browse = @import("view_settings_accounts_browse.zig");
 const sandboxes = @import("sandboxes.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
@@ -105,9 +106,11 @@ pub const Page = struct {
     login: login.State = .{},
     /// The cloud sandboxes card's own state (the list is the app's).
     cloud: cloud.Cloud = .{},
+    browse: browse.State = .{},
 
     pub fn deinit(p: *Page, gpa: Allocator) void {
         p.cloud.deinit(gpa);
+        p.browse.deinit(gpa);
         p.snapshot.deinit(gpa);
         p.usage.deinit(gpa);
         p.jobs.deinit(gpa);
@@ -413,6 +416,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (p.key_notice) if (rows.warningStrip(c, k, key_rejected_notice)) {
         p.key_notice = false;
     };
+    if (browse.shown(a)) browse.card(c, a, k);
     codegraff(c, a, k, now);
     graff.chatgpt(c, a, k);
     graff.providers(c, a, k);

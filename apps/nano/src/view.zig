@@ -116,12 +116,14 @@ pub fn view(a: *App, c: *ui.Context) void {
             }
         }
         defer if (seamRounded(a, k)) seam(c, a, k);
+        a.view.seam_inset = if (seamRounded(a, k)) 1 else 0;
         ui.key(c, "main-column");
         var main = ui.div(c).row().grow().w(0).hFull();
         if (k.plane()) |p| main = main.bg(p);
         defer main.end();
         column: {
-            const chat = ui.div(c).column().grow().w(0).hFull().clip();
+            // Inside the seam's border, as GPUI's card lays out.
+            const chat = ui.div(c).column().grow().w(0).hFull().pl(a.view.seam_inset).clip();
             defer chat.end();
             if (a.view.settings_open) {
                 _ = c.leaf(.{ .width = .fill, .height = .{ .px = sidebar.titlebar_h } }, .none, null);
@@ -208,7 +210,7 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
     var box = ui.div(c).grow().wFull().h(0);
     box = if (across) box.row() else box.column();
     defer box.end();
-    const total: f32 = if (across) transcript_view.mainWidth(c, a) else c.size.h - sidebar.titlebar_h;
+    const total: f32 = if (across) transcript_view.contentWidth(c, a) else c.size.h - sidebar.titlebar_h;
     var focus: ?usize = null;
     const press = a.view.pane_press;
     if (c.input.pressed or c.input.released) a.view.pane_press = null;
@@ -429,14 +431,16 @@ fn trailing(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn header(c: *ui.Context, a: *App, k: theme.Colors) void {
     const side = a.view.sidebar_width;
     // Clear of the title bar's buttons, and 16 points into the main column.
-    const left = @max(side + 16, cluster_x + cluster_w + 12 + 32) - side;
+    // The header is the title bar's (GPUI draws it there), not inside the
+    // seam's border the column's content is.
+    const left = @max(side + 16, cluster_x + cluster_w + 12 + 32) - side - a.view.seam_inset;
     const bar = ui.div(c).row().wFull().h(sidebar.titlebar_h).pt(4).pl(left).pr(6).gap(6).itemsCenter().clip();
     defer bar.end();
     const id = a.selected orelse return;
     const chat = a.findChat(id) orelse return;
     const mark = icons.harnessMark(chat.harness orelse "graff");
     icons.icon(c, mark.name, 14, mark.brand orelse k.muted, 0);
-    const room = @import("view_transcript.zig").mainWidth(c, a) - left - 6 - 70;
+    const room = @import("view_transcript.zig").contentWidth(c, a) - left - 6 - 70;
     const title = sidebar.chatLabel(chat);
     const title_st: ui.TextStyle = .{ .size = 12, .weight = .medium, .color = k.text.alpha(0.85) };
     const title_w = @min(c.text.width(title, title_st), room * 0.6);

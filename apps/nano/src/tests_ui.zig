@@ -563,11 +563,16 @@ test "Settings › Shortcuts: a chip takes the next keys; a clash is refused, as
     try testing.expectEqualStrings("mod-alt-b", h.a.settings.combo(shortcuts.all[0]));
     try testing.expect(h.t.hasText("Cmd+Opt+B"));
     try testing.expect(h.t.hasText("Reset"));
+    // The follow-up card above the groups puts Browser under the fold.
+    h.t.scroll(700, 400, -400);
+    h.t.settle(1);
     try h.t.clickText("Cmd+Shift+R");
     h.t.settle(1);
     h.press(.{ .key = 'b', .cmd = true, .alt = true });
     try testing.expectEqualStrings("mod-shift-r", h.a.settings.combo(shortcuts.all[1]));
     try testing.expect(h.t.hasText("Cmd+Opt+B is already assigned to Save file."));
+    h.t.scroll(700, 400, 2000);
+    h.t.settle(1);
     try h.t.clickText("Restore defaults");
     h.t.settle(1);
     try testing.expectEqualStrings("mod-s", h.a.settings.combo(shortcuts.all[0]));

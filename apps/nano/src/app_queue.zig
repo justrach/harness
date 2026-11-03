@@ -76,6 +76,8 @@ pub fn stop(a: *App) void {
 pub fn deinit(a: *App) void {
     if (a.queue_edit) |*e| e.deinit(a.gpa);
     a.queue_edit = null;
+    for (a.steers.items) |*s| s.deinit(a.gpa);
+    a.steers.deinit(a.gpa);
     a.queue.deinit();
     if (a.queue_begin) |b| a.gpa.free(b);
 }
@@ -101,6 +103,131 @@ pub fn queues(a: *const App) bool {
 pub fn queueMessage(a: *App, text: []const u8) void {
     const chat = a.selected orelse return;
     a.request(requests.queueMessage(chat, text), .of(App, a, App.onNotice));
+}
+
+// Messages while the agent is working (crates/ui/src/composer/follow_up.rs):
+// queued for the turn's end, or steered into the turn at its next step.
+
+/// Settings › Shortcuts' choice (`FollowUpBehavior`, `followUpBehavior`).
+pub const FollowUp = enum { queue, steer };
+
+pub fn followUpBehavior(a: *const App) FollowUp {
+    const v = a.settings.text("followUpBehavior") orelse return .queue;
+    return if (std.mem.eql(u8, v, "steer")) .steer else .queue;
+}
+
+pub fn opposite(f: FollowUp) FollowUp {
+    return if (f == .queue) .steer else .queue;
+}
+
+/// Why a steer can't be sent now (`steer_unavailable`), as `steer_reason`
+/// words it; null when it can.
+pub fn steerUnavailable(live: bool, has_text: bool, has_attachments: bool, queue_actions: bool, step_boundary: bool) ?[]const u8 {
+    if (!live) return "Steer is available while a run is active";
+    if (!has_text) return "Steer needs text in the composer";
+    if (has_attachments) return "Steer only supports text; remove attachments or screenshots";
+    if (!queue_actions) return "Update Harness on this device and the chat host to use this action";
+    if (!step_boundary) return "This agent does not support steering during a turn";
+    return null;
+}
+
+/// What a send during a run does (`main_action`): a steer only when it can
+/// be one, else the queue.
+pub fn followUpAction(behavior: FollowUp, unavailable: ?[]const u8) FollowUp {
+    return if (behavior == .steer and unavailable == null) .steer else .queue;
+}
+
+test "follow-ups steer only when they can, as follow_up.rs decides" {
+    const t = std.testing;
+    try t.expectEqual(FollowUp.queue, followUpAction(.queue, null));
+    try t.expectEqual(FollowUp.steer, followUpAction(.steer, null));
+    try t.expectEqual(FollowUp.queue, followUpAction(.steer, "x"));
+    try t.expectEqual(FollowUp.steer, opposite(.queue));
+    try t.expectEqualStrings("Steer only supports text; remove attachments or screenshots", steerUnavailable(true, true, true, true, true).?);
+    try t.expectEqualStrings("Update Harness on this device and the chat host to use this action", steerUnavailable(true, true, false, false, true).?);
+    try t.expectEqualStrings("This agent does not support steering during a turn", steerUnavailable(true, true, false, true, false).?);
+    try t.expect(steerUnavailable(true, true, false, true, true) == null);
+}
+
+/// "With text: …" under the Queue | Steer switch (`follow_up_hint`).
+pub fn followUpHint(on_enter: bool, mac: bool) []const u8 {
+    if (on_enter) return if (mac)
+        "With text: Cmd+Enter uses the opposite behaviour; Cmd+Option+Enter is an alias. Empty: Cmd+Enter sends the newest queued message; the alias does nothing."
+    else
+        "With text: Ctrl+Enter uses the opposite behaviour; Ctrl+Alt+Enter is an alias. Empty: Ctrl+Enter sends the newest queued message; the alias does nothing.";
+    return if (mac) "With text: Cmd+Option+Enter uses the opposite behaviour. Empty composer: no action." else "With text: Ctrl+Alt+Enter uses the opposite behaviour. Empty composer: no action.";
+}
+
+test "the follow-up hint tracks the send profile (follow_up_hint_tracks_the_composer_send_profile)" {
+    try std.testing.expectEqualStrings("With text: Cmd+Option+Enter uses the opposite behaviour. Empty composer: no action.", followUpHint(false, true));
+    try std.testing.expectEqualStrings("With text: Ctrl+Alt+Enter uses the opposite behaviour. Empty composer: no action.", followUpHint(false, false));
+}
+
+/// Whether the open chat's run would take a steer now, and if not, why.
+pub fn steerBlocker(a: *const App, has_text: bool, has_attachments: bool) ?[]const u8 {
+    const chat_id = a.selected orelse return steerUnavailable(false, has_text, has_attachments, false, false);
+    const ch = a.findChat(chat_id);
+    // The agent list is this device's: it speaks for a chat hosted here.
+    const local = if (ch) |c| (if (c.device_id) |d| (if (a.device_id) |mine| std.mem.eql(u8, d, mine) else false) else false) else false;
+    const harness = if (ch) |c| c.harness else null;
+    const steps = local and if (harness) |h| for (a.harnesses.items) |x| {
+        if (std.mem.eql(u8, x.id, h)) break x.steers_mid_turn;
+    } else false else false;
+    return steerUnavailable(queues(a), has_text, has_attachments, a.caps.actions and host(a) == null, steps);
+}
+
+pub const PendingSteer = struct {
+    req: u64,
+    chat: []u8,
+    host: ?[]u8,
+
+    pub fn deinit(s: *PendingSteer, gpa: std.mem.Allocator) void {
+        gpa.free(s.chat);
+        if (s.host) |h| gpa.free(h);
+    }
+};
+
+/// A steer: queued like any follow-up, then promoted into the live turn
+/// by its row's id (`STEER_QUEUED_MESSAGE_NOW`).
+pub fn steer(a: *App, text: []const u8) void {
+    const chat = a.selected orelse return;
+    const id = a.send_(requests.queueMessage(chat, text), .of(App, a, onQueuedSteer)) orelse return a.setNotice("Send failed: not connected");
+    const owned = a.gpa.dupe(u8, chat) catch return;
+    const h = if (host(a)) |d| a.gpa.dupe(u8, d) catch null else null;
+    a.steers.append(a.gpa, .{ .req = id, .chat = owned, .host = h }) catch {
+        a.gpa.free(owned);
+        if (h) |x| a.gpa.free(x);
+    };
+}
+
+fn onQueuedSteer(a: *App, id: u64, r: rpc.Reply) void {
+    const at = for (a.steers.items, 0..) |s, i| {
+        if (s.req == id) break i;
+    } else return;
+    var s = a.steers.orderedRemove(at);
+    defer s.deinit(a.gpa);
+    switch (r) {
+        .ok => |v| {
+            const row = if (v == .object) (if (v.object.get("id")) |x| (if (x == .string and x.string.len > 0) x.string else null) else null) else null;
+            const rid = row orelse return a.setNotice("Send failed: queue did not return an id");
+            a.request(requests.steerQueuedNow(s.chat, rid, s.host), .of(App, a, onSteered));
+        },
+        .err => |e| {
+            var buf: [160]u8 = undefined;
+            a.setNotice(std.fmt.bufPrint(&buf, "Send failed: {s}", .{e}) catch "Send failed");
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
+fn onSteered(a: *App, _: u64, r: rpc.Reply) void {
+    switch (r) {
+        .ok => |v| if (!acked(v, "sent")) a.setNotice("Message queued, but the follow-up action was not accepted. Check the queue or transcript."),
+        .err => a.setNotice("Message queued, but the follow-up action failed. Check the queue or transcript."),
+        else => {},
+    }
+    a.redraw();
 }
 
 pub fn remove(a: *App, row: []const u8) void {

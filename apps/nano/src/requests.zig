@@ -117,6 +117,10 @@ pub fn sendQueuedNow(chat_id: []const u8, row: []const u8, host: ?[]const u8) Re
     return .{ .method = "SendQueuedMessageNow", .params = Row{ .chatId = chat_id, .id = row, .targetDeviceId = host } };
 }
 
+pub fn steerQueuedNow(chat_id: []const u8, row: []const u8, host: ?[]const u8) Request(Row) {
+    return .{ .method = "SteerQueuedMessageNow", .params = Row{ .chatId = chat_id, .id = row, .targetDeviceId = host } };
+}
+
 pub fn beginEdit(chat_id: []const u8, row: []const u8, device: []const u8, instance: []const u8, host: ?[]const u8) Request(struct { chatId: []const u8, id: []const u8, editorDeviceId: []const u8, editorInstanceId: []const u8, targetDeviceId: ?[]const u8 }) {
     return .{ .method = "BeginQueuedMessageEdit", .params = .{ .chatId = chat_id, .id = row, .editorDeviceId = device, .editorInstanceId = instance, .targetDeviceId = host } };
 }

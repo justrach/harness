@@ -92,6 +92,9 @@ pub const View = struct {
     /// opens with the composer focused, as GPUI's does.
     focus_composer: bool = true,
     composer_id: u64 = 0,
+    /// The rounded seam's hairline is the column's left border, which
+    /// takes layout room in GPUI (`border_l_1`): 1 while it shows, else 0.
+    seam_inset: f32 = 0,
     /// Stable compact-capacity decision, with the GPUI composer's hysteresis.
     composer_expanded: bool = false,
     /// The composer's caret as of its last frame: where dictated words go.
@@ -307,6 +310,8 @@ pub const App = struct {
     caps: queue_mod.Caps = .{},
     queue_edit: ?queue_mod.Edit = null,
     queue_begin: ?[]u8 = null,
+    /// Steers queued and waiting for their row's id, to promote it.
+    steers: std.ArrayList(queue_mod.PendingSteer) = .empty,
     /// This window's editor id for queue edit leases.
     instance: [36]u8 = undefined,
     instance_set: bool = false,
@@ -1039,6 +1044,12 @@ pub const App = struct {
 
     /// Sends what the composer holds: to the open chat, or to a new one.
     pub fn send(a: *App) void {
+        a.sendFollowUp(null);
+    }
+
+    /// As `send`, with a follow-up during a run named by the shortcut that
+    /// asked for it (`choose_follow_up`) rather than Settings' choice.
+    pub fn sendFollowUp(a: *App, explicit: ?queue_mod.FollowUp) void {
         if (a.queue_edit != null) return queue_mod.finishEdit(a, .commit);
         const attachments = @import("app_attachments.zig");
         const text = std.mem.trim(u8, a.composer.text(), " \n\t");
@@ -1056,7 +1067,15 @@ pub const App = struct {
         }
         if (prompt.len == 0 or a.engine.state != .connected) return;
         if (a.queues()) {
-            queue_mod.queueMessage(a, prompt);
+            // Enter falls back to the queue when a steer can't go now; a
+            // shortcut asking for one says why instead.
+            const blocker = queue_mod.steerBlocker(a, text.len > 0, attachments.count(a) > 0);
+            if (explicit == .steer) if (blocker) |why| {
+                a.setNotice(why);
+                return a.redraw();
+            };
+            const action = explicit orelse queue_mod.followUpAction(queue_mod.followUpBehavior(a), blocker);
+            if (action == .steer) queue_mod.steer(a, prompt) else queue_mod.queueMessage(a, prompt);
             attachments.clear(a);
             a.composer.clear();
             return a.redraw();

@@ -239,7 +239,16 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
             a.composer.want_caret = r.caret + 1;
         }
     }
-    if (!on_enter and (std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0) and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) a.send();
+    // ⌘↩ with something typed sends; with Enter sending, during a run it
+    // takes the other follow-up, as ⌘⌥↩ always does (`on_modified_submit`,
+    // `on_follow_up_shortcut`).
+    const queue_mod = @import("app_queue.zig");
+    const has_content = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0;
+    const other = queue_mod.opposite(queue_mod.followUpBehavior(a));
+    if (has_content and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) {
+        if (on_enter and a.queues() and a.queue_edit == null) a.sendFollowUp(other) else a.send();
+    }
+    if (has_content and a.queues() and a.queue_edit == null and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true, .alt = true })) a.sendFollowUp(other);
     recall(c, a, c.node(@intCast(at)).id);
     keepFocus(c, a, c.node(@intCast(at)).id);
     // ⌘↩ with nothing typed sends the newest queued message now.

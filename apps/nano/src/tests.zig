@@ -44,6 +44,7 @@ test {
     _ = @import("view_setup.zig");
     _ = @import("accounts.zig");
     _ = @import("view_settings_accounts.zig");
+    _ = @import("view_settings_accounts_browse.zig");
     _ = @import("sandboxes.zig");
     _ = @import("app_sandboxes.zig");
     _ = @import("parity_sandboxes.zig");

@@ -59,7 +59,8 @@ const Harness = struct {
                 try testing.expectApproxEqAbs(x - 256, r.x, 1);
                 side = true;
             }
-            if (r.h == 2 and r.w == 12 and @abs(r.x - (x + 16)) < 1) rail_ticks += 1;
+            // 16 into the content, which starts past the seam's border.
+            if (r.h == 2 and r.w == 12 and @abs(r.x - (x + h.a.view.seam_inset + 16)) < 1) rail_ticks += 1;
             switch (node.content) {
                 .text => |text| if (std.mem.eql(u8, text.str, "Synthetic sidebar chat") and r.y < 38) {
                     // The mark and its gap follow the animated titlebar clearance.

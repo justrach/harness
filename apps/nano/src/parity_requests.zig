@@ -51,6 +51,7 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "queue a message", r.queueMessage(chat, "Then update the changelog"), false),
         try case(gpa, "remove a queued message", r.removeQueued(chat, "row-parity", null), false),
         try case(gpa, "send a queued message now", r.sendQueuedNow(chat, "row-parity", null), false),
+        try case(gpa, "steer a queued message now", r.steerQueuedNow(chat, "row-parity", null), false),
         try case(gpa, "begin editing a queued message", r.beginEdit(chat, "row-parity", device, "22222222-0000-4000-8000-000000000002", null), false),
         try case(gpa, "renew an edit", r.renewEdit(chat, "row-parity", "lease-parity", null), false),
         try case(gpa, "save an edit", r.finishEdit(chat, "row-parity", "lease-parity", "commit", "Then update the README", "abc123", null), false),

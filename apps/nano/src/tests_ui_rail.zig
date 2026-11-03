@@ -57,7 +57,8 @@ const Harness = struct {
     /// chat column.
     fn ticks(h: *Harness, out: []Node) []Node {
         var n: usize = 0;
-        const left = sidebar.width + 16;
+        // 16 into the column's content, inside the seam's border as GPUI's.
+        const left = sidebar.width + h.a.view.seam_inset + 16;
         for (h.t.ctx.nodes.items) |node| {
             if (node.rect.h != 2 or @abs(node.rect.x - left) > 0.5) continue;
             if (n == out.len) break;

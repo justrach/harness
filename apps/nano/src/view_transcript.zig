@@ -38,10 +38,17 @@ pub fn mainWidth(c: *ui.Context, a: *const App) f32 {
     return @max(w, 300);
 }
 
+/// What lays out inside the column: GPUI's card takes the rounded seam's
+/// hairline as its left border (`border_l_1`), a point of layout, while
+/// its width sums and the rail's gate use the column whole.
+pub fn contentWidth(c: *ui.Context, a: *const App) f32 {
+    return mainWidth(c, a) - a.view.seam_inset;
+}
+
 /// The focused pane's width: the chat column's, less the other panes of a
 /// split across it.
 pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
-    const w = mainWidth(c, a);
+    const w = contentWidth(c, a);
     const s = a.tabs.layout() orelse return w;
     if (s.zoomed or s.axis != .horizontal) return w;
     return @max(w * s.shares.items[s.focus] - 1, 200);

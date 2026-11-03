@@ -25,6 +25,7 @@
     {"name": "queue a message", "method": "QueueMessage", "stream": false, "params": {"chatId":"chat-parity","text":"Then update the changelog","holdForTurnEnd":true}},
     {"name": "remove a queued message", "method": "RemoveQueuedMessage", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity"}},
     {"name": "send a queued message now", "method": "SendQueuedMessageNow", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity"}},
+    {"name": "steer a queued message now", "method": "SteerQueuedMessageNow", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity"}},
     {"name": "begin editing a queued message", "method": "BeginQueuedMessageEdit", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity","editorDeviceId":"$DEVICE","editorInstanceId":"22222222-0000-4000-8000-000000000002"}},
     {"name": "renew an edit", "method": "RenewQueuedMessageEdit", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity","leaseId":"lease-parity"}},
     {"name": "save an edit", "method": "FinishQueuedMessageEdit", "stream": false, "params": {"chatId":"chat-parity","id":"row-parity","leaseId":"lease-parity","action":"commit","text":"Then update the README","expectedTextHash":"abc123"}},
