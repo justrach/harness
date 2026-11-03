@@ -38,7 +38,13 @@ impl Render for InteractionPanes {
                         960.0
                     }
                 });
-                return shell.render_chat_split(main.into_any_element(), width, cx);
+                // The panes size themselves to the row they're given (#737).
+                return div()
+                    .w(px(width))
+                    .h_full()
+                    .flex()
+                    .child(shell.render_chat_split(main.into_any_element(), cx))
+                    .into_any_element();
             }
             let Some(split) = shell.chat_split.as_ref() else {
                 // The split closed: one ordinary transcript pane remains.
