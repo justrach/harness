@@ -207,7 +207,11 @@ fn open_question(core: &EngineCore) -> Option<(String, UserInputQuestion)> {
                 resolved: false,
                 ..
             } if request_id.starts_with("branch-drift-") => {
-                Some((request_id.clone(), questions[0].clone()))
+                // A live document can expose the input before its questions
+                // are populated; wait for a usable question instead of indexing.
+                questions
+                    .first()
+                    .map(|question| (request_id.clone(), question.clone()))
             }
             _ => None,
         })
@@ -496,7 +500,7 @@ async fn owned_branch_creation_from_an_explicit_base_survives_restart() {
         send(
             &core,
             "m2",
-            &format!("shell: {operation} feature/example base; git status --short"),
+            &format!("shell: git status --short; {operation} feature/example base"),
             &cwd,
         );
         wait_turn(&core, &prompts, 2).await;
@@ -554,6 +558,95 @@ async fn branch_creation_does_not_approve_unrelated_or_unproven_switches() {
         );
         assert_eq!(prompts.lock().unwrap().len(), 2, "{command}");
         assert_eq!(context_branch(&core), "alpha", "context is not accepted");
+        core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skipped_or_failed_creation_cannot_claim_an_external_switch() {
+    for (command, reserve_branch) in [
+        ("false && git switch -c feature/example; true", false),
+        ("exit 0; git switch -c feature/example", false),
+        ("e''xit 0; git switch -c feature/example", false),
+        ("{ exit 0; }; git switch -c feature/example", false),
+        ("exec true; git switch -c feature/example", false),
+        (
+            "trap 'exit 0' EXIT; false && git switch -c feature/example",
+            false,
+        ),
+        ("if false; then\ngit switch -c feature/example\nfi", false),
+        ("git switch -c feature/example; git status --short", true),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, cwd) = test_repo(tmp.path());
+        let (core, prompts) = engine(&tmp.path().join("data"));
+        create_chat(&core, &cwd);
+        send(&core, "m1", "establish alpha", &cwd);
+        wait_turn(&core, &prompts, 1).await;
+        if reserve_branch {
+            git(&repo, &["branch", "feature/example"]);
+        }
+        send(&core, "m2", &format!("shell: {command}"), &cwd);
+        wait_turn(&core, &prompts, 2).await;
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "alpha");
+        if reserve_branch {
+            git(&repo, &["switch", "feature/example"]);
+        } else {
+            git(&repo, &["switch", "-c", "feature/example"]);
+        }
+        send(&core, "m3", "follow-up", &cwd);
+        wait_for(
+            || prompts.lock().unwrap().len() == 3 || open_question(&core).is_some(),
+            "the external switch to dispatch or ask",
+        )
+        .await;
+        assert!(
+            open_question(&core).is_some(),
+            "unproven command: {command}"
+        );
+        assert_eq!(prompts.lock().unwrap().len(), 2, "the send must be held");
+        assert_eq!(context_branch(&core), "alpha");
+        core.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owned_creation_still_asks_when_git_evidence_is_missing_or_mismatched() {
+    for evidence in ["branch", "head", "start-point"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, cwd) = test_repo(tmp.path());
+        let (core, prompts) = engine(&tmp.path().join("data"));
+        create_chat(&core, &cwd);
+        send(&core, "m1", "establish alpha", &cwd);
+        wait_turn(&core, &prompts, 1).await;
+        send(&core, "m2", "shell: git switch -c feature/example", &cwd);
+        wait_turn(&core, &prompts, 2).await;
+        let branch_log = repo.join(".git/logs/refs/heads/feature/example");
+        match evidence {
+            "branch" => std::fs::remove_file(&branch_log).unwrap(),
+            "head" => std::fs::remove_file(repo.join(".git/logs/HEAD")).unwrap(),
+            _ => {
+                let original = std::fs::read_to_string(&branch_log).unwrap();
+                assert!(original.contains("branch: Created from HEAD"));
+                std::fs::write(
+                    &branch_log,
+                    original.replace(
+                        "branch: Created from HEAD",
+                        "branch: Created from other-base",
+                    ),
+                )
+                .unwrap();
+            }
+        }
+        send(&core, "m3", "follow-up", &cwd);
+        wait_for(
+            || prompts.lock().unwrap().len() == 3 || open_question(&core).is_some(),
+            "the missing-evidence follow-up to dispatch or ask",
+        )
+        .await;
+        assert!(open_question(&core).is_some(), "evidence: {evidence}");
+        assert_eq!(prompts.lock().unwrap().len(), 2);
+        assert_eq!(context_branch(&core), "alpha");
         core.shutdown().await;
     }
 }

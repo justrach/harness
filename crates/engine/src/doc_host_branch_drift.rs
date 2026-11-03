@@ -112,6 +112,7 @@ fn branch_creation(command: &str) -> Option<(&str, &str)> {
     let mut steps = Vec::new();
     let mut quote = None;
     let mut start = 0;
+    let mut chain = 0;
     let mut chars = command.char_indices().peekable();
     while let Some((at, ch)) = chars.next() {
         match quote {
@@ -132,12 +133,13 @@ fn branch_creation(command: &str) -> Option<(&str, &str)> {
                     if chars.next().map(|(_, ch)| ch) != Some('&') {
                         return None;
                     }
-                    steps.push(&command[start..at]);
+                    steps.push((&command[start..at], chain));
                     start = at + 2;
                 }
                 ';' | '\n' => {
-                    steps.push(&command[start..at]);
+                    steps.push((&command[start..at], chain));
                     start = at + 1;
+                    chain += 1;
                 }
                 _ => {}
             },
@@ -146,49 +148,103 @@ fn branch_creation(command: &str) -> Option<(&str, &str)> {
     if quote.is_some() {
         return None;
     }
-    steps.push(&command[start..]);
-    let steps: Vec<Vec<&str>> = steps
+    steps.push((&command[start..], chain));
+    let steps: Vec<(Vec<&str>, usize)> = steps
         .iter()
-        .map(|step| step.split_whitespace().collect())
+        .map(|(step, chain)| (step.split_whitespace().collect::<Vec<_>>(), *chain))
+        .filter(|(words, _)| !words.is_empty())
         .collect();
-    if steps.iter().any(|words| {
-        words.first().is_some_and(|word| {
-            matches!(
-                word.trim_matches(['\'', '"']),
-                "cd" | "pushd" | "popd" | "export" | "source" | "." | "eval"
-            ) || word.starts_with("GIT_")
-        })
+    if steps.iter().any(|(words, _)| {
+        let word = words[0];
+        word.contains(['\'', '"', '='])
+            || matches!(
+                word,
+                "cd" | "pushd"
+                    | "popd"
+                    | "export"
+                    | "source"
+                    | "."
+                    | "eval"
+                    | "exit"
+                    | "return"
+                    | "exec"
+                    | "trap"
+                    | "set"
+                    | "unset"
+                    | "alias"
+                    | "unalias"
+                    | "command"
+                    | "builtin"
+                    | "if"
+                    | "then"
+                    | "else"
+                    | "elif"
+                    | "fi"
+                    | "for"
+                    | "while"
+                    | "until"
+                    | "do"
+                    | "done"
+                    | "case"
+                    | "esac"
+                    | "select"
+                    | "break"
+                    | "continue"
+                    | "function"
+                    | "readonly"
+                    | "declare"
+                    | "typeset"
+                    | "local"
+                    | "time"
+                    | "!"
+                    | "coproc"
+                    | "hash"
+                    | "read"
+                    | "getopts"
+                    | "newgrp"
+                    | "fc"
+                    | "{"
+                    | "}"
+            )
+            || word.starts_with("GIT_")
     }) {
         return None;
     }
-    steps.iter().find_map(|words| {
-        let ["git", operation, args @ ..] = words.as_slice() else {
-            return None;
-        };
-        let quiet = args
-            .iter()
-            .take_while(|arg| matches!(**arg, "-q" | "--quiet"))
-            .count();
-        let [option, branch, rest @ ..] = &args[quiet..] else {
-            return None;
-        };
-        let creates = matches!(
-            (*operation, *option),
-            ("switch", "-c" | "--create") | ("checkout", "-b")
-        );
-        if !creates || rest.len() > 1 {
-            return None;
-        }
-        let start = rest.first().copied().unwrap_or("HEAD");
-        let literal_ref = |word: &str| {
-            !word.is_empty()
-                && !word.starts_with('-')
-                && word
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || "./_-~^@{}".contains(ch))
-        };
-        (literal_ref(branch) && literal_ref(start)).then_some((*branch, start))
-    })
+    // Only the final nonempty && chain determines a successful shell result.
+    // In `false && git switch -c task; true`, the tool succeeds without ever
+    // running Git. A later external creation must not inherit that authority.
+    let last_chain = steps.last()?.1;
+    steps
+        .iter()
+        .filter(|(_, chain)| *chain == last_chain)
+        .find_map(|(words, _)| {
+            let ["git", operation, args @ ..] = words.as_slice() else {
+                return None;
+            };
+            let quiet = args
+                .iter()
+                .take_while(|arg| matches!(**arg, "-q" | "--quiet"))
+                .count();
+            let [option, branch, rest @ ..] = &args[quiet..] else {
+                return None;
+            };
+            let creates = matches!(
+                (*operation, *option),
+                ("switch", "-c" | "--create") | ("checkout", "-b")
+            );
+            if !creates || rest.len() > 1 {
+                return None;
+            }
+            let start = rest.first().copied().unwrap_or("HEAD");
+            let literal_ref = |word: &str| {
+                !word.is_empty()
+                    && !word.starts_with('-')
+                    && word
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || "./_-~^@{}".contains(ch))
+            };
+            (literal_ref(branch) && literal_ref(start)).then_some((*branch, start))
+        })
 }
 
 /// Exactly one checkout, from the accepted branch to the fresh branch.
@@ -1083,7 +1139,7 @@ mod tests {
         }
         assert_eq!(
             branch_creation(
-                "git fetch upstream && git switch -c feature/example upstream/main; git status"
+                "git fetch upstream && git switch -c feature/example upstream/main && git status"
             ),
             Some(("feature/example", "upstream/main"))
         );
@@ -1112,6 +1168,43 @@ mod tests {
             "git switch -c $branch",
             "git switch -c feature/example || true",
             "git switch -c feature/example & wait",
+        ] {
+            assert_eq!(branch_creation(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn branch_creation_requires_a_success_determining_chain() {
+        for command in [
+            "git fetch upstream; git switch -c feature/example && git status",
+            "git status\ngit switch -c feature/example;\n",
+            "git switch -c feature/example && git commit -m \"safe; quoted && text\"",
+        ] {
+            assert_eq!(
+                branch_creation(command),
+                Some(("feature/example", "HEAD")),
+                "{command}"
+            );
+        }
+        for command in [
+            "false && git switch -c feature/example; true",
+            "git switch -c feature/example; git status",
+            "git switch -c feature/example\ntrue",
+            "if false; then\ngit switch -c feature/example\nfi",
+            "exit 0; git switch -c feature/example",
+            "e''xit 0; git switch -c feature/example",
+            "{ exit 0; }; git switch -c feature/example",
+            "PATH=elsewhere; git switch -c feature/example",
+            "NAME=value exit 0; git switch -c feature/example",
+            "function git { true; }; git switch -c feature/example",
+            "exec true; git switch -c feature/example",
+            "time exit 0; git switch -c feature/example",
+            "! exit 0; git switch -c feature/example",
+            "hash -p /usr/bin/true git; git switch -c feature/example",
+            "trap 'exit 0' EXIT; false && git switch -c feature/example",
+            "git switch -c feature/example && echo 'unterminated",
+            "git switch -c feature/example && echo \"$variable\"",
+            "git switch -c feature/example && echo `true`",
         ] {
             assert_eq!(branch_creation(command), None, "{command}");
         }
