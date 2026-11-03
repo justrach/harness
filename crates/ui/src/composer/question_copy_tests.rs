@@ -4,6 +4,9 @@ use crate::markdown::{render, selection};
 const QUESTION: &str = "Which synthetic approach should we use?";
 const ANSWER: &str = "Keep this unfinished answer";
 
+#[path = "question_copy_tests/edges.rs"]
+mod edges;
+
 #[gpui::test]
 fn agent_question_selection_copies_with_keyboard_and_menu(cx: &mut gpui::TestAppContext) {
     let _lock = selection::test_state_lock();
@@ -51,7 +54,7 @@ fn agent_question_selection_copies_with_keyboard_and_menu(cx: &mut gpui::TestApp
             let bounds = render::selection_test_entries()
                 .into_iter()
                 .rev()
-                .find(|(key, text, _)| key.starts_with("composer-question:") && text == QUESTION)
+                .find(|(key, text, _)| key.starts_with("composer-question-") && text == QUESTION)
                 .expect("question text must be painted")
                 .2;
             let position = bounds.origin + point(px(3.0), px(8.0));

@@ -6076,6 +6076,10 @@ pub struct Composer {
     wizard_focus: FocusHandle,
     wizard_expanded: bool,
     wizard_scroll: gpui::ScrollHandle,
+    /// Isolate question geometry and highlights from other composers/windows.
+    question_selection_scope: String,
+    /// Chat, request, page, and Markdown whose snapshotted selection is valid.
+    question_selection_source: Option<(String, String, usize, String)>,
     available_height: Option<f32>,
     /// Requests already answered locally (suppresses the panel until the doc
     /// frame marks them resolved).
@@ -6248,9 +6252,15 @@ impl Composer {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        // Selection snapshots are process-global, but entity IDs are App-local.
+        static NEXT_QUESTION_SCOPE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         probe_dictation(cx);
-        cx.on_release(|this, cx| this.release_queue_previews(cx))
-            .detach();
+        cx.on_release(|this, cx| {
+            this.release_queue_previews(cx);
+            crate::markdown::render::clear_selection_surface(&this.question_selection_scope);
+        })
+        .detach();
         let input = cx.new(|cx| {
             let mut input =
                 ComposerInput::with_context("Do anything…", MESSAGE_COMPOSER_CONTEXT, cx);
@@ -6368,6 +6378,11 @@ impl Composer {
             wizard_focus: cx.focus_handle(),
             wizard_expanded: false,
             wizard_scroll: gpui::ScrollHandle::new(),
+            question_selection_scope: format!(
+                "composer-question-{}|",
+                NEXT_QUESTION_SCOPE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+            question_selection_source: None,
             available_height: None,
             answered_requests: HashSet::new(),
             wizard_retries: HashMap::new(),
@@ -10597,6 +10612,9 @@ impl Composer {
             .when(!theme.is_frost(), |el| el.shadow_lg())
             .flex()
             .flex_col()
+            .child(crate::markdown::render::selection_surface_reset(
+                self.question_selection_scope.clone(),
+            ))
             .child(
                 div()
                     .id(("question-body", page))
@@ -10655,19 +10673,20 @@ impl Composer {
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
                             .text_color(theme.text)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, window, cx| {
-                                    // Markdown selection uses the answer editor's scoped Copy route.
-                                    // Don't let the panel's default focus handler take it back.
-                                    window.focus(&this.input.focus_handle(cx), cx);
+                            .on_any_mouse_down(cx.listener(
+                                |this, event: &MouseDownEvent, window, cx| {
+                                    // Only a primary selection changes focus. Secondary clicks
+                                    // preserve the existing Copy route instead of focusing the panel.
+                                    if event.button == MouseButton::Left {
+                                        window.focus(&this.input.focus_handle(cx), cx);
+                                    }
                                     window.prevent_default();
-                                }),
-                            )
+                                },
+                            ))
                             .child(crate::markdown::render::render_tree(
                                 &question_markdown(&question.question),
                                 &crate::markdown::render::RenderOptions::settled(
-                                    "composer-question".into(),
+                                    self.question_selection_scope.clone().into(),
                                 ),
                                 &theme,
                                 window,
@@ -11048,6 +11067,29 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::transcript::record_view_frame("composer");
         let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
+        let question_source = self
+            .wizard
+            .as_ref()
+            .filter(|_| {
+                self.wizard_active()
+                    && !self.write_open
+                    && (self.wizard_expanded || !self.question_needs_popover(window))
+            })
+            .and_then(|wizard| {
+                wizard.current().map(|question| {
+                    (
+                        self.current_key.clone(),
+                        wizard.request_id.clone(),
+                        wizard.page,
+                        question.question.clone(),
+                    )
+                })
+            });
+        if question_source != self.question_selection_source {
+            // Reflow keeps a selection; replacing or hiding its source does not.
+            crate::markdown::render::clear_selection_surface(&self.question_selection_scope);
+            self.question_selection_source = question_source;
+        }
         if self.write_open {
             // The Write page renders the input (`render_write_page`); one
             // entity can't be drawn in two places.
