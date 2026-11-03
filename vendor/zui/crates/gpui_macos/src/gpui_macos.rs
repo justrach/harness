@@ -11,6 +11,7 @@ mod events;
 mod frame_pacing;
 mod frame_stats;
 mod keyboard;
+mod metal_display_link;
 mod pasteboard;
 mod system_notifications;
 mod view_display_link;

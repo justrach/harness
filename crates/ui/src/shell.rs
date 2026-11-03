@@ -78,6 +78,8 @@ mod codegraff_account;
 mod command_palette;
 mod files_panel;
 #[cfg(test)]
+mod frame_cap_tests;
+#[cfg(test)]
 mod link_tests;
 mod project_icon;
 mod reauth;
