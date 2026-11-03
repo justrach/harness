@@ -170,7 +170,11 @@ fn sidebar_control_removal_retained_new_tab_actions_preserve_split_and_draft(
                     press_keys(cx, &platform_combo("mod-b"));
                 }
                 if keyboard {
-                    press_keys(cx, &platform_combo("mod-t"));
+                    // New chat is Ctrl+Shift+T off macOS; use this platform's default.
+                    press_keys(
+                        cx,
+                        &platform_combo(crate::settings::ShortcutId::NewSession.default_combo()),
+                    );
                 } else {
                     let plus = cx.debug_bounds("titlebar-new-session").unwrap();
                     cx.simulate_click(plus.center(), Default::default());
