@@ -104,12 +104,6 @@ impl Preview {
         self.detail_task = None;
         self.detail_bounds = None;
     }
-    pub fn preferred_height(&self) -> f32 {
-        self.pending.as_ref().map_or(480.0, |p| {
-            // No cost row: the card is a line shorter than the preview was.
-            (330.0 + p.model.options.len() as f32 * 60.0).min(480.0)
-        })
-    }
     pub fn animating(&self, reduced: bool) -> bool {
         !reduced && self.slider_motion.is_some_and(|m| m.active(Instant::now()))
     }
@@ -950,7 +944,7 @@ impl Pickers {
             .unwrap_or("Model default");
         let mut body = div()
             .id("preview-options")
-            .flex_1()
+            .flex_shrink_1()
             .min_h_0()
             .overflow_y_scroll()
             .p(px(16.0))
@@ -1168,7 +1162,6 @@ impl Pickers {
             )
         });
         div()
-            .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
@@ -1786,6 +1779,55 @@ mod tests {
         });
     }
     #[gpui::test]
+    fn preview_reasoning_fits_content_without_a_bottom_void(cx: &mut gpui::TestAppContext) {
+        struct CompactFixture(Entity<Pickers>);
+        impl Render for CompactFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .p(px(20.0))
+                    .child(self.0.update(cx, |p, cx| {
+                        let content = p.render_model_preview(cx);
+                        div()
+                            .id("reasoning-card")
+                            .debug_selector(|| "reasoning-card".into())
+                            .w(px(PICKER_WIDTH))
+                            .child(p.popover_frame_flush(PICKER_WIDTH, content, cx))
+                    }))
+            }
+        }
+        cx.update(|cx| cx.set_global(Theme::light()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let picker = cx.new(|cx| Pickers::model_picker_fixture(state, false, false, cx));
+            picker.update(cx, |p, cx| {
+                p.menu_geometry.insert(
+                    PickerKind::HarnessModel,
+                    popover::MenuGeometry {
+                        height: 480.0,
+                        below: false,
+                    },
+                );
+                p.fixture_preview_model("openai/gpt-5.4", cx);
+            });
+            CompactFixture(picker)
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+        let card = visual
+            .debug_bounds("reasoning-card")
+            .expect("reasoning card");
+        let button = visual.debug_bounds("preview-use-model").expect("Use model");
+        assert!(
+            card.size.height < px(300.0),
+            "card should fit its controls: {card:?}"
+        );
+        assert!(button.bottom() <= card.bottom());
+        assert!(card.bottom() - button.bottom() <= px(16.0));
+    }
+
+    #[gpui::test]
     fn preview_pointer_drag_and_keyboard_share_staged_reasoning(cx: &mut gpui::TestAppContext) {
         struct PointerFixture(Entity<Pickers>);
         impl Render for PointerFixture {
@@ -2143,6 +2185,7 @@ mod tests {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         };
         for theme in [Theme::light(), Theme::dark()] {
             let grok = brand_accent(&model("xai/grok-5"), HarnessId::Graff, &theme);
@@ -2173,6 +2216,7 @@ mod tests {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         };
         // Nothing listed: no row rather than a made-up value.
         assert_eq!(reasoning_range(&model), None);
