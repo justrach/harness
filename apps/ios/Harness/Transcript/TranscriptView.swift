@@ -519,57 +519,35 @@ struct MarkdownRowView: View {
     }
 
     var body: some View {
-        if streaming, isVeilable, !reduceMotion {
-            // Reattaching a row must never fade already-visible text to black.
-            let veil = veils.veil(for: row.id, seededLength: textLength)
-            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !fading)) { _ in
-                veiledText(veil: veil)
-            }
-            .onChange(of: textLength) { _, _ in
-                fading = veil.isFading
-            }
-            .task(id: textLength) {
-                // Stop frame work when the last appended span has settled.
-                // A new chunk cancels this task and starts a new deadline.
-                try? await Task.sleep(for: .milliseconds(600))
-                while !Task.isCancelled, veil.isFading {
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-                guard !Task.isCancelled else { return }
-                fading = false
-            }
-            .onAppear { fading = veil.isFading }
-            .transaction { $0.animation = nil }
-        } else {
-            MarkdownBlockView(block: block, cacheKey: row.id)
+        // Keep the same native text view through the streaming → settled
+        // handoff so finishing a response doesn't throw away its selection.
+        let veil = streaming && isVeilable && !reduceMotion
+            ? veils.veil(for: row.id, seededLength: textLength) : nil
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: veil == nil || !fading)) { _ in
+            MarkdownBlockView(block: block, cacheKey: row.id, veil: veil)
         }
+        .onChange(of: textLength) { _, _ in
+            fading = veil?.isFading ?? false
+        }
+        .task(id: textLength) {
+            guard let veil else { return }
+            // Stop frame work when the last appended span has settled.
+            // A new chunk cancels this task and starts a new deadline.
+            try? await Task.sleep(for: .milliseconds(600))
+            while !Task.isCancelled, veil.isFading {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard !Task.isCancelled else { return }
+            fading = false
+        }
+        .onAppear { fading = veil?.isFading ?? false }
+        .transaction { $0.animation = nil }
     }
 
     private var isVeilable: Bool {
         switch block {
         case .paragraph, .heading: return true
         default: return false
-        }
-    }
-
-    @ViewBuilder
-    private func veiledText(veil: RowVeil) -> some View {
-        switch block {
-        case .paragraph(let runs):
-            runs.styledVeiled(veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(MD.lineHeight - MD.textSize - 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        case .heading(let level, let runs):
-            let m = MD.headingMetrics(level)
-            runs.styledVeiled(size: m.size, weight: .semibold, veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(m.line - m.size - 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        default:
-            MarkdownBlockView(block: block, cacheKey: row.id)
         }
     }
 }
@@ -738,7 +716,7 @@ struct ToolChipRow: View {
     var body: some View {
         Button {
             // Lying flat on a Duo, the row opens in the Inspect pane beside the chat.
-            if let inspectTool { inspectTool(tool); return }
+            if let inspectTool, !tool.call.isThought { inspectTool(tool); return }
             withAnimation(reduceMotion ? nil : Motion.resize) { expanded.toggle() }
             onResize()
         } label: {
@@ -761,10 +739,13 @@ struct ToolChipRow: View {
                         if tool.isError {
                             Text("Failed").font(Theme.sans(12)).foregroundStyle(Theme.danger)
                         } else if !tool.resolved {
-                            Text("Running").font(Theme.sans(12)).foregroundStyle(Theme.textFaint)
+                            Text(tool.call.isThought ? "Thinking" : "Running")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.textFaint)
                         }
                     }
-                    if !tool.call.chipDetail.isEmpty {
+                    if tool.call.isThought {
+                        ThoughtDetail(text: tool.call.chipDetail, live: !tool.resolved, expanded: expanded)
+                    } else if !tool.call.chipDetail.isEmpty {
                         Text(expanded ? tool.call.expandedDetail : tool.call.chipDetail)
                             .font(Theme.mono(13))
                             .foregroundStyle(Theme.text.opacity(0.85))
@@ -782,12 +763,37 @@ struct ToolChipRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-        .accessibilityHint("Shows the full tool details")
+        .accessibilityHint(tool.call.isThought ? "Shows the full thought" : "Shows the full tool details")
         .contextMenu {
             Button("Copy details", systemImage: "doc.on.doc") {
                 UIPasteboard.general.string = tool.call.expandedDetail
             }
         }
+    }
+}
+
+/// A thought's body: prose in the reply's typeface, so it scales with
+/// Dynamic Type like the reply does. Collapsed, it previews two lines, the
+/// newest while the model is still thinking.
+private struct ThoughtDetail: View {
+    let text: String
+    let live: Bool
+    let expanded: Bool
+
+    var body: some View {
+        if !text.isEmpty {
+            Text(Self.inlineMarkdown(expanded ? text : thoughtPreview(text, live: live)))
+                .font(Theme.sans(14))
+                .foregroundStyle(Theme.text.opacity(0.85))
+                .lineLimit(expanded ? nil : 2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private static func inlineMarkdown(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
     }
 }
 

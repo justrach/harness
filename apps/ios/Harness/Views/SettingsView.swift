@@ -14,6 +14,9 @@ struct SettingsView: View {
     /// Screenshot rig: `-demo -open-autonomy` opens on Agents > Autonomy.
     @State private var showAutonomy = ProcessInfo.processInfo.arguments.contains("-demo")
         && ProcessInfo.processInfo.arguments.contains("-open-autonomy")
+    /// Screenshot rig: `-demo -open-notifications` opens on Notifications.
+    @State private var showNotifications = ProcessInfo.processInfo.arguments.contains("-demo")
+        && ProcessInfo.processInfo.arguments.contains("-open-notifications")
 
     init(openCrashReports: Bool = false) {
         _showCrashReports = State(initialValue: openCrashReports)
@@ -166,6 +169,7 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationDestination(isPresented: $showCrashReports) { CrashReportsView() }
             .navigationDestination(isPresented: $showAutonomy) { AutonomyView() }
+            .navigationDestination(isPresented: $showNotifications) { NotificationsView() }
             .fullScreenCover(isPresented: $replaySetup) {
                 OnboardingView { replaySetup = false }
                     .environment(model)

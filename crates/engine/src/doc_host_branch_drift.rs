@@ -102,6 +102,174 @@ fn renamed_through(reflog: &[(i64, String)], since: i64, from: &str, to: &str) -
     renamed && branch == to
 }
 
+/// A literal fresh-branch checkout and its start point. Unsupported shell
+/// syntax stays behind the drift question; a mention inside `echo`, a command
+/// in another directory, or a forced branch reset is not ownership evidence.
+fn branch_creation(command: &str) -> Option<(&str, &str)> {
+    // Split simple shell lists without treating quoted commit messages (or
+    // quoted mentions of Git commands) as executable steps. Expansion, pipes,
+    // background jobs and other shell programs remain deliberately unsupported.
+    let mut steps = Vec::new();
+    let mut quote = None;
+    let mut start = 0;
+    let mut chain = 0;
+    let mut chars = command.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                }
+            }
+            Some('"') => match ch {
+                '"' => quote = None,
+                '$' | '`' | '\\' => return None,
+                _ => {}
+            },
+            _ => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '|' | '$' | '`' | '\\' | '(' | ')' | '<' | '>' | '#' => return None,
+                '&' => {
+                    if chars.next().map(|(_, ch)| ch) != Some('&') {
+                        return None;
+                    }
+                    steps.push((&command[start..at], chain));
+                    start = at + 2;
+                }
+                ';' | '\n' => {
+                    steps.push((&command[start..at], chain));
+                    start = at + 1;
+                    chain += 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    steps.push((&command[start..], chain));
+    let steps: Vec<(Vec<&str>, usize)> = steps
+        .iter()
+        .map(|(step, chain)| (step.split_whitespace().collect::<Vec<_>>(), *chain))
+        .filter(|(words, _)| !words.is_empty())
+        .collect();
+    if steps.iter().any(|(words, _)| {
+        let word = words[0];
+        word.contains(['\'', '"', '='])
+            || matches!(
+                word,
+                "cd" | "pushd"
+                    | "popd"
+                    | "export"
+                    | "source"
+                    | "."
+                    | "eval"
+                    | "exit"
+                    | "return"
+                    | "exec"
+                    | "trap"
+                    | "set"
+                    | "unset"
+                    | "alias"
+                    | "unalias"
+                    | "command"
+                    | "builtin"
+                    | "if"
+                    | "then"
+                    | "else"
+                    | "elif"
+                    | "fi"
+                    | "for"
+                    | "while"
+                    | "until"
+                    | "do"
+                    | "done"
+                    | "case"
+                    | "esac"
+                    | "select"
+                    | "break"
+                    | "continue"
+                    | "function"
+                    | "readonly"
+                    | "declare"
+                    | "typeset"
+                    | "local"
+                    | "time"
+                    | "!"
+                    | "coproc"
+                    | "hash"
+                    | "read"
+                    | "getopts"
+                    | "newgrp"
+                    | "fc"
+                    | "{"
+                    | "}"
+            )
+            || word.starts_with("GIT_")
+    }) {
+        return None;
+    }
+    // Only the final nonempty && chain determines a successful shell result.
+    // In `false && git switch -c task; true`, the tool succeeds without ever
+    // running Git. A later external creation must not inherit that authority.
+    let last_chain = steps.last()?.1;
+    steps
+        .iter()
+        .filter(|(_, chain)| *chain == last_chain)
+        .find_map(|(words, _)| {
+            let ["git", operation, args @ ..] = words.as_slice() else {
+                return None;
+            };
+            let quiet = args
+                .iter()
+                .take_while(|arg| matches!(**arg, "-q" | "--quiet"))
+                .count();
+            let [option, branch, rest @ ..] = &args[quiet..] else {
+                return None;
+            };
+            let creates = matches!(
+                (*operation, *option),
+                ("switch", "-c" | "--create") | ("checkout", "-b")
+            );
+            if !creates || rest.len() > 1 {
+                return None;
+            }
+            let start = rest.first().copied().unwrap_or("HEAD");
+            let literal_ref = |word: &str| {
+                !word.is_empty()
+                    && !word.starts_with('-')
+                    && word
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || "./_-~^@{}".contains(ch))
+            };
+            (literal_ref(branch) && literal_ref(start)).then_some((*branch, start))
+        })
+}
+
+/// Exactly one checkout, from the accepted branch to the fresh branch.
+/// Other switches (even away and back), renames, and rebases onto another
+/// branch are not covered by an earlier branch-creation command.
+fn created_through(reflog: &[(i64, String)], since: i64, from: &str, to: &str) -> bool {
+    let expected = format!("checkout: moving from {from} to {to}");
+    let mut created = false;
+    for (_, subject) in reflog.iter().filter(|(at, _)| *at >= since) {
+        if subject.starts_with("checkout:") {
+            if created || subject != &expected {
+                return false;
+            }
+            created = true;
+        } else if subject.starts_with("Branch: renamed ") {
+            return false;
+        } else if let Some((_, returned)) = subject.split_once("returning to refs/heads/")
+            && returned != if created { to } else { from }
+        {
+            return false;
+        }
+    }
+    created
+}
+
 /// A dispatch waiting on the user's answer. Also stored in the chat document
 /// under the question id, preserving attachments and configuration on restart.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -302,55 +470,61 @@ impl DocHost {
         })?;
         if !shared
             && !drift.checkout_replaced
-            && self.own_turn_renamed(chat_id, &previous, &drift).await
+            && self
+                .own_turn_changed_branch(chat_id, &previous, &drift)
+                .await
         {
             tracing::info!(
                 chat = %chat_id,
                 from = %drift.from_branch,
                 to = %drift.to_branch,
-                "branch renamed by the chat's own turn; continuing without asking"
+                "branch changed by the chat's own turn; continuing without asking"
             );
             return None;
         }
         Some(drift)
     }
 
-    /// Whether the chat's own last turn renamed its branch (`git branch -m`
-    /// while preparing a PR, say) and nothing else moved it since (#453).
-    /// Both must hold: the chat ran a rename after its last accepted
-    /// context, and this checkout's `HEAD` reflog since then goes from the
-    /// old branch to the current one through renames alone. Anything less,
-    /// a switch, another chat's rename, a reflog we cannot read, still asks.
-    async fn own_turn_renamed(
+    /// Reconcile a proven rename (#453) or fresh-branch checkout (#732)
+    /// performed by this chat. Tool-call ownership and Git continuity must
+    /// agree; a successful shell command alone never approves arbitrary drift.
+    async fn own_turn_changed_branch(
         &self,
         chat_id: &str,
         previous: &ConversationSourceContext,
         drift: &Drift,
     ) -> bool {
         let since_ms = previous.observed_at.timestamp_millis();
-        let ran_rename = self
+        let Ok(entries) = self
             .open(chat_id)
             .and_then(|handle| Ok(handle.doc.read_entries()?))
-            .is_ok_and(|entries| {
-                entries
-                    .iter()
-                    .filter(|entry| {
-                        entry.role == MessageRole::Assistant && entry.created_at >= since_ms
-                    })
-                    .flat_map(|entry| &entry.parts)
-                    .any(|part| {
-                        matches!(
-                            part,
-                            MessagePart::Tool {
-                                call: harness_proto::ToolCall::Exec { command },
-                                resolved: true,
-                                is_error: false,
-                                ..
-                            } if is_branch_rename(command)
-                        )
-                    })
-            });
-        if !ran_rename {
+        else {
+            return false;
+        };
+        let mut ran_rename = false;
+        let mut creation_start = None;
+        for command in entries
+            .iter()
+            .filter(|entry| entry.role == MessageRole::Assistant && entry.created_at >= since_ms)
+            .flat_map(|entry| &entry.parts)
+            .filter_map(|part| match part {
+                MessagePart::Tool {
+                    call: harness_proto::ToolCall::Exec { command },
+                    resolved: true,
+                    is_error: false,
+                    ..
+                } => Some(command.as_str()),
+                _ => None,
+            })
+        {
+            ran_rename |= is_branch_rename(command);
+            if let Some((branch, start)) = branch_creation(command)
+                && branch == drift.to_branch
+            {
+                creation_start = Some(start);
+            }
+        }
+        if !ran_rename && creation_start.is_none() {
             return false;
         }
         let Some(repos) = self.inner.repos.get() else {
@@ -359,12 +533,18 @@ impl DocHost {
         let Ok(reflog) = repos.head_reflog(Path::new(&previous.cwd)).await else {
             return false;
         };
-        renamed_through(
-            &reflog,
-            previous.observed_at.timestamp(),
-            &drift.from_branch,
-            &drift.to_branch,
-        )
+        let since = previous.observed_at.timestamp();
+        if ran_rename && renamed_through(&reflog, since, &drift.from_branch, &drift.to_branch) {
+            return true;
+        }
+        let Some(start) = creation_start else {
+            return false;
+        };
+        created_through(&reflog, since, &drift.from_branch, &drift.to_branch)
+            && repos
+                .branch_created_since(Path::new(&previous.cwd), &drift.to_branch, start, since)
+                .await
+                .unwrap_or(false)
     }
 
     /// The queue must not release anything while a drift question waits.
@@ -946,6 +1126,122 @@ mod tests {
             "alpha",
             "other"
         ));
+    }
+
+    #[test]
+    fn only_literal_fresh_branch_commands_prove_creation() {
+        for command in [
+            "git switch -c feature/example",
+            "git switch -q --create feature/example",
+            "git checkout -b feature/example",
+        ] {
+            assert_eq!(branch_creation(command), Some(("feature/example", "HEAD")));
+        }
+        assert_eq!(
+            branch_creation(
+                "git fetch upstream && git switch -c feature/example upstream/main && git status"
+            ),
+            Some(("feature/example", "upstream/main"))
+        );
+        assert_eq!(
+            branch_creation("git checkout -q -b feature/example HEAD~1"),
+            Some(("feature/example", "HEAD~1"))
+        );
+        assert_eq!(
+            branch_creation("git switch -c feature/example && git commit -m 'task; work'"),
+            Some(("feature/example", "HEAD"))
+        );
+        for command in [
+            "git switch feature/example",
+            "git switch -C feature/example",
+            "git checkout -B feature/example",
+            "git branch feature/example",
+            "echo git switch -c feature/example",
+            "echo 'git switch -c feature/example'",
+            "echo 'example; git switch -c feature/example'",
+            "echo \"example && git switch -c feature/example\"",
+            "GIT_DIR=elsewhere; git switch -c feature/example",
+            "\"cd\" elsewhere && git switch -c feature/example",
+            "cd elsewhere && git switch -c feature/example",
+            "git -C elsewhere switch -c feature/example",
+            "GIT_DIR=elsewhere git switch -c feature/example",
+            "git switch -c $branch",
+            "git switch -c feature/example || true",
+            "git switch -c feature/example & wait",
+        ] {
+            assert_eq!(branch_creation(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn branch_creation_requires_a_success_determining_chain() {
+        for command in [
+            "git fetch upstream; git switch -c feature/example && git status",
+            "git status\ngit switch -c feature/example;\n",
+            "git switch -c feature/example && git commit -m \"safe; quoted && text\"",
+        ] {
+            assert_eq!(
+                branch_creation(command),
+                Some(("feature/example", "HEAD")),
+                "{command}"
+            );
+        }
+        for command in [
+            "false && git switch -c feature/example; true",
+            "git switch -c feature/example; git status",
+            "git switch -c feature/example\ntrue",
+            "if false; then\ngit switch -c feature/example\nfi",
+            "exit 0; git switch -c feature/example",
+            "e''xit 0; git switch -c feature/example",
+            "{ exit 0; }; git switch -c feature/example",
+            "PATH=elsewhere; git switch -c feature/example",
+            "NAME=value exit 0; git switch -c feature/example",
+            "function git { true; }; git switch -c feature/example",
+            "exec true; git switch -c feature/example",
+            "time exit 0; git switch -c feature/example",
+            "! exit 0; git switch -c feature/example",
+            "hash -p /usr/bin/true git; git switch -c feature/example",
+            "trap 'exit 0' EXIT; false && git switch -c feature/example",
+            "git switch -c feature/example && echo 'unterminated",
+            "git switch -c feature/example && echo \"$variable\"",
+            "git switch -c feature/example && echo `true`",
+        ] {
+            assert_eq!(branch_creation(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn only_one_matching_creation_checkout_is_continuity() {
+        let checkout = "checkout: moving from alpha to beta";
+        let log = |subjects: &[&str]| -> Vec<(i64, String)> {
+            subjects
+                .iter()
+                .map(|subject| (100, subject.to_string()))
+                .collect()
+        };
+        assert!(created_through(
+            &log(&["commit: before", checkout, "commit: after"]),
+            100,
+            "alpha",
+            "beta"
+        ));
+        for subjects in [
+            vec![],
+            vec![checkout, "checkout: moving from beta to other"],
+            vec![checkout, "checkout: moving from beta to alpha", checkout],
+            vec!["checkout: moving from other to beta"],
+            vec![
+                "Branch: renamed refs/heads/alpha to refs/heads/other",
+                checkout,
+            ],
+            vec![checkout, "rebase (finish): returning to refs/heads/other"],
+        ] {
+            assert!(
+                !created_through(&log(&subjects), 100, "alpha", "beta"),
+                "{subjects:?}"
+            );
+        }
+        assert!(!created_through(&log(&[checkout]), 101, "alpha", "beta"));
     }
 
     #[test]

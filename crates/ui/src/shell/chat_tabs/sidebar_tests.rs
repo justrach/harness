@@ -194,7 +194,7 @@ fn sidebar_click_reveals_existing_tab_and_pane(cx: &mut gpui::TestAppContext) {
 struct QuestionNavigation(Entity<Shell>);
 
 impl Render for QuestionNavigation {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             div()
                 .size_full()
@@ -203,7 +203,11 @@ impl Render for QuestionNavigation {
                     div()
                         .w(px(280.0))
                         .h_full()
-                        .child(shell.render_chat_sidebar(&Theme::default(), cx)),
+                        .child(shell.render_workspace_session_sidebar(
+                            &Theme::default(),
+                            window,
+                            cx,
+                        )),
                 )
                 .child(
                     div()
@@ -288,6 +292,22 @@ fn assert_active_question_reselection(cx: &mut gpui::TestAppContext, tabs: bool,
                     None,
                 );
             }
+            shell.ensure_workspace_sessions(cx);
+            shell.chat_tabs[0].id = "current-session".into();
+            shell.chat_tabs[0].selected = Some("current".into());
+            let layout = shell.panel_layout_mut(cx);
+            layout.panels[0].tabs = vec![workspace_panels::PanelTab::Chat("current".into())];
+            layout.last_selected = Some(Some("current".into()));
+            if split {
+                layout.panels.push(workspace_panels::WorkspacePanel {
+                    id: 1,
+                    tabs: vec![workspace_panels::PanelTab::Chat("peer".into())],
+                    active: 0,
+                    share: 0.5,
+                });
+                layout.panels[0].share = 0.5;
+                layout.next_id = 2;
+            }
             shell.composer.update(cx, |composer, cx| {
                 composer.set_available_width(200.0, cx);
                 composer.set_available_height(600.0, cx);
@@ -321,10 +341,10 @@ fn assert_active_question_reselection(cx: &mut gpui::TestAppContext, tabs: bool,
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("question-popover").is_some());
-    let mut selectors = vec!["chat-current", "chat-tab-0"];
-    if split {
-        selectors.push("chat-pane-card-1");
-    }
+    // Exercise the visible workspace-session row and the handler used by an
+    // already-focused panel tab. The narrow host keeps the question in its
+    // floating presentation, independent of the main workspace's dimensions.
+    let selectors = ["workspace-session-current-session", "active-panel-tab"];
     for selector in &selectors {
         // Ordinary outside clicks and background notifications stay dismissed.
         let outside = cx.debug_bounds("question-outside").unwrap();
@@ -340,9 +360,7 @@ fn assert_active_question_reselection(cx: &mut gpui::TestAppContext, tabs: bool,
         // Repeated clicks on the real already-active control must reopen even
         // though mouse-down outside the question dismisses it first.
         for _ in 0..2 {
-            let control = cx.debug_bounds(selector).unwrap();
-            cx.simulate_click(control.center(), Default::default());
-            cx.run_until_parked();
+            reselect_question_control(&shell, selector, cx);
             assert!(cx.debug_bounds("question-popover").is_some(), "{selector}");
             shell.read_with(cx, |shell, cx| {
                 assert_eq!(
@@ -376,15 +394,35 @@ fn assert_active_question_reselection(cx: &mut gpui::TestAppContext, tabs: bool,
     });
     cx.run_until_parked();
     for selector in selectors {
-        let control = cx.debug_bounds(selector).unwrap();
-        cx.simulate_click(control.center(), Default::default());
-        cx.run_until_parked();
+        reselect_question_control(&shell, selector, cx);
         assert!(cx.debug_bounds("question-popover").is_none(), "{selector}");
         composer.read_with(cx, |composer, cx| {
             assert_eq!(composer.editing_queued.as_deref(), Some("row"));
             assert_eq!(composer.input.read(cx).text(), "queued text");
         });
     }
+}
+
+fn reselect_question_control(
+    shell: &Entity<Shell>,
+    selector: &'static str,
+    cx: &mut gpui::VisualTestContext,
+) {
+    if selector == "active-panel-tab" {
+        shell.update_in(cx, |shell, window, cx| {
+            let panel = shell.panel_layout(cx).unwrap().focused;
+            shell.focus_workspace_tab(
+                panel,
+                workspace_panels::PanelTab::Chat("current".into()),
+                window,
+                cx,
+            );
+        });
+    } else {
+        let control = cx.debug_bounds(selector).unwrap();
+        cx.simulate_click(control.center(), Default::default());
+    }
+    cx.run_until_parked();
 }
 
 #[gpui::test]
@@ -399,22 +437,22 @@ fn active_sidebar_tab_and_pane_reselection_reopens_pending_question(cx: &mut gpu
     assert_active_question_reselection(cx, true, true);
 }
 
-/// The real chat sidebar at a fixed window height.
+/// The workspace session sidebar at a fixed window height.
 struct ChatSidebar(Entity<Shell>);
 
 impl Render for ChatSidebar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             div()
                 .w(px(280.0))
                 .h(px(600.0))
-                .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                .child(shell.render_workspace_session_sidebar(&Theme::default(), window, cx))
         })
     }
 }
 
 #[gpui::test]
-fn open_tabs_do_not_consume_conversation_sidebar_space(cx: &mut gpui::TestAppContext) {
+fn workspace_sessions_scroll_without_displacing_sidebar_controls(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -448,25 +486,37 @@ fn open_tabs_do_not_consume_conversation_sidebar_space(cx: &mut gpui::TestAppCon
             shell.route = Route::Chat;
             shell.chat_tabs = vec![Default::default(); 25];
             shell.chat_tab = 24;
+            shell.ensure_workspace_sessions(cx);
             shell
         }))
     });
     let shell = host.read_with(cx, |host, _| host.0.clone());
     cx.run_until_parked();
-    let filter = cx
-        .debug_bounds("sidebar-new-tab")
-        .expect("new-tab row rendered");
+    // The workspace already provides creation and search actions. No duplicate
+    // legacy controls (or their click targets) should take space above the list.
+    assert!(cx.debug_bounds("sidebar-new-chat").is_none());
+    assert!(cx.debug_bounds("sidebar-search-field").is_none());
+    let create = cx
+        .debug_bounds("sidebar-session-create")
+        .expect("new-session footer rendered");
     let switcher = cx.debug_bounds("session-switcher").unwrap();
-    assert!(filter.top() >= switcher.bottom(), "{filter:?}");
-    assert!(
-        cx.debug_bounds("chat-tab-24").is_none(),
-        "open tabs no longer consume sidebar space"
-    );
+    let list = cx.debug_bounds("workspace-session-list").unwrap();
+    assert!(list.top() >= switcher.bottom());
+    shell.read_with(cx, |shell, _| {
+        assert_eq!(shell.chat_tabs.len(), 25);
+        let viewport = shell.sidebar_scroll.bounds();
+        assert!(viewport.bottom() <= create.top());
+        assert!(shell.sidebar_scroll.max_offset().y > px(0.0));
+    });
     shell.update(cx, |shell, cx| {
         shell.chat_tabs.truncate(1);
         shell.chat_tab = 0;
         cx.notify();
     });
-    assert_eq!(cx.debug_bounds("sidebar-new-tab").unwrap(), filter);
+    cx.run_until_parked();
+    assert_eq!(cx.debug_bounds("sidebar-session-create").unwrap(), create);
     assert_eq!(cx.debug_bounds("session-switcher").unwrap(), switcher);
+    shell.read_with(cx, |shell, _| {
+        assert_eq!(shell.sidebar_scroll.max_offset().y, px(0.0))
+    });
 }

@@ -2,6 +2,8 @@
 //! belongs to its tab bar. Moving a tab never reorders either panel.
 use super::*;
 use gpui::point;
+#[cfg(feature = "browser-fixture")]
+use gpui_base::ElementExt as _;
 use std::collections::{HashMap, HashSet};
 mod device_picker;
 mod recovery;
@@ -864,6 +866,8 @@ pub(super) struct PanelWorkspaces {
     pub(super) needs_persist: bool,
     pub layouts: HashMap<String, WorkspaceLayout>,
     pub(super) menu: Option<PanelMenu>,
+    #[cfg(feature = "browser-fixture")]
+    fixture_menu_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
     pub(super) device_menu: Option<device_picker::PanelDeviceMenu>,
     device_choices: HashMap<(String, u64), device_picker::PanelDeviceContext>,
     pub(super) pending_tools: HashMap<String, Vec<(u64, usize, crate::settings::SavedPanelTab)>>,
@@ -912,6 +916,10 @@ pub(super) struct PanelWorkspaces {
 }
 
 impl Shell {
+    pub(super) fn workspace_resize_active(&self) -> bool {
+        self.workspace_panels.resize.is_some()
+    }
+
     pub(super) fn workspace_layout_key(&self, cx: &App) -> String {
         self.chat_tabs
             .get(self.chat_tab)
@@ -1250,8 +1258,18 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let reselected_chat = matches!(&tab, PanelTab::Chat(id)
+            if self.state.read(cx).selected_chat.as_ref() == Some(id))
+            && self.panel_layout(cx).is_some_and(|layout| {
+                layout.focused == panel
+                    && layout.panel(panel).and_then(|panel| panel.selected()) == Some(&tab)
+            });
         self.park_workspace_draft(cx);
         self.activate_workspace_tab(panel, tab, window, cx);
+        if reselected_chat {
+            self.composer
+                .update(cx, |composer, cx| composer.reveal_pending_question(cx));
+        }
     }
 
     fn activate_workspace_tab(
@@ -2725,15 +2743,17 @@ impl Shell {
                 .child(div().flex_1().child(*title)),
             );
         }
-        Some(
-            div()
-                .absolute()
-                .left(px(x))
-                .top(px(y))
-                .occlude()
-                .child(card)
-                .into_any_element(),
-        )
+        #[cfg(feature = "browser-fixture")]
+        let card = {
+            let measured = self.workspace_panels.fixture_menu_bounds.clone();
+            card.on_prepaint(move |bounds, _, _| measured.set(Some(bounds)))
+        };
+        Some(popover::menu_at(
+            "workspace-panel-menu",
+            point(px(x), px(y)),
+            card.into_any_element(),
+            None,
+        ))
     }
 
     fn render_workspace_button(
@@ -4700,6 +4720,7 @@ impl Shell {
                                     extent: extent.max(1.0),
                                     shares: (before.share, after.share),
                                 });
+                                cx.notify();
                                 cx.stop_propagation();
                             }),
                         )
@@ -4860,6 +4881,7 @@ impl Shell {
                 };
                 if e.pressed_button != Some(MouseButton::Left) {
                     this.workspace_panels.resize = None;
+                    cx.notify();
                     return;
                 }
                 let Some(layout) = this.workspace_panels.layouts.get_mut(&drag.workspace) else {
@@ -4892,7 +4914,11 @@ impl Shell {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.workspace_panels.resize = None),
+                cx.listener(|this, _, _, cx| {
+                    if this.workspace_panels.resize.take().is_some() {
+                        cx.notify();
+                    }
+                }),
             )
             .child(
                 self.titlebar_drag_region(
@@ -4925,6 +4951,167 @@ impl Shell {
             .children(overlays)
             .children(menu)
             .into_any_element()
+    }
+}
+
+/// Native browser fixtures follow the workspace's measured chrome and resize
+/// state; legacy right-pane drag markers do not describe these panels.
+#[cfg(feature = "browser-fixture")]
+impl Shell {
+    fn fixture_active_browser_panel(&self, cx: &App) -> Option<(u64, PanelTab)> {
+        let surface = self.resolved_right_active(cx);
+        if !matches!(surface, RightSurface::Browser(_)) {
+            return None;
+        }
+        self.panel_layout(cx)?.panels.iter().find_map(|panel| {
+            panel.tabs.iter().find_map(|tab| {
+                matches!(tab, PanelTab::Surface { surface: candidate, .. } if *candidate == surface)
+                    .then(|| (panel.id, tab.clone()))
+            })
+        })
+    }
+
+    pub(super) fn fixture_workspace_browser_menu(
+        &mut self,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_panels.fixture_menu_bounds.set(None);
+        if open {
+            if let Some((panel, tab)) = self.fixture_active_browser_panel(cx) {
+                let workspace = self.workspace_layout_key(cx);
+                let tab_bounds = self
+                    .workspace_panels
+                    .active_tab_bounds
+                    .borrow()
+                    .get(&(workspace, panel))
+                    .copied();
+                if let Some(bounds) = tab_bounds {
+                    self.open_panel_menu(
+                        panel,
+                        Some(tab),
+                        point(bounds.left() + px(24.0), bounds.bottom()),
+                        false,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        } else {
+            self.workspace_panels.menu = None;
+            self.workspace_panels.target = None;
+            cx.notify();
+        }
+    }
+
+    pub fn fixture_browser_menu_bounds(&self) -> Option<gpui::Bounds<Pixels>> {
+        self.workspace_panels.fixture_menu_bounds.get()
+    }
+
+    pub(super) fn fixture_workspace_expand_browser(&mut self, cx: &mut Context<Self>) {
+        if let Some((panel, _)) = self.fixture_active_browser_panel(cx) {
+            let layout = self.panel_layout_mut(cx);
+            layout.expanded = (layout.expanded != Some(panel)).then_some(panel);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn fixture_workspace_toggle_browser_visibility(&mut self, cx: &mut Context<Self>) {
+        if let Some((panel, _)) = self.fixture_active_browser_panel(cx) {
+            let layout = self.panel_layout_mut(cx);
+            layout.expanded = if layout.expanded.is_some() {
+                None
+            } else {
+                layout
+                    .panels
+                    .iter()
+                    .find(|candidate| candidate.id != panel)
+                    .map(|other| other.id)
+            };
+            cx.notify();
+        }
+    }
+
+    pub(super) fn fixture_workspace_resize_browser(&mut self, width: f32, cx: &mut Context<Self>) {
+        let Some((panel, _)) = self.fixture_active_browser_panel(cx) else {
+            return;
+        };
+        let extent = self.viewport_width - self.sidebar_now() - GUTTER;
+        let layout = self.panel_layout_mut(cx);
+        if layout.axis != SplitAxis::Horizontal || layout.panels.len() < 2 || layout.expanded.is_some() {
+            return;
+        }
+        let extent = (extent - layout.gap() * layout.panels.len().saturating_sub(1) as f32).max(1.0);
+        let minimum = PANEL_MIN / extent;
+        let target = (width / extent).clamp(
+            minimum,
+            (1.0 - minimum * (layout.panels.len() - 1) as f32).max(minimum),
+        );
+        let remainder: f32 = layout
+            .panels
+            .iter()
+            .filter(|p| p.id != panel)
+            .map(|p| p.share)
+            .sum();
+        for candidate in &mut layout.panels {
+            candidate.share = if candidate.id == panel {
+                target
+            } else {
+                candidate.share / remainder * (1.0 - target)
+            };
+        }
+        cx.notify();
+    }
+
+    pub fn fixture_browser_panel_targets(
+        &self,
+        browser: u64,
+        cx: &App,
+    ) -> Option<(gpui::Bounds<Pixels>, gpui::Bounds<Pixels>)> {
+        let workspace = self.workspace_layout_key(cx);
+        let layout = self.panel_layout(cx)?;
+        if layout.axis != SplitAxis::Horizontal || layout.expanded.is_some() {
+            return None;
+        }
+        let (panel_index, panel, tab_index) =
+            layout.panels.iter().enumerate().find_map(|(index, panel)| {
+                panel
+                    .tabs
+                    .iter()
+                    .position(|tab| {
+                        matches!(tab,
+                            PanelTab::Surface { surface: RightSurface::Browser(id), .. } if *id == browser
+                        )
+                    })
+                    .map(|tab| (index, panel, tab))
+            })?;
+        if panel_index == 0 {
+            return None;
+        }
+        let key = (workspace.clone(), panel.id);
+        let bounds = *self.workspace_panels.panel_bounds.borrow().get(&key)?;
+        let frame = self.workspace_panels.rendered_frames.get(&key)?;
+        let tab = *self
+            .workspace_panels
+            .window_tab_bounds
+            .borrow()
+            .get(&(workspace, panel.id, tab_index))?;
+        let divider = gpui::Bounds::new(
+            point(
+                bounds.left() - px(6.0),
+                bounds.top() + px(frame.header_height),
+            ),
+            gpui::size(
+                px(6.0),
+                (bounds.size.height - px(frame.header_height)).max(px(0.0)),
+            ),
+        );
+        Some((tab, divider))
+    }
+
+    pub fn fixture_workspace_resizing(&self) -> bool {
+        self.workspace_resize_active()
     }
 }
 

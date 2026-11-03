@@ -133,7 +133,20 @@ impl Shell {
 
     pub(super) fn toggle_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sidebar_search.take().is_some() {
-            window.focus(&self.sidebar_search_trigger_focus, cx);
+            // Legacy sidebars retain a search trigger. The workspace sidebar
+            // opens Find on demand, so return typing to its mounted composer.
+            let composer = self.composer.focus_handle(cx);
+            let focus = if self
+                .shortcut_focus
+                .contains(&self.sidebar_search_trigger_focus, window)
+            {
+                &self.sidebar_search_trigger_focus
+            } else if self.shortcut_focus.contains(&composer, window) {
+                &composer
+            } else {
+                &self.session_switcher_focus
+            };
+            window.focus(focus, cx);
         } else {
             self.cancel_sidebar_session_transfer(cx);
             self.cancel_pinned_session_drag(cx);

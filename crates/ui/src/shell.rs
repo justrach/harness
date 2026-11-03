@@ -85,6 +85,8 @@ mod codex_import;
 mod chat_history_fixture;
 mod files_panel;
 #[cfg(test)]
+mod frame_cap_tests;
+#[cfg(test)]
 mod link_tests;
 mod project_icon;
 mod reauth;
@@ -114,6 +116,8 @@ mod tabs;
 mod titlebar_tests;
 #[cfg(test)]
 mod typing_tests;
+#[cfg(test)]
+mod view_cache_tests;
 #[cfg(test)]
 mod work_pane_tests;
 
@@ -2042,7 +2046,7 @@ pub struct Shell {
     /// The selection the split last saw, to tell outside picks from its own.
     chat_split_selected: Option<String>,
     /// Only a gesture begun in a peer pane may activate it on release.
-    chat_pane_press: Option<(usize, gpui::MouseButton)>,
+    chat_pane_press: Option<chat_split::ChatPanePress>,
     /// Unfocused panes' chats last seen unarchived. Only archiving one of
     /// those closes its pane; an archived session opened to read keeps its
     /// pane when focus moves away (#489).
@@ -2203,6 +2207,8 @@ pub struct Shell {
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
+    /// Restarted whenever closing a running session shows its temporary warning.
+    close_archive_notice_task: Option<Task<()>>,
     /// Local lifecycle of an in-app update (macOS bundle swap) — the engine's
     /// UpdateStatus stream says WHETHER one exists; this says how far the
     /// download/stage of it has come in this process.
@@ -2747,6 +2753,7 @@ impl Shell {
             attention_sound_gate: Default::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
+            close_archive_notice_task: None,
             update_flow: UpdateFlow::Idle,
             update_task: None,
             auto_download_failed: None,
@@ -4158,6 +4165,29 @@ impl Shell {
             RightSurface::File(id),
         );
         self.set_right_active(RightSurface::File(id), cx);
+    }
+
+    fn add_file_surface_at_anchor(
+        &mut self,
+        path: String,
+        anchor: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_file_surface(path.clone(), window, cx);
+        let panel_key = self.panel_key(cx);
+        let engine_owner = self.files_engine_owner(&panel_key, cx);
+        let lookup = (panel_key, engine_owner, path.clone());
+        if let Some(file) = self
+            .file_surface_keys
+            .get(&lookup)
+            .and_then(|id| self.file_surfaces.get(id))
+            .cloned()
+        {
+            file.update(cx, |file, cx| {
+                file.navigate_markdown_anchor(path, anchor, cx)
+            });
+        }
     }
 
     fn open_workspace_file_link(
@@ -13302,7 +13332,7 @@ impl Render for Shell {
             && !self.session_overview;
         // Native clipping follows the animated GPUI mask. Drags only transfer
         // pointer ownership; the browser continues rendering and reflowing.
-        let browser_dragging = cx.has_active_drag();
+        let browser_dragging = cx.has_active_drag() || self.workspace_resize_active();
         for (id, browser) in &self.browsers {
             let presentation = crate::browser::model::presentation(
                 browser_active && workspace_browser_ids.contains(id),
@@ -13772,7 +13802,7 @@ impl Render for Shell {
                     );
                     // A side-by-side chat split gives the focused column its
                     // share; the peers take the rest (`render_chat_split`).
-                    let main_target_width = split_total_width * self.focused_chat_pane_share();
+                    let main_target_width = self.focused_chat_pane_width(split_total_width);
                     let main_transition = self
                         .active_tween_endpoints(self.main_takeover_tween)
                         .map(|(from, to)| {
@@ -13873,7 +13903,7 @@ impl Render for Shell {
                     } else {
                         main
                     };
-                    let main = self.render_chat_split(main, split_total_width, cx);
+                    let main = self.render_chat_split(main, cx);
                     // Drag a sidebar session onto the chat area to split it open.
                     let drop_zones = self.render_split_drop_zones(&Theme::of(cx).clone(), cx);
                     let main = if drop_zones.is_empty() {
@@ -18211,19 +18241,14 @@ impl Shell {
     pub fn fixture_close_browser(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.close_right_surface(RightSurface::Browser(id), window, cx);
     }
-    pub fn fixture_browser_menu(&mut self, open: bool, cx: &mut Context<Self>) {
-        if open {
-            self.right_plus.open(());
-            cx.notify();
-        } else {
-            self.close_right_plus(cx);
-        }
+    pub fn fixture_browser_menu(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.fixture_workspace_browser_menu(open, window, cx);
     }
     pub fn fixture_browser_menu_mounted(&self) -> bool {
-        self.right_plus.get().is_some()
+        self.workspace_panels.menu.is_some()
     }
     pub fn fixture_expand_browser(&mut self, cx: &mut Context<Self>) {
-        self.toggle_right_pane_expand(cx);
+        self.fixture_workspace_expand_browser(cx);
     }
     pub fn fixture_blur_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.route = Route::Settings(SettingsSection::Devices);
@@ -18232,15 +18257,15 @@ impl Shell {
     }
     pub fn fixture_toggle_sidebar(&mut self, right: bool, cx: &mut Context<Self>) {
         if right {
-            // The fixtures drive the surface host only; the explorer stays put.
-            self.set_surfaces_open(!self.right_pane_open(cx), cx);
+            // Expanding its neighboring panel hides the browser without
+            // closing its tab; restoring panels brings the same page back.
+            self.fixture_workspace_toggle_browser_visibility(cx);
         } else {
             self.toggle_sidebar(cx);
         }
     }
     pub fn fixture_resize_browser(&mut self, width: f32, cx: &mut Context<Self>) {
-        self.settings.right_pane_width = width;
-        cx.notify();
+        self.fixture_workspace_resize_browser(width, cx);
     }
 }
 

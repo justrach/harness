@@ -49,13 +49,17 @@ impl Shell {
             &file,
             window,
             move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                if matches!(
+                    event,
+                    FilesEvent::OpenFile(_)
+                        | FilesEvent::OpenFileAtAnchor { .. }
+                        | FilesEvent::RevealFile(_)
+                ) && !this.accepts_file_navigation(&event_panel_key, &source, cx)
                 {
                     return;
                 }
                 match event {
-                    FilesEvent::OpenFile(path) => {
+                    FilesEvent::OpenFile(path) | FilesEvent::OpenFileAtAnchor { path, .. } => {
                         let previous_owner = this
                             .workspace_panels
                             .resource_owner
@@ -65,7 +69,16 @@ impl Shell {
                             .workspace_panels
                             .resource_engine_owner
                             .replace(engine_owner);
-                        this.add_file_surface(path.clone(), window, cx);
+                        if let FilesEvent::OpenFileAtAnchor { anchor, .. } = event {
+                            this.add_file_surface_at_anchor(
+                                path.clone(),
+                                anchor.clone(),
+                                window,
+                                cx,
+                            );
+                        } else {
+                            this.add_file_surface(path.clone(), window, cx);
+                        }
                         this.workspace_panels.resource_owner = previous_owner;
                         this.workspace_panels.resource_engine_owner = previous_engine;
                     }

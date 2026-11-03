@@ -2016,6 +2016,16 @@ enum CaretAffinity {
     Downstream,
 }
 
+/// The one process-global Markdown claim is associated with its window, not
+/// a particular editor entity. Replacement editors may inherit it only there.
+#[derive(Clone, Copy)]
+struct WindowMarkdownSelection {
+    window: gpui::WindowId,
+    claim: crate::markdown::selection::SelectionClaim,
+}
+
+impl gpui::Global for WindowMarkdownSelection {}
+
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
@@ -2032,6 +2042,9 @@ pub struct ComposerInput {
     muted_placeholder: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
+    /// Markdown gesture handed off from this window. Its identity survives
+    /// virtualization and prevents an editor from revoking a newer claim.
+    markdown_selection: Option<crate::markdown::selection::SelectionClaim>,
     caret_affinity: CaretAffinity,
     marked_range: Option<Range<usize>>,
     /// Retained through vertical moves across short rows; other moves reset it.
@@ -2156,6 +2169,7 @@ impl ComposerInput {
             muted_placeholder: false,
             selected_range: 0..0,
             selection_reversed: false,
+            markdown_selection: None,
             caret_affinity: CaretAffinity::Downstream,
             marked_range: None,
             preferred_column: None,
@@ -2776,6 +2790,7 @@ impl ComposerInput {
     }
 
     fn restore(&mut self, snapshot: EditSnapshot, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         self.invalidate_mention_tooltip();
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.content = snapshot.content;
@@ -2826,7 +2841,20 @@ impl ComposerInput {
         }
     }
 
+    fn claim_input_selection(&mut self, cx: &mut Context<Self>) {
+        if self
+            .markdown_selection
+            .take()
+            .is_some_and(crate::markdown::selection::clear_claim)
+        {
+            // The owning row may be cached, unmounted, or in another pane;
+            // invalidating only this editor would leave its old wash painted.
+            cx.refresh_windows();
+        }
+    }
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         self.last_edit = None;
         let offset = self.projection.normalize_range(offset..offset).start;
         self.selected_range = offset..offset;
@@ -2840,6 +2868,7 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         self.last_edit = None;
         self.extend_selection(offset, cx);
     }
@@ -3203,9 +3232,12 @@ impl ComposerInput {
                 text.clone(),
                 serde_json::json!({ "harnessComposerV1": raw, "text": text }),
             ));
-        } else if let Some(text) = crate::markdown::selection::selected_text() {
+        } else if let Some(text) = self
+            .markdown_selection
+            .and_then(crate::markdown::selection::selected_text_for_claim)
+        {
             // The composer keeps focus while the user reads the transcript —
-            // Cmd+C with no input selection copies the markdown selection.
+            // Cmd+C copies only this window's associated Markdown claim.
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -4489,6 +4521,7 @@ impl ComposerInput {
     }
 
     fn replace_range(&mut self, range: Range<usize>, new_text: &str, cx: &mut Context<Self>) {
+        self.claim_input_selection(cx);
         let range = self.projection.normalize_range(range);
         self.invalidate_mention_tooltip();
         // An IME commit is the tail of a composition whose pre-composition
@@ -4607,6 +4640,7 @@ impl EntityInputHandler for ComposerInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        self.claim_input_selection(cx);
         let range = self.projection.normalize_range(range);
         self.invalidate_mention_tooltip();
         // First keystroke of a composition: snapshot the text as it stood
@@ -5118,7 +5152,13 @@ impl gpui::Element for ComposerTextElement {
 }
 
 impl Render for ComposerInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(owner) = cx.try_global::<WindowMarkdownSelection>()
+            && owner.window == window.window_handle().window_id()
+            && Some(owner.claim) == crate::markdown::selection::current_claim()
+        {
+            self.markdown_selection = Some(owner.claim);
+        }
         if self.mentions_enabled && self.syntax_source != self.content {
             self.syntax_source = self.content.clone();
             self.syntax_spans.clear();
@@ -5211,12 +5251,43 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::redo))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, _| {
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                let previous_claim = crate::markdown::selection::latest_claim();
+                let was_focused = this.focus_handle.is_focused(window);
                 // Capture runs before the clicked control handles the press, so
                 // another input can take focus normally during bubbling.
-                if event.button == MouseButton::Left && this.focus_handle.is_focused(window) {
+                if was_focused {
                     window.blur();
                 }
+                let input = cx.weak_entity();
+                // Markdown claims direct hits and whitespace anchors during
+                // bubbling. Resolve ownership afterwards, regardless of paint
+                // order, without clearing selections for unrelated controls.
+                window.defer(cx, move |window, cx| {
+                    if let Some(claim) = crate::markdown::selection::claim_after(previous_claim) {
+                        cx.set_global(WindowMarkdownSelection {
+                            window: window.window_handle().window_id(),
+                            claim,
+                        });
+                        input
+                            .update(cx, |input, cx| {
+                                input.markdown_selection = Some(claim);
+                                let cursor = input.cursor_offset();
+                                input.selected_range = cursor..cursor;
+                                input.selection_reversed = false;
+                                // Copy is routed through the composer. Restore its
+                                // focus only if the click did not focus a control.
+                                if was_focused && window.focused(cx).is_none() {
+                                    window.focus(&input.focus_handle, cx);
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                });
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -12813,8 +12884,28 @@ fn question_markdown(question: &str) -> crate::markdown::BlockTree {
 }
 
 #[cfg(test)]
+#[path = "composer/cache_identity_tests.rs"]
+mod cache_identity_tests;
+
+#[cfg(test)]
+#[path = "composer/cache_lifecycle_tests.rs"]
+mod cache_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "composer/cache_phase_tests.rs"]
+mod cache_phase_tests;
+
+#[cfg(test)]
+#[path = "composer/cache_state_tests.rs"]
+mod cache_state_tests;
+
+#[cfg(test)]
 #[path = "composer/fade_tests.rs"]
 mod fade_tests;
+
+#[cfg(test)]
+#[path = "composer/full_shell_cache_tests.rs"]
+mod full_shell_cache_tests;
 
 #[cfg(test)]
 #[path = "composer/prompt_history_tests.rs"]
@@ -12827,6 +12918,10 @@ mod question_recovery_tests;
 #[cfg(test)]
 #[path = "composer/write_tests.rs"]
 mod write_tests;
+
+#[cfg(test)]
+#[path = "composer/selection_tests.rs"]
+mod selection_tests;
 
 #[cfg(test)]
 mod tests {
@@ -17105,6 +17200,134 @@ mod tests {
             input.newline(&Newline, window, cx);
             assert!(input.content.ends_with("item\n"));
         });
+    }
+
+    #[gpui::test]
+    fn transcript_selection_replaces_composer_selection_and_copies_output(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::markdown::{parser, render, selection};
+
+        let _selection = selection::test_state_lock();
+        let _dir = composer_test_init(cx);
+        struct SelectionHost(Entity<ComposerInput>);
+        impl Render for SelectionHost {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(40.0))
+                    .child(render::selection_frame_reset())
+                    .child(render::render_tree(
+                        &parser::parse_full("Synthetic output text"),
+                        &render::RenderOptions::settled("selection-output".into()),
+                        Theme::of(cx),
+                        window,
+                        &|_| None,
+                    ))
+                    .child(self.0.clone())
+            }
+        }
+        let (host, cx) =
+            cx.add_window_view(|_, cx| SelectionHost(cx.new(|cx| ComposerInput::new("Draft", cx))));
+        let input = host.read_with(cx, |host, _| host.0.clone());
+        input.update(cx, |input, cx| input.set_text("Synthetic prompt", cx));
+        cx.update(|window, cx| {
+            let focus = input.read(cx).focus_handle.clone();
+            window.focus(&focus, cx);
+            window.draw(cx).clear();
+        });
+        let (_, _, output) = render::selection_test_entries()
+            .into_iter()
+            .find(|(_, text, _)| text == "Synthetic output text")
+            .unwrap();
+        let output_position = output.origin + point(px(2.0), px(8.0));
+        let input_position = input.read_with(cx, |input, _| {
+            input.last_bounds.unwrap().origin + point(px(2.0), px(8.0))
+        });
+        for clicks in [2, 3, 1] {
+            // Reproduce the prompt-then-output gesture, without moving focus.
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                click_count: 3,
+                ..Default::default()
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                ..Default::default()
+            });
+            input.read_with(cx, |input, _| {
+                assert_eq!(input.selected_range, 0..input.content.len());
+            });
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: output_position,
+                click_count: clicks,
+                ..Default::default()
+            });
+            if clicks == 1 {
+                cx.simulate_event(MouseMoveEvent {
+                    position: point(output.right() + px(2.0), output_position.y),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                });
+            }
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: output_position,
+                ..Default::default()
+            });
+            let expected = if clicks == 2 {
+                "Synthetic"
+            } else {
+                "Synthetic output text"
+            };
+            assert_eq!(selection::selected_text().as_deref(), Some(expected));
+            input.read_with(cx, |input, _| assert!(input.selected_range.is_empty()));
+            cx.update(|window, cx| {
+                assert!(input.read(cx).focus_handle.is_focused(window));
+                window.dispatch_action(Box::new(Copy), cx);
+            });
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some(expected)
+                );
+            });
+            // Selecting the draft again must retire the output highlight too.
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                click_count: 2,
+                ..Default::default()
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position: input_position,
+                ..Default::default()
+            });
+            assert!(selection::selected_text().is_none());
+            input.read_with(cx, |input, _| {
+                assert_eq!(input.selected_range, 0..9);
+                assert_eq!(input.text(), "Synthetic prompt");
+            });
+            cx.update(|window, cx| window.dispatch_action(Box::new(Copy), cx));
+            cx.run_until_parked();
+            cx.update(|_, cx| {
+                assert_eq!(
+                    cx.read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some("Synthetic")
+                );
+            });
+        }
     }
 
     #[gpui::test]

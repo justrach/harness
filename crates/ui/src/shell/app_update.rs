@@ -458,9 +458,10 @@ impl Shell {
             shared.owner.upgrade().is_some()
                 && Some(shared.owner.entity_id()) != self.app_update.entity_id
         });
-        update_control(
+        let flow = shared.map_or(&self.update_flow, |shared| &shared.flow);
+        let control = update_control(
             self.state.read(cx).update.as_ref(),
-            shared.map_or(&self.update_flow, |shared| &shared.flow),
+            flow,
             self.install.supports_desktop_update(),
             shared.map_or(self.update_dismissed.as_deref(), |shared| {
                 shared.dismissed.as_deref()
@@ -470,7 +471,23 @@ impl Shell {
             shared.map_or(self.app_update.postponed.as_deref(), |shared| {
                 shared.postponed.as_deref()
             }),
-        )
+        );
+        // Automatic restart can wait indefinitely for an idle moment. Keep a
+        // manual restart in the titlebar while it waits.
+        if let UpdateFlow::Ready(staged) = flow
+            && self.install.supports_desktop_update()
+        {
+            if self.app_update.countdown_started.is_some() {
+                return None;
+            }
+            return Some(control.unwrap_or_else(|| {
+                (
+                    UpdateControl::Ready { on_quit: true },
+                    staged.version.clone(),
+                )
+            }));
+        }
+        control
     }
 
     /// Width the titlebar's left cluster gains while the update control
@@ -1086,13 +1103,7 @@ mod tests {
         peer.update(cx, |shell, _, cx| {
             shell.publish_update_phase(cx);
             assert_eq!(cx.global::<SharedUpdatePhase>().0, UpdatePhase::Ready("9.9.9".into()));
-            if harness_update::desktop_auto_update_enabled()
-                && settings::with_current(cx, |s| s.restart_to_install_updates)
-            {
-                assert!(shell.update_control_now(cx).is_none());
-            } else {
-                assert!(matches!(shell.update_control_now(cx), Some((UpdateControl::Ready { .. }, version)) if version == "9.9.9"));
-            }
+            assert!(matches!(shell.update_control_now(cx), Some((UpdateControl::Ready { .. }, version)) if version == "9.9.9"));
             assert!(matches!(shell.update_flow, UpdateFlow::Idle), "peers display the flow without owning its staged installer");
         }).unwrap();
         owner

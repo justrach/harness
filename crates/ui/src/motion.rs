@@ -594,12 +594,30 @@ where
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FADE_TEST_SAMPLES: std::cell::RefCell<Option<Vec<(ElementId, f32)>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// Quick opacity-only fade over [`FADE_QUICK`].
 pub fn fade_quick<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
 where
     E: Styled + IntoElement + 'static,
 {
-    element.with_animation(id, FADE_QUICK.animation(), |el, t| el.opacity(t))
+    let id = id.into();
+    #[cfg(test)]
+    let sample_id = id.clone();
+    element.with_animation(id, FADE_QUICK.animation(), move |el, t| {
+        #[cfg(test)]
+        FADE_TEST_SAMPLES.with_borrow_mut(|samples| {
+            if let Some(samples) = samples {
+                samples.push((sample_id.clone(), t));
+            }
+        });
+        el.opacity(t)
+    })
 }
 
 /// Popover entrance: fade + translateY −2→0 over [`MENU_IN`].

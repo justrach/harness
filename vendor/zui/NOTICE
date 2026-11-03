@@ -27,3 +27,23 @@ native checks in `native_tests.rs` and the idle benchmark in
 `examples/windows_idle_frames.rs`. Harness drives the requests from zui's
 `frame_requester` and `pause_frame_requests` hooks instead of re-arming after
 every present, and leaves out the GPU-reset test case.
+
+Drawing macOS frames into the drawables a `CAMetalDisplayLink` hands out is
+adapted from upstream Zed (Apache-2.0, https://github.com/zed-industries/zed)
+at 0373366f43 ("gpui_macos: Fix animations running at 30 fps on M5 Macs",
+#65472): the link in `crates/gpui_macos/src/metal_display_link.rs`, the
+renderer's display-link mode and drawable handoff in `metal_renderer.rs`, the
+window's Metal frame source and update callback in `window.rs`, and the two
+renderer tests ported from it. Harness keeps zui's objc/cocoa bindings and
+its own pacing (`frame_pacing.rs`: the screen's full rate, GPUI's 30 Hz cap for
+an inactive window, paused while idle through `pause_frame_requests`), makes
+the window's view the link's delegate, and keeps the `CADisplayLink` and
+`CVDisplayLink` sources behind `GPUI_DISPLAY_LINK=cadisplaylink` and
+`cvdisplaylink`.
+
+`GlobalElementId` keeping its path's hash (crates/gpui/src/element.rs) is adapted
+from upstream Zed (https://github.com/zed-industries/zed, Apache-2.0) at
+1dd9bbfd71 ("gpui: Hash a GlobalElementId once, when it is built"): the hash is
+computed once when the id is built, `Hash` writes it, and `PartialEq` compares it
+before the path. Harness ports the first half (not the per-prefix hashes of the
+id stack).

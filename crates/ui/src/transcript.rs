@@ -96,6 +96,9 @@ mod selection_tests;
 #[cfg(test)]
 #[path = "transcript/stall_tests.rs"]
 mod stall_tests;
+#[cfg(test)]
+#[path = "transcript/zoom_tests.rs"]
+mod zoom_tests;
 
 // ---------------------------------------------------------------------------
 // Constants (mugen ports)
@@ -199,7 +202,7 @@ const ACTIVITY_BRANCH_END_X: f32 = 28.0;
 const ACTIVITY_ICON_LEFT: f32 = 32.0;
 const ACTIVITY_ICON_SIZE: f32 = 16.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
-const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
+const TOOL_LABEL_SIZE: f32 = render::MD_TEXT_SIZE;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
 /// Compact rows retain the analytic heights used by row and group folds.
@@ -2747,7 +2750,7 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
         move |bounds, window, _| {
             let probe = window.text_system().shape_line(
                 overlay_text.clone(),
-                px(TOOL_LABEL_SIZE),
+                crate::typography::ui_rems(TOOL_LABEL_SIZE).to_pixels(window.rem_size()),
                 &[TextRun {
                     len: overlay_text.len(),
                     font: overlay_font.clone(),
@@ -2771,7 +2774,7 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
                 }
                 let line = window.text_system().shape_line(
                     overlay_text.clone(),
-                    px(TOOL_LABEL_SIZE),
+                    crate::typography::ui_rems(TOOL_LABEL_SIZE).to_pixels(window.rem_size()),
                     &[TextRun {
                         len: overlay_text.len(),
                         font: overlay_font.clone(),
@@ -2795,7 +2798,8 @@ fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Them
                     },
                 };
                 window.with_content_mask(Some(mask), |window| {
-                    let line_height = px(TOOL_LABEL_LINE_HEIGHT);
+                    let line_height = crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT)
+                        .to_pixels(window.rem_size());
                     let _ = line.paint(
                         bounds.origin,
                         line_height,
@@ -2868,6 +2872,11 @@ pub fn chips_height(count: usize) -> f32 {
 /// [`crate::changes::body_height`]. The chip's own [`CHIP_HEIGHT`] is already
 /// counted by [`chips_height`].
 pub fn detail_height(detail: &ToolDetail) -> f32 {
+    detail_height_with_ui_size(detail, 16.0)
+}
+
+/// Thinking follows interface zoom; code output and diffs retain pixel sizes.
+fn detail_height_with_ui_size(detail: &ToolDetail, ui_size: f32) -> f32 {
     let body = match detail {
         ToolDetail::Output {
             lines,
@@ -2881,7 +2890,9 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
             truncated_by,
         } => {
             let rows = lines.len() + usize::from(*truncated_by > 0);
-            rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
+            let line_height =
+                f32::from(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT).to_pixels(px(ui_size)));
+            rows as f32 * line_height + OUTPUT_BODY_PAD
         }
         ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
@@ -3100,7 +3111,7 @@ fn compact_work_title(
                 .left_0()
                 .right_0()
                 .top_0()
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                 .flex()
                 .items_center()
                 .overflow_hidden()
@@ -3111,7 +3122,7 @@ fn compact_work_title(
             div()
                 .relative()
                 .top(px(4.0 * (1.0 - t)))
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                 .flex()
                 .items_center()
                 .overflow_hidden()
@@ -9576,6 +9587,8 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
+        let ui_size = crate::typography::font_size(cx).pixels();
+        let detail_height = |detail: &ToolDetail| detail_height_with_ui_size(detail, ui_size);
         let base_row_height = if collapses {
             TOOL_TREE_ROW_HEIGHT
         } else {
@@ -9695,8 +9708,8 @@ impl Transcript {
             .pr(px(4.0))
             .h(px(TOOL_GROUP_HEADER_HEIGHT))
             .cursor_pointer()
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+            .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE))
+            .line_height(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
@@ -9731,7 +9744,7 @@ impl Transcript {
             .child(
                 div()
                     .min_w_0()
-                    .h(px(TOOL_LABEL_LINE_HEIGHT))
+                    .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                     .flex()
                     .items_center()
                     .overflow_hidden()
@@ -10679,10 +10692,11 @@ fn detail_body(
             truncated_by,
         } => body
             .py(px(6.0))
-            .text_size(px(TOOL_TEXT_SIZE))
+            .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE))
+            .line_height(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT))
             .children(lines.iter().enumerate().map(|(line_ix, line)| {
                 let row = div()
-                    .h(px(OUTPUT_LINE_HEIGHT))
+                    .h(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT))
                     .w_full()
                     .min_w_0()
                     .flex()
@@ -10698,7 +10712,11 @@ fn detail_body(
                 )))
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
+                block.child(
+                    more_lines_row(*truncated_by, theme)
+                        .h(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT))
+                        .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE)),
+                )
             })
             .into_any_element(),
     }
@@ -10859,8 +10877,8 @@ fn chip_header_row(
         .items_center()
         .gap(px(8.0))
         .px(px(if activity { 0.0 } else { 8.0 }))
-        .text_size(px(TOOL_LABEL_SIZE))
-        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE))
+        .line_height(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
         .when(!activity, |row| {
             row.child(
                 // Subagent icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
@@ -10887,7 +10905,7 @@ fn chip_header_row(
         .child(
             div()
                 .flex_none()
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                 .flex()
                 .items_center()
                 .when(!activity, |label| {
@@ -10910,7 +10928,7 @@ fn chip_header_row(
             div()
                 .when(!activity, |detail| detail.flex_1())
                 .min_w_0()
-                .h(px(if file_path.is_some() {
+                .h(crate::typography::ui_rems(if file_path.is_some() {
                     22.0
                 } else {
                     TOOL_LABEL_LINE_HEIGHT

@@ -243,6 +243,15 @@ final class DemoDataset {
             seedAppshots(store)
         } else if ProcessInfo.processInfo.arguments.contains("-longhistory") {
             store.setEntries(BenchRunner.syntheticEntries(turns: 200))
+        } else if ProcessInfo.processInfo.arguments.contains("-textselection") {
+            store.setEntries([
+                MessageEntry(id: "selection-ask", role: .user,
+                    parts: [.text(id: "t0", text: "Show a response I can select and copy.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "selection-reply", role: .assistant,
+                    parts: [.text(id: "t0", text: "Select this word and drag across multiple lines to copy only the highlighted passage. The rest of this response stays unselected.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil)
+            ])
         } else if ProcessInfo.processInfo.arguments.contains("-links") {
             // Link-tap UI checks: a settled reply with a bare URL and a
             // markdown link, both loopback so a tap opens the host-link sheet.
@@ -272,6 +281,31 @@ final class DemoDataset {
                 error("errors-limit", "Claude usage limit reached — try again after the limit resets."),
                 ask("errors-ask-3", "And once more."),
                 error("errors-plain", "Claude Code exited with status 1: the upload test crashed"),
+            ])
+        } else if ProcessInfo.processInfo.arguments.contains("-thinking") {
+            // Thought chips: a settled turn that thought between tools, then a
+            // turn still thinking.
+            let exec = { (id: String, command: String) in
+                MessagePart.tool(id: id, call: RenderToolCall(tag: "exec", fields: ["command": command]),
+                                 isError: false, resolved: true)
+            }
+            store.setEntries([
+                MessageEntry(id: "thinking-ask-1", role: .user,
+                    parts: [.text(id: "t0", text: "Why does the upload retry twice?")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "thinking-reply-1", role: .assistant, parts: [
+                    .reasoning(id: "r0", text: "The retry wrapper and the client both retry on a **timeout**.\nCheck which one owns it."),
+                    exec("c0", "rg -n retry src/upload"),
+                    .reasoning(id: "r1", text: "The client already retries once, so the wrapper doubles it."),
+                    .text(id: "t1", text: "Both the wrapper and the client retry on a timeout. I removed the wrapper's retry, so an upload now retries once."),
+                ], createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "thinking-ask-2", role: .user,
+                    parts: [.text(id: "t0", text: "Add a test for it.")],
+                    createdAt: nowMs(), deviceId: "demo", status: .complete, continuationOf: nil),
+                MessageEntry(id: "thinking-reply-2", role: .assistant, parts: [
+                    exec("c0", "ls tests/upload"),
+                    .reasoning(id: "r0", text: "A fake client that times out once.\nAssert it was called exactly twice, then once more after the fix."),
+                ], createdAt: nowMs(), deviceId: "demo", status: .streaming, continuationOf: nil),
             ])
         } else if ProcessInfo.processInfo.arguments.contains("-longprompt") {
             store.setEntries([

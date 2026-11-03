@@ -422,6 +422,123 @@ fn window_transfer_keeps_file_entity_and_path(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn window_transfer_markdown_anchor_keeps_panel_and_engine_owners(cx: &mut TestAppContext) {
+    let (dir, source) = setup(cx);
+    let (tab, file) = source
+        .update(cx, |shell, window, cx| {
+            shell.state.update(cx, |state, _| {
+                state.local_device_id = Some("fixture-device".into());
+                for chat in &mut state.chats {
+                    chat.cwd = Some(dir.path().join(&chat.id).to_string_lossy().into_owned());
+                }
+            });
+            let owner = shell.panel_key(cx);
+            shell.add_file_surface("README.md".into(), window, cx);
+            let id = shell.file_surface_keys[&(owner.clone(), "chat-a".into(), "README.md".into())];
+            let file = shell.file_surfaces[&id].clone();
+            // The file retains chat-a's checkout even when another chat owns
+            // the selected conversation in the window being detached from.
+            shell.focus_workspace_tab(0, PanelTab::Chat("chat-b".into()), window, cx);
+            let tab = PanelTab::Surface {
+                owner,
+                surface: RightSurface::File(id),
+            };
+            install_resource(shell, tab.clone(), cx);
+            (tab, file)
+        })
+        .unwrap();
+    let destination = source
+        .update(cx, |shell, window, cx| {
+            shell.move_workspace_tab_to_new_window(0, tab, None, window, cx)
+        })
+        .unwrap()
+        .unwrap();
+    let owner = destination
+        .read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                Some("chat-b")
+            );
+            assert_eq!(file.read(cx).session_owner(), "chat-a");
+            assert!(file.read(cx).is_current_target(cx));
+            shell.panel_key(cx)
+        })
+        .unwrap();
+
+    let mut opened = None;
+    for anchor in ["installation", "examples"] {
+        file.update(cx, |_, cx| {
+            cx.emit(FilesEvent::OpenFileAtAnchor {
+                path: "guide.md".into(),
+                anchor: anchor.into(),
+            });
+        });
+        cx.run_until_parked();
+        destination
+            .read_with(cx, |shell, cx| {
+                let id =
+                    shell.file_surface_keys[&(owner.clone(), "chat-a".into(), "guide.md".into())];
+                let target = &shell.file_surfaces[&id];
+                assert_eq!(
+                    target.read(cx).test_pending_markdown_anchor(),
+                    Some(("guide.md".into(), anchor.into()))
+                );
+                assert_eq!(target.read(cx).session_owner(), "chat-a");
+                if let Some(previous) = opened.replace(target.entity_id()) {
+                    assert_eq!(previous, target.entity_id(), "reuse the same editor");
+                }
+                assert_eq!(shell.file_surfaces.len(), 2);
+                assert!(shell.workspace_panels.resource_owner.is_none());
+                assert!(shell.workspace_panels.resource_engine_owner.is_none());
+            })
+            .unwrap();
+        source
+            .read_with(cx, |shell, _| assert!(shell.file_surfaces.is_empty()))
+            .unwrap();
+    }
+
+    // Queued link events must be rejected after hiding the source or before
+    // the editor has accepted a changed checkout target.
+    for stale_target in [false, true] {
+        destination
+            .update(cx, |shell, _, cx| {
+                shell.route = if stale_target {
+                    Route::Chat
+                } else {
+                    Route::Settings(SettingsSection::Appearance)
+                };
+                if stale_target {
+                    shell.state.update(cx, |state, _| {
+                        state
+                            .chats
+                            .iter_mut()
+                            .find(|chat| chat.id == "chat-a")
+                            .unwrap()
+                            .cwd =
+                            Some(dir.path().join("changed-checkout").to_string_lossy().into());
+                    });
+                    assert!(!file.read(cx).is_current_target(cx));
+                }
+            })
+            .unwrap();
+        file.update(cx, |_, cx| {
+            cx.emit(FilesEvent::OpenFileAtAnchor {
+                path: "must-not-open.md".into(),
+                anchor: "ignored".into(),
+            });
+        });
+        cx.run_until_parked();
+        destination
+            .read_with(cx, |shell, _| {
+                assert_eq!(shell.file_surfaces.len(), 2);
+                assert!(shell.workspace_panels.resource_owner.is_none());
+                assert!(shell.workspace_panels.resource_engine_owner.is_none());
+            })
+            .unwrap();
+    }
+}
+
+#[gpui::test]
 fn window_transfer_rejected_queue_edit_preserves_source_and_window_count(cx: &mut TestAppContext) {
     let (_dir, source) = setup(cx);
     source

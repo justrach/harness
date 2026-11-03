@@ -552,6 +552,7 @@ final class ParityTests: XCTestCase {
     private func part(_ part: MessagePart) -> String {
         switch part {
         case .text(let id, let text): return "text \(id) \(text)"
+        case .reasoning(let id, let text): return "reasoning \(id) \(text)"
         case .image(let id, let reference):
             return "image \(id) \(reference.path) \(reference.name) \(reference.mimeType)"
         case .tool(let id, let call, let isError, let resolved):

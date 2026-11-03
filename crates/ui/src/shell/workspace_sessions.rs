@@ -176,6 +176,10 @@ impl Shell {
         self.command_palette = None;
         self.route = Route::Chat;
         if let Some(ix) = self.chat_tabs.iter().position(|tab| tab.id == id) {
+            if ix == self.chat_tab {
+                self.composer
+                    .update(cx, |composer, cx| composer.reveal_pending_question(cx));
+            }
             self.activate_chat_tab(ix, cx);
             self.focus_composer(cx);
             cx.notify();

@@ -1,5 +1,6 @@
 //! Exercise the explorer and editors against an isolated real workspace/RPC.
 //! Set HARNESS_FILES_CAPTURES to a directory to run on X11 and capture the fixture.
+use super::workspace_panels::PanelTab;
 use super::*;
 use gpui::{AppContext, AsyncApp, WindowHandle};
 use std::{path::Path, sync::Arc};
@@ -63,6 +64,53 @@ async fn frame(window: WindowHandle<Shell>, cx: &mut AsyncApp, output: Option<&P
             .unwrap();
         assert!(status.success(), "fixture capture failed");
     }
+}
+
+fn explorer_visible(shell: &Shell, explorer: u64, cx: &App) -> bool {
+    shell.panel_layout(cx).is_some_and(|layout| {
+        layout.panels.iter().any(|panel| {
+            layout.expanded.is_none_or(|id| id == panel.id)
+                && panel.selected() == Some(&PanelTab::FileTree(explorer))
+        })
+    })
+}
+
+fn assert_panel_geometry(shell: &Shell, window: &Window, cx: &App) -> usize {
+    let workspace = shell.workspace_layout_key(cx);
+    let layout = shell.panel_layout(cx).unwrap();
+    let measured = shell.workspace_panels.panel_bounds.borrow();
+    let viewport = window.viewport_size();
+    let mut visible: Vec<gpui::Bounds<Pixels>> = Vec::new();
+    for panel in &layout.panels {
+        if layout.expanded.is_some_and(|id| id != panel.id) {
+            continue;
+        }
+        let bounds = *measured
+            .get(&(workspace.clone(), panel.id))
+            .expect("a visible workspace panel must have painted bounds");
+        assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
+        assert!(bounds.left() >= px(0.0) && bounds.top() >= px(0.0));
+        assert!(bounds.right() <= viewport.width + px(1.0));
+        assert!(bounds.bottom() <= viewport.height + px(1.0));
+        for other in &visible {
+            assert!(
+                bounds.right() <= other.left()
+                    || other.right() <= bounds.left()
+                    || bounds.bottom() <= other.top()
+                    || other.bottom() <= bounds.top(),
+                "visible workspace panels must not overlap"
+            );
+        }
+        visible.push(bounds);
+    }
+    visible.len()
+}
+
+fn open_explorer_file(explorer: &Entity<FilesSurface>, path: &str, cx: &mut AsyncApp) {
+    explorer.update(cx, |files, cx| {
+        files.reveal_file_explicit(path.into(), cx);
+        cx.emit(FilesEvent::OpenFile(path.into()));
+    });
 }
 
 #[test]
@@ -227,23 +275,53 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     shell.active_chat == "first"
                 })
                 .await;
-                window
+                let (first_session, first_owner, explorer_id, first_explorer) = window
                     .update(cx, |shell, window, cx| {
                         shell.splash = SplashPhase::Gone;
-                        shell.add_files_surface(window, cx);
+                        shell.ensure_workspace_sessions(cx);
+                        shell.open_workspace_files(window, cx);
+                        let id = shell.workspace_panels.seq;
+                        let (explorer, _, owner) = &shell.workspace_panels.explorers[&id];
+                        (
+                            shell.chat_tabs[shell.chat_tab].id.clone(),
+                            owner.clone(),
+                            id,
+                            explorer.clone(),
+                        )
                     })
                     .unwrap();
-                wait_for(window, cx, "root listing", |shell, cx| {
-                    shell.files["first"].read(cx).tree().node("src").is_some()
-                })
+                let first_engine_owner =
+                    first_explorer.read_with(cx, |files, _| files.session_owner().to_owned());
+                assert_eq!(first_engine_owner, "first");
+                let file_key = |path: &str| {
+                    (
+                        first_owner.clone(),
+                        first_engine_owner.clone(),
+                        path.to_owned(),
+                    )
+                };
+                wait_for(
+                    window,
+                    cx,
+                    "workspace explorer root listing",
+                    |shell, cx| {
+                        explorer_visible(shell, explorer_id, cx)
+                            && first_explorer.read(cx).tree().node("src").is_some()
+                    },
+                )
                 .await;
                 frame(window, cx, output.as_deref(), "01-chat-files").await;
+                window
+                    .update(cx, |shell, window, cx| {
+                        assert_eq!(assert_panel_geometry(shell, window, cx), 2);
+                    })
+                    .unwrap();
                 wait_for(
                     window,
                     cx,
                     "Git decorations without a Diffs panel",
-                    |shell, cx| {
-                        let files = shell.files["first"].read(cx);
+                    |_, cx| {
+                        let files = first_explorer.read(cx);
                         let theme = Theme::of(cx);
                         files.test_git_color("README.md", false, cx) == Some(theme.warning)
                             && files.test_git_color("src/new.rs", false, cx) == Some(theme.success)
@@ -266,53 +344,32 @@ fn files_panel_workspace_navigation_and_external_updates() {
                         });
                         other.update(cx, |files, cx| files.ensure_git_status(cx));
                         assert_eq!(
-                            shell.files["first"].read(cx).test_git_source(),
+                            first_explorer.read(cx).test_git_source(),
                             other.read(cx).test_git_source(),
                             "chats on the same checkout share one status source"
                         );
                     })
                     .unwrap();
-                window
-                    .update(cx, |shell, window, cx| {
-                        shell.settings.files_panel_width = FILES_PANEL_MAX;
-                        shell.settings.right_pane_width = 760.0;
-                        shell.set_surfaces_open(true, cx);
-                        window.resize(gpui::size(px(1200.0), px(800.0)));
-                        window.bounds_changed(cx);
-                    })
-                    .unwrap();
-                frame(window, cx, output.as_deref(), "01b-picker-files-compact").await;
-                window
-                    .update(cx, |shell, window, cx| {
-                        assert_eq!(shell.files_visible_width(cx), 284.0);
-                        assert_eq!(shell.files_reserved_width(cx), 284.0);
-                        assert_eq!(shell.right_visible_width(cx), RIGHT_PANE_MIN);
-                        assert_eq!(shell.settings.files_panel_width, FILES_PANEL_MAX);
-                        assert!(shell.right_surface_rows(cx).is_empty());
-                        shell.set_surfaces_open(false, cx);
-                        shell.settings.files_panel_width = FILES_PANEL_DEFAULT;
-                        shell.settings.right_pane_width = RIGHT_PANE_DEFAULT;
-                        window.resize(gpui::size(px(1400.0), px(800.0)));
-                        window.bounds_changed(cx);
-                    })
-                    .unwrap();
-                window
-                    .update(cx, |shell, window, cx| {
-                        shell.add_file_surface("src/nested/main.rs".into(), window, cx)
-                    })
-                    .unwrap();
+
+                // Reveal/select the row, then use the workspace explorer's real
+                // event subscription to choose the adjacent editor and its owner.
+                open_explorer_file(&first_explorer, "src/nested/main.rs", cx);
                 wait_for(window, cx, "nested file and selection", |shell, cx| {
-                    shell.files["first"].read(cx).tree().selected() == Some("src/nested/main.rs")
-                        && shell.file_surfaces.values().any(|file| {
-                            file.read(cx)
-                                .test_document_text("src/nested/main.rs")
-                                .is_some()
-                        })
+                    first_explorer.read(cx).tree().selected() == Some("src/nested/main.rs")
+                        && shell
+                            .file_surface_keys
+                            .get(&file_key("src/nested/main.rs"))
+                            .is_some_and(|id| {
+                                shell.file_surfaces[id]
+                                    .read(cx)
+                                    .test_document_text("src/nested/main.rs")
+                                    .is_some_and(|text| text.contains("Hello"))
+                            })
                 })
                 .await;
-                window
+                let first_file = window
                     .update(cx, |shell, _, cx| {
-                        let tree = shell.files["first"].read(cx).tree();
+                        let tree = first_explorer.read(cx).tree();
                         assert!(tree.is_expanded("src") && tree.is_expanded("src/nested"));
                         assert!(
                             shell.file_surfaces.values().all(|file| file
@@ -322,14 +379,24 @@ fn files_panel_workspace_navigation_and_external_updates() {
                                 .is_empty()),
                             "editors must not load hidden trees"
                         );
+                        shell.file_surface_keys[&file_key("src/nested/main.rs")]
                     })
                     .unwrap();
                 frame(window, cx, output.as_deref(), "02-editor-files").await;
-                window
-                    .update(cx, |shell, window, cx| {
-                        shell.add_file_surface("README.md".into(), window, cx);
-                    })
-                    .unwrap();
+                open_explorer_file(&first_explorer, "README.md", cx);
+                wait_for(window, cx, "second file tab", |shell, cx| {
+                    shell
+                        .file_surface_keys
+                        .get(&file_key("README.md"))
+                        .is_some_and(|id| {
+                            *id != first_file
+                                && shell.file_surfaces[id]
+                                    .read(cx)
+                                    .test_document_text("README.md")
+                                    .is_some_and(|text| text.contains("Changed documentation"))
+                        })
+                })
+                .await;
                 frame(window, cx, output.as_deref(), "02b-two-file-tabs").await;
                 window
                     .update(cx, |shell, window, cx| shell.toggle_files_panel(window, cx))
@@ -342,54 +409,51 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 )
                 .await;
                 window
-                    .update(cx, |shell, _, cx| {
+                    .update(cx, |shell, window, cx| {
+                        assert!(!explorer_visible(shell, explorer_id, cx));
+                        assert_eq!(assert_panel_geometry(shell, window, cx), 1);
                         assert!(
-                            shell.files["first"].read(cx).test_git_source().is_none(),
-                            "closing the explorer releases its status subscription"
+                            shell
+                                .panel_layout(cx)
+                                .unwrap()
+                                .hidden_tools
+                                .iter()
+                                .any(|(_, _, _, tab)| *tab == PanelTab::FileTree(explorer_id))
                         );
-                    })
-                    .unwrap();
-                window
-                    .update(cx, |shell, window, cx| {
+                        assert_eq!(
+                            shell.workspace_panels.explorers[&explorer_id].0, first_explorer,
+                            "hiding an explorer retains its workspace-owned entity"
+                        );
                         shell.toggle_files_panel(window, cx);
-                        shell.add_file_surface("src/nested/main.rs".into(), window, cx);
+                        assert!(explorer_visible(shell, explorer_id, cx));
                     })
                     .unwrap();
+                open_explorer_file(&first_explorer, "src/nested/main.rs", cx);
+                frame(window, cx, None, "restored-files").await;
                 window
-                    .update(cx, |shell, _, cx| shell.toggle_right_pane_expand(cx))
+                    .update(cx, |shell, _, cx| {
+                        assert_eq!(
+                            shell.file_surface_keys[&file_key("src/nested/main.rs")],
+                            first_file
+                        );
+                        shell.toggle_chat_pane_zoom(cx);
+                    })
                     .unwrap();
-                frame(window, cx, output.as_deref(), "03-expanded-files").await;
+                frame(window, cx, output.as_deref(), "03-expanded-editor").await;
                 window
                     .update(cx, |shell, window, cx| {
-                        shell.toggle_right_pane_expand(cx);
+                        assert_eq!(assert_panel_geometry(shell, window, cx), 1);
+                        assert!(!explorer_visible(shell, explorer_id, cx));
+                        shell.toggle_chat_pane_zoom(cx);
                         window.resize(gpui::size(px(1000.0), px(720.0)));
                         window.bounds_changed(cx);
                     })
                     .unwrap();
                 frame(window, cx, output.as_deref(), "04-narrow-files").await;
                 window
-                    .update(cx, |shell, _, cx| {
-                        let files = shell.files_visible_width(cx);
-                        let surface = shell.right_visible_width(cx);
-                        let sidebar = shell.eval_tween(shell.sidebar_tween, shell.sidebar_target());
-                        assert_eq!(shell.files_reserved_width(cx), files);
-                        assert!(files > 0.0 && surface > 0.0);
-                        assert!(sidebar + files + surface < shell.viewport_width);
-                        assert_eq!(shell.settings.files_panel_width, FILES_PANEL_DEFAULT);
-                    })
-                    .unwrap();
-                window
-                    .update(cx, |shell, _, cx| shell.toggle_right_pane_expand(cx))
-                    .unwrap();
-                frame(window, cx, output.as_deref(), "04b-expanded-narrow-files").await;
-                window
-                    .update(cx, |shell, _, cx| {
-                        assert_eq!(shell.files_visible_width(cx), FILES_PANEL_DEFAULT);
-                        assert_eq!(
-                            shell.right_visible_width(cx),
-                            1000.0 - 256.0 - FILES_PANEL_DEFAULT
-                        );
-                        shell.toggle_right_pane_expand(cx);
+                    .update(cx, |shell, window, cx| {
+                        assert!(explorer_visible(shell, explorer_id, cx));
+                        assert_eq!(assert_panel_geometry(shell, window, cx), 2);
                     })
                     .unwrap();
                 // A browser surface coexists with the explorer and keeps its own tab.
@@ -401,9 +465,25 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 frame(window, cx, output.as_deref(), "05-browser-files").await;
                 window
                     .update(cx, |shell, window, cx| {
-                        shell.add_file_surface("src/nested/main.rs".into(), window, cx);
-                        shell.toggle_files_panel(window, cx);
+                        assert!(explorer_visible(shell, explorer_id, cx));
+                        assert_eq!(assert_panel_geometry(shell, window, cx), 2);
+                        assert!(shell.panel_layout(cx).unwrap().panels.iter().any(|panel| {
+                            panel.tabs.iter().any(|tab| {
+                                matches!(
+                                    tab,
+                                    PanelTab::Surface {
+                                        surface: RightSurface::Browser(_),
+                                        ..
+                                    }
+                                )
+                            })
+                        }));
                     })
+                    .unwrap();
+                open_explorer_file(&first_explorer, "src/nested/main.rs", cx);
+                frame(window, cx, None, "selected-editor").await;
+                window
+                    .update(cx, |shell, window, cx| shell.toggle_files_panel(window, cx))
                     .unwrap();
                 std::fs::write(
                     project.join("src/nested/main.rs"),
@@ -415,45 +495,58 @@ fn files_panel_workspace_navigation_and_external_updates() {
                     cx,
                     "document update with explorer hidden",
                     |shell, cx| {
-                        shell.file_surfaces.values().any(|file| {
-                            file.read(cx)
+                        !explorer_visible(shell, explorer_id, cx)
+                            && shell.file_surfaces[&first_file]
+                                .read(cx)
                                 .test_document_text("src/nested/main.rs")
                                 .is_some_and(|text| text.contains("Updated"))
-                        })
                     },
                 )
                 .await;
+
                 // Events queued in an inactive session must never open a tab in another.
-                let first_explorer = window
-                    .update(cx, |shell, _, _| shell.files["first"].clone())
+                let before_inactive_event = window
+                    .update(cx, |shell, _, cx| {
+                        shell.create_workspace_session(cx);
+                        shell.file_surface_keys.clone()
+                    })
                     .unwrap();
                 state.update(cx, |state, cx| state.select_chat(Some("second".into()), cx));
                 wait_for(window, cx, "second session", |shell, _| {
                     shell.active_chat == "second"
                 })
                 .await;
+                let second_owner = window
+                    .update(cx, |shell, _, cx| shell.panel_key(cx))
+                    .unwrap();
+                assert_ne!(first_owner, second_owner);
                 first_explorer.update(cx, |_, cx| {
-                    cx.emit(FilesEvent::OpenFile("README.md".into()))
+                    cx.emit(FilesEvent::OpenFile("src/new.rs".into()))
                 });
                 frame(window, cx, None, "inactive-event").await;
                 window
                     .update(cx, |shell, _, _| {
-                        assert!(
-                            !shell
-                                .file_surface_keys
-                                .contains_key(&("second".into(), "README.md".into()))
-                        )
+                        assert_eq!(shell.file_surface_keys, before_inactive_event);
                     })
                     .unwrap();
-                state.update(cx, |state, cx| state.select_chat(Some("first".into()), cx));
+                window
+                    .update(cx, |shell, _, cx| {
+                        shell.activate_workspace_session(&first_session, cx)
+                    })
+                    .unwrap();
                 wait_for(window, cx, "restored session", |shell, _| {
                     shell.active_chat == "first"
                 })
                 .await;
                 window
                     .update(cx, |shell, window, cx| {
-                        shell.add_files_surface(window, cx);
-                        assert_eq!(shell.files["first"].entity_id(), first_explorer.entity_id());
+                        assert!(!explorer_visible(shell, explorer_id, cx));
+                        shell.toggle_files_panel(window, cx);
+                        assert!(explorer_visible(shell, explorer_id, cx));
+                        assert_eq!(
+                            shell.workspace_panels.explorers[&explorer_id].0,
+                            first_explorer
+                        );
                     })
                     .unwrap();
                 std::fs::rename(
@@ -464,24 +557,43 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 wait_for(window, cx, "renamed file and tab", |shell, cx| {
                     shell
                         .file_surface_keys
-                        .contains_key(&("first".into(), "src/nested/renamed.rs".into()))
-                        && shell.files["first"].read(cx).tree().selected()
-                            == Some("src/nested/renamed.rs")
+                        .get(&file_key("src/nested/renamed.rs"))
+                        == Some(&first_file)
+                        && !shell
+                            .file_surface_keys
+                            .contains_key(&file_key("src/nested/main.rs"))
+                        && first_explorer
+                            .read(cx)
+                            .tree()
+                            .node("src/nested/renamed.rs")
+                            .is_some()
+                        && shell.file_surfaces[&first_file]
+                            .read(cx)
+                            .test_document_text("src/nested/renamed.rs")
+                            .is_some_and(|text| text.contains("Updated"))
+                })
+                .await;
+                open_explorer_file(&first_explorer, "src/nested/renamed.rs", cx);
+                wait_for(window, cx, "renamed file selection", |shell, cx| {
+                    first_explorer.read(cx).tree().selected() == Some("src/nested/renamed.rs")
+                        && shell
+                            .file_surface_keys
+                            .get(&file_key("src/nested/renamed.rs"))
+                            == Some(&first_file)
                 })
                 .await;
                 std::fs::remove_file(project.join("src/nested/renamed.rs")).unwrap();
                 wait_for(window, cx, "deleted file", |shell, cx| {
-                    shell.files["first"]
+                    first_explorer
                         .read(cx)
                         .tree()
                         .node("src/nested/renamed.rs")
                         .is_none()
-                        && shell.file_surfaces.values().any(|file| {
-                            file.read(cx)
-                                .test_document_phase("src/nested/renamed.rs")
-                                .as_deref()
-                                == Some("DeletedOnDisk")
-                        })
+                        && shell.file_surfaces[&first_file]
+                            .read(cx)
+                            .test_document_phase("src/nested/renamed.rs")
+                            .as_deref()
+                            == Some("DeletedOnDisk")
                 })
                 .await;
                 core.workspace.set_chat_archived("first", true).unwrap();
@@ -496,13 +608,15 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 .await;
                 window
                     .update(cx, |shell, window, cx| {
-                        assert!(shell.files_panel_open(cx));
-                        assert_eq!(shell.files["first"].entity_id(), first_explorer.entity_id());
-                        assert!(shell.files_subs.contains_key("first"));
+                        assert!(explorer_visible(shell, explorer_id, cx));
+                        assert_eq!(
+                            shell.workspace_panels.explorers[&explorer_id].0,
+                            first_explorer
+                        );
                         shell.toggle_files_panel(window, cx);
-                        assert!(!shell.files_panel_open(cx));
+                        assert!(!explorer_visible(shell, explorer_id, cx));
                         shell.toggle_files_panel(window, cx);
-                        assert!(shell.files_panel_open(cx));
+                        assert!(explorer_visible(shell, explorer_id, cx));
                     })
                     .unwrap();
                 // An archived chat's explorer must survive subsequent state updates
@@ -510,19 +624,50 @@ fn files_panel_workspace_navigation_and_external_updates() {
                 state.update(cx, |_, cx| cx.notify());
                 std::fs::write(project.join("archived.txt"), "still accessible\n").unwrap();
                 wait_for(window, cx, "archived explorer update", |shell, cx| {
-                    shell.files_panel_open(cx)
-                        && shell.files.get("first").is_some_and(|files| {
-                            files.read(cx).tree().node("archived.txt").is_some()
-                        })
+                    explorer_visible(shell, explorer_id, cx)
+                        && first_explorer
+                            .read(cx)
+                            .tree()
+                            .node("archived.txt")
+                            .is_some()
                 })
                 .await;
                 core.workspace.delete_chat("first").unwrap();
-                wait_for(window, cx, "deleted explorer cleanup", |shell, _| {
-                    !shell.files.contains_key("first")
-                        && !shell.files_subs.contains_key("first")
-                        && !shell.panels.get("first").files_open
-                })
+                wait_for(
+                    window,
+                    cx,
+                    "deleted chat target invalidation",
+                    |shell, cx| {
+                        !shell
+                            .state
+                            .read(cx)
+                            .chats
+                            .iter()
+                            .any(|chat| chat.id == "first")
+                            && !first_explorer.read(cx).is_current_target(cx)
+                    },
+                )
                 .await;
+                let before_deleted_event = window
+                    .update(cx, |shell, _, _| {
+                        // The workspace retains the explorer after its backing
+                        // chat disappears; its subscription must reject stale events.
+                        assert_eq!(
+                            shell.workspace_panels.explorers[&explorer_id].0,
+                            first_explorer
+                        );
+                        shell.file_surface_keys.clone()
+                    })
+                    .unwrap();
+                first_explorer.update(cx, |_, cx| {
+                    cx.emit(FilesEvent::OpenFile("archived.txt".into()));
+                });
+                frame(window, cx, None, "deleted-event").await;
+                window
+                    .update(cx, |shell, _, _| {
+                        assert_eq!(shell.file_surface_keys, before_deleted_event);
+                    })
+                    .unwrap();
                 drop(first_explorer);
                 drop(state);
                 let handle = gpui::AnyWindowHandle::from(window);

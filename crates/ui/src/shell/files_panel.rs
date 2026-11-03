@@ -203,7 +203,7 @@ impl Shell {
                 &files,
                 window,
                 move |this: &mut Self, source, event, window, cx| match event {
-                    FilesEvent::OpenFile(path)
+                    FilesEvent::OpenFile(path) | FilesEvent::OpenFileAtAnchor { path, .. }
                         if this.accepts_file_navigation(&owner, &source, cx) =>
                     {
                         let previous_owner =
@@ -213,7 +213,16 @@ impl Shell {
                             .workspace_panels
                             .resource_engine_owner
                             .replace(engine_owner);
-                        this.add_file_surface(path.clone(), window, cx);
+                        if let FilesEvent::OpenFileAtAnchor { anchor, .. } = event {
+                            this.add_file_surface_at_anchor(
+                                path.clone(),
+                                anchor.clone(),
+                                window,
+                                cx,
+                            );
+                        } else {
+                            this.add_file_surface(path.clone(), window, cx);
+                        }
                         this.workspace_panels.resource_owner = previous_owner;
                         this.workspace_panels.resource_engine_owner = previous_engine;
                     }
@@ -603,10 +612,8 @@ mod tests {
         window
             .update(cx, |shell, window, cx| {
                 shell.add_files_surface(window, cx);
-                assert!(
-                    shell.files.is_empty(),
-                    "the new-session canvas has no explorer"
-                );
+                assert_eq!(shell.files.len(), 1, "the draft canvas owns its explorer");
+                assert!(!shell.files_panel_open(cx));
                 shell.active_chat = "first".into();
                 shell.add_files_surface(window, cx);
                 let explorer = shell.files["first"].entity_id();
@@ -620,7 +627,43 @@ mod tests {
                 assert_eq!(shell.file_surfaces.len(), 1);
                 assert_eq!(shell.right_surface_rows(cx).len(), 1);
                 assert!(shell.right_pane_open(cx));
-                shell.toggle_files_panel(window, cx);
+                shell.add_file_surface_at_anchor(
+                    "notes/Cheatsheet.md".into(),
+                    "fractions".into(),
+                    window,
+                    cx,
+                );
+                let owner = shell.panel_key(cx);
+                let key = (
+                    owner.clone(),
+                    shell.files_engine_owner(&owner, cx),
+                    "notes/Cheatsheet.md".into(),
+                );
+                let id = shell.file_surface_keys[&key];
+                assert_eq!(
+                    shell.file_surfaces[&id]
+                        .read(cx)
+                        .test_pending_markdown_anchor(),
+                    Some(("notes/Cheatsheet.md".into(), "fractions".into()))
+                );
+                shell.add_file_surface_at_anchor(
+                    "notes/Cheatsheet.md".into(),
+                    "roots".into(),
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    shell.file_surface_keys[&key], id,
+                    "section links must reuse the document tab"
+                );
+                assert_eq!(
+                    shell.file_surfaces[&id]
+                        .read(cx)
+                        .test_pending_markdown_anchor(),
+                    Some(("notes/Cheatsheet.md".into(), "roots".into()))
+                );
+                shell.close_right_surface(RightSurface::File(id), window, cx);
+                shell.close_files_panel(cx);
                 assert!(!shell.files_panel_open(cx));
                 assert!(shell.right_pane_open(cx));
                 assert_eq!(shell.file_surfaces.len(), 1);
@@ -669,6 +712,7 @@ mod tests {
         window
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "chat".into();
+                shell.viewport_width = 1400.0;
                 // Widths settle immediately so the assertions see end states.
                 shell.reduced_motion = true;
                 // A fresh pane toggle lands on the surface host alone.
@@ -679,8 +723,8 @@ mod tests {
                 assert!(!shell.right_pane_open(cx));
                 assert!(!shell.files_panel_open(cx));
 
-                // The explorer toggle opens the pane with only its portion.
-                shell.toggle_files_panel(window, cx);
+                // Opening the legacy explorer docks only its portion.
+                shell.add_files_surface(window, cx);
                 assert!(shell.files_panel_open(cx));
                 assert!(!shell.right_pane_open(cx));
                 assert!(shell.files_visible_width(cx) > 0.0);
@@ -707,9 +751,9 @@ mod tests {
                 assert!(shell.file_surfaces.is_empty());
                 assert!(!shell.right_pane_open(cx) && shell.files_panel_open(cx));
 
-                // Only the explorer toggle undocks it; with nothing else open
+                // Closing the legacy explorer undocks it; with nothing else open
                 // that closes the pane entirely.
-                shell.toggle_files_panel(window, cx);
+                shell.close_files_panel(cx);
                 assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
                 assert_eq!(shell.files_reserved_width(cx), 0.0);
 

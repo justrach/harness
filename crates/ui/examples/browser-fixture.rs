@@ -80,7 +80,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn validate_blur(
+fn validate_menu_surface(
     directory: &std::path::Path,
     region: (f64, f64, f64, f64),
     window_width: f32,
@@ -93,6 +93,10 @@ fn validate_blur(
     let x1 = ((x + w - 16.) * scale) as u32;
     let y0 = ((y + h - 33.) * scale) as u32;
     let y1 = ((y + h - 15.) * scale) as u32;
+    anyhow::ensure!(
+        x0 < x1 && y0 < y1 && x1 + 1 < baseline.width() && y1 + 1 < baseline.height(),
+        "menu sample lies outside the captured window"
+    );
     let measure = |img: &image::RgbImage| {
         let mut edges = 0.;
         let mut mean = 0.;
@@ -114,22 +118,42 @@ fn validate_blur(
     };
     let (sharp, _) = measure(&baseline);
     let dark = measure(&image::open(directory.join("browser-blur-dark.png"))?.to_rgb8());
-    let light = measure(&image::open(directory.join("browser-blur-light.png"))?.to_rgb8());
-    let solid = measure(&image::open(directory.join("browser-blur-solid-light.png"))?.to_rgb8());
+    let light_image = image::open(directory.join("browser-blur-light.png"))?.to_rgb8();
+    let solid_image = image::open(directory.join("browser-blur-solid-light.png"))?.to_rgb8();
+    let light = measure(&light_image);
+    let solid = measure(&solid_image);
+    let mut backdrop_difference = 0.;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            for c in 0..3 {
+                backdrop_difference += (light_image.get_pixel(x, y).0[c] as f64
+                    - solid_image.get_pixel(x, y).0[c] as f64)
+                    .abs();
+            }
+        }
+    }
+    backdrop_difference /= ((x1 - x0) * (y1 - y0) * 3) as f64;
     std::fs::write(
-        directory.join("blur-measurements.json"),
+        directory.join("menu-surface-measurements.json"),
         serde_json::to_string_pretty(
-            &serde_json::json!({"sample":[x0,y0,x1,y1],"baseline_edges":sharp,"dark_edges":dark.0,"light_edges":light.0,"light_mean":light.1,"solid_mean":solid.1}),
+            &serde_json::json!({"sample":[x0,y0,x1,y1],"baseline_edges":sharp,"dark_edges":dark.0,"light_edges":light.0,"dark_mean":dark.1,"light_mean":light.1,"solid_mean":solid.1,"backdrop_difference":backdrop_difference}),
         )?,
     )?;
-    anyhow::ensure!(sharp > 10., "blur sample did not cover the checkerboard");
+    anyhow::ensure!(sharp > 10., "menu sample did not cover the checkerboard");
     anyhow::ensure!(
         dark.0 < sharp * 0.035 && light.0 < sharp * 0.035,
-        "menu tint did not blur checkerboard edges"
+        "menu did not cover the checkerboard"
+    );
+    // popover_card deliberately paints an opaque surface in every theme,
+    // including when the surrounding shell uses the Frosted preference.
+    // Changing the live page underneath must leave that surface unchanged.
+    anyhow::ensure!(
+        backdrop_difference < 1.,
+        "live page bled through the opaque menu surface"
     );
     anyhow::ensure!(
-        (light.1 - solid.1).abs() > 3.,
-        "menu is opaque instead of showing the live page backdrop"
+        light.1 - dark.1 > 40.,
+        "menu surface did not follow the dark/light appearance"
     );
     Ok(())
 }
@@ -300,13 +324,20 @@ fn main() -> anyhow::Result<()> {
                 window.update(cx, |shell, w, cx| shell.fixture_close_browser(second_id, w, cx))?;
                 drop(second);
                 #[cfg(target_os = "linux")]
-                linux::exercise(window, first.clone(), &output, cx).await?;
+                linux::exercise(window, first_id, first.clone(), &output, cx).await?;
                 #[cfg(target_os = "macos")]
                 let mut recording;
                 #[cfg(target_os = "macos")]
                 {
                     pause(cx, 400).await;
                     let (left, top) = first.read_with(cx, |b, _| b.fixture_origin());
+                    let (tab, divider) = window.update(cx, |shell, _, cx| shell.fixture_browser_panel_targets(first_id, cx))?
+                        .ok_or_else(|| anyhow::anyhow!("browser panel chrome was not measured"))?;
+                    let reload = first.read_with(cx, |b, _| b.fixture_reload_bounds())
+                        .ok_or_else(|| anyhow::anyhow!("browser reload button was not measured"))?;
+                    let tab_hover = (f32::from(tab.center().x), f32::from(tab.center().y));
+                    let reload_hover = (f32::from(reload.center().x), f32::from(reload.center().y));
+                    let outside = (f32::from(divider.left()) - 20.0, f32::from(divider.center().y));
                     first.read_with(cx, |b, _| b.fixture_focus());
                     pause(cx, 100).await;
                     first.read_with(cx, |b,_| b.fixture_eval("(() => { let live = document.createElement('div'); live.style='position:fixed;bottom:16px;right:16px;padding:8px 12px;background:#29483b;color:white;border-radius:8px;font:12px monospace;z-index:99999'; document.body.append(live); let start=performance.now(); function frame() { live.textContent='LIVE  '+((performance.now()-start)/1000).toFixed(2)+'s'; requestAnimationFrame(frame); } frame(); })()"));
@@ -316,7 +347,7 @@ fn main() -> anyhow::Result<()> {
                     // Actual GPUI mouse dispatch exercises tab and toolbar hover
                     // listeners and tooltip timers, including rapid cancellation.
                     for _ in 0..12 {
-                        for (x,y) in [(left + 35.,20.), (left - 20.,100.), (left + 78.,56.)] {
+                        for (x,y) in [tab_hover, outside, reload_hover] {
                             first.read_with(cx, |b,_| b.fixture_move_cursor(x as f64,y as f64));
                             gpui::AnyWindowHandle::from(window).update(cx, |_, w, cx| { w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position:gpui::point(px(x),px(y)), pressed_button:None,modifiers:Default::default() }),cx); })?;
                             pause(cx, 80).await;
@@ -333,19 +364,19 @@ fn main() -> anyhow::Result<()> {
                     // Also dwell on the tab itself: its URL tooltip is the
                     // original reported flicker case, distinct from toolbar hover.
                     for _ in 0..2 {
-                        for (x,y) in [(left+35.,20.), (left+78.,56.)] {
+                        for (x,y) in [tab_hover, reload_hover] {
                             first.read_with(cx, |b,_| b.fixture_move_cursor(x as f64,y as f64));
                             gpui::AnyWindowHandle::from(window).update(cx, |_,w,cx| { w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {position:gpui::point(px(x),px(y)),pressed_button:None,modifiers:Default::default()}),cx); })?;
                             pause(cx, 1000).await;
                             anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_visible() && b.fixture_native_visible() && b.fixture_focused() && b.fixture_visibility_changes() == before), "repeated tab/toolbar tooltip disrupted the live page");
                         }
                     }
-                    first.read_with(cx, |b,_| b.fixture_move_cursor((left-20.) as f64,150.));
-                    gpui::AnyWindowHandle::from(window).update(cx, |_,w,cx| { w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {position:gpui::point(px(left-20.),px(150.)),pressed_button:None,modifiers:Default::default()}),cx); })?;
+                    first.read_with(cx, |b,_| b.fixture_move_cursor(outside.0 as f64,outside.1 as f64));
+                    gpui::AnyWindowHandle::from(window).update(cx, |_,w,cx| { w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {position:gpui::point(px(outside.0),px(outside.1)),pressed_button:None,modifiers:Default::default()}),cx); })?;
                     pause(cx, 400).await;
                     anyhow::ensure!(!first.read_with(cx, |b,_| b.fixture_overlay_visible()), "dismissed tooltip left stale overlay pixels");
                 }
-                window.update(cx, |shell, _, cx| shell.fixture_browser_menu(true, cx))?;
+                window.update(cx, |shell, w, cx| shell.fixture_browser_menu(true, w, cx))?;
                 pause(cx, 700).await;
                 #[cfg(target_os = "macos")]
                 {
@@ -377,7 +408,7 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(not(target_os = "macos"))]
                 {
                     capture(&output, "browser-menu-dark")?;
-                    window.update(cx, |shell, _, cx| shell.fixture_browser_menu(false, cx))?;
+                    window.update(cx, |shell, w, cx| shell.fixture_browser_menu(false, w, cx))?;
                 }
                 pause(cx, 500).await;
                 #[cfg(target_os = "macos")]
@@ -403,22 +434,25 @@ fn main() -> anyhow::Result<()> {
                     let (left,top)=first.read_with(cx,|b,_|b.fixture_origin());
                     // Real resize-handle drag, including crossing into the native page.
                     eprintln!("Browser fixture: starting resize drag");
-                    // The 20px shell target overlaps the native browser by 9px
-                    // after its one-point panel border. That full overlap must
-                    // reach GPUI, while content beyond it stays native.
-                    for offset in [-6., -2., 0., 3., 6., 8.5] {
-                        anyhow::ensure!(!first.read_with(cx,|b,_|b.fixture_page_hit((left+offset) as f64,(top+120.) as f64)),"native page stole the resize target at offset {offset}");
+                    let (_,divider)=window.update(cx,|shell,_,cx|shell.fixture_browser_panel_targets(first_id,cx))?
+                        .ok_or_else(||anyhow::anyhow!("browser divider was not measured"))?;
+                    // Workspace dividers occupy the gutter, leaving the page
+                    // itself native until a resize takes pointer ownership.
+                    for fraction in [0.1, 0.5, 0.9] {
+                        let x=f32::from(divider.left()+divider.size.width*fraction);
+                        let y=f32::from(divider.center().y);
+                        anyhow::ensure!(!first.read_with(cx,|b,_|b.fixture_page_hit(x as f64,y as f64)),"native page stole the workspace divider at {fraction}");
                     }
-                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_page_hit((left+10.) as f64,(top+120.) as f64)),"resize target blocked adjacent page content");
-                    let start=gpui::point(px(left+3.),px(top+120.));
+                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_page_hit((left+10.) as f64,(top+120.) as f64)),"workspace divider blocked adjacent page content");
+                    let start=divider.center();
                     gpui::AnyWindowHandle::from(window).update(cx,|_,w,cx| {w.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent{position:start,button:gpui::MouseButton::Left,click_count:1,..Default::default()}),cx);})?;
                     let mut widths=Vec::new();
                     for delta in [10.,30.,60.,100.,140.,180.,140.,100.,60.,20.,-20.,-60.,-100.,-140.,-180.,-140.,-100.,-60.,-20.,0.] {
-                        let pos=gpui::point(px(left+3.+delta),start.y);
+                        let pos=start+gpui::point(px(delta),px(0.));
                         first.read_with(cx,|b,_|b.fixture_move_cursor(f32::from(pos.x) as f64,f32::from(pos.y) as f64));
                         gpui::AnyWindowHandle::from(window).update(cx,|_,w,cx| {w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent{position:pos,pressed_button:Some(gpui::MouseButton::Left),modifiers:Default::default()}),cx);})?;
                         pause(cx,100).await;
-                        anyhow::ensure!(cx.update(|cx|cx.has_active_drag()),"resize did not start a real GPUI drag");
+                        anyhow::ensure!(window.update(cx,|shell,_,_|shell.fixture_workspace_resizing())?,"workspace divider resize did not start");
                         let (layout,native,clip)=first.read_with(cx,|b,_|b.fixture_geometry());
                         widths.push(layout);
                         let (x,y)=first.read_with(cx,|b,_|b.fixture_origin());
@@ -428,7 +462,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     gpui::AnyWindowHandle::from(window).update(cx,|_,w,cx| {w.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent{position:start,button:gpui::MouseButton::Left,click_count:1,..Default::default()}),cx);})?;
                     pause(cx,250).await;
-                    anyhow::ensure!(!cx.update(|cx|cx.has_active_drag()),"resize drag did not end");
+                    anyhow::ensure!(!window.update(cx,|shell,_,_|shell.fixture_workspace_resizing())?,"workspace divider resize did not end");
                     anyhow::ensure!(widths.iter().copied().fold(f32::MIN,f32::max)-widths.iter().copied().fold(f32::MAX,f32::min)>150.,"resize did not exercise both viewport sizes");
                     let (x,y)=first.read_with(cx,|b,_|b.fixture_origin());
                     anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_page_hit((x+100.) as f64,(y+100.) as f64)),"resize release did not restore page hit testing");
@@ -450,35 +484,26 @@ fn main() -> anyhow::Result<()> {
                         for _ in 0..20 {pause(cx,16).await;anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_native_visible() && b.fixture_visibility_changes()==before),"left sidebar toggle hid the browser");}
                     }
                     eprintln!("Browser fixture: left sidebar transitions passed");
-                    // Reverse the right sidebar mid-animation. It must remain
-                    // live inside a narrowing mask, without bleeding into chat.
+                    // Expanding the neighboring workspace panel hides the
+                    // browser; restoring the layout keeps its existing page.
                     for _ in 0..3 {
                         window.update(cx,|s,_,cx|s.fixture_toggle_sidebar(true,cx))?;
-                        let deadline=std::time::Instant::now()+Duration::from_secs(2);
-                        loop {
-                            pause(cx,1).await;
-                            let (width,_,clip)=first.read_with(cx,|b,_|b.fixture_geometry());
-                            anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_native_visible()),"closing sidebar skipped intermediate live frames");
-                            if clip<width { break; }
-                            anyhow::ensure!(std::time::Instant::now()<deadline,"closing sidebar did not clip the live browser");
-                        }
+                        pause(cx,350).await;
+                        anyhow::ensure!(!first.read_with(cx,|b,_|b.fixture_native_visible()),"expanded neighboring panel retained the native browser");
                         window.update(cx,|s,_,cx|s.fixture_toggle_sidebar(true,cx))?;
                         pause(cx,350).await;
-                        anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_native_visible()),"interrupted toggle lost browser visibility");
+                        anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_native_visible()),"restoring workspace panels lost browser visibility");
                     }
-                    window.update(cx,|s,_,cx|s.fixture_toggle_sidebar(true,cx))?;
-                    pause(cx,350).await;
-                    anyhow::ensure!(!first.read_with(cx,|b,_|b.fixture_native_visible()),"closed sidebar retained native content");
-                    window.update(cx,|s,_,cx|s.fixture_toggle_sidebar(true,cx))?;
-                    pause(cx,350).await;
                     first.read_with(cx,|b,_|b.fixture_eval("document.title='Fieldnotes'"));
-                    eprintln!("Browser fixture: right sidebar transitions passed");
+                    eprintln!("Browser fixture: workspace panel visibility passed");
                     capture(&output,"browser-blur-baseline-dark")?;
-                    window.update(cx,|s,_,cx|s.fixture_browser_menu(true,cx))?;
+                    window.update(cx,|s,w,cx|s.fixture_browser_menu(true,w,cx))?;
                     pause(cx,1000).await;
-                    let regions=first.read_with(cx,|b,_|b.fixture_backdrops());
-                    anyhow::ensure!(!regions.is_empty(),"menu has no native browser backdrop");
-                    std::fs::write(output.join("blur-regions.json"),serde_json::to_string(&regions)?)?;
+                    let menu_bounds=window.update(cx,|s,_,_|s.fixture_browser_menu_bounds())?
+                        .ok_or_else(||anyhow::anyhow!("browser tab menu was not measured"))?;
+                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_overlay_visible() && b.fixture_native_visible()),"menu did not paint above the live browser");
+                    let backdrops=first.read_with(cx,|b,_|b.fixture_backdrops());
+                    std::fs::write(output.join("blur-regions.json"),serde_json::to_string(&backdrops)?)?;
                     capture(&output,"browser-blur-dark")?;
                     cx.update(|cx|appearance::set_mode(appearance::AppearanceMode::Light,cx));
                     pause(cx,700).await;
@@ -492,28 +517,39 @@ fn main() -> anyhow::Result<()> {
                     anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_backdrops().is_empty()),"opaque appearance retained native blur");
                     capture(&output,"browser-menu-opaque")?;
                     cx.update(|cx| {appearance::set_mode(appearance::AppearanceMode::Dark,cx);appearance::set_surface(harness_theme::SurfacePreference::Frosted,cx);});
-                    window.update(cx,|s,_,cx|s.fixture_browser_menu(false,cx))?;
+                    window.update(cx,|s,w,cx|s.fixture_browser_menu(false,w,cx))?;
                     pause(cx,500).await;
-                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_backdrops().is_empty()),"dismissed menu retained native blur");
+                    anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_backdrops().is_empty() && !b.fixture_overlay_visible() && b.fixture_native_visible()),"dismissed menu retained a native layer or hid the page");
                     let deadline=std::time::Instant::now()+Duration::from_secs(30);
                     loop {if let Some(status)=layout_video.try_wait()? {anyhow::ensure!(status.success(),"layout recording failed");break;}anyhow::ensure!(std::time::Instant::now()<deadline,"layout recording timed out");pause(cx,100).await;}
                     anyhow::ensure!(std::fs::metadata(output.join("browser-layout.mov"))?.len()>10000,"layout recording is empty");
-                    validate_blur(&output,regions[0],window_width)?;
+                    validate_menu_surface(&output,(f32::from(menu_bounds.origin.x) as f64,f32::from(menu_bounds.origin.y) as f64,f32::from(menu_bounds.size.width) as f64,f32::from(menu_bounds.size.height) as f64),window_width)?;
                 }
+                #[cfg(target_os = "macos")]
+                let mut fractional_widths = Vec::new();
                 for width in [380.25, 640.5, 520.75] {
                     window.update(cx, |shell, _, cx| shell.fixture_resize_browser(width, cx))?;
                     pause(cx, 150).await;
                     #[cfg(target_os = "macos")]
                     {
                         let (layout,native,clip)=first.read_with(cx,|b,_|b.fixture_geometry());
+                        fractional_widths.push(layout);
                         anyhow::ensure!((layout-native).abs()<0.01 && (clip-native).abs()<0.01,"fractional resize left a gap between the page and clip: {layout}/{native}/{clip}");
                     }
                 }
+                #[cfg(target_os = "macos")]
+                anyhow::ensure!(fractional_widths.iter().copied().fold(f32::MIN,f32::max)-fractional_widths.iter().copied().fold(f32::MAX,f32::min)>100.,"fractional resize did not change the browser viewport");
+                #[cfg(target_os = "macos")]
+                let restored_width=first.read_with(cx,|b,_|b.fixture_geometry().0);
                 window.update(cx, |shell, _, cx| shell.fixture_expand_browser(cx))?;
                 pause(cx, 400).await;
+                #[cfg(target_os = "macos")]
+                anyhow::ensure!(first.read_with(cx,|b,_|b.fixture_geometry().0)>restored_width+100.,"expanding the browser panel did not grow its viewport");
                 window.update(cx, |shell, _, cx| shell.fixture_expand_browser(cx))?;
                 cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
                 pause(cx, 600).await;
+                #[cfg(target_os = "macos")]
+                anyhow::ensure!((first.read_with(cx,|b,_|b.fixture_geometry().0)-restored_width).abs()<1.,"restoring browser panel did not restore its viewport");
                 capture(&output, "browser-light")?;
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 {

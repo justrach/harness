@@ -152,6 +152,8 @@ pub struct BrowserSurface {
     #[cfg(feature = "browser-fixture")]
     fixture_forward_control:
         std::rc::Rc<std::cell::Cell<(f32, Option<gpui::Bounds<gpui::Pixels>>)>>,
+    #[cfg(feature = "browser-fixture")]
+    fixture_reload_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
     presentation: Presentation,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
@@ -253,6 +255,8 @@ impl BrowserSurface {
             fixture_preview_open: Default::default(),
             #[cfg(feature = "browser-fixture")]
             fixture_forward_control: Default::default(),
+            #[cfg(feature = "browser-fixture")]
+            fixture_reload_bounds: Default::default(),
             presentation: Presentation::Hidden,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
@@ -461,6 +465,10 @@ impl BrowserSurface {
     #[cfg(feature = "browser-fixture")]
     pub fn fixture_forward_control(&self) -> (f32, Option<gpui::Bounds<gpui::Pixels>>) {
         self.fixture_forward_control.get()
+    }
+    #[cfg(feature = "browser-fixture")]
+    pub fn fixture_reload_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.fixture_reload_bounds.get()
     }
 
     /// The daemon resolves the session's current cwd for every update, so a

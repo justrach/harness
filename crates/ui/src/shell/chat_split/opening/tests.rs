@@ -298,7 +298,7 @@ fn selecting_text_in_an_unfocused_pane_keeps_the_selection(cx: &mut TestAppConte
                 state.chats = vec![chat(Some("active"))];
                 state.select_chat(Some("original".into()), cx);
             });
-            shell.split_chat(SplitAxis::Horizontal, window, cx);
+            shell.split_chat_opening(SplitAxis::Horizontal, None, window, cx);
             let focus = shell.chat_split.as_ref().unwrap().focus;
             let other = 1 - focus;
 

@@ -184,12 +184,21 @@ fn titlebar_keeps_toggle_and_update_inside_sidebar_across_first_prompt(
             cx.update(|window, cx| window.draw(cx).clear());
             let toggle = cx.debug_bounds("toggle-sidebar").unwrap();
             let update = cx.debug_bounds("titlebar-update");
-            if matches!(mode, "none" | "available" | "downloading" | "ready") {
+            if matches!(mode, "none" | "available" | "downloading") {
                 assert!(update.is_none());
                 shell.read_with(cx, |shell, cx| {
                     assert_eq!(shell.titlebar_update_slot(cx), 0.0)
                 });
                 continue;
+            }
+            if mode == "ready" {
+                // Automatic restart may wait on active work. A staged update
+                // still offers manual restart in the compact titlebar slot.
+                shell.read_with(cx, |shell, cx| {
+                    assert!(settings::with_current(cx, |s| s.restart_to_install_updates));
+                    assert!(shell.app_update.postponed.is_none());
+                    assert!(shell.app_update.countdown_started.is_none());
+                });
             }
             let update = update.expect("every visible update state owns the same slot");
             assert_eq!(update.left() - toggle.right(), px(TITLEBAR_CONTROL_GAP));
@@ -647,6 +656,7 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
     });
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("app-update-countdown").is_none());
+    // Postponed updates keep the compact titlebar control even with the sidebar open.
     assert!(cx.debug_bounds("titlebar-update").is_some());
 
     // Settings → Devices sees the same flow, and its button does what the

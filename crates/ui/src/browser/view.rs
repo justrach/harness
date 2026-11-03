@@ -555,6 +555,11 @@ impl Render for BrowserSurface {
         .when(has_page, |el| {
             el.on_click(cx.listener(|this, _, w, cx| this.reload(w, cx)))
         });
+        #[cfg(feature = "browser-fixture")]
+        let reload = {
+            let measured = self.fixture_reload_bounds.clone();
+            reload.on_prepaint(move |bounds, _, _| measured.set(Some(bounds)))
+        };
         let address_bounds = self.search.address_bounds.clone();
         let search_open = self.search_suggestions_open(window, cx);
         let address = div()
@@ -701,6 +706,7 @@ impl Render for BrowserSurface {
                 let native = native.handle();
                 let resize_inset = self.resize_inset;
                 let right_occlusion = self.right_occlusion;
+                let passthrough = self.presentation == super::model::Presentation::Passthrough;
                 body.child(
                     gpui::canvas(
                         |_, _, _| (),
@@ -710,7 +716,7 @@ impl Render for BrowserSurface {
                             let right =
                                 (window.viewport_size().width - right_occlusion).max(mask.left());
                             mask.size.width = mask.size.width.min(right - mask.left());
-                            let dragging = cx.has_active_drag();
+                            let dragging = passthrough || cx.has_active_drag();
                             window.on_present(move || {
                                 if let Some(native) = native.upgrade() {
                                     native.borrow_mut().sync(
@@ -776,7 +782,16 @@ impl Render for BrowserSurface {
                 .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {
                     w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers);cx.stop_propagation();
                 }))
-                .on_mouse_up(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
+                .on_mouse_up(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {
+                    // Presentation updates at render time. A divider release
+                    // can arrive first, so only consume presses owned by this page.
+                    if this.presentation == super::model::Presentation::Live
+                        && this.native.as_ref().is_some_and(|native| native.pressed.get() == Some(event.button))
+                    {
+                        this.linux_pointer("up",event.position,Some(event.button),event.modifiers);
+                        cx.stop_propagation();
+                    }
+                }))
                 .on_mouse_up_out(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,_| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);}))
                 .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
                 .on_mouse_down(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))

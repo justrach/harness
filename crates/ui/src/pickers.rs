@@ -590,6 +590,20 @@ pub fn browser_rows(listing: &FolderListing) -> Vec<&harness_proto::FolderEntry>
 /// the first Down lands on row 0.
 const NO_ACTIVE_ROW: usize = usize::MAX;
 
+/// Project rows precede two pinned actions: New project, then the opt-out.
+/// Shift+Down skips the project section; within the footer, arrows keep stepping.
+fn next_project_menu_row(active: usize, project_count: usize, delta: isize, shift: bool) -> usize {
+    if shift && delta > 0 && (active == NO_ACTIVE_ROW || active < project_count) {
+        return project_count;
+    }
+    popover::menu_step(
+        (active != NO_ACTIVE_ROW).then_some(active),
+        project_count + 2,
+        delta,
+    )
+    .unwrap_or(0)
+}
+
 /// Which pane the harness/model picker's icon rail is showing (t3code
 /// ModelPickerContent `selectedInstanceId | "favorites"`). `Harness` means
 /// "the effective harness's list" — the rail has no browse-without-commit
@@ -2877,7 +2891,7 @@ impl Pickers {
     /// An implicit empty selection has no highlight until the user navigates.
     fn selected_space_index(&self, cx: &App) -> usize {
         if self.state.read(cx).no_project {
-            return self.scoped_space_rows(cx).len();
+            return self.scoped_space_rows(cx).len() + 1;
         }
         let selected = self
             .state
@@ -3424,6 +3438,44 @@ impl Pickers {
             .into_any_element()
     }
 
+    /// One cursor drives both mouse and keyboard selection. A checkmark
+    /// indicates the current destination without implying a second Enter target.
+    fn project_menu_row(
+        &self,
+        theme: &Theme,
+        index: usize,
+        selected: bool,
+        id: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        popover::menu_cursor_row(theme, self.active == index)
+            .relative()
+            .pr(px(28.0))
+            .when(selected, |row| {
+                row.child(
+                    div()
+                        .absolute()
+                        .right(px(8.0))
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
+            .id(id)
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                if this.project_menu_open() && this.active != index {
+                    this.active = index;
+                    cx.notify();
+                }
+            }))
+    }
+
     /// The project popover: search + one row per project on the picked device
     /// (check on the current pick), then "New project" and the opt-out rows. Rows
     /// are device-scoped, so no per-row `@ device` tag — the device chip next
@@ -3436,8 +3488,8 @@ impl Pickers {
             .read(cx)
             .selected_space_row()
             .map(|s| s.id.clone());
-        let active = self.active;
-        let no_project_index = rows.len();
+        let new_project_index = rows.len();
+        let no_project_index = new_project_index + 1;
         let scrollbar = popover::rail(self, "space-scrollbar", &theme, cx);
         let body: AnyElement = if rows.is_empty() {
             // Distinguish "the filter ate everything" from "this device has
@@ -3467,13 +3519,13 @@ impl Pickers {
                             let label: SharedString = space.display_name().to_string().into();
                             let is_selected = selected.as_deref() == Some(space.id.as_str());
                             let pick_id = space.id.clone();
-                            popover::menu_row_nav(
+                            self.project_menu_row(
                                 &theme,
+                                ix,
                                 is_selected,
-                                ix == active,
-                                format!("space-row-{ix}"),
+                                format!("space-row-{ix}").into(),
+                                cx,
                             )
-                            .id(("space-row", ix))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.pick_space(pick_id.clone(), cx);
                             }))
@@ -3483,34 +3535,32 @@ impl Pickers {
                 .children(scrollbar)
                 .into_any_element()
         };
-        let no_project = popover::menu_row_nav(
-            &theme,
-            self.state.read(cx).no_project,
-            active == no_project_index,
-            "project-none".to_string(),
-        )
-        .id("project-none")
-        .on_click(cx.listener(|this, _, _, cx| this.pick_no_project(cx)))
-        .child(
-            crate::icons::icon(crate::icons::CLOSE)
-                .size(px(12.0))
-                .flex_none()
-                .text_color(theme.text_muted),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child("Don't work in a project"),
-        );
+        let no_project = self
+            .project_menu_row(
+                &theme,
+                no_project_index,
+                self.state.read(cx).no_project,
+                "project-none".into(),
+                cx,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.pick_no_project(cx)))
+            .child(
+                crate::icons::icon(crate::icons::CLOSE)
+                    .size(px(12.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child("Don't work in a project"),
+            );
         // Action row under a hairline: mint a project.
-        let new_project = popover::menu_row_nav(&theme, false, false, "project-new".to_string())
-            .id("project-new")
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.dismiss(cx);
-                window.dispatch_action(Box::new(crate::shell::AddSpacePalette), cx);
-            }))
+        let new_project = self
+            .project_menu_row(&theme, new_project_index, false, "project-new".into(), cx)
+            .on_click(cx.listener(|this, _, _, cx| this.new_project(cx)))
             .child(
                 crate::icons::icon(crate::icons::PLUS)
                     .size(px(12.0))
@@ -3551,6 +3601,13 @@ impl Pickers {
             .into_any_element()
     }
 
+    fn new_project(&mut self, cx: &mut Context<Self>) {
+        self.dismiss(cx);
+        // Search submissions also reach here through an entity subscription,
+        // without a Window. Defer dispatch until that entity update has ended.
+        cx.defer(|cx| cx.dispatch_action(&crate::shell::AddSpacePalette));
+    }
+
     fn on_search_submit(&mut self, cx: &mut Context<Self>) {
         if self.open_kind() == Some(PickerKind::Branch)
             && let Some(row) = self.filtered_ref_rows(cx).into_iter().nth(self.active)
@@ -3562,6 +3619,8 @@ impl Pickers {
             if let Some(space) = rows.get(self.active) {
                 self.pick_space(space.id.clone(), cx);
             } else if self.active == rows.len() {
+                self.new_project(cx);
+            } else if self.active == rows.len() + 1 {
                 self.pick_no_project(cx);
             }
         }
@@ -3670,7 +3729,7 @@ impl Pickers {
                     Some(PickerKind::HarnessModel) => {
                         self.model_rows_len(cx) + self.setting_groups(cx).len()
                     }
-                    Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 1,
+                    Some(PickerKind::Space) => self.filtered_space_rows(cx).len() + 2,
                     Some(PickerKind::Device) => {
                         self.filtered_device_rows(cx).len()
                             + usize::from(matches!(
@@ -3681,7 +3740,16 @@ impl Pickers {
                     None => 0,
                 };
                 let current = (self.active != NO_ACTIVE_ROW).then_some(self.active);
-                self.active = popover::menu_step(current, count, delta).unwrap_or(0);
+                self.active = if self.open_kind() == Some(PickerKind::Space) {
+                    next_project_menu_row(
+                        self.active,
+                        count - 2,
+                        delta,
+                        event.keystroke.modifiers.shift,
+                    )
+                } else {
+                    popover::menu_step(current, count, delta).unwrap_or(0)
+                };
                 // Step over provider section headers (bounded: a list of
                 // nothing but headers must not spin).
                 if self.open_kind() == Some(PickerKind::HarnessModel) {
@@ -3706,6 +3774,11 @@ impl Pickers {
                 {
                     self.model_scroll
                         .scroll_to_item(self.active, gpui::ScrollStrategy::Nearest);
+                }
+                // Project rows are direct children of the plain-div scroller;
+                // the two pinned footer actions are outside it.
+                if self.open_kind() == Some(PickerKind::Space) && self.active < count - 2 {
+                    self.menu_scroll.scroll_to_item(self.active);
                 }
                 cx.notify();
                 cx.stop_propagation();
@@ -4824,15 +4897,17 @@ impl Pickers {
     ) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let height = self.menu_geometry().height.min(self.open_model_height);
-        #[cfg(feature = "model-picker-preview")]
-        let height = if self.preview.enabled {
-            height.min(self.preview.preferred_height())
-        } else {
-            height
-        };
-        popover::popover_card_flush(&theme)
+        let frame = popover::popover_card_flush(&theme)
             .w(px(width))
-            .h(px(height))
+            .h(px(height));
+        #[cfg(feature = "model-picker-preview")]
+        let frame = if self.preview.enabled && self.preview.pending.is_some() {
+            // Fit the reasoning controls, but keep scrolling in short windows.
+            frame.h_auto().max_h(px(height))
+        } else {
+            frame
+        };
+        frame
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.on_key_down(event, window, cx)
@@ -8687,6 +8762,293 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_picker_navigation_handles_filtered_and_empty_lists() {
+        for (active, projects, delta, shift, expected) in [
+            (0, 3, 1, true, 3),
+            (2, 3, 1, true, 3),
+            (NO_ACTIVE_ROW, 3, 1, true, 3),
+            (3, 3, 1, true, 4),
+            (4, 3, -1, false, 3),
+            (3, 3, -1, false, 2),
+            (4, 3, 1, false, 0),
+            (0, 3, -1, false, 4),
+            (0, 1, 1, true, 1),
+            (NO_ACTIVE_ROW, 0, 1, true, 0),
+            (0, 0, 1, false, 1),
+            (1, 0, -1, false, 0),
+        ] {
+            assert_eq!(
+                next_project_menu_row(active, projects, delta, shift),
+                expected,
+                "active={active}, projects={projects}, delta={delta}, shift={shift}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn project_picker_only_highlights_the_enter_target(cx: &mut gpui::TestAppContext) {
+        let pickers = cx.new(|cx| {
+            let state = cx.new(|_| AppState::new());
+            Pickers::new(state, cx)
+        });
+        pickers.update(cx, |pickers, cx| {
+            let theme = Theme::dark();
+            let highlighted: gpui::Fill = crate::theme::card_selected_bg().into();
+            // The current destination may be a different project or the
+            // opt-out. Neither may retain a second filled highlight.
+            for selected in [0, 3] {
+                for active in 0..4 {
+                    pickers.active = active;
+                    let filled: Vec<usize> = (0..4)
+                        .filter(|&index| {
+                            let mut row = pickers.project_menu_row(
+                                &theme,
+                                index,
+                                index == selected,
+                                format!("project-highlight-{index}").into(),
+                                cx,
+                            );
+                            row.style().background.as_ref() == Some(&highlighted)
+                        })
+                        .collect();
+                    assert_eq!(filled, vec![active], "selected={selected}, active={active}");
+                }
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn project_picker_keyboard_reaches_both_footer_actions(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.apply_spaces(
+                    ["alpha", "beta", "gamma"]
+                        .into_iter()
+                        .map(|name| Space {
+                            id: name.into(),
+                            device_id: "local".into(),
+                            path: format!("/{name}"),
+                            name: None,
+                            git_detected: false,
+                            git_checked_at: None,
+                            checkout_id: None,
+                            created_at: chrono::Utc::now(),
+                        })
+                        .collect(),
+                );
+                state
+            });
+            Pickers::new(state, cx)
+        });
+        handle
+            .update(cx, |pickers, window, cx| {
+                let key = |key: &str| KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                pickers.open.open(PickerKind::Space);
+                pickers.active = 0;
+                pickers.on_key_down(&key("shift-down"), window, cx);
+                assert_eq!(pickers.active, 3, "Shift+Down jumps to New project");
+                pickers.on_key_down(&key("down"), window, cx);
+                assert_eq!(pickers.active, 4, "Down reaches the opt-out row");
+                pickers.on_key_down(&key("up"), window, cx);
+                assert_eq!(pickers.active, 3, "Up returns to New project");
+                pickers.on_key_down(&key("up"), window, cx);
+                assert_eq!(pickers.active, 2, "Up returns to the project list");
+                pickers.on_key_down(&key("down"), window, cx);
+                assert_eq!(pickers.active, 3, "plain Down also reaches New project");
+                pickers.on_key_down(&key("shift-down"), window, cx);
+                assert_eq!(pickers.active, 4, "Shift+Down still navigates the footer");
+                pickers.on_key_down(&key("enter"), window, cx);
+                assert!(pickers.state.read(cx).no_project);
+                assert!(!pickers.is_open());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn project_picker_arrows_scroll_the_highlight_into_view(cx: &mut gpui::TestAppContext) {
+        struct Fixture(Entity<Pickers>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |pickers, cx| {
+                    let content = pickers.render_space_popover(cx);
+                    pickers.popover_frame(280.0, content, cx)
+                })
+            }
+        }
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+        });
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.apply_spaces(
+                    (0..24)
+                        .map(|ix| Space {
+                            id: format!("project-{ix:02}"),
+                            device_id: "local".into(),
+                            path: format!("/demo/project-{ix:02}"),
+                            name: None,
+                            git_detected: false,
+                            git_checked_at: None,
+                            checkout_id: None,
+                            created_at: chrono::Utc::now(),
+                        })
+                        .collect(),
+                );
+                state
+            });
+            Fixture(cx.new(|cx| {
+                let mut pickers = Pickers::new(state, cx);
+                pickers.open.open(PickerKind::Space);
+                pickers.active = 0;
+                pickers
+            }))
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |fixture, window, cx| {
+                window.focus(&fixture.0.read(cx).search.focus_handle(cx), cx);
+            })
+            .unwrap();
+        let assert_visible = |cx: &mut gpui::TestAppContext, expected| {
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            handle
+                .read_with(cx, |fixture, cx| {
+                    let pickers = fixture.0.read(cx);
+                    assert_eq!(pickers.active, expected);
+                    let scroll = &pickers.menu_scroll;
+                    let viewport = scroll.bounds();
+                    let row = scroll.bounds_for_item(expected).unwrap();
+                    assert!(
+                        row.top() + scroll.offset().y >= viewport.top() - px(0.1)
+                            && row.bottom() + scroll.offset().y <= viewport.bottom() + px(0.1),
+                        "highlighted project {expected} must be fully visible"
+                    );
+                })
+                .unwrap();
+        };
+        for expected in 1..24 {
+            cx.simulate_keystrokes(handle.into(), "down");
+            assert_visible(cx, expected);
+        }
+        for expected in (0..23).rev() {
+            cx.simulate_keystrokes(handle.into(), "up");
+            assert_visible(cx, expected);
+        }
+        // The two footer actions are pinned, not children of the scroller.
+        // Returning from them must still reveal the final project row.
+        cx.simulate_keystrokes(handle.into(), "shift-down");
+        handle
+            .read_with(cx, |fixture, cx| {
+                let pickers = fixture.0.read(cx);
+                assert_eq!(pickers.active, 24);
+                assert_eq!(pickers.menu_scroll.offset().y, px(0.0));
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "up");
+        assert_visible(cx, 23);
+        let position = handle
+            .read_with(cx, |fixture, cx| {
+                let scroll = &fixture.0.read(cx).menu_scroll;
+                scroll.bounds_for_item(22).unwrap().center() + scroll.offset()
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_visible(cx, 22);
+        // A stationary pointer must not keep its own highlight when the
+        // keyboard moves on, and Enter must follow the shared cursor.
+        cx.simulate_keystrokes(handle.into(), "up");
+        assert_visible(cx, 21);
+        cx.simulate_keystrokes(handle.into(), "enter");
+        handle
+            .read_with(cx, |fixture, cx| {
+                assert_eq!(
+                    fixture.0.read(cx).state.read(cx).selected_space.as_deref(),
+                    Some("project-21")
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn project_picker_search_keyboard_opens_new_project(cx: &mut gpui::TestAppContext) {
+        struct Fixture {
+            pickers: Entity<Pickers>,
+            new_project_requests: usize,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let menu = self.pickers.update(cx, |pickers, cx| {
+                    pickers.is_open().then(|| {
+                        let content = pickers.render_space_popover(cx);
+                        pickers.popover_frame(280.0, content, cx)
+                    })
+                });
+                div()
+                    .size_full()
+                    .on_action(
+                        cx.listener(|this, _: &crate::shell::AddSpacePalette, _, cx| {
+                            this.new_project_requests += 1;
+                            cx.notify();
+                        }),
+                    )
+                    .children(menu)
+            }
+        }
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::composer::init(cx, Default::default());
+        });
+        let handle = cx.add_window(|_, cx| Fixture {
+            pickers: cx.new(|cx| {
+                let state = cx.new(|_| AppState::new());
+                let mut pickers = Pickers::new(state, cx);
+                pickers.open.open(PickerKind::Space);
+                pickers.active = NO_ACTIVE_ROW;
+                pickers
+            }),
+            new_project_requests: 0,
+        });
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        handle
+            .update(cx, |fixture, window, cx| {
+                window.activate_window();
+                window.focus(&fixture.pickers.read(cx).search.focus_handle(cx), cx);
+            })
+            .unwrap();
+        cx.simulate_keystrokes(handle.into(), "shift-down enter");
+        cx.run_until_parked();
+        handle
+            .read_with(cx, |fixture, cx| {
+                assert_eq!(fixture.new_project_requests, 1);
+                assert!(!fixture.pickers.read(cx).is_open());
+                assert!(!fixture.pickers.read(cx).state.read(cx).no_project);
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn startup_draft_does_not_restore_shared_checkout_after_projects_load(
         cx: &mut gpui::TestAppContext,
@@ -8768,7 +9130,7 @@ mod tests {
             pickers.config.branch = Some("old-branch".into());
             pickers.config.checkout = CheckoutKind::NewWorktree;
             pickers.open.open(PickerKind::Space);
-            pickers.active = 1; // project row followed by the projectless row
+            pickers.active = 2; // project row, New project, then the projectless row
             pickers.on_search_submit(cx);
         });
         cx.run_until_parked();
@@ -8778,13 +9140,13 @@ mod tests {
             assert!(pickers.defaults.no_project);
             assert!(pickers.state.read(cx).auto_selected);
             assert!(pickers.defaults.project.is_none());
-            assert_eq!(pickers.selected_space_index(cx), 1);
+            assert_eq!(pickers.selected_space_index(cx), 2);
         });
         state.update(cx, |state, cx| state.select_device("remote".into(), cx));
         cx.run_until_parked();
         pickers.update(cx, |pickers, cx| {
             assert_eq!(pickers.space_target(cx).as_deref(), Some("remote"));
-            assert_eq!(pickers.selected_space_index(cx), 0); // empty device
+            assert_eq!(pickers.selected_space_index(cx), 1); // empty device
             assert!(pickers.target_generation >= 2);
         });
     }

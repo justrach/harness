@@ -1138,6 +1138,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.focus_sidebar_search(window, cx);
         if !cx.has_active_drag() {
             self.session_sidebar.drop_target = None;
         }
@@ -1223,12 +1224,19 @@ impl Shell {
         };
         let user_menu = self.render_user_menu(user_line, identity, theme, cx);
         let session_menu = self.render_workspace_session_menu(cx);
+        // Find is an on-demand view. Keep the workspace list unchanged until
+        // search is invoked, and use its existing conversation result routing.
+        let search_controls = self.render_sidebar_search_controls(theme, cx);
+        let scroll = self
+            .render_sidebar_search_results(theme, cx)
+            .unwrap_or_else(|| scroll.into_any_element());
         div()
             .w(px(self.settings.sidebar_width))
             .h_full()
             .flex()
             .flex_col()
             .child(self.render_session_switcher(theme, cx))
+            .when_some(search_controls, |sidebar, controls| sidebar.child(controls))
             .child(div().flex_1().min_h_0().child(scroll))
             .when(cfg!(target_os = "macos"), |el| {
                 el.when_some(self.render_cloud_sandbox_strip(theme, cx), |el, card| el.child(card))
