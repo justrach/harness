@@ -40,3 +40,10 @@ an inactive window, paused while idle through `pause_frame_requests`), makes
 the window's view the link's delegate, and keeps the `CADisplayLink` and
 `CVDisplayLink` sources behind `GPUI_DISPLAY_LINK=cadisplaylink` and
 `cvdisplaylink`.
+
+`GlobalElementId` keeping its path's hash (crates/gpui/src/element.rs) is adapted
+from upstream Zed (https://github.com/zed-industries/zed, Apache-2.0) at
+1dd9bbfd71 ("gpui: Hash a GlobalElementId once, when it is built"): the hash is
+computed once when the id is built, `Hash` writes it, and `PartialEq` compares it
+before the path. Harness ports the first half (not the per-prefix hashes of the
+id stack).
