@@ -10655,6 +10655,15 @@ impl Composer {
                             .text_size(crate::typography::ui_rems(15.0))
                             .line_height(px(20.0))
                             .text_color(theme.text)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    // Markdown selection uses the answer editor's scoped Copy route.
+                                    // Don't let the panel's default focus handler take it back.
+                                    window.focus(&this.input.focus_handle(cx), cx);
+                                    window.prevent_default();
+                                }),
+                            )
                             .child(crate::markdown::render::render_tree(
                                 &question_markdown(&question.question),
                                 &crate::markdown::render::RenderOptions::settled(
@@ -12403,6 +12412,10 @@ mod prompt_history_tests;
 #[cfg(test)]
 #[path = "composer/question_recovery_tests.rs"]
 mod question_recovery_tests;
+
+#[cfg(test)]
+#[path = "composer/question_copy_tests.rs"]
+mod question_copy_tests;
 
 #[cfg(test)]
 #[path = "composer/write_tests.rs"]
