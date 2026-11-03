@@ -27,12 +27,33 @@ pub(crate) fn fixture_link(target: &str) -> Option<(Point<Pixels>, FocusHandle)>
 pub struct LinkRanges {
     pub id: SharedString,
     pub child: AnyElement,
-    pub layout: TextLayout,
+    /// Shaped text ranges, or the child's whole visible box for an equation.
+    pub layout: Option<TextLayout>,
     /// Selection belongs to this rendered text, not every transcript/window.
     pub selection_key: Option<std::sync::Arc<str>>,
     pub links: Vec<(Range<usize>, LinkTarget)>,
     pub ui: Option<LinkUi>,
 }
+impl LinkRanges {
+    fn rects(
+        &self,
+        range: &Range<usize>,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+    ) -> Vec<Bounds<Pixels>> {
+        if let Some(layout) = &self.layout {
+            range_rects(layout, range, 0., 0.)
+        } else {
+            let visible = bounds.intersect(&window.content_mask().bounds);
+            if visible.size.width > px(0.) && visible.size.height > px(0.) {
+                vec![visible]
+            } else {
+                vec![]
+            }
+        }
+    }
+}
+
 struct Interaction {
     targets: Vec<LinkTarget>,
     focus: Vec<FocusHandle>,
@@ -133,10 +154,8 @@ impl Element for LinkRanges {
             let theme = Theme::of(cx).clone();
             let mut overlays = Vec::new();
             for (index, (range, target)) in self.links.iter().enumerate() {
-                for (part, rect) in range_rects(&self.layout, range, 0., 0.)
-                    .into_iter()
-                    .enumerate()
-                {
+                let rects = self.rects(range, bounds, window);
+                for (part, rect) in rects.into_iter().enumerate() {
                     #[cfg(feature = "browser-fixture")]
                     if part == 0 {
                         FIXTURE_LINKS.with(|links| {
@@ -244,7 +263,8 @@ impl Element for LinkRanges {
             }
             if state.menu.borrow().is_none() && !state.dismissed.get() {
                 if let Some(index) = disclosure_focus {
-                    let source = range_rects(&self.layout, &self.links[index].0, 0., 0.)
+                    let source = self
+                        .rects(&self.links[index].0, bounds, window)
                         .into_iter()
                         .reduce(|bounds, rect| bounds.union(&rect));
                     if let Some((card, position, anchor)) = source.and_then(|source| {
@@ -387,7 +407,8 @@ impl Element for LinkRanges {
                         }),
                     );
                 }
-                let open_in_harness = crate::settings::with_current(cx, |s| s.open_web_links_in_harness);
+                let open_in_harness =
+                    crate::settings::with_current(cx, |s| s.open_web_links_in_harness);
                 let menu = state.menu.clone();
                 card = card.child(popover::menu_separator()).child(
                     popover::menu_row(
@@ -538,7 +559,7 @@ mod tests {
                 .child(LinkRanges {
                     id: "bottom-link".into(),
                     child: text.into_any_element(),
-                    layout: self.layout.clone(),
+                    layout: Some(self.layout.clone()),
                     selection_key: None,
                     links: vec![(0..4, LinkTarget::new("Docs", "https://example.com/docs"))],
                     ui: Some(LinkUi {

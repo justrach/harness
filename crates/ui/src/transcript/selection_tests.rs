@@ -60,8 +60,8 @@ fn collapsed_prompt_does_not_capture_reply_selection(cx: &mut gpui::TestAppConte
     }
     let entries = render::selection_test_entries();
     let (reply_key, _, bounds) = entries.iter().find(|(_, text, _)| text == reply).unwrap();
-    let (prompt_key, _, prompt_bounds) =
-        entries.iter().find(|(_, text, _)| text == &prompt).unwrap();
+    let (prompt_key, _, _) = entries.iter().find(|(_, text, _)| text == &prompt).unwrap();
+    let (_, prompt_layout, _) = render::selection_test_snapshot(prompt_key);
     let (_, layout, _) = render::selection_test_snapshot(reply_key);
     let position = gpui::point(
         layout
@@ -72,7 +72,7 @@ fn collapsed_prompt_does_not_capture_reply_selection(cx: &mut gpui::TestAppConte
     );
     assert!(bounds.contains(&position));
     assert!(
-        prompt_bounds.contains(&position),
+        prompt_layout.bounds().contains(&position),
         "hidden prompt layout overlaps the reply"
     );
     let ix = layout.index_for_position(position).unwrap_or_else(|ix| ix);

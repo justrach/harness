@@ -4091,13 +4091,20 @@ impl Shell {
             &file,
             window,
             move |this: &mut Self, source, event, window, cx| {
-                if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                if matches!(
+                    event,
+                    FilesEvent::OpenFile(_)
+                        | FilesEvent::OpenFileAtAnchor { .. }
+                        | FilesEvent::RevealFile(_)
+                ) && !this.accepts_file_navigation(&event_panel_key, &source, cx)
                 {
                     return;
                 }
                 match event {
                     FilesEvent::OpenFile(path) => this.add_file_surface(path.clone(), window, cx),
+                    FilesEvent::OpenFileAtAnchor { path, anchor } => {
+                        this.add_file_surface_at_anchor(path.clone(), anchor.clone(), window, cx)
+                    }
                     FilesEvent::RevealFile(path) => {
                         this.add_files_surface(window, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
@@ -4141,6 +4148,30 @@ impl Shell {
             RightSurface::File(id),
         );
         self.set_right_active(RightSurface::File(id), cx);
+    }
+
+    fn add_file_surface_at_anchor(
+        &mut self,
+        path: String,
+        anchor: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_chat.is_empty() {
+            return;
+        }
+        self.add_file_surface(path.clone(), window, cx);
+        let lookup = (self.panel_key(cx), path.clone());
+        if let Some(file) = self
+            .file_surface_keys
+            .get(&lookup)
+            .and_then(|id| self.file_surfaces.get(id))
+            .cloned()
+        {
+            file.update(cx, |file, cx| {
+                file.navigate_markdown_anchor(path, anchor, cx)
+            });
+        }
     }
 
     fn open_workspace_file_link(
@@ -13735,7 +13766,7 @@ impl Render for Shell {
                 );
                 // A side-by-side chat split gives the focused column its
                 // share; the peers take the rest (`render_chat_split`).
-                let main_target_width = split_total_width * self.focused_chat_pane_share();
+                let main_target_width = self.focused_chat_pane_width(split_total_width);
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -13832,7 +13863,7 @@ impl Render for Shell {
                 } else {
                     main
                 };
-                let main = self.render_chat_split(main, split_total_width, cx);
+                let main = self.render_chat_split(main, cx);
                 // Drag a sidebar session onto the chat area to split it open.
                 let drop_zones = self.render_split_drop_zones(&Theme::of(cx).clone(), cx);
                 let main = if drop_zones.is_empty() {
