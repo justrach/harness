@@ -14,12 +14,12 @@ impl Render for DropPanes {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             let width = f32::from(window.viewport_size().width);
-            let main_width = width * shell.focused_chat_pane_share();
+            let main_width = shell.focused_chat_pane_width(width);
             let main = shell.render_main(window, main_width, main_width, cx);
             div()
                 .size_full()
                 .flex()
-                .child(shell.render_chat_split(main, width, cx))
+                .child(shell.render_chat_split(main, cx))
         })
     }
 }
