@@ -13766,7 +13766,7 @@ impl Render for Shell {
                 );
                 // A side-by-side chat split gives the focused column its
                 // share; the peers take the rest (`render_chat_split`).
-                let main_target_width = split_total_width * self.focused_chat_pane_share();
+                let main_target_width = self.focused_chat_pane_width(split_total_width);
                 let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
@@ -13863,7 +13863,7 @@ impl Render for Shell {
                 } else {
                     main
                 };
-                let main = self.render_chat_split(main, split_total_width, cx);
+                let main = self.render_chat_split(main, cx);
                 // Drag a sidebar session onto the chat area to split it open.
                 let drop_zones = self.render_split_drop_zones(&Theme::of(cx).clone(), cx);
                 let main = if drop_zones.is_empty() {
