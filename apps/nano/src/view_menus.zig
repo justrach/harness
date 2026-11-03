@@ -14,7 +14,7 @@ const App = @import("app.zig").App;
 
 pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
     const v = &a.view;
-    if (!v.account_menu and !v.space_menu) return;
+    if (!v.account_menu and !v.space_menu and !v.checkout_menu) return;
     {
         // Behind the menu: a click anywhere else closes it.
         const back = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(4);
@@ -22,6 +22,7 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (back.clicked()) {
             v.account_menu = false;
             v.space_menu = false;
+            v.checkout_menu = false;
             return;
         }
     }
@@ -41,6 +42,19 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (item(c, k, .plus, "Add folder…", false)) {
             v.space_menu = false;
             a.addFolder();
+        }
+    };
+    // Where the new chat runs (`render_checkout_popover`): the project's
+    // own checkout, or a fresh worktree made off the base on send.
+    if (v.checkout_menu) if (v.checkout_anchor) |r| {
+        const m = panel(c, k, r.x, r.y + r.h + 4, 220);
+        defer m.end();
+        const newchat = @import("view_newchat.zig");
+        inline for (.{ .{ true, icons.Name.folder }, .{ false, icons.Name.@"git-branch" } }) |opt| {
+            if (item(c, k, opt[1], newchat.checkoutLabel(opt[0]), a.new_checkout_local == opt[0])) {
+                a.new_checkout_local = opt[0];
+                v.checkout_menu = false;
+            }
         }
     };
     if (v.account_menu) if (v.account_anchor) |r| accountMenu(c, a, k, r);

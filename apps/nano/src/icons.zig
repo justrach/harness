@@ -40,6 +40,7 @@ pub const Name = enum {
     document,
     @"document-add",
     @"exo-mark",
+    @"expand-arrows",
     eye,
     @"eye-closed",
     @"fast-tier",

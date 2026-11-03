@@ -150,6 +150,11 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, radi
     const actions = ui.div(c).row().wFull().h(42).px(12).pt(2).pb(8).itemsCenter();
     defer actions.end();
     attachButtons(c, a, k);
+    // The Write page, while there's a draft or the field has the keys.
+    if (a.composer.text().len > 0 or focused) {
+        _ = c.leaf(.{ .width = .{ .px = 2 } }, .none, null);
+        @import("view_write.zig").button(c, a, k);
+    }
     ui.spacer(c);
     send(c, a, k);
 }

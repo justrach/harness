@@ -47,6 +47,8 @@ pub const Chat = struct {
     harness: ?[]const u8,
     model: ?[]const u8,
     reasoning: ?[]const u8 = null,
+    /// A plain chat, not a coding session (`ChatConfig::chat_mode`).
+    chat_mode: bool = false,
     cwd: ?[]const u8,
     /// The harness's own id for the chat's latest run (`harnessSessionId`).
     harness_session_id: ?[]const u8 = null,
@@ -219,6 +221,7 @@ fn parseChat(a: Allocator, o: json.ObjectMap) ?Chat {
         .harness = if (config) |c| str(a, c, "harness") else null,
         .model = if (config) |c| str(a, c, "model") else null,
         .reasoning = if (config) |c| str(a, c, "reasoning") else null,
+        .chat_mode = if (config) |c| (if (c.get("chatMode")) |v| v == .bool and v.bool else false) else false,
         .cwd = str(a, o, "cwd"),
         .harness_session_id = str(a, o, "harnessSessionId"),
         .branch = currentBranch(a, o),

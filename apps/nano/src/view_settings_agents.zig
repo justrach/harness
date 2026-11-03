@@ -595,7 +595,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (p.install_notice.items.len > 0) set.subtitle(c, k, p.install_notice.items, false);
     // Above the list: a missing grant breaks every agent's screenshots.
     cards.screenAccess(c, a, k);
-    cards.autonomyCard(c, a, k);
+    if (@import("view_setup.zig").enabled) cards.autonomyCard(c, a, k);
     switch (p.phase) {
         .idle, .loading => {
             const cd = set.card(c, k);

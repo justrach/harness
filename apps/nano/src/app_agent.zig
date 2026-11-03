@@ -22,6 +22,12 @@ pub fn target(a: *const App) Target {
     if (a.selected) |id| if (a.findChat(id)) |ch| {
         t = .{ .harness = ch.harness orelse "graff", .model = ch.model, .reasoning = ch.reasoning };
     };
+    // A plain chat runs on graff's tiers, starting on the first on offer;
+    // never the catalog's default model (`selected_model`).
+    if (chatMode(a)) {
+        t.harness = chat_mode.harness;
+        if (t.model == null or !chat_mode.offers(t.model.?)) t.model = chat_mode.defaultId(graffCatalog(a));
+    }
     // The model's ladder, else its agent's (`trait_ladder`), at its default.
     if (t.reasoning == null) if (modelOf(a, t.model) != null) {
         t.reasoning = rules.defaultReasoning(ladder(a, t.harness, t.model));
@@ -40,6 +46,11 @@ fn modelOf(a: *const App, id: ?[]const u8) ?workspace.Model {
 }
 
 pub fn modelLabel(a: *const App, id: ?[]const u8) []const u8 {
+    // Chat mode names its tiers itself (`selected_model_label`).
+    if (chatMode(a)) {
+        if (id) |x| if (chat_mode.labelFor(x)) |l| return l;
+        if (chatAvailability(a) == .unavailable) return chat_mode.unavailable_chip;
+    }
     if (modelOf(a, id)) |m| return m.label;
     return id orelse harnessName(a, target(a).harness);
 }
@@ -130,13 +141,67 @@ fn setChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, new_model:
         .harness = ch.harness orelse "graff",
         .model = if (new_model) model else ch.model,
         .reasoning = if (new_model) null else reasoning orelse ch.reasoning,
+        // The config is replaced whole: a plain chat stays one.
+        .chatMode = if (ch.chat_mode) true else null,
     }), .of(App, a, App.onNotice));
     a.redraw();
 }
 
-/// The project a new chat starts in: the one picked, else the first.
+/// The project a new chat starts in: the one picked, else the first; a
+/// plain chat has none.
 pub fn newChatSpace(a: *const App) ?workspace.Space {
+    if (a.selected == null and a.new_chat_mode) return null;
     return a.findSpace(a.space) orelse if (a.spaces.items.len > 0) a.spaces.items[0] else null;
+}
+
+const chat_mode = @import("chat_mode.zig");
+
+/// Whether the open chat, else the new one, is a plain chat.
+pub fn chatMode(a: *const App) bool {
+    if (a.selected) |id| return if (a.findChat(id)) |ch| ch.chat_mode else false;
+    return a.new_chat_mode;
+}
+
+fn graffCatalog(a: *const App) []const workspace.Model {
+    return @import("model_picker.zig").modelsFor(a, chat_mode.harness);
+}
+
+/// `chat_mode_availability`: graff installed, its catalog listing a tier.
+pub fn chatAvailability(a: *const App) chat_mode.Availability {
+    const installed: ?bool = if (a.harnesses.items.len == 0) null else for (a.harnesses.items) |h| {
+        if (std.mem.eql(u8, h.id, chat_mode.harness)) break h.installed;
+    } else false;
+    const loaded = if (a.view.model_picker.catalogs.get(chat_mode.harness)) |cat| !cat.loading else false;
+    return chat_mode.availability(installed, graffCatalog(a), loaded or std.mem.eql(u8, a.models_for, chat_mode.harness) and a.models.items.len > 0);
+}
+
+/// The composer's note in a plain chat: why it can't run, else the tier's
+/// (`chat_mode_note`).
+pub fn chatNote(a: *const App) ?[]const u8 {
+    if (!chatMode(a)) return null;
+    if (chatAvailability(a) == .unavailable) return chat_mode.unavailable_note;
+    return chat_mode.noteFor(target(a).model);
+}
+
+/// Switches the new chat between a plain chat and a coding session
+/// (`set_chat_mode`): a chat drops its project and starts on Auto (low);
+/// either way the picks start over. With no tier on offer it stays a
+/// coding session and asks graff's catalog again.
+pub fn setChatMode(a: *App, on: bool) void {
+    if (a.selected != null or a.new_chat_mode == on) return;
+    if (on and chatAvailability(a) == .unavailable) {
+        _ = @import("model_picker.zig").ensureCatalog(a, chat_mode.harness, true);
+        return a.redraw();
+    }
+    a.new_chat_mode = on;
+    setHarness(a, chat_mode.harness);
+}
+
+/// A plain-chat draft with no tier to run on holds its send
+/// (`chat_mode_send_blocked`).
+pub fn chatSendBlocked(a: *const App) bool {
+    if (a.selected != null or !a.new_chat_mode) return false;
+    return target(a).model == null;
 }
 
 /// Archives a chat from its row, or brings it back.

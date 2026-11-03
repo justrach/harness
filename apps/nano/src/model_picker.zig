@@ -339,6 +339,16 @@ pub fn rows(a: *const App, gpa: Allocator) ![]Row {
     const harness = a.target().harness;
     const query = std.mem.trim(u8, p.query.text(), " \t\r\n");
     var out: std.ArrayList(Row) = .empty;
+    if (@import("app_agent.zig").chatMode(a)) {
+        // A plain chat offers the three Auto tiers and nothing else.
+        const chat_mode = @import("chat_mode.zig");
+        var buf: [chat_mode.tiers.len]workspace.Model = undefined;
+        for (chat_mode.models(&buf, modelsFor(a, chat_mode.harness))) |m| {
+            if (query.len > 0 and searchRank(query, m) == null) continue;
+            try out.append(gpa, .{ .harness = chat_mode.harness, .model = m });
+        }
+        return out.toOwnedSlice(gpa);
+    }
     if (p.starred) {
         for (p.favorites.items) |f| {
             if (a.selected != null and !std.mem.eql(u8, f.harness, harness)) continue;

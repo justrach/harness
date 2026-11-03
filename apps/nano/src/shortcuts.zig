@@ -104,7 +104,9 @@ pub const fixed = [_]Fixed{
     .{ .title = "First chat tab (2–8 for the next ones)", .keys = "Ctrl+1" },
     .{ .title = "Last chat tab", .keys = "Ctrl+9" },
     .{ .title = "Jump to the message box", .keys = "Cmd+L" },
+    .{ .title = "Write the message on a full page (and back)", .keys = "Cmd+Shift+E" },
     .{ .title = "Command palette", .keys = "Cmd+K" },
+    .{ .title = "Search sessions", .keys = "Cmd+F" },
     .{ .title = "Settings", .keys = "Cmd+," },
 };
 

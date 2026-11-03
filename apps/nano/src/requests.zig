@@ -25,10 +25,19 @@ pub const Config = struct {
     reasoning: ?[]const u8 = null,
     modelOptions: Empty = .{},
     sandbox: []const u8 = "workspace-write",
+    /// A plain chat (`chatMode`); left out for a coding session.
+    chatMode: ?bool = null,
 };
 
-pub fn createChat(chat_id: []const u8, space_id: ?[]const u8, config: Config) Request(struct { op: []const u8, chatId: []const u8, spaceId: ?[]const u8, config: Config }) {
+pub fn createChat(chat_id: []const u8, space_id: ?[]const u8, config: Config) Request(struct { op: []const u8, chatId: []const u8, spaceId: ?[]const u8, deviceId: ?[]const u8 = null, config: Config }) {
     return .{ .method = "Mutate", .params = .{ .op = "createChat", .chatId = chat_id, .spaceId = space_id, .config = config } };
+}
+
+/// A chat with no project names the device that hosts it, as GPUI's.
+pub fn createChatOn(chat_id: []const u8, device_id: ?[]const u8, config: Config) @TypeOf(createChat("", null, .{ .harness = "" })) {
+    var r = createChat(chat_id, null, config);
+    r.params.deviceId = device_id;
+    return r;
 }
 
 pub fn setChatConfig(chat_id: []const u8, config: Config) Request(struct { op: []const u8, chatId: []const u8, config: Config }) {
@@ -75,6 +84,16 @@ pub const RunRequest = struct {
     cwd: []const u8,
     sandbox: []const u8 = "workspace-write",
     autoApprove: bool = false,
+    /// A fresh worktree the host makes as it drains the run, and runs in
+    /// (`WorktreeSpec`); an older host ignores it and runs in `cwd`.
+    worktree: ?WorktreeSpec = null,
+};
+
+pub const WorktreeSpec = struct {
+    repoPath: []const u8,
+    /// Empty: the host resolves the repository's default branch.
+    base: []const u8 = "",
+    spaceId: ?[]const u8 = null,
 };
 
 const Run = struct { kind: []const u8, messageId: []const u8, request: RunRequest };

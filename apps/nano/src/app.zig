@@ -56,6 +56,9 @@ pub const View = struct {
     /// Archived rows shown: 10, then 25 more at a time.
     archived_limit: usize = 10,
     space_menu: bool = false,
+    /// The new chat's checkout menu (`PickerKind::Checkout`) and its chip.
+    checkout_menu: bool = false,
+    checkout_anchor: ?nanoui.ui.Rect = null,
     account_menu: bool = false,
     /// Where the controls that open popovers were, as last laid out.
     filter_anchor: ?nanoui.ui.Rect = null,
@@ -92,6 +95,10 @@ pub const View = struct {
     /// opens with the composer focused, as GPUI's does.
     focus_composer: bool = true,
     composer_id: u64 = 0,
+    /// The Write page has the pane (view_write.zig); its field takes the
+    /// keys when next drawn.
+    write_open: bool = false,
+    write_focus: bool = false,
     /// The rounded seam's hairline is the column's left border, which
     /// takes layout room in GPUI (`border_l_1`): 1 while it shows, else 0.
     seam_inset: f32 = 0,
@@ -289,6 +296,12 @@ pub const App = struct {
     /// starts with another agent (`mock` against a test engine).
     new_harness: []u8 = &.{},
     new_model: ?[]u8 = null,
+    /// Where a new chat in a git project runs: a fresh worktree, GPUI's
+    /// default (`CheckoutKind::NewWorktree`), unless the project's own
+    /// checkout was picked.
+    new_checkout_local: bool = false,
+    /// The new chat is a plain chat (chat_mode.zig), not a coding session.
+    new_chat_mode: bool = false,
     new_reasoning: ?[]u8 = null,
     /// The agent `models` lists models for (owned).
     models_for: []u8 = &.{},
@@ -984,6 +997,8 @@ pub const App = struct {
         drafts.leave(a);
         defer drafts.enter(a);
         a.view.focus_composer = true;
+        // Another chat closes the Write page; its draft stays the old one's.
+        a.view.write_open = false;
         @import("app_panes.zig").select(a, chat_id);
         a.notice_len = 0;
         queue_mod.stop(a);
@@ -1066,6 +1081,8 @@ pub const App = struct {
             return @import("view_palette.zig").toggle(a, .replace_current);
         }
         if (prompt.len == 0 or a.engine.state != .connected) return;
+        // A plain chat with no Auto tier would fall to graff's own default.
+        if (@import("app_agent.zig").chatSendBlocked(a)) return;
         if (a.queues()) {
             // Enter falls back to the queue when a steer can't go now; a
             // shortcut asking for one says why instead.
@@ -1087,6 +1104,7 @@ pub const App = struct {
         var model: ?[]const u8 = null;
         var reasoning: ?[]const u8 = null;
         var cwd: []const u8 = "~";
+        var worktree: ?requests.WorktreeSpec = null;
         const chat_id = if (a.selected) |id| blk: {
             if (a.findChat(id)) |c| {
                 harness = c.harness;
@@ -1097,16 +1115,31 @@ pub const App = struct {
             break :blk id;
         } else blk: {
             const id = uuid(a.io, &chat_buf);
-            const space = a.findSpace(a.space) orelse if (a.spaces.items.len > 0) a.spaces.items[0] else null;
+            const agent_mod = @import("app_agent.zig");
+            const space = agent_mod.newChatSpace(a);
             if (space) |s| cwd = s.path;
-            harness = a.new_harness;
-            model = a.new_model;
+            // A git project's new chat runs in a fresh worktree unless its
+            // own checkout was picked (`CheckoutPlan::NewWorktree`); cwd
+            // stays the repo, where an older host runs it.
+            if (space) |s| if (s.git and !a.new_checkout_local) {
+                worktree = .{ .repoPath = s.path, .spaceId = s.id };
+            };
+            const t = agent_mod.target(a);
+            const plain = a.new_chat_mode;
+            harness = if (plain) t.harness else a.new_harness;
+            model = if (plain) t.model else a.new_model;
             reasoning = a.new_reasoning;
-            a.request(requests.createChat(id, if (space) |s| s.id else null, .{
-                .harness = a.new_harness,
-                .model = a.new_model,
-                .reasoning = a.new_reasoning,
-            }), .of(App, a, onNotice));
+            const config: requests.Config = .{
+                .harness = harness.?,
+                .model = model,
+                .reasoning = reasoning,
+                .chatMode = if (plain) true else null,
+            };
+            // A chat with no project names its device instead.
+            if (space) |s|
+                a.request(requests.createChat(id, s.id, config), .of(App, a, onNotice))
+            else
+                a.request(requests.createChatOn(id, a.device_id, config), .of(App, a, onNotice));
             break :blk id;
         };
         const feedback = @import("app_send_feedback.zig");
@@ -1120,6 +1153,7 @@ pub const App = struct {
             .model = model,
             .reasoning = reasoning,
             .cwd = cwd,
+            .worktree = worktree,
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));
         // Sent: the prompt is no one's draft any more.
         attachments.clear(a);

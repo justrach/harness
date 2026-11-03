@@ -24,6 +24,12 @@ const App = @import("app.zig").App;
 
 pub const questions: usize = 4;
 
+/// Off until GPUI's desktop onboarding (`feat/desktop-onboarding`) is on
+/// main: Nano matches main's GPUI, which neither runs first-run setup at
+/// launch nor shows Settings › Agents' Autonomy card. `HARNESS_SETUP_STEP`
+/// still opens it, for working on it.
+pub const enabled = false;
+
 /// What agents on a device may do without asking (`harness_proto::Autonomy`).
 pub const Autonomy = enum {
     read_only,
@@ -130,7 +136,7 @@ fn check(a: *App) void {
         if (env.get("HARNESS_SETUP_STEP")) |s| return open(a, std.fmt.parseInt(usize, s, 10) catch 0);
         if (env.get("HARNESS_SETUP_OFF") != null) return;
     }
-    if (a.offscreen) return;
+    if (!enabled or a.offscreen) return;
     const p = markerPath(a) orelse return;
     defer a.gpa.free(p);
     const body = std.Io.Dir.cwd().readFileAlloc(a.settings.io, p, a.gpa, .limited(4096)) catch {

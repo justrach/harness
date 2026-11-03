@@ -101,7 +101,13 @@ fn heading(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     // The frame keeps the words: not a buffer on this stack.
     const buf = c.alloc().alloc(u8, 128) catch return;
     const name = if (a.account.user) |u| u.name else null;
-    kit.ellipsisText(c, greeting(buf, name), .{ .size = 24, .line_height = 24 * phi, .weight = .semibold, .color = k.text }, w);
+    const plain = a.selected == null and a.new_chat_mode;
+    kit.ellipsisText(c, if (plain) chat_mode.heading_title else greeting(buf, name), .{ .size = 24, .line_height = 24 * phi, .weight = .semibold, .color = k.text }, w);
+    if (plain) {
+        // A plain chat has no project to name or pick: it says what it is.
+        ui.text(c, chat_mode.heading_eyebrow, .{ .size = 13, .line_height = 13 * phi, .color = k.muted });
+        return;
+    }
     const space = a.newChatSpace();
     const t = ui.div(c).row().gap(4).itemsCenter();
     defer t.end();
@@ -120,8 +126,31 @@ fn pickersAbove(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const r = ui.div(c).row().w(w).h(20).gap(4).justifyEnd();
     defer r.end();
     const space = a.newChatSpace();
+    modeSwitch(c, a, k);
     if (footerChip(c, k, .monitor, a.deviceName(a.device_id))) a.setNotice("Choosing a device isn't in Harness Nano yet.");
-    if (footerChip(c, k, .folder, if (space) |s| s.name else "No project") and a.spaces.items.len > 0) a.view.space_menu = !a.view.space_menu;
+    if (!a.new_chat_mode) if (footerChip(c, k, .folder, if (space) |s| s.name else "No project") and a.spaces.items.len > 0) {
+        a.view.space_menu = !a.view.space_menu;
+    };
+}
+
+const chat_mode = @import("chat_mode.zig");
+const agent = @import("app_agent.zig");
+
+/// Chat | Code (`render_chat_mode_switch`): which the new session is; a
+/// click switches. Dimmed while no Auto tier is on offer, saying why.
+fn modeSwitch(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const plain = a.new_chat_mode;
+    const unavailable = !plain and agent.chatAvailability(a) == .unavailable;
+    const hint = if (plain) "Plain chat. Click for a coding session" else if (unavailable) chat_mode.unavailable_note else "Coding session. Click for a plain chat";
+    ui.key(c, "picker-chat-mode");
+    var b = ui.div(c).row().h(20).px(8).gap(6).itemsCenter().rounded(6).hover(k.hover);
+    if (unavailable) b = b.opacity(0.5);
+    b = @import("view_tooltip.zig").on(b, k, .{ .text = hint });
+    defer b.end();
+    const hot = b.hovered();
+    icons.icon(c, if (plain) .@"chat-round-line" else .@"file-code", 12, k.muted.alpha(0.7), 0);
+    ui.text(c, if (plain) "Chat" else "Code", .{ .size = 12, .line_height = 12 * phi, .weight = .medium, .color = if (hot) k.text.alpha(0.8) else k.muted.alpha(0.7) });
+    if (b.clicked()) agent.setChatMode(a, !plain);
 }
 
 /// `composer-footer` on a new chat: `px(10)`, the model chip, then for a
@@ -130,16 +159,31 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const r = ui.div(c).row().w(w).h(24).px(10).gap(4).itemsCenter().clip();
     defer r.end();
     composer.chip(c, a, k);
+    // A plain chat's note (the Auto (smart) cost, or why it can't run).
+    if (agent.chatNote(a)) |note| kit.ellipsisText(c, note, .{ .size = 11.5, .line_height = 11.5 * phi, .color = k.muted }, w - 200);
     const space = a.newChatSpace() orelse return;
     if (!space.git) return;
-    if (footerChip(c, k, .folder, "Current checkout")) a.setNotice("Choosing a checkout isn't in Harness Nano yet.");
+    // `checkout_label`: a fresh worktree by default, else the project's own.
+    if (footerChipAt(c, k, .folder, checkoutLabel(a.new_checkout_local), &a.view.checkout_anchor)) a.view.checkout_menu = !a.view.checkout_menu;
     if (footerChip(c, k, .@"git-branch", "Select ref")) a.setNotice("Choosing a ref isn't in Harness Nano yet.");
+}
+
+pub fn checkoutLabel(local: bool) []const u8 {
+    return if (local) "Current checkout" else "New worktree";
 }
 
 /// A quiet chip: an icon, its words and a chevron (`footer_chip`).
 fn footerChip(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8) bool {
+    return footerChipAt(c, k, icon, label, null);
+}
+
+/// As `footerChip`, keeping where it was laid out for a menu to hang from.
+fn footerChipAt(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8, anchor: ?*?ui.Rect) bool {
     const b = ui.div(c).row().h(20).maxW(280).px(8).gap(6).itemsCenter().rounded(6).hover(k.hover);
     defer b.end();
+    if (anchor) |p| if (c.rects.get(c.node(b.index).id)) |r| {
+        p.* = r;
+    };
     const hot = b.hovered();
     icons.icon(c, icon, 12, k.muted.alpha(0.7), 0);
     ui.text(c, label, .{ .size = 12, .line_height = 12 * phi, .weight = .medium, .color = if (hot) k.text.alpha(0.8) else k.muted.alpha(0.7) });

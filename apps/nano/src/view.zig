@@ -193,6 +193,8 @@ fn seam(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// The focused pane: its chat's transcript over the composer, or a new
 /// chat's page.
 fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
+    // The Write page takes the pane: the transcript and composer step aside.
+    if (a.view.write_open) return @import("view_write.zig").page(c, a, k, transcript_view.paneWidth(c, a));
     if (a.selected == null) {
         @import("view_newchat.zig").canvas(c, a, k);
     } else {
@@ -338,6 +340,15 @@ fn keys(c: *ui.Context, a: *App) void {
     if (c.shortcut(.{ .key = 'b', .cmd = true })) toggleSidebar(c, a, false);
     if (c.shortcut(.{ .key = ',', .cmd = true })) settings_view.open(a);
     if (c.shortcut(.{ .key = 'l', .cmd = true })) a.view.focus_composer = true;
+    // The Write page, from the composer's place (`ToggleWriteDocument`); the
+    // page takes the same keys back itself.
+    if (!a.view.write_open and !a.view.settings_open and a.picker == .none and c.shortcut(@import("view_write.zig").toggle)) @import("view_write.zig").open(a);
+    // ⌘F (`open_sidebar_search`): the sidebar, then its search, focused.
+    if (!a.view.settings_open and a.picker == .none and c.shortcut(.{ .key = 'f', .cmd = true })) {
+        if (!a.view.sidebar_open) toggleSidebar(c, a, false);
+        const search = @import("view_sidebar_search.zig");
+        if (!a.view.search.open) search.toggle(a) else a.view.search.focus = true;
+    }
     if (a.selected != null and c.shortcut(.{ .key = 'e', .cmd = true })) @import("app_files.zig").toggle(a);
     if (a.selected != null and c.shortcut(.{ .key = 'r', .cmd = true })) @import("app_panels.zig").toggleHost(a);
     if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) a.newTab();

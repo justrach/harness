@@ -197,3 +197,84 @@ test "completed historical tools never display active loading cells" {
             return error.HistoricalToolStillLoading;
     }
 }
+
+test "a new chat in a git project runs in a fresh worktree unless its own checkout is picked (CheckoutPlan)" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"QueueCommand":{},"Mutate":{}}
+    , .{});
+    a.engine.state = .connected;
+    var spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"git","deviceId":"d","path":"/work/synthetic-repo","gitDetected":true},
+        \\ {"id":"plain","deviceId":"d","path":"/work/synthetic-notes","gitDetected":false}]
+    , .{});
+    defer spaces.deinit();
+    try a.spaces.replace(spaces.value);
+    const Case = struct { space: []const u8, local: bool, worktree: bool };
+    for ([_]Case{
+        .{ .space = "git", .local = false, .worktree = true },
+        .{ .space = "git", .local = true, .worktree = false },
+        .{ .space = "plain", .local = false, .worktree = false },
+    }) |case| {
+        a.select(null, case.space);
+        a.new_checkout_local = case.local;
+        a.composer.set("Synthetic first prompt");
+        const before = a.engine.sent.items.len;
+        a.send();
+        var run: ?[]const u8 = null;
+        for (a.engine.sent.items[before..]) |f| if (std.mem.indexOf(u8, f, "QueueCommand") != null) {
+            run = f;
+        };
+        const frame = run orelse return error.NoRun;
+        const spec = "\"worktree\":{\"repoPath\":\"/work/synthetic-repo\",\"base\":\"\",\"spaceId\":\"git\"}";
+        try testing.expectEqual(case.worktree, std.mem.indexOf(u8, frame, spec) != null);
+        if (!case.worktree) try testing.expect(std.mem.indexOf(u8, frame, "\"worktree\"") == null);
+    }
+}
+
+test "a plain chat goes out with no project, on Auto (low), its config saying chatMode (set_chat_mode)" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"QueueCommand":{},"Mutate":{}}
+    , .{});
+    a.engine.state = .connected;
+    var spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"git","deviceId":"d","path":"/work/synthetic-repo","gitDetected":true}]
+    , .{});
+    defer spaces.deinit();
+    try a.spaces.replace(spaces.value);
+    var models = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"codegraff/claude-opus-5-5","label":"Claude Opus 5.5"},{"id":"codegraff/auto-high","label":"x"},{"id":"codegraff/auto-low","label":"y"}]
+    , .{});
+    defer models.deinit();
+    try a.models.replace(models.value);
+    a.gpa.free(a.models_for);
+    a.models_for = try a.gpa.dupe(u8, "graff");
+    a.select(null, "git");
+    const agent = @import("app_agent.zig");
+    agent.setChatMode(&a, true);
+    try testing.expect(a.new_chat_mode and agent.newChatSpace(&a) == null);
+    try testing.expectEqualStrings("Auto (low)", agent.modelLabel(&a, agent.target(&a).model));
+    a.composer.set("Synthetic plain question");
+    const before = a.engine.sent.items.len;
+    a.send();
+    var create: ?[]const u8 = null;
+    var run: ?[]const u8 = null;
+    for (a.engine.sent.items[before..]) |f| {
+        if (std.mem.indexOf(u8, f, "createChat") != null) create = f;
+        if (std.mem.indexOf(u8, f, "QueueCommand") != null) run = f;
+    }
+    const c = create orelse return error.NoCreate;
+    try testing.expect(std.mem.indexOf(u8, c, "\"spaceId\"") == null);
+    try testing.expect(std.mem.indexOf(u8, c, "\"chatMode\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, c, "\"model\":\"codegraff/auto-low\"") != null);
+    const r = run orelse return error.NoRun;
+    try testing.expect(std.mem.indexOf(u8, r, "\"cwd\":\"~\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "\"worktree\"") == null);
+}
