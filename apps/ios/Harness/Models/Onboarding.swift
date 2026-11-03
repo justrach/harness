@@ -49,6 +49,14 @@ enum Autonomy: String, CaseIterable, Identifiable, Decodable {
     }
 }
 
+/// The engine's answer to `GetKeepAwake` / `SetKeepAwake`: whether that
+/// computer stays awake while its agents work, and whether it can at all
+/// (macOS only today; elsewhere the setting is hidden).
+struct KeepAwakeSetting: Decodable, Equatable {
+    var enabled: Bool
+    var supported: Bool
+}
+
 /// The engine's answer to `GetAutonomy` / `SetAutonomy`.
 struct AutonomySetting: Decodable, Equatable {
     var autonomy: Autonomy
