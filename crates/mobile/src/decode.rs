@@ -37,6 +37,11 @@ fn part(value: &Value) -> Option<MessagePartRecord> {
             id,
             text: text(m, "text").unwrap_or_default().to_owned(),
         }),
+        // The body lives in `reasoning`, never `text` (crates/doc schema.rs).
+        "reasoning" => Some(MessagePartRecord::Reasoning {
+            id,
+            text: text(m, "reasoning").unwrap_or_default().to_owned(),
+        }),
         "visual" => {
             // Mobile shows only the bounded title; source is never read or executed.
             let title = text(m, "title")?;
@@ -328,10 +333,19 @@ mod tests {
             {"id": "i", "kind": "image", "path": "relative.png", "name": "n", "mimeType": "image/png"},
             {"id": "q", "kind": "input", "questions": [{"id": "1", "header": "h", "question": "?", "options": ["a"]}, {"id": "2"}]},
             {"id": "e", "kind": "error", "message": "m", "reauth": "somewhere"},
-            {"id": "r", "kind": "reasoning", "thinking": "hidden"},
+            {"id": "r", "kind": "reasoning", "reasoning": "weighing the plan"},
+            {"id": "x", "kind": "future", "text": "hidden"},
         ]}]));
         let parts = &entries[0].parts;
-        assert_eq!(parts.len(), 5, "unknown kinds are dropped");
+        assert_eq!(parts.len(), 6, "unknown kinds are dropped");
+        assert_eq!(
+            parts[5],
+            MessagePartRecord::Reasoning {
+                id: "r".into(),
+                text: "weighing the plan".into()
+            },
+            "thinking reads its own field, never `text`"
+        );
         let MessagePartRecord::Tool {
             tag,
             fields,
