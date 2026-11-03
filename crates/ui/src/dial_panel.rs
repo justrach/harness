@@ -1,7 +1,8 @@
 //! A DialKit-style tuning panel: compact rows that show their value as a fill,
-//! named presets instead of dropdowns, and a copy-as-code row. This is the
-//! dev-only **Tune** panel for Harness's own motion and shape tokens; it
-//! floats over the app, so it is the one glass layer on screen.
+//! named presets instead of dropdowns, and a copy-as-code row. Two uses: the
+//! dev-only **Tune** panel for Harness's own motion and shape tokens (glass,
+//! it floats over the app), and the solid **Run settings** card for an agent
+//! run's options.
 //!
 //! Pure render functions over plain data, so a fixture can render any state.
 //! Idea from DialKit (MIT, https://github.com/joshpuckett/dialkit) and the fork
@@ -38,12 +39,17 @@ pub const CURVE_PRESETS: [(&str, CubicBezier); 6] = [
     ("Linear", CubicBezier::new(0.0, 0.0, 1.0, 1.0)),
 ];
 
+/// Label column for choice rows, so every control starts on one edge.
+const LABEL_WIDTH: f32 = 72.0;
+/// Off / On toggles are this wide, right-aligned with the choice rows.
+const TOGGLE_WIDTH: f32 = 80.0;
+
 fn track(theme: &Theme) -> Hsla {
     theme.ink(0.05)
 }
 
 /// The floating panel. `glass` is for the dev Tune panel, which floats over
-/// the app; a panel used as a popover passes `false` and stays solid.
+/// the app; the Run settings card is a popover and stays solid.
 pub fn panel(theme: &Theme, glass: bool) -> Div {
     div()
         .w(px(PANEL_WIDTH))
@@ -128,6 +134,11 @@ pub fn section(theme: &Theme, label: impl Into<SharedString>, open: bool) -> Div
         )
 }
 
+/// A hairline between groups, inset like the labels.
+pub fn divider(theme: &Theme) -> Div {
+    div().mx(px(8.0)).my(px(4.0)).h(px(1.0)).bg(theme.border)
+}
+
 /// A slider row in DialKit's shape: the value is a fill behind the label,
 /// with a thin handle on its edge, and the number sits at the right in
 /// tabular figures. `focused` draws the edge handle stronger, as while
@@ -201,6 +212,40 @@ pub fn segmented(theme: &Theme, options: &[&str], selected: usize) -> Div {
                 .when(on, |el| el.font_weight(WEIGHT_STRONG))
                 .child(label.to_string())
         }))
+}
+
+/// A labelled row with a [`segmented`] control on the right.
+pub fn choice_row(theme: &Theme, label: &str, options: &[&str], selected: usize) -> Div {
+    div()
+        .h(px(ROW_HEIGHT))
+        .pl(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .w(px(LABEL_WIDTH))
+                .text_color(theme.text_muted)
+                .child(label.to_string()),
+        )
+        .child(segmented(theme, options, selected).flex_1())
+}
+
+/// An Off / On row, DialKit's boolean.
+pub fn toggle_row(theme: &Theme, label: &str, on: bool) -> Div {
+    div()
+        .h(px(ROW_HEIGHT))
+        .pl(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_1()
+                .text_color(theme.text_muted)
+                .child(label.to_string()),
+        )
+        .child(segmented(theme, &["Off", "On"], on as usize).w(px(TOGGLE_WIDTH)))
 }
 
 fn curve_path(curve: CubicBezier, w: f32, h: f32, steps: usize) -> Vec<(f32, f32)> {
@@ -354,6 +399,42 @@ pub fn curve_presets(theme: &Theme, selected: usize) -> Div {
         }))
 }
 
+/// Preset pills with a name and a one-line caption, for run presets.
+pub fn run_presets(theme: &Theme, presets: &[(&str, &str)], selected: usize) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .gap(px(2.0))
+        .children(presets.iter().enumerate().map(|(ix, (name, caption))| {
+            let on = ix == selected;
+            div()
+                .w(px((PANEL_WIDTH - 2.0 * CARD_INSET - 2.0 - 2.0) / 2.0))
+                .px(px(8.0))
+                .py(px(6.0))
+                .rounded(px(ROW_RADIUS))
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .bg(if on { theme.accent_wash } else { track(theme) })
+                .child(
+                    div()
+                        .font_weight(WEIGHT_STRONG)
+                        .text_color(if on { theme.accent_strong } else { theme.text })
+                        .child(name.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(if on {
+                            theme.accent_strong.opacity(0.8)
+                        } else {
+                            theme.text_faint
+                        })
+                        .child(caption.to_string()),
+                )
+        }))
+}
+
 /// Several numbers in one row, like DialKit fork's X Y Z scale: each cell is
 /// scrubbed by dragging its letter, and the lock ties them together.
 pub fn axis_row(theme: &Theme, cells: &[(&str, &str)], locked: bool) -> Div {
@@ -482,6 +563,12 @@ mod tests {
     fn rows_are_concentric_with_the_panel() {
         assert_eq!(ROW_RADIUS, 7.0);
         assert_eq!(SEGMENT_RADIUS, 5.0);
+    }
+
+    #[test]
+    fn toggles_fit_in_the_choice_column() {
+        let control = PANEL_WIDTH - 2.0 * CARD_INSET - 8.0 - LABEL_WIDTH - 8.0;
+        assert!(TOGGLE_WIDTH < control);
     }
 
     #[test]

@@ -1,7 +1,8 @@
-//! The DialKit-style dev Tune panel rendered from made-up values: motion and
-//! shape tokens. No engine, no agent calls.
+//! DialKit-style panels rendered from made-up values: the dev Tune panel
+//! (motion and shape tokens) and the Run settings card. No engine, no agent
+//! calls.
 //!
-//! `HARNESS_DIAL_SCENE=motion|shape` picks the panel.
+//! `HARNESS_DIAL_SCENE=motion|shape|run` picks the panel.
 //! `HARNESS_FIXTURE_APPEARANCE=dark|light` picks the appearance.
 //! cargo run -p harness-ui --example dial-panel-fixture
 use gpui::{
@@ -16,6 +17,13 @@ use harness_ui::*;
 struct Fixture {
     scene: String,
 }
+
+const RUN_PRESETS: [(&str, &str); 4] = [
+    ("Fast", "Low · asks"),
+    ("Careful", "Med · read-only"),
+    ("Deep", "High · worktree"),
+    ("Hands-off", "Auto · worktree"),
+];
 
 fn tune_header(theme: &Theme, tab: usize) -> Vec<gpui::AnyElement> {
     vec![
@@ -61,11 +69,30 @@ fn shape(theme: &Theme) -> gpui::Div {
         .child(code_row(theme, "nested_radius(12, 1, 4) = 7"))
 }
 
+fn run(theme: &Theme) -> gpui::Div {
+    let card = panel(theme, false)
+        .child(header(
+            theme,
+            "Run settings",
+            Some("graff".into()),
+            vec![icons::CLOSE],
+        ))
+        .child(segmented(theme, &["Presets", "Saved"], 0))
+        .child(run_presets(theme, &RUN_PRESETS, 2))
+        .child(divider(theme));
+    card.child(choice_row(theme, "Reasoning", &["Low", "Med", "High"], 2))
+        .child(choice_row(theme, "Sandbox", &["Read", "Write", "Full"], 1))
+        .child(toggle_row(theme, "Auto-approve", false))
+        .child(toggle_row(theme, "Worktree", true))
+        .child(dial_row(theme, "Compact", "80%", 0.8, false))
+}
+
 impl Render for Fixture {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let body = match self.scene.as_str() {
             "shape" => shape(&theme),
+            "run" => run(&theme),
             _ => motion(&theme),
         };
         div()
@@ -85,6 +112,7 @@ fn main() -> anyhow::Result<()> {
     let scene = std::env::var("HARNESS_DIAL_SCENE").unwrap_or_else(|_| "motion".into());
     let light = std::env::var("HARNESS_FIXTURE_APPEARANCE").as_deref() == Ok("light");
     let height = match scene.as_str() {
+        "run" => 580.0,
         "shape" => 580.0,
         _ => 640.0,
     };
