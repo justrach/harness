@@ -121,6 +121,17 @@ fn branch_label(branch: &str) -> String {
 
 /// The note the agent gets once the user accepts the new branch, so it does
 /// not assume its earlier work is checked out.
+/// The continued prompt, told that the branch moved. A prompt that starts
+/// with a command (`/compact`) goes as typed: agents only run a command at
+/// the very start of a message, and after the command the note would become
+/// its arguments.
+fn with_continue_note(drift: &Drift, prompt: &str) -> String {
+    if harness_proto::invocation::leading_command(prompt).is_some() {
+        return prompt.to_string();
+    }
+    format!("{}\n\n{prompt}", continue_note(drift))
+}
+
 fn continue_note(drift: &Drift) -> String {
     let (from, to) = (
         branch_label(&drift.from_branch),
@@ -700,8 +711,7 @@ impl DocHost {
                 .and_then(|ws| ws.chat(chat_id).ok().flatten())
                 .and_then(|chat| chat.source_context);
             if let Some(drift) = previous.as_ref().and_then(|p| detect(p, &current)) {
-                held.request.prompt =
-                    format!("{}\n\n{}", continue_note(&drift), held.request.prompt);
+                held.request.prompt = with_continue_note(&drift, &held.request.prompt);
             }
             if let Some(ws) = self.workspace()
                 && let Err(err) = ws.set_chat_source_context(chat_id, &current)

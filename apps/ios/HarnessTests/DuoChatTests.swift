@@ -76,4 +76,90 @@ final class DuoChatTests: XCTestCase {
         XCTAssertEqual(DuoChat.headerInset(duoChat: false, compactWidth: true, flat: false, listToggle: false,
                                            chrome: 100, hitTarget: 44), 100)
     }
+
+    // MARK: Cover display (466 x 678 pt; the system's vertical bar column is an 84pt trailing inset)
+
+    private let coverWidth: CGFloat = 466
+    private let coverBarInset: CGFloat = 84
+
+    /// The bar's column is the system's safe area; the rows inside it used to keep 20pt a side on top, a 342pt
+    /// text column. Beside the bar they keep 8pt to its edge, and the scroll indicator gets the bar's gutter.
+    func testCoverTranscriptTakesTheWidthBesideTheBar() {
+        let insets = CoverLayout.rowInsets(barEdge: .trailing, barInset: coverBarInset)
+        let safeWidth = coverWidth - coverBarInset
+        XCTAssertEqual(CoverLayout.RowInsets.standard.textWidth(safeWidth: safeWidth), 342)
+        XCTAssertEqual(insets.textWidth(safeWidth: safeWidth), 358)
+        // The text stops short of the safe area; only the scroll indicator's gutter reaches into the column, and
+        // it stays clear of the bar's controls (17pt into the column).
+        XCTAssertEqual(insets.trailing - insets.bleedTrailing, CoverLayout.barSideGap)
+        XCTAssertGreaterThan(insets.bleedTrailing, 0)
+        XCTAssertLessThan(insets.bleedTrailing, 17)
+        XCTAssertEqual(insets.bleedLeading, 0)
+    }
+
+    func testABarOnTheLeadingSideMirrorsTheInsets() {
+        let insets = CoverLayout.rowInsets(barEdge: .leading, barInset: coverBarInset)
+        XCTAssertEqual(insets.bleedLeading, CoverLayout.gutter)
+        XCTAssertEqual(insets.leading, CoverLayout.gutter + CoverLayout.barSideGap)
+        XCTAssertEqual(insets.trailing, CoverLayout.openSidePadding)
+    }
+
+    /// No bar, or an inset too narrow to be a bar column (a phone's rounded corners): 20pt a side as before.
+    func testWithoutABarColumnRowsKeepTheirPadding() {
+        XCTAssertEqual(CoverLayout.rowInsets(barEdge: nil, barInset: 84), .standard)
+        XCTAssertEqual(CoverLayout.rowInsets(barEdge: .trailing, barInset: 0), .standard)
+        XCTAssertEqual(CoverLayout.rowInsets(barEdge: .trailing, barInset: 20), .standard)
+    }
+
+    /// The SDK reports the bar's side; without it (older SDKs) a Duo at compact width with a bar-wide inset on
+    /// one side only has one. A landscape iPhone has insets on both sides and no bar.
+    func testBarEdgeFallsBackToTheInsetsOnlyOnADuo() {
+        XCTAssertEqual(CoverLayout.barEdge(reported: .leading, duo: false, compactWidth: false,
+                                           leadingInset: 0, trailingInset: 0), .leading)
+        XCTAssertEqual(CoverLayout.barEdge(reported: nil, duo: true, compactWidth: true,
+                                           leadingInset: 0, trailingInset: 84), .trailing)
+        XCTAssertNil(CoverLayout.barEdge(reported: nil, duo: false, compactWidth: true,
+                                         leadingInset: 0, trailingInset: 84))
+        XCTAssertNil(CoverLayout.barEdge(reported: nil, duo: true, compactWidth: false,
+                                         leadingInset: 0, trailingInset: 84))
+        XCTAssertNil(CoverLayout.barEdge(reported: nil, duo: true, compactWidth: true,
+                                         leadingInset: 59, trailingInset: 59))
+        XCTAssertNil(CoverLayout.barEdge(reported: nil, duo: true, compactWidth: true,
+                                         leadingInset: 0, trailingInset: 0))
+    }
+
+    // MARK: Popovers
+
+    /// The context card was 398pt wide whatever the screen; the cover display leaves 382pt beside its bar, and
+    /// the system centered the card in a narrower popover and cut off both edges.
+    func testContextCardFitsTheCoverDisplay() {
+        let available = PopoverFit.availableWidth(windowWidth: coverWidth, leadingInset: 0,
+                                                  trailingInset: coverBarInset)
+        XCTAssertEqual(available, 350)
+        XCTAssertGreaterThan(ContextCardLayout.idealWidth, coverWidth - coverBarInset)
+        let layout = ContextCardLayout.fitting(available)
+        XCTAssertLessThanOrEqual(layout.width, available)
+        // The bar keeps every segment, thinner.
+        XCTAssertLessThanOrEqual(ContextCardLayout.barWidth(segmentWidth: layout.segmentWidth)
+                                 + 2 * ContextCardLayout.padding, layout.width + 0.001)
+        XCTAssertGreaterThanOrEqual(layout.segmentWidth, ContextCardLayout.minimumSegmentWidth)
+        XCTAssertEqual(layout.legendColumns, 2)
+    }
+
+    func testContextCardKeepsItsWidthWhereItFitsAndReflowsWhereItDoesNot() {
+        // iPhone 17 (402pt): 370 available, the ideal 398 doesn't fit either.
+        XCTAssertLessThanOrEqual(ContextCardLayout.fitting(
+            PopoverFit.availableWidth(windowWidth: 402, leadingInset: 0, trailingInset: 0)).width, 370)
+        // iPad, or no window: the ideal card, two columns.
+        let ipad = ContextCardLayout.fitting(PopoverFit.availableWidth(windowWidth: 1024, leadingInset: 0,
+                                                                        trailingInset: 0))
+        XCTAssertEqual(ipad, ContextCardLayout.fitting(nil))
+        XCTAssertEqual(ipad.width, ContextCardLayout.idealWidth)
+        XCTAssertEqual(ipad.segmentWidth, ContextCardLayout.idealSegmentWidth)
+        XCTAssertEqual(ipad.legendColumns, 2)
+        // Very narrow: one legend column, and never thinner segments than the floor.
+        let narrow = ContextCardLayout.fitting(200)
+        XCTAssertEqual(narrow.legendColumns, 1)
+        XCTAssertEqual(narrow.segmentWidth, ContextCardLayout.minimumSegmentWidth, accuracy: 0.001)
+    }
 }

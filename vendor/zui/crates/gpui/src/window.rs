@@ -218,6 +218,11 @@ impl WindowInvalidator {
         self.inner.borrow_mut().dirty_views = views;
     }
 
+    /// Forget one view's pending notification, reporting whether it had one.
+    pub fn take_view(&self, entity: EntityId) -> bool {
+        self.inner.borrow_mut().dirty_views.remove(&entity)
+    }
+
     pub fn not_drawing(&self) -> bool {
         self.inner.borrow().draw_phase == DrawPhase::None
     }
@@ -1077,6 +1082,10 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    /// How many frames this window has drawn: `rendered_frame` is frame `frames_drawn`, and
+    /// `next_frame` the one after. Modified by Harness: cached views tag their replay ranges
+    /// with it, since those ranges index into the frame they were recorded in.
+    frames_drawn: u64,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1129,11 +1138,60 @@ struct ModifierState {
     saw_keystroke: bool,
 }
 
+/// Whether a throttled window's next frame is due, `elapsed` after its last
+/// one, at a cap of one frame per `min_interval`.
+///
+/// Frame callbacks land on display ticks that jitter by a fraction of a
+/// millisecond, so a strict `elapsed >= min_interval` turns a 30 fps cap into
+/// 27 fps or less on a 240 Hz display (a tick at 33.2 ms waits for the next
+/// at 37.5 ms), and into 15 fps when the frame source itself runs at the cap.
+/// Allow a frame up to 2 ms (or an eighth of the interval) early.
+pub(crate) fn throttled_frame_is_due(elapsed: Duration, min_interval: Duration) -> bool {
+    let slack = (min_interval / 8).min(Duration::from_millis(2));
+    elapsed + slack >= min_interval
+}
+
+/// Modified by Harness: how long after the last input a focused window's animation frames keep
+/// the display's full rate. Scrolls, drags and typing, and the springs and glides they start,
+/// run at full rate; ambient motion after that (spinners, status glyphs) is held to
+/// [`AMBIENT_FRAME_INTERVAL`].
+pub const AMBIENT_AFTER_INPUT: Duration = Duration::from_secs(1);
+
+/// Modified by Harness: ambient animation's cap in a focused window, 60 Hz. On a 240 Hz display
+/// a spinner otherwise redraws the whole window 240 times a second.
+pub const AMBIENT_FRAME_INTERVAL: Duration = Duration::from_micros(16667);
+
+/// The cap on a window's next frame, or `None` for the display's full rate. Only frames that
+/// animations asked for are capped (`animation_driven`): an inactive window's at 30 Hz, a hot
+/// machine's at 60 Hz, and a focused window's at 60 Hz once nothing has been typed, clicked or
+/// scrolled for [`AMBIENT_AFTER_INPUT`]. Pure.
+#[doc(hidden)]
+pub fn frame_interval_cap(
+    animation_driven: bool,
+    active: bool,
+    thermal_pressure: bool,
+    since_input: Option<Duration>,
+) -> Option<Duration> {
+    if !animation_driven {
+        None
+    } else if !active {
+        Some(Duration::from_micros(33333))
+    } else if thermal_pressure {
+        Some(Duration::from_micros(16667))
+    } else if since_input.is_none_or(|elapsed| elapsed >= AMBIENT_AFTER_INPUT) {
+        Some(AMBIENT_FRAME_INTERVAL)
+    } else {
+        None
+    }
+}
+
 /// Tracks input event timestamps to determine if input is arriving at a high rate.
 /// Used for selective VRR (Variable Refresh Rate) optimization.
 #[derive(Clone, Debug)]
 pub(crate) struct InputRateTracker {
     timestamps: Vec<Instant>,
+    /// The last input that changed something (Modified by Harness).
+    last_input: Option<Instant>,
     window: Duration,
     inputs_per_second: u32,
     sustain_until: Instant,
@@ -1144,6 +1202,7 @@ impl Default for InputRateTracker {
     fn default() -> Self {
         Self {
             timestamps: Vec::new(),
+            last_input: None,
             window: Duration::from_millis(100),
             inputs_per_second: 60,
             sustain_until: Instant::now(),
@@ -1155,6 +1214,7 @@ impl Default for InputRateTracker {
 impl InputRateTracker {
     pub fn record_input(&mut self) {
         let now = Instant::now();
+        self.last_input = Some(now);
         self.timestamps.push(now);
         self.prune_old_timestamps(now);
 
@@ -1166,6 +1226,11 @@ impl InputRateTracker {
 
     pub fn is_high_rate(&self) -> bool {
         Instant::now() < self.sustain_until
+    }
+
+    /// How long ago the last input that changed something arrived, if any has.
+    pub fn since_last_input(&self, now: Instant) -> Option<Duration> {
+        self.last_input.map(|at| now.saturating_duration_since(at))
     }
 
     fn prune_old_timestamps(&mut self, now: Instant) {
@@ -1534,31 +1599,44 @@ impl Window {
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
+            // The cap last sent to the platform window.
+            let mut reported_frame_interval_cap = None;
             move |request_frame_options| {
                 let thermal_state = handle
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
                     .log_err();
 
-                // Throttle frame rate based on conditions:
-                // - Thermal pressure (Serious/Critical): cap to ~60fps
-                // - Inactive window (not focused): cap to ~30fps to save energy
-                let min_frame_interval = if !request_frame_options.force_render
-                    && !request_frame_options.require_presentation
-                    && next_frame_callbacks.borrow().is_empty()
-                {
-                    None
-                } else if !active.get() {
-                    Some(Duration::from_micros(33333))
-                } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
-                    Some(Duration::from_micros(16667))
-                } else {
-                    None
-                };
+                // Throttle animation frames: an inactive window to ~30fps, thermal pressure
+                // and a focused window's ambient motion (no input for a second) to ~60fps.
+                let min_frame_interval = frame_interval_cap(
+                    request_frame_options.force_render
+                        || request_frame_options.require_presentation
+                        || !next_frame_callbacks.borrow().is_empty(),
+                    active.get(),
+                    matches!(
+                        thermal_state,
+                        Some(ThermalState::Critical | ThermalState::Serious)
+                    ),
+                    input_rate_tracker
+                        .borrow()
+                        .since_last_input(Instant::now()),
+                );
+
+                if min_frame_interval != reported_frame_interval_cap {
+                    reported_frame_interval_cap = min_frame_interval;
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            window
+                                .platform_window
+                                .set_frame_interval_cap(min_frame_interval)
+                        })
+                        .log_err();
+                }
 
                 let now = Instant::now();
                 if let Some(min_interval) = min_frame_interval {
                     if let Some(last_frame) = last_frame_time.get()
-                        && now.duration_since(last_frame) < min_interval
+                        && !throttled_frame_is_due(now.duration_since(last_frame), min_interval)
                     {
                         // Must still complete the frame on platforms that require it.
                         // On Wayland, `surface.frame()` was already called to request the
@@ -1621,6 +1699,9 @@ impl Window {
                                 && window.input_rate_tracker.borrow().is_high_rate())
                         {
                             window.platform_window.pause_frame_requests();
+                            // Pausing clears the platform's cap, so the first
+                            // frame after an idle isn't held to it.
+                            reported_frame_interval_cap = None;
                         }
                     })
                     .log_err();
@@ -1797,6 +1878,7 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            frames_drawn: 0,
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
@@ -2558,7 +2640,7 @@ impl Window {
         f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
     ) -> R {
         self.with_id(element_id, |this| {
-            let global_id = GlobalElementId(Arc::from(&*this.element_id_stack));
+            let global_id = GlobalElementId::new(&this.element_id_stack);
 
             f(&global_id, this)
         })
@@ -2815,6 +2897,7 @@ impl Window {
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
+        self.frames_drawn += 1;
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
@@ -2889,6 +2972,14 @@ impl Window {
         );
         let mut entities_ref = cx.entities.accessed_entities.get_mut();
         mem::swap(&mut entities, entities_ref.deref_mut());
+    }
+
+    /// Whether `view` was notified after this frame began drawing and before
+    /// now (a parent's render handing it new state, say), consuming that
+    /// notification: a cached view rendering now reflects it already.
+    /// Notifications made while drawing otherwise wait for the next frame.
+    pub(crate) fn take_notified_while_drawing(&self, view: EntityId) -> bool {
+        !self.invalidator.not_drawing() && self.invalidator.take_view(view)
     }
 
     fn invalidate_entities(&mut self) {
@@ -3267,6 +3358,38 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
         }
+    }
+
+    /// The serial of the frame being drawn; the rendered frame's is one less.
+    pub(crate) fn drawing_frame_serial(&self) -> u64 {
+        self.frames_drawn + 1
+    }
+
+    /// Whether ranges recorded while drawing frame `serial` index into the rendered frame.
+    pub(crate) fn recorded_in_rendered_frame(&self, serial: u64) -> bool {
+        serial == self.frames_drawn
+    }
+
+    /// Where the element states the frame being drawn has accessed so far end.
+    pub(crate) fn element_states_index(&self) -> usize {
+        self.next_frame.accessed_element_states.len()
+    }
+
+    /// The element states the frame being drawn has accessed since `start`.
+    pub(crate) fn element_states_since(&self, start: usize) -> Vec<(GlobalElementId, TypeId)> {
+        self.next_frame
+            .accessed_element_states
+            .get(start..)
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    /// Keeps element states for the next frame without accessing them, as a reused cached
+    /// view does for the states its content accessed outside its replayed ranges.
+    pub(crate) fn retain_element_states(&mut self, keys: &[(GlobalElementId, TypeId)]) {
+        self.next_frame
+            .accessed_element_states
+            .extend(keys.iter().cloned());
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
@@ -6903,12 +7026,13 @@ pub fn outline(
 
 #[cfg(test)]
 mod tests {
+    use super::throttled_frame_is_due;
     use crate::{
         AppContext as _, Bounds, Context, FocusHandle, InteractiveElement as _, IntoElement,
         ParentElement as _, Pixels, Render, Styled as _, TestAppContext, Window, canvas, div, px,
         size,
     };
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::Cell, rc::Rc, time::Duration};
 
     struct RootView {
         explicit_size: bool,
@@ -7031,6 +7155,83 @@ mod tests {
             "resize must wake a parked window"
         );
         assert!(!platform.simulate_display_tick());
+    }
+
+    #[test]
+    fn throttled_frames_tolerate_display_tick_jitter() {
+        let thirty_fps = Duration::from_micros(33_333);
+        let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+        // Eight 240 Hz ticks, landing 0.1 ms early. A strict comparison
+        // waits for the ninth tick (37.5 ms): 27 fps instead of 30.
+        assert!(throttled_frame_is_due(ms(33.2), thirty_fps));
+        // A frame source paced at 30 Hz itself, jittering early.
+        assert!(throttled_frame_is_due(ms(32.9), thirty_fps));
+        assert!(throttled_frame_is_due(ms(33.4), thirty_fps));
+        // Seven 240 Hz ticks is still too soon: the cap holds.
+        assert!(!throttled_frame_is_due(ms(29.2), thirty_fps));
+        assert!(!throttled_frame_is_due(ms(4.2), thirty_fps));
+
+        let sixty_fps = Duration::from_micros(16_667);
+        assert!(throttled_frame_is_due(ms(16.5), sixty_fps));
+        // Three 240 Hz ticks.
+        assert!(!throttled_frame_is_due(ms(12.5), sixty_fps));
+    }
+
+    #[test]
+    fn inactive_window_animation_caps_the_platform_frame_rate() {
+        let mut cx = TestAppContext::single();
+        let handle = cx.add_window(|_, _| RootView {
+            explicit_size: false,
+            child_bounds: Rc::new(Cell::new(Bounds::default())),
+        });
+        let platform = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.platform_window.as_test().unwrap().clone()
+            })
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(!platform.simulate_display_tick(), "clean window parks");
+        assert_eq!(platform.frame_interval_cap(), None);
+
+        // A spinner in an inactive window: GPUI draws it at 30 fps, so the
+        // display link need not wake the app at 120 or 240 Hz.
+        fn spin(window: &Window) {
+            window.on_next_frame(|window, _| {
+                window.refresh();
+                spin(window);
+            });
+        }
+        cx.update_window(handle.into(), |_, window, _| {
+            window.active.set(false);
+            spin(window);
+        })
+        .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert_eq!(
+            platform.frame_interval_cap(),
+            Some(Duration::from_micros(33_333)),
+            "an inactive window's animation should cap the frame source"
+        );
+
+        // Focused, the same animation runs at the display's full rate.
+        cx.update_window(handle.into(), |_, window, _| window.active.set(true))
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert_eq!(platform.frame_interval_cap(), None);
+
+        // Inactive again, then the animation stops and the window parks:
+        // the cap must not outlive the animation.
+        cx.update_window(handle.into(), |_, window, _| window.active.set(false))
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(platform.frame_interval_cap().is_some());
+        cx.update_window(handle.into(), |_, window, _| {
+            window.next_frame_callbacks.borrow_mut().clear();
+            window.active.set(true);
+        })
+        .unwrap();
+        while platform.simulate_display_tick() {}
+        assert_eq!(platform.frame_interval_cap(), None);
     }
 
     struct NativeFrameProbe {

@@ -194,12 +194,25 @@ impl InstanceBufferPool {
     }
 }
 
+/// Where a window renderer's frames get their drawable. Modified by Harness:
+/// from upstream Zed 0373366f43; see `metal_display_link.rs`.
+enum DisplayLinkMode {
+    /// Ask the layer with `nextDrawable`.
+    Detached,
+    /// A `CAMetalDisplayLink` drives the layer: draw only into the drawable
+    /// its current update handed out.
+    Attached {
+        drawable: Option<metal::MetalDrawable>,
+    },
+}
+
 pub(crate) struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
+    display_link_mode: DisplayLinkMode,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
     command_queue: CommandQueue,
@@ -472,6 +485,7 @@ impl MetalRenderer {
             device,
             layer,
             presents_with_transaction: false,
+            display_link_mode: DisplayLinkMode::Detached,
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -523,6 +537,46 @@ impl MetalRenderer {
 
     pub fn sprite_atlas(&self) -> &Arc<MetalAtlas> {
         &self.sprite_atlas
+    }
+
+    /// Draw the next frame into `drawable` instead of asking the layer for one.
+    ///
+    /// A `CAMetalDisplayLink` hands out each frame's drawable early enough for
+    /// the frame to reach the display on time; `nextDrawable` would instead
+    /// wait for the compositor to release one. Pass `None` once the frame is
+    /// done, so a drawable the frame didn't use goes back to the layer.
+    ///
+    /// Returns the drawable this replaces: after a frame, `Some` means the
+    /// frame neither drew nor presented.
+    ///
+    /// A setter rather than a guard scoped to one frame, because the window
+    /// releases its lock on the renderer while GPUI draws.
+    pub fn set_frame_drawable(
+        &mut self,
+        drawable: Option<metal::MetalDrawable>,
+    ) -> Option<metal::MetalDrawable> {
+        match &mut self.display_link_mode {
+            DisplayLinkMode::Attached { drawable: current } => mem::replace(current, drawable),
+            DisplayLinkMode::Detached => {
+                // Only a live link hands out drawables, and a link is detached
+                // only after it has been invalidated.
+                debug_assert!(
+                    drawable.is_none(),
+                    "received a display link drawable while detached"
+                );
+                None
+            }
+        }
+    }
+
+    /// Record whether a `CAMetalDisplayLink` drives the layer. While one does,
+    /// frames are drawn only into the drawables it hands out.
+    pub fn set_display_link_attached(&mut self, attached: bool) {
+        self.display_link_mode = if attached {
+            DisplayLinkMode::Attached { drawable: None }
+        } else {
+            DisplayLinkMode::Detached
+        };
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
@@ -633,20 +687,35 @@ impl MetalRenderer {
                 return;
             }
         };
-        let viewport_size = layer.drawable_size();
-        let viewport_size: Size<DevicePixels> = size(
-            (viewport_size.width.ceil() as i32).into(),
-            (viewport_size.height.ceil() as i32).into(),
-        );
-        let drawable = if let Some(drawable) = layer.next_drawable() {
-            drawable
-        } else {
-            log::error!(
-                "failed to retrieve next drawable, drawable size: {:?}",
-                viewport_size
-            );
-            return;
+        let drawable_requested_at = std::time::Instant::now();
+        let owned_drawable: metal::MetalDrawable = match &mut self.display_link_mode {
+            DisplayLinkMode::Attached { drawable } => {
+                let Some(drawable) = drawable.take() else {
+                    log::error!("skipped a frame drawn outside its display link's update");
+                    return;
+                };
+                drawable
+            }
+            DisplayLinkMode::Detached => {
+                let Some(drawable) = layer.next_drawable() else {
+                    log::error!(
+                        "failed to retrieve next drawable, drawable size: {:?}",
+                        layer.drawable_size()
+                    );
+                    return;
+                };
+                drawable.to_owned()
+            }
         };
+        let drawable: &metal::MetalDrawableRef = &owned_drawable;
+        let drawable_wait = drawable_requested_at.elapsed();
+        // A display link's drawable was sized when the link handed it out,
+        // which can be before a resize the layer has since taken.
+        let texture = drawable.texture();
+        let viewport_size: Size<DevicePixels> = size(
+            (texture.width() as i32).into(),
+            (texture.height() as i32).into(),
+        );
 
         loop {
             let mut instance_buffer = self
@@ -671,11 +740,14 @@ impl MetalRenderer {
                         if let Some(instance_buffer) = instance_buffer.take() {
                             instance_buffer_pool.lock().release(instance_buffer);
                         }
-                        if gpu_stats::enabled() {
+                        if gpu_stats::enabled() || crate::frame_stats::enabled() {
                             let (start, end): (f64, f64) = unsafe {
                                 (msg_send![buffer, GPUStartTime], msg_send![buffer, GPUEndTime])
                             };
-                            gpu_stats::record(end - start, blur_count, device_bytes);
+                            crate::frame_stats::gpu_time(end - start);
+                            if gpu_stats::enabled() {
+                                gpu_stats::record(end - start, blur_count, device_bytes);
+                            }
                         }
                     });
                     let block = block.copy();
@@ -689,6 +761,7 @@ impl MetalRenderer {
                         command_buffer.present_drawable(drawable);
                         command_buffer.commit();
                     }
+                    crate::frame_stats::present(drawable_wait, self.presents_with_transaction);
                     return;
                 }
                 Err(err) => {
@@ -2923,5 +2996,104 @@ mod backdrop_blur_tests {
                 .iter()
                 .all(|p| p.scratch.width() <= 640 && p.scratch.height() <= 480)
         );
+    }
+}
+
+#[cfg(test)]
+mod display_link_tests {
+    use super::*;
+    use crate::metal_display_link::MetalDisplayLink;
+    use cocoa::base::id;
+
+    fn window_renderer() -> MetalRenderer {
+        assert!(
+            metal::Device::system_default().is_some(),
+            "requires Metal GPU"
+        );
+        let mut renderer =
+            MetalRenderer::new(Arc::new(Mutex::new(InstanceBufferPool::default())), false);
+        renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(64)));
+        renderer
+    }
+
+    fn layer_drawable(renderer: &MetalRenderer) -> metal::MetalDrawable {
+        renderer
+            .layer()
+            .and_then(|layer| layer.next_drawable())
+            .expect("window renderer must supply a drawable")
+            .to_owned()
+    }
+
+    // Ported from upstream Zed 0373366f43
+    // (`display_link_mode_consumes_and_clears_drawables`).
+    #[test]
+    fn a_display_links_drawable_is_drawn_once_then_cleared() {
+        objc::rc::autoreleasepool(|| {
+            let mut renderer = window_renderer();
+            let drawable = layer_drawable(&renderer);
+
+            renderer.set_display_link_attached(true);
+            assert!(matches!(
+                renderer.display_link_mode,
+                DisplayLinkMode::Attached { drawable: None }
+            ));
+            assert!(
+                renderer
+                    .set_frame_drawable(Some(drawable.clone()))
+                    .is_none()
+            );
+            assert!(matches!(
+                renderer.display_link_mode,
+                DisplayLinkMode::Attached { drawable: Some(_) }
+            ));
+            renderer.draw(&Scene::default());
+            assert!(matches!(
+                renderer.display_link_mode,
+                DisplayLinkMode::Attached { drawable: None }
+            ));
+            // A frame that drew consumed its drawable; one that didn't hands it back.
+            assert!(
+                renderer
+                    .set_frame_drawable(Some(drawable.clone()))
+                    .is_none()
+            );
+            assert!(renderer.set_frame_drawable(None).is_some());
+
+            // Attached with no drawable: a draw outside the link's update is
+            // skipped, never asking the layer.
+            renderer.draw(&Scene::default());
+
+            renderer.set_frame_drawable(Some(drawable));
+            renderer.set_display_link_attached(false);
+            assert!(matches!(
+                renderer.display_link_mode,
+                DisplayLinkMode::Detached
+            ));
+        });
+    }
+
+    // Ported from upstream Zed 0373366f43
+    // (`a_renderer_draws_normally_after_its_display_link_is_invalidated`).
+    #[test]
+    fn a_renderer_draws_normally_after_its_display_link_is_dropped() {
+        if !MetalDisplayLink::is_available() {
+            return;
+        }
+        objc::rc::autoreleasepool(|| unsafe {
+            let mut renderer = window_renderer();
+            let delegate: id = msg_send![class!(NSObject), new];
+            // A paused link: attaching it to the layer is the state under test.
+            let link = MetalDisplayLink::new(renderer.layer_ptr() as id, delegate)
+                .expect("macOS 14 has CAMetalDisplayLink");
+            renderer.set_display_link_attached(true);
+            renderer.draw(&Scene::default());
+
+            drop(link);
+            renderer.set_display_link_attached(false);
+            renderer.draw(&Scene::default());
+            // Detached again: the layer vends drawables through nextDrawable.
+            let _ = layer_drawable(&renderer);
+            let _: () = msg_send![delegate, release];
+        });
     }
 }

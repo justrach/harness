@@ -29,8 +29,13 @@ use windows::{
 };
 
 use crate::direct_manipulation::DirectManipulationHandler;
+use crate::frame_schedule::{FrameRequest, FrameWake};
 use crate::*;
 use gpui::*;
+
+// Modified by Harness: each window holds its demand for a frame, which zui's frame loop arms
+// through `frame_requester` and releases through `pause_frame_requests`, adapted from
+// longbridge/gpui-fast 124f79b and ec3f4a3. See `frame_schedule.rs` and vendor/zui/NOTICE.
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
@@ -61,6 +66,10 @@ pub struct WindowsWindowState {
     pub last_reported_capslock: Cell<Option<Capslock>>,
     pub hovered: Cell<bool>,
     pub direct_manipulation: DirectManipulationHandler,
+    /// This window's demand for a frame at the VSync worker's next vsync.
+    pub(crate) frame_request: Arc<FrameRequest>,
+    /// Set when zui's frame loop pauses frame requests during the current frame.
+    pub(crate) frame_paused: Cell<bool>,
 
     pub renderer: RefCell<DirectXRenderer>,
     /// Set after a GPU device-lost recovery so the next `draw_window` call is
@@ -115,6 +124,7 @@ impl WindowsWindowState {
         appearance: WindowAppearance,
         disable_direct_composition: bool,
         invalidate_devices: Arc<AtomicBool>,
+        frame_wake: Arc<FrameWake>,
     ) -> Result<Self> {
         let scale_factor = {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
@@ -147,8 +157,10 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
-            .context("initializing Direct Manipulation")?;
+        let frame_request = Arc::new(FrameRequest::new(frame_wake));
+        let direct_manipulation =
+            DirectManipulationHandler::new(hwnd, scale_factor, frame_request.clone())
+                .context("initializing Direct Manipulation")?;
 
         Ok(Self {
             origin: Cell::new(origin),
@@ -179,6 +191,8 @@ impl WindowsWindowState {
             hwnd,
             invalidate_devices,
             direct_manipulation,
+            frame_request,
+            frame_paused: Cell::new(false),
             a11y: RefCell::new(None),
         })
     }
@@ -255,6 +269,7 @@ impl WindowsWindowInner {
             context.appearance,
             context.disable_direct_composition,
             context.invalidate_devices.clone(),
+            context.frame_wake.clone(),
         )?;
 
         Ok(Rc::new(Self {
@@ -402,6 +417,7 @@ struct WindowCreateContext {
     disable_direct_composition: bool,
     directx_devices: DirectXDevices,
     invalidate_devices: Arc<AtomicBool>,
+    frame_wake: Arc<FrameWake>,
     parent_hwnd: Option<HWND>,
 }
 
@@ -429,6 +445,7 @@ impl WindowsWindow {
             disable_direct_composition,
             directx_devices,
             invalidate_devices,
+            frame_wake,
         } = creation_info;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
@@ -513,6 +530,7 @@ impl WindowsWindow {
             disable_direct_composition,
             directx_devices,
             invalidate_devices,
+            frame_wake,
             parent_hwnd,
         };
         let creation_result = unsafe {
@@ -922,7 +940,29 @@ impl PlatformWindow for WindowsWindow {
         self.state.callbacks.request_frame.set(Some(callback));
     }
 
+    fn frame_requester(&self) -> Option<Rc<dyn Fn()>> {
+        // Invalidations, next-frame callbacks and refreshes call this. It only marks the
+        // window and wakes the VSync worker; the frame runs at the next vsync.
+        let request = self.state.frame_request.clone();
+        Some(Rc::new(move || request.request()))
+    }
+
+    fn pause_frame_requests(&self) {
+        // The frame loop has nothing left to draw, present or call back. The paint handler
+        // reads this when the frame ends and stops asking for vsyncs.
+        self.state.frame_paused.set(true);
+    }
+
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {
+        #[cfg(test)]
+        let callback = {
+            let hwnd = self.0.hwnd.0 as usize;
+            let mut callback = callback;
+            Box::new(move |event| {
+                crate::native_tests::input(hwnd);
+                callback(event)
+            }) as Box<dyn FnMut(PlatformInput) -> DispatchEventResult>
+        };
         self.state.callbacks.input.set(Some(callback));
     }
 

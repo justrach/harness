@@ -406,40 +406,27 @@ pub(super) struct DividerDrag {
     start: Vec<f32>,
 }
 
-/// Label on the pane that takes your typing while the column is split.
+/// The name screen readers give the pane that takes your typing while the column is split.
 pub(super) const FOCUS_CUE_LABEL: &str = "Typing here";
 
-/// The focused pane's cue: an accent rule along its top edge and a small
-/// solid "Typing here" tag under the titlebar. Never intercepts the mouse.
+/// The focused pane's cue: a solid 2px ring in the accent around the whole pane, its top edge
+/// along the titlebar's bottom. It takes no space and covers no text, the way editors and
+/// terminals mark the split that has the keyboard: one color that means focus, on every edge,
+/// strong enough to find at a glance. Never intercepts the mouse.
 fn focus_cue(theme: &Theme) -> AnyElement {
     div()
         .absolute()
-        .top(px(Theme::TITLEBAR_HEIGHT - 2.0))
+        .top(px(Theme::TITLEBAR_HEIGHT - FOCUS_RING_WIDTH))
         .left_0()
         .right_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .child(div().w_full().h(px(2.0)).bg(theme.accent))
-        .child(
-            div()
-                .mt(px(4.0))
-                .h(px(20.0))
-                .px(px(8.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(5.0))
-                .rounded(px(10.0))
-                .bg(theme.accent_wash)
-                .text_size(crate::typography::ui_rems(11.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.accent)
-                .child(div().size(px(6.0)).rounded_full().bg(theme.accent))
-                .child(SharedString::from(FOCUS_CUE_LABEL)),
-        )
+        .bottom_0()
+        .border(px(FOCUS_RING_WIDTH))
+        .border_color(theme.accent)
         .into_any_element()
 }
+
+/// How thick the focused pane's ring is: WCAG 2.2's focus appearance asks for at least 2px.
+const FOCUS_RING_WIDTH: f32 = 2.0;
 
 /// A live read-only transcript for one unfocused pane's chat.
 pub(super) struct PeerChatView {
@@ -851,7 +838,15 @@ impl Shell {
             let share = split.shares[ix];
             if ix == split.focus {
                 let body = main.take().expect("one focused pane");
-                let slot = div().relative().flex().min_w_0().min_h_0().overflow_hidden();
+                let slot = div()
+                    .id("chat-pane-focused")
+                    .role(gpui::Role::Group)
+                    .aria_label(FOCUS_CUE_LABEL)
+                    .relative()
+                    .flex()
+                    .min_w_0()
+                    .min_h_0()
+                    .overflow_hidden();
                 children.push(
                     if horizontal { slot.flex_1().h_full() } else { slot.w_full().h(gpui::relative(share)) }
                         .child(body)
@@ -1093,7 +1088,7 @@ impl Shell {
                     ),
             )
             // Unfocused panes stay live and readable (no dimming); the
-            // focused one carries the "Typing here" cue instead.
+            // focused one carries the accent rule and outline instead.
             .child(div().flex_1().min_h_0().flex().flex_col().child(body))
             // Every visible pane takes dropped files, not just the focused
             // one; the drop focuses the pane it lands on (#488).

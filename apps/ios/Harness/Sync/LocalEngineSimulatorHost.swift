@@ -74,7 +74,7 @@ final class LocalEngineSimulatorHost: SimulatorHost {
         return try JSONDecoder().decode(Response.self, from: result.get())
     }
 
-    private struct Ok: Decodable {}
+    fileprivate struct Ok: Decodable {}
 
     func listSimulators(deviceId: String) async throws -> SimulatorList {
         try await call("ListSimulators", [:])
@@ -94,22 +94,45 @@ final class LocalEngineSimulatorHost: SimulatorHost {
 
     func simulatorScreen(deviceId: String, simulatorId: String, maxFps: Int) async throws
         -> AsyncThrowingStream<SimulatorFrame, Error> {
+        try stream("WatchSimulatorScreen", ["simulatorId": simulatorId, "maxFps": maxFps],
+                   as: SimulatorFrame.self)
+    }
+
+    fileprivate func stream<Item: Decodable>(_ method: String, _ params: [String: Any],
+                                             as: Item.Type) throws -> AsyncThrowingStream<Item, Error> {
         let task = connected()
         let id = nextId
         nextId += 1
-        let stream = pending.registerStream(id: id, as: SimulatorFrame.self) { [weak self] in
+        let stream = pending.registerStream(id: id, as: Item.self) { [weak self] in
             Task { @MainActor in
                 guard let self, self.pending.removeStreamForCancellation(id: id) else { return }
                 self.send(["id": id, "cancel": true], on: task, id: id)
             }
         }
-        send(["id": id, "method": "WatchSimulatorScreen",
-              "params": ["simulatorId": simulatorId, "maxFps": maxFps]], on: task, id: id)
+        send(["id": id, "method": method, "params": params], on: task, id: id)
         return stream
     }
 
     func simulatorInput(deviceId: String, simulatorId: String, input: SimulatorInput) async throws {
         let _: Ok = try await call("SimulatorInput", ["simulatorId": simulatorId, "input": input.params])
+    }
+}
+
+/// The same engine serves localhost pages, so the page view can be tested end
+/// to end against a real browser on this Mac.
+extension LocalEngineSimulatorHost: LocalhostPageHost {
+    func watchLocalhostPage(deviceId: String, watch: LocalhostWatch) async throws
+        -> AsyncThrowingStream<LocalhostPageEvent, Error> {
+        try stream("WatchLocalhostPage", watch.params, as: LocalhostPageEvent.self)
+    }
+
+    func localhostPageInput(deviceId: String, viewId: String, input: LocalhostPageInput) async throws {
+        let _: Ok = try await call("LocalhostPageInput", ["viewId": viewId, "input": input.params])
+    }
+
+    func listLocalhostServers(deviceId: String) async throws -> [LocalServer] {
+        let list: LocalServerList = try await call("ListLocalhostServers", [:])
+        return list.servers
     }
 }
 #endif

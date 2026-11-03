@@ -17,6 +17,7 @@ each app runs its own test against the same files, so neither can drift without 
 | `vectors/chat-mode.json` | chat mode's auto tiers (order, names, the older-gateway stand-in), when a chat can start, the model a new chat starts on, and the cost and unavailable notes (the desktop checks the same rules in `harness-ui`'s `chat_mode`) | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/composer-stop.json` | how long the composer ignores Stop after a question panel gives way to it (the desktop checks it too, in `harness-ui`'s `composer`) | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/annotations.json` | the text an annotated image adds to the prompt: numbered boxes in image pixels, notes, text marks, and the annotated file name (the desktop sets the format and checks it in `harness-ui`'s `annotate`; the phones do not annotate yet) | not yet | not yet |
+| `vectors/localhost-pages.json` | which addresses open on the phone as a page its computer renders, and the address that computer's browser opens (the engine checks it too, in `harness-engine`'s `localhost_view::url_rule`) | `ParityTests.swift` | not yet |
 | `perf-contract.json` | the operations the performance monitor times, their budgets, and the Performance page copy | `ParityTests.swift` | `ParityTest.kt` |
 | `apps/ios/Harness/Theme/themes.json` | the theme catalog (Android bundles a copy) | `ThemeStoreTests.swift` | `ThemeCatalogTest.kt` |
 
@@ -47,3 +48,7 @@ Android's drafts survive navigation but not the process being killed, while iOS 
 The Attachments editor on a queued message (add, preview, replace and remove its images; #187, #493) is iOS-only
 for now. Its copy goes into `ux-contract.json` when the Compose app gets the editor, since the string check would
 otherwise fail the Android build.
+
+The Write page (the composer's draft on a full-height sheet, with markdown styled as it is typed) is iOS-only for
+now too. Its copy ("Write in full screen", "Done", "Send", "N words") goes into `ux-contract.json` with the Compose
+port, for the same reason.

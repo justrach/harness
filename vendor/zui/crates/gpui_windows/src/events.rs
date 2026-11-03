@@ -1,3 +1,7 @@
+// Modified by Harness: paints run only when a window asked for a frame, and a frame that
+// didn't pause asks for the next vsync, adapted from longbridge/gpui-fast 124f79b and ec3f4a3.
+// See `frame_schedule.rs` and vendor/zui/NOTICE.
+
 use std::{rc::Rc, sync::atomic::Ordering};
 
 use anyhow::Context as _;
@@ -17,6 +21,7 @@ use windows::{
     core::PCWSTR,
 };
 
+use crate::frame_schedule;
 use crate::*;
 use gpui::*;
 
@@ -216,6 +221,8 @@ impl WindowsWindowInner {
             self.state
                 .invalidate_devices
                 .store(true, std::sync::atomic::Ordering::Release);
+            // Wake the VSync worker, which recreates the devices.
+            self.state.frame_request.request();
         }
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
@@ -1223,11 +1230,37 @@ impl WindowsWindowInner {
         None
     }
 
+    /// A paint while the frame callback is out: nested inside the current draw, before the
+    /// window registered its callback, or while minimized.
+    fn paint_without_frame_callback(&self, handle: HWND) -> Option<isize> {
+        let parked = self.state.restore_from_minimized.take();
+        let minimized = parked.is_some();
+        self.state.restore_from_minimized.set(parked);
+        match frame_schedule::paint(false, minimized) {
+            frame_schedule::Paint::Retry => {
+                // Validate the region so a nested message loop doesn't keep re-dispatching
+                // WM_PAINT until the current draw unwinds, and draw at the next vsync instead.
+                unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+                self.state.frame_request.request();
+                Some(0)
+            }
+            frame_schedule::Paint::Draw | frame_schedule::Paint::Skip => None,
+        }
+    }
+
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
-        let mut request_frame = self.state.callbacks.request_frame.take()?;
+        let Some(mut request_frame) = self.state.callbacks.request_frame.take() else {
+            return self.paint_without_frame_callback(handle);
+        };
+        // Retire only the current paint, before the frame callback can ask for another one. A
+        // trailing ValidateRect would also erase an invalidation the VSync worker made meanwhile.
+        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+        self.state.frame_paused.set(false);
+        #[cfg(test)]
+        crate::native_tests::paint_started(handle);
 
-        self.state.direct_manipulation.update();
+        let manipulating = self.state.direct_manipulation.update();
 
         let events = self.state.direct_manipulation.drain_events();
         if !events.is_empty() {
@@ -1251,8 +1284,12 @@ impl WindowsWindowInner {
         });
 
         self.state.callbacks.request_frame.set(Some(request_frame));
+        if frame_schedule::wants_next_frame(self.state.frame_paused.get(), manipulating) {
+            self.state.frame_request.request();
+        }
         self.update_ime_enabled(handle);
-        unsafe { ValidateRect(Some(handle), None).ok().log_err() };
+        #[cfg(test)]
+        crate::native_tests::paint_done(handle);
 
         Some(0)
     }

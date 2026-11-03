@@ -787,3 +787,35 @@ async fn only_an_accepted_run_records_its_checkout() {
     );
     core.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_continued_after_a_branch_change_still_starts_the_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "alpha"]);
+    git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
+    let cwd = repo.to_string_lossy().into_owned();
+    let (core, prompts) = engine(&root.join("data"));
+    core.workspace
+        .create_chat(CHAT, None, Some(&core.device_id), None, Some(cwd.clone()))
+        .unwrap();
+    core.workspace.rename_chat(CHAT, "Pre-titled").unwrap();
+    let turns = |n: usize| {
+        let prompts = prompts.clone();
+        move || prompts.lock().unwrap().len() == n
+    };
+    send(&core, "m1", "first", &cwd);
+    wait_for(turns(1), "first turn").await;
+
+    // `/compact` held behind the question, then continued: the branch note
+    // went in front of it, so the agent read the command as plain text.
+    git(&repo, &["switch", "-c", "beta"]);
+    send(&core, "m2", "/compact", &cwd);
+    let (request_id, _) = wait_question(&core).await;
+    answer(&core, &request_id, "Continue on beta");
+    wait_for(turns(2), "the continued command").await;
+    assert_eq!(prompts.lock().unwrap()[1], "/compact");
+    assert_eq!(context_branch(&core), "beta");
+}

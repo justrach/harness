@@ -23,6 +23,8 @@ struct TranscriptView: View {
     var inspectDiff: ((DiffSummary) -> Void)? = nil
     /// Open one tool call in the Inspect pane (flat Duo).
     var inspectTool: ((ToolItem) -> Void)? = nil
+    /// Row padding, and how far the transcript reaches past the safe area beside a vertical bar (CoverLayout).
+    var rowInsets: CoverLayout.RowInsets = .standard
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -53,7 +55,7 @@ struct TranscriptView: View {
             reduceMotion: reduceMotion,
             configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
                 ^ colorScheme.hashValue ^ duoChat.hashValue ^ (inspectDiff != nil).hashValue
-                ^ (inspectTool != nil).hashValue &* 31) { row in
+                ^ (inspectTool != nil).hashValue &* 31 ^ rowInsets.hashValue) { row in
                 AnyView(rowView(row, earlier: earlierErrors.contains(row.id))
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
@@ -69,6 +71,10 @@ struct TranscriptView: View {
                         return .handled
                     }))
             }
+            // Beside a vertical bar the table reaches into the bar's empty edge, so its scroll indicator
+            // sits in that gutter rather than over the text.
+            .padding(.leading, -rowInsets.bleedLeading)
+            .padding(.trailing, -rowInsets.bleedTrailing)
             .modifier(TranscriptViewportProbe(chatId: chatId))
             .background(Theme.sessionPage(lifted: liftedPlane))
             .overlay(alignment: .bottom) {
@@ -198,7 +204,8 @@ struct TranscriptView: View {
             }
         }
         .padding(.top, row.topGap)
-        .padding(.horizontal, 20)
+        .padding(.leading, rowInsets.leading)
+        .padding(.trailing, rowInsets.trailing)
         .frame(maxWidth: Self.maxContentWidth)
         .frame(maxWidth: .infinity)
     }
@@ -512,57 +519,35 @@ struct MarkdownRowView: View {
     }
 
     var body: some View {
-        if streaming, isVeilable, !reduceMotion {
-            // Reattaching a row must never fade already-visible text to black.
-            let veil = veils.veil(for: row.id, seededLength: textLength)
-            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !fading)) { _ in
-                veiledText(veil: veil)
-            }
-            .onChange(of: textLength) { _, _ in
-                fading = veil.isFading
-            }
-            .task(id: textLength) {
-                // Stop frame work when the last appended span has settled.
-                // A new chunk cancels this task and starts a new deadline.
-                try? await Task.sleep(for: .milliseconds(600))
-                while !Task.isCancelled, veil.isFading {
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-                guard !Task.isCancelled else { return }
-                fading = false
-            }
-            .onAppear { fading = veil.isFading }
-            .transaction { $0.animation = nil }
-        } else {
-            MarkdownBlockView(block: block, cacheKey: row.id)
+        // Keep the same native text view through the streaming → settled
+        // handoff so finishing a response doesn't throw away its selection.
+        let veil = streaming && isVeilable && !reduceMotion
+            ? veils.veil(for: row.id, seededLength: textLength) : nil
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: veil == nil || !fading)) { _ in
+            MarkdownBlockView(block: block, cacheKey: row.id, veil: veil)
         }
+        .onChange(of: textLength) { _, _ in
+            fading = veil?.isFading ?? false
+        }
+        .task(id: textLength) {
+            guard let veil else { return }
+            // Stop frame work when the last appended span has settled.
+            // A new chunk cancels this task and starts a new deadline.
+            try? await Task.sleep(for: .milliseconds(600))
+            while !Task.isCancelled, veil.isFading {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard !Task.isCancelled else { return }
+            fading = false
+        }
+        .onAppear { fading = veil?.isFading ?? false }
+        .transaction { $0.animation = nil }
     }
 
     private var isVeilable: Bool {
         switch block {
         case .paragraph, .heading: return true
         default: return false
-        }
-    }
-
-    @ViewBuilder
-    private func veiledText(veil: RowVeil) -> some View {
-        switch block {
-        case .paragraph(let runs):
-            runs.styledVeiled(veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(MD.lineHeight - MD.textSize - 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        case .heading(let level, let runs):
-            let m = MD.headingMetrics(level)
-            runs.styledVeiled(size: m.size, weight: .semibold, veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(m.line - m.size - 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        default:
-            MarkdownBlockView(block: block, cacheKey: row.id)
         }
     }
 }

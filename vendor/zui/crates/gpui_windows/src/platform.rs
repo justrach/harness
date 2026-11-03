@@ -27,12 +27,32 @@ use windows::{
     core::*,
 };
 
+use crate::device_wake::DeviceWake;
+use crate::frame_schedule::{FrameRequest, FrameWake};
 use crate::*;
 use gpui::*;
 
+// Modified by Harness: the VSync worker sleeps until a window asks for a frame and then
+// invalidates only that window, adapted from longbridge/gpui-fast 124f79b and ec3f4a3.
+// See `frame_schedule.rs` and vendor/zui/NOTICE.
+
+/// A window the VSync worker may invalidate, with its demand for a frame.
+pub(crate) struct TrackedWindow {
+    handle: SafeHwnd,
+    frame_request: Arc<FrameRequest>,
+}
+
+impl TrackedWindow {
+    pub(crate) fn as_raw(&self) -> HWND {
+        self.handle.as_raw()
+    }
+}
+
+pub(crate) type WindowList = RwLock<SmallVec<[TrackedWindow; 4]>>;
+
 pub struct WindowsPlatform {
     inner: Rc<WindowsPlatformInner>,
-    raw_window_handles: Arc<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    raw_window_handles: Arc<WindowList>,
     // The below members will never change throughout the entire lifecycle of the app.
     headless: bool,
     icon: HICON,
@@ -44,6 +64,10 @@ pub struct WindowsPlatform {
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
     invalidate_devices: Arc<AtomicBool>,
+    /// Wakes the VSync worker when a window asks for a frame.
+    frame_wake: Arc<FrameWake>,
+    /// Stops the VSync worker when the platform is dropped.
+    vsync_stop: Arc<AtomicBool>,
     handle: HWND,
     suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
     disable_direct_composition: bool,
@@ -54,7 +78,7 @@ pub struct WindowsPlatform {
 
 struct WindowsPlatformInner {
     state: WindowsPlatformState,
-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    raw_window_handles: std::sync::Weak<WindowList>,
     // The below members will never change throughout the entire lifecycle of the app.
     validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
@@ -203,6 +227,8 @@ impl WindowsPlatform {
             has_package_identity: has_package_identity(),
             drop_target_helper,
             invalidate_devices: Arc::new(AtomicBool::new(false)),
+            frame_wake: Arc::new(FrameWake::default()),
+            vsync_stop: Arc::new(AtomicBool::new(false)),
             app_identity: RefCell::new(None),
             system_notifications: RefCell::new(SystemNotificationState::new()),
         })
@@ -239,6 +265,7 @@ impl WindowsPlatform {
             disable_direct_composition: self.disable_direct_composition,
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             invalidate_devices: self.invalidate_devices.clone(),
+            frame_wake: self.frame_wake.clone(),
         }
     }
 
@@ -316,13 +343,21 @@ impl WindowsPlatform {
         let all_windows = Arc::downgrade(&self.raw_window_handles);
         let text_system = Arc::downgrade(direct_write_text_system);
         let invalidate_devices = self.invalidate_devices.clone();
+        let frame_wake = self.frame_wake.clone();
+        let stop = self.vsync_stop.clone();
 
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
-                loop {
+                // Device removal wakes the worker, so it can sleep while no window wants a
+                // frame. Without that registration it checks the device once a second.
+                let mut device_wake = DeviceWake::start(&directx_device.device, &frame_wake);
+                while frame_wake.wait(&stop, device_wake.is_some()) {
                     vsync_provider.wait_for_vsync();
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
                     if check_device_lost(&directx_device.device)
                         || invalidate_devices.fetch_and(false, Ordering::Acquire)
                     {
@@ -335,14 +370,24 @@ impl WindowsPlatform {
                         ) {
                             panic!("Device lost: {err}");
                         }
+                        // Watch the device that replaced the lost one.
+                        drop(device_wake.take());
+                        device_wake = DeviceWake::start(&directx_device.device, &frame_wake);
                     }
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
                     };
-                    for hwnd in all_windows.read().iter() {
-                        unsafe {
-                            let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
+                    for window in all_windows.read().iter() {
+                        #[cfg(test)]
+                        crate::native_tests::before_frame_request(window.as_raw());
+                        if !window.frame_request.take() {
+                            continue;
                         }
+                        unsafe {
+                            let _ = RedrawWindow(Some(window.as_raw()), None, None, RDW_INVALIDATE);
+                        }
+                        #[cfg(test)]
+                        crate::native_tests::paint_invalidated(window.as_raw());
                     }
                 }
             })
@@ -525,7 +570,12 @@ impl Platform for WindowsPlatform {
     ) -> Result<Box<dyn PlatformWindow>> {
         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
         let handle = window.get_raw_handle();
-        self.raw_window_handles.write().push(handle.into());
+        self.raw_window_handles.write().push(TrackedWindow {
+            handle: handle.into(),
+            frame_request: window.state.frame_request.clone(),
+        });
+        // The first frame: gpui drew the window before it could ask for one.
+        window.state.frame_request.request();
 
         Ok(Box::new(window))
     }
@@ -1105,6 +1155,9 @@ impl WindowsPlatformInner {
 
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
+        // Not joined: the worker can be sending this thread a message. It exits once it wakes.
+        self.vsync_stop.store(true, Ordering::Release);
+        self.frame_wake.request();
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
                 // SAFETY: notification was returned by RegisterSuspendResumeNotification.
@@ -1132,11 +1185,12 @@ pub(crate) struct WindowCreationInfo {
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
     /// as resizing them has failed, causing us to have lost at least the render target.
     pub(crate) invalidate_devices: Arc<AtomicBool>,
+    pub(crate) frame_wake: Arc<FrameWake>,
 }
 
 struct PlatformWindowCreateContext {
     inner: Option<Result<Rc<WindowsPlatformInner>>>,
-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    raw_window_handles: std::sync::Weak<WindowList>,
     validation_number: usize,
     main_sender: Option<PriorityQueueSender<RunnableVariant>>,
     main_receiver: Option<PriorityQueueReceiver<RunnableVariant>>,
@@ -1360,7 +1414,7 @@ fn handle_gpu_device_lost(
     directx_devices: &mut DirectXDevices,
     platform_window: HWND,
     validation_number: usize,
-    all_windows: &std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    all_windows: &std::sync::Weak<WindowList>,
     text_system: &std::sync::Weak<DirectWriteTextSystem>,
 ) -> Result<()> {
     // Here we wait a bit to ensure the system has time to recover from the device lost state.

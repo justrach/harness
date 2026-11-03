@@ -22,6 +22,12 @@
 //! spinner stays in phase. A substep or a step changing state fades up over
 //! 200ms. Reduced motion stops the spinners on a static partial ring and
 //! snaps the fades.
+//!
+//! The footer chip's card lists the agents; clicking one takes the chat to
+//! the agent's spawn chip ([`RevealAgent`]) and closes the card.
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -44,6 +50,12 @@ pub const SPIN: MotionSpec = MotionSpec::new(1000, CubicBezier::new(0.0, 0.0, 1.
 pub const ENTER: MotionSpec = MotionSpec::new(180, crate::motion::EASE_OUT_QUINT);
 /// The spinner's gap, in turns (54 degrees).
 const SPINNER_GAP: f32 = 0.15;
+/// Angles a spinner's arc is drawn at, per turn. GPUI keeps the triangles of
+/// every path shape it builds (2048 shapes, 16 MiB a thread): an arc at a new
+/// angle every frame would fill that with shapes drawn once. On these steps a
+/// turning spinner is at most this many shapes, each reused from the turn
+/// before, and one step a frame at 240 Hz over its one-second turn.
+pub const SPINNER_STEPS: f32 = 240.0;
 /// Substeps shown under the active step, newest last.
 pub const MAX_SUBSTEPS: usize = 3;
 /// Step dots in the composer footer before it switches to "3/9".
@@ -572,9 +584,10 @@ pub fn spin_phase(view: EntityId, cx: &mut App) -> f32 {
 }
 
 /// The arc a spinner draws at `phase`: start and sweep in turns, clockwise
-/// from 12 o'clock.
+/// from 12 o'clock. The start is on one of [`SPINNER_STEPS`] angles a turn.
 pub fn spinner_arc(phase: f32) -> (f32, f32) {
-    (phase.rem_euclid(1.0), 1.0 - SPINNER_GAP)
+    let start = (phase.rem_euclid(1.0) * SPINNER_STEPS).round() / SPINNER_STEPS;
+    (start.rem_euclid(1.0), 1.0 - SPINNER_GAP)
 }
 
 fn arc_path(
@@ -1062,10 +1075,20 @@ pub fn tool_chips(tools: &[ToolChip], p: &Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// The agents card body: a header and one row per subagent. No Stop or
-/// Review buttons: the card is a tooltip, which takes no clicks, and the
-/// spawn chip in the transcript already opens a subagent.
-pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
+/// Takes the chat to an agent: called with the agent's spawn part id
+/// ([`AgentRow::id`]) when its row in the card is clicked.
+pub type RevealAgent = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// How far a clickable agent row's hover wash reaches past its content, so
+/// the wash has room around the glyph without moving the rows.
+const ROW_WASH_X: f32 = 8.0;
+const ROW_WASH_Y: f32 = 5.0;
+
+/// The agents card body: a header and one row per subagent. With `on_row`,
+/// each row is a button that takes the chat to that agent's spawn chip,
+/// where the chip itself still opens the subagent's own tab. No Stop or
+/// Review buttons.
+pub fn agents(work: &Work, p: &Palette, phase: f32, on_row: Option<&RevealAgent>) -> AnyElement {
     let (count, word) = agents_header(work);
     let header = div()
         .flex()
@@ -1075,7 +1098,7 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
         .tabular_nums()
         .child(div().text_color(p.text).child(SharedString::from(count)))
         .child(div().text_color(p.muted).child(word));
-    let rows = work.agents.iter().map(|agent| {
+    let rows = work.agents.iter().enumerate().map(|(ix, agent)| {
         let glyph = match agent.state {
             AgentState::Running => spinner(18.0, 2.0, p.accent, p.line, phase),
             AgentState::Done => check_dot(18.0, p),
@@ -1086,7 +1109,7 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
             AgentState::Failed => p.red_text,
             _ => p.muted,
         };
-        div()
+        let row = div()
             .flex()
             .items_start()
             .gap(px(12.0))
@@ -1115,7 +1138,30 @@ pub fn agents(work: &Work, p: &Palette, phase: f32) -> AnyElement {
                             .text_color(detail_color)
                             .child(SharedString::from(agent.detail.clone())),
                     ),
-            )
+            );
+        let Some(open) = on_row else {
+            return row.into_any_element();
+        };
+        let open = open.clone();
+        let id = agent.id.clone();
+        let wash = p.text.opacity(0.07);
+        row.id(("agent-row", ix))
+            .debug_selector(move || format!("agent-row-{ix}"))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!(
+                "Show {} in the chat",
+                agent.title
+            )))
+            // The wash reaches past the content; the margins cancel it, so
+            // rows keep the positions they had as plain text.
+            .mx(px(-ROW_WASH_X))
+            .px(px(ROW_WASH_X))
+            .my(px(-ROW_WASH_Y))
+            .py(px(ROW_WASH_Y))
+            .rounded(px(CHIP_RADIUS))
+            .cursor_pointer()
+            .hover(move |s| s.bg(wash))
+            .on_click(move |_, window, cx| open(&id, window, cx))
             .into_any_element()
     });
     div()
@@ -1142,7 +1188,12 @@ pub fn card(p: &Palette) -> gpui::Div {
 }
 
 /// The whole hover card: timeline, agents and tools, whichever exist.
-pub fn work_card(work: &Work, p: &Palette, phase: f32) -> AnyElement {
+pub fn work_card(
+    work: &Work,
+    p: &Palette,
+    phase: f32,
+    on_agent: Option<&RevealAgent>,
+) -> AnyElement {
     card(p)
         .when(!work.steps.is_empty(), |c| {
             c.child(timeline(&work.steps, p, phase))
@@ -1151,7 +1202,7 @@ pub fn work_card(work: &Work, p: &Palette, phase: f32) -> AnyElement {
             c.when(!work.steps.is_empty(), |c| {
                 c.child(div().h(px(1.0)).bg(p.card_border))
             })
-            .child(agents(work, p, phase))
+            .child(agents(work, p, phase, on_agent))
         })
         .when(!work.tools.is_empty(), |c| {
             c.child(tool_chips(&work.tools, p))
@@ -1170,13 +1221,35 @@ pub fn footer_dots(work: &Work) -> Option<Vec<StepState>> {
     (!states.is_empty() && states.len() <= MAX_FOOTER_DOTS).then_some(states)
 }
 
+thread_local! {
+    /// Views whose chip card was just used: their next render draws the chip
+    /// without its card, which closes it ([`dismiss_card`]).
+    static DISMISSED: RefCell<HashSet<EntityId>> = RefCell::new(HashSet::new());
+}
+
+/// Close the card `view`'s footer chip has open. GPUI drops a tooltip whose
+/// element renders without a tooltip builder, so the chip's next render
+/// leaves it out once; the render after brings hover back.
+pub fn dismiss_card(view: EntityId, cx: &mut App) {
+    DISMISSED.with(|views| views.borrow_mut().insert(view));
+    cx.notify(view);
+}
+
+fn take_dismissed(view: EntityId) -> bool {
+    DISMISSED.with(|views| views.borrow_mut().remove(&view))
+}
+
 /// The chip next to the context ring while the chat has steps or agents.
+/// `view` is the view that renders it; `on_reveal` makes the card's agent
+/// rows clickable.
 pub fn footer_chip(
     state: Entity<AppState>,
     theme: &Theme,
     view: EntityId,
+    on_reveal: Option<RevealAgent>,
     cx: &mut App,
 ) -> Option<AnyElement> {
+    let dismissed = take_dismissed(view);
     let work = work(&state.read(cx).transcript);
     if work.is_empty() {
         return None;
@@ -1235,15 +1308,28 @@ pub fn footer_chip(
         .child(body);
     Some(
         hit_area("agent-work", "agent-work", HitSlop::AGENT_WORK, pill)
-            // hoverable: the card stays open while the pointer is on it
-            .hoverable_tooltip(move |_, cx| hover_card(state.clone(), cx))
+            .debug_selector(|| "agent-work-chip".into())
+            // hoverable: the card stays open while the pointer moves from
+            // the chip into it, so its agent rows can be clicked
+            .when(!dismissed, |chip| {
+                chip.hoverable_tooltip(move |_, cx| {
+                    hover_card(state.clone(), view, on_reveal.clone(), cx)
+                })
+            })
             .into_any_element(),
     )
 }
 
-/// The card the footer chip opens on hover.
-pub fn hover_card(state: Entity<AppState>, cx: &mut App) -> gpui::AnyView {
-    cx.new(|cx| AgentWorkCard::new(state, cx)).into()
+/// The card the footer chip opens on hover. `owner` is the view that renders
+/// the chip; a click on an agent row runs `on_reveal` and closes the card.
+pub fn hover_card(
+    state: Entity<AppState>,
+    owner: EntityId,
+    on_reveal: Option<RevealAgent>,
+    cx: &mut App,
+) -> gpui::AnyView {
+    cx.new(|cx| AgentWorkCard::new(state, owner, on_reveal, cx))
+        .into()
 }
 
 /// The hover card's live view.
@@ -1251,16 +1337,30 @@ pub struct AgentWorkCard {
     state: Entity<AppState>,
     built_from: Option<u64>,
     work: Work,
+    /// A click on an agent row: reveal it, then close this card.
+    on_agent: Option<RevealAgent>,
     _subscription: Subscription,
 }
 
 impl AgentWorkCard {
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        owner: EntityId,
+        on_reveal: Option<RevealAgent>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let on_agent = on_reveal.map(|reveal| {
+            Rc::new(move |id: &str, window: &mut Window, cx: &mut App| {
+                reveal(id, window, cx);
+                dismiss_card(owner, cx);
+            }) as RevealAgent
+        });
         Self {
             _subscription: cx.observe(&state, |_, _, cx| cx.notify()),
             state,
             built_from: None,
             work: Work::default(),
+            on_agent,
         }
     }
 }
@@ -1280,7 +1380,11 @@ impl Render for AgentWorkCard {
         } else {
             0.0
         };
-        work_card(&self.work, &p, phase)
+        // Occludes: a click on a row must not also start a text selection
+        // in the transcript under the card.
+        div()
+            .occlude()
+            .child(work_card(&self.work, &p, phase, self.on_agent.as_ref()))
     }
 }
 
@@ -1653,6 +1757,50 @@ mod tests {
         // One shared 1s linear clock: every spinner reads the same phase.
         assert_eq!(SPIN.duration_ms, 1000);
         assert_eq!(SPIN.curve.eval(0.5), 0.5);
+    }
+
+    /// The spinner's clock as a 240 Hz display samples it: each frame's arc
+    /// is one step on from the last, so quantizing never holds or skips one.
+    #[test]
+    fn a_spinner_moves_one_step_every_frame_at_240_hz() {
+        let step = 1.0 / SPINNER_STEPS;
+        let start = |frame: u32| {
+            let elapsed = Duration::from_secs_f64(f64::from(frame) / 240.0);
+            let phase = (elapsed.as_secs_f32() / SPIN.total().as_secs_f32()).fract();
+            spinner_arc(phase).0
+        };
+        for frame in 1..2400 {
+            let moved = (start(frame) - start(frame - 1)).rem_euclid(1.0);
+            assert!(
+                (moved - step).abs() < step * 0.01,
+                "frame {frame} moved {moved} turns, not one step"
+            );
+        }
+    }
+
+    /// A spinner turning for 3000 frames on the wall clock (no two frames
+    /// at exactly the same phase) leaves GPUI's path cache holding its track
+    /// and at most one arc per step, not 16 MiB of arcs drawn once.
+    #[test]
+    fn a_turning_spinner_keeps_the_path_cache_small() {
+        let center = point(px(40.3), px(17.5));
+        let radius = (12.0 - 1.5) / 2.0;
+        let mut starts = HashSet::new();
+        for frame in 0..3000 {
+            let phase = (frame as f32 * 0.016_734).fract();
+            let (start, sweep) = spinner_arc(phase);
+            starts.insert(start.to_bits());
+            arc_path(center, radius, 0.0, 1.0, 1.5, None).unwrap();
+            arc_path(center, radius, start, sweep, 1.5, None).unwrap();
+        }
+        let (shapes, bytes) = gpui::kept_path_shapes();
+        assert!(starts.len() <= SPINNER_STEPS as usize);
+        assert_eq!(shapes, starts.len() + 1, "one arc per step, and the track");
+        assert!(
+            bytes < 4 * 1024 * 1024,
+            "a turning spinner keeps {} KiB of paths",
+            bytes / 1024
+        );
     }
 
     #[test]

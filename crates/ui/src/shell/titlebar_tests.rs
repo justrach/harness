@@ -106,6 +106,9 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
             });
             // Postponed, so it waits on the person and the control shows.
             shell.app_update.postponed = Some("9.9.9".into());
+            // A staged update's restart sits in the sidebar while it's open; the preview keeps
+            // the titlebar slot showing, which is the geometry under test.
+            shell.app_update.dev_preview = true;
             shell
         }))
     });
@@ -262,6 +265,15 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
             // An automatic download shows nothing either.
             if mode == "none" || mode == "downloading" {
                 assert!(update.is_none(), "mode={mode}");
+                continue;
+            }
+            // A staged update's restart is a row in the open chat sidebar's footer.
+            if mode == "ready" && !in_settings {
+                assert!(update.is_none(), "mode={mode}");
+                assert_eq!(
+                    shell.read_with(cx, |shell, _| shell.restart_place_now()),
+                    Some((app_update::RestartPlace::SidebarRow, "9.9.9".into()))
+                );
                 continue;
             }
             let update = update.expect("every visible update state owns the same slot");
@@ -740,6 +752,10 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
     // It restarts into the update on its own: only the heads-up shows.
     assert!(cx.debug_bounds("titlebar-update").is_none());
     assert_eq!(
+        shell.read_with(cx, |shell, _| shell.restart_place_now()),
+        None
+    );
+    assert_eq!(
         shell.read_with(cx, |shell, cx| shell.titlebar_update_slot(cx)),
         0.0
     );
@@ -758,8 +774,25 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
     });
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("app-update-countdown").is_none());
-    // Postponed, it waits on the person: the control comes back.
+    // Postponed, it waits on the person: "Restart to update" comes back, in the sidebar's
+    // footer while the sidebar is open...
+    // (This window draws no chat sidebar, so check where it goes rather than its row.)
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.restart_place_now()),
+        Some((app_update::RestartPlace::SidebarRow, "9.9.9".into()))
+    );
+    assert!(cx.debug_bounds("titlebar-update").is_none());
+    // ...and in the titlebar while it's collapsed.
+    shell.update(cx, |shell, cx| {
+        shell.settings.sidebar_collapsed = true;
+        cx.notify();
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("titlebar-update").is_some());
+    shell.update(cx, |shell, cx| {
+        shell.settings.sidebar_collapsed = false;
+        cx.notify();
+    });
 
     // Settings → Devices sees the same flow, and its button does what the
     // titlebar click does: here, try the (nonexistent) staged install, which

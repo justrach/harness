@@ -22,7 +22,7 @@ members = [
 exclude = ["vendor/zui", "vendor/gpui-component", "tui"]
 
 [workspace.package]
-version = "0.2.159"
+version = "0.2.168"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
@@ -46,10 +46,6 @@ harness-observe = { path = "crates/observe" }
 
 # CRDT
 loro = "1.13"
-# Wire protocol for the SessionRoom DO rooms — official Rust twin of the npm
-# `loro-protocol` package the TS edge speaks (same monorepo, byte-identical
-# frames, cross-checked by its js_snapshots tests).
-loro-protocol = "0.3"
 
 # gpui — vendored Zui, extracted from wingleeio/zed e2ddcc6 with identical
 # crate sources; adds bounded blur passes and shared Gaussian weights.
@@ -107,7 +103,7 @@ async-trait = "0.1"
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-json5 = "0.4"
+json5 = "1"
 # antigravity writes `settings.json` but reads it back with `hjson.load`, so a
 # user's comments and unquoted keys have to survive our read of the same file.
 deser-hjson = "2.2"
