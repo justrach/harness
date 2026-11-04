@@ -221,6 +221,7 @@ mod pinned_session_tests {
                 Default::default(),
                 cx,
             );
+            crate::settings::init(crate::settings::UiSettings::default(), path, cx);
         });
         cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -321,11 +322,12 @@ mod pinned_session_tests {
                 assert!(!shell.settings.sidebar_compact);
                 assert_eq!(visibility(shell), chosen);
                 // The expanded menu wraps after its last display field.
-                shell.sidebar_view_menu.open_mut().unwrap().active = Some(7);
+                let last = SidebarViewMenuLayout::new(false).item_count() - 1;
+                shell.sidebar_view_menu.open_mut().unwrap().active = Some(last);
                 shell.sidebar_view_menu_key(&key("down"), cx);
                 assert_eq!(shell.sidebar_view_menu.get().unwrap().active, Some(0));
                 shell.sidebar_view_menu_key(&key("up"), cx);
-                assert_eq!(shell.sidebar_view_menu.get().unwrap().active, Some(7));
+                assert_eq!(shell.sidebar_view_menu.get().unwrap().active, Some(last));
                 assert_eq!(visibility(shell), chosen);
             })
             .unwrap();
@@ -1208,7 +1210,7 @@ mod pinned_session_tests {
 
         struct SidebarHost(Entity<Shell>);
         impl Render for SidebarHost {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 self.0.update(cx, |shell, cx| {
                     div()
                         .w(px(280.0))
@@ -1221,7 +1223,7 @@ mod pinned_session_tests {
                                 shell.cancel_sidebar_session_transfer(cx)
                             }),
                         )
-                        .child(shell.render_chat_sidebar(&Theme::default(), cx))
+                        .child(shell.render_chat_sidebar(&Theme::default(), window, cx))
                 })
             }
         }
@@ -2031,6 +2033,108 @@ fn called_at(chat: &harness_proto::Chat) -> chrono::DateTime<chrono::Utc> {
         .unwrap_or(chat.created_at)
 }
 
+/// The remote marker takes title space on a narrow row, so it has to tell rows
+/// apart: with nothing from this computer listed, it would be on every row.
+pub(super) fn marks_remote_chats<'a>(
+    local_device: Option<&str>,
+    mut chat_devices: impl Iterator<Item = &'a str>,
+) -> bool {
+    local_device.is_some_and(|local| chat_devices.any(|device| device == local))
+}
+
+/// A By project heading. `device_tag` is set only where the name alone would
+/// read as the wrong group: the same project name on two computers, or chats
+/// with no project on another computer.
+/// Waiting on you: a question to answer, or a failure you haven't seen.
+fn needs_you(status: ChatIndicator) -> bool {
+    matches!(
+        status,
+        ChatIndicator::AwaitingInput | ChatIndicator::Errored
+    )
+}
+
+/// The "By status" section a chat sits in: waiting on you first, then anything
+/// active today, then the rest.
+fn status_group(
+    status: ChatIndicator,
+    at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> (&'static str, &'static str) {
+    match status {
+        status if needs_you(status) => (NEEDS_YOU_GROUP, "Needs you"),
+        _ if at.with_timezone(&chrono::Local).date_naive()
+            == now.with_timezone(&chrono::Local).date_naive() =>
+        {
+            ("today", "Today")
+        }
+        _ => ("earlier", "Earlier"),
+    }
+}
+
+const NEEDS_YOU_GROUP: &str = "needs";
+
+/// "Needs you" above everything, then "Today" above "Earlier". Other groups
+/// keep the order they were found in.
+fn sidebar_group_rank(key: Option<&str>) -> u8 {
+    match key {
+        Some(NEEDS_YOU_GROUP) => 0,
+        Some("today") => 1,
+        _ => 2,
+    }
+}
+
+/// A row out from under its project's heading has to name the project itself.
+pub(super) fn sidebar_row_shows_project(
+    settings: &settings::UiSettings,
+    status: ChatIndicator,
+) -> bool {
+    settings.sidebar_show_project_label
+        || (needs_you(status) && settings.sidebar_organization != SidebarOrganization::InOneList)
+}
+
+/// How many rows a project or device shows before "Show more".
+const SIDEBAR_FOLD_AFTER: usize = 5;
+const SIDEBAR_FOLD_ROW_HEIGHT: f32 = 26.0;
+
+/// Fold a group's older rows away. Anything running, unread or open stays, so
+/// the fold only ever hides work that is finished and already seen. Folding a
+/// single row would swap it for a row saying so.
+pub(super) fn fold_sidebar_group<T>(rows: Vec<T>, keep: impl Fn(&T) -> bool) -> (Vec<T>, usize) {
+    let hidden = rows
+        .iter()
+        .enumerate()
+        .filter(|(ix, row)| *ix >= SIDEBAR_FOLD_AFTER && !keep(row))
+        .count();
+    if hidden < 2 {
+        return (rows, 0);
+    }
+    let visible = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(ix, row)| *ix < SIDEBAR_FOLD_AFTER || keep(row))
+        .map(|(_, row)| row)
+        .collect();
+    (visible, hidden)
+}
+
+fn sidebar_collapse_key(organization: SidebarOrganization, key: &str) -> String {
+    let organization = match organization {
+        SidebarOrganization::ByDevice => "device",
+        SidebarOrganization::ByProject => "project",
+        SidebarOrganization::InOneList => "list",
+        SidebarOrganization::ByStatus => "status",
+    };
+    format!("{organization}:{key}")
+}
+
+pub(super) fn project_group_label(project: Option<&str>, device_tag: Option<&str>) -> String {
+    let name = project.unwrap_or("No project");
+    match device_tag {
+        Some(tag) => format!("{name} {tag}"),
+        None => name.to_string(),
+    }
+}
+
 pub(super) fn compare_sidebar_chats(
     sort: SidebarSort,
     left: &harness_proto::Chat,
@@ -2086,6 +2190,7 @@ impl Render for SidebarViewOptionsTooltip {
 #[derive(Clone, Copy)]
 enum SidebarViewRow {
     ByProject,
+    ByStatus,
     Compact,
     ShowProjectIcon,
     ShowProjectLabel,
@@ -2105,18 +2210,24 @@ impl SidebarViewRow {
     fn closes_submenu(self) -> bool {
         matches!(
             self,
-            Self::ByProject | Self::ByDevice | Self::InOneList | Self::LastUpdated | Self::Created
+            Self::ByProject
+                | Self::ByStatus
+                | Self::ByDevice
+                | Self::InOneList
+                | Self::LastUpdated
+                | Self::Created
         )
     }
 }
 
 const SIDEBAR_VIEW_GROUPS: [(&str, std::ops::Range<usize>); 2] =
-    [("Organize", 0..3), ("Sort", 3..5)];
+    [("Organize", 0..4), ("Sort", 4..6)];
 const SIDEBAR_VIEW_COMPACT_INDEX: usize = SIDEBAR_VIEW_GROUPS.len();
-const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 5] = [
+const SIDEBAR_VIEW_ROWS: [SidebarViewRow; 6] = [
     SidebarViewRow::ByDevice,
     SidebarViewRow::ByProject,
     SidebarViewRow::InOneList,
+    SidebarViewRow::ByStatus,
     SidebarViewRow::LastUpdated,
     SidebarViewRow::Created,
 ];
@@ -2154,6 +2265,60 @@ impl SidebarViewMenuLayout {
 // List items stay tightly related at 1px, while section boundaries use 14px.
 // Disclosure content gets a small 4px
 // handoff from its header without leaving dead space while collapsed.
+/// Rows this far past either edge of the session list still render, so a
+/// scroll or a few new rows above don't reach a skipped one before the next
+/// render places it.
+const SIDEBAR_ROW_OVERSCAN: f32 = 600.0;
+
+/// The span of the session list worth rendering rows for, in the coordinates
+/// [`sidebar_row_recorder`] stores: a row's window top with the scroll offset
+/// it was painted at taken out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct SidebarRowWindow {
+    lo: f32,
+    hi: f32,
+}
+
+impl SidebarRowWindow {
+    /// Whether a row whose last placement was `top` (`None`: never placed)
+    /// renders. Pure.
+    pub(super) fn keeps(self, top: Option<f32>, height: f32) -> bool {
+        top.is_none_or(|top| top < self.hi && top + height > self.lo)
+    }
+}
+
+/// Records where a session slot sat (for the next render's
+/// [`Shell::sidebar_row_window`]); a skipped slot found on screen after all
+/// (a large reshuffle since the last frame) re-renders the sidebar at once.
+fn sidebar_row_recorder(
+    chat_id: String,
+    height: f32,
+    skipped: bool,
+    tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
+    scroll: gpui::ScrollHandle,
+    sidebar: gpui::EntityId,
+) -> impl IntoElement {
+    gpui::canvas(
+        move |bounds, window, _| {
+            let offset = f32::from(scroll.offset().y);
+            let top = f32::from(bounds.top());
+            tops.borrow_mut().insert(chat_id, top - offset);
+            let viewport = scroll.bounds();
+            if skipped
+                && top < f32::from(viewport.bottom())
+                && top + height > f32::from(viewport.top())
+            {
+                window.on_next_frame(move |_, cx| cx.notify(sidebar));
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_0()
+}
+
 pub(super) const SIDEBAR_SECTION_GAP: f32 = 14.0;
 pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
@@ -2219,8 +2384,11 @@ fn sidebar_disclosure_header(theme: &Theme, label: SharedString, chevron: AnyEle
 /// One activatable row of the open dropdown, in nav order. `AddSpace` names
 /// the card's pinned "New project" footer, not a list row — keyboard nav
 /// maps the list-length index to it.
+pub(super) const ALL_PROJECTS_LABEL: &str = "All projects";
+
 #[derive(Clone, PartialEq)]
 pub(super) enum SpacesMenuRow {
+    AllProjects,
     Space(String),
     AddSpace,
 }
@@ -3130,7 +3298,7 @@ impl Shell {
     /// Projects matching the search (ranked by `popover::filter_indices`).
     /// The "New project…"
     /// action is not a row here — the card renders it as a pinned footer.
-    fn spaces_menu_rows(&self, cx: &App) -> Vec<SpacesMenuRow> {
+    pub(super) fn spaces_menu_rows(&self, cx: &App) -> Vec<SpacesMenuRow> {
         let query = self
             .spaces_menu
             .get()
@@ -3143,6 +3311,12 @@ impl Shell {
             .map(|s| s.display_name().to_string())
             .collect();
         let mut rows: Vec<SpacesMenuRow> = Vec::new();
+        // The workspace sidebar shows one project's sessions at a time.
+        if !self.settings.sidebar_task_view
+            && !popover::filter_indices(&query, &[ALL_PROJECTS_LABEL.to_string()]).is_empty()
+        {
+            rows.push(SpacesMenuRow::AllProjects);
+        }
         // Ranked by the search, then split: connected devices first, away ones after.
         let now = Utc::now();
         let ranked: Vec<_> = popover::filter_indices(&query, &names)
@@ -3186,6 +3360,7 @@ impl Shell {
         self.spaces_menu_bar.clear_scroll_baseline();
         let rows = self.spaces_menu_rows(cx);
         let start = match &current {
+            _ if self.sidebar_lists_all_projects() => 0,
             None => 0,
             Some(id) => rows
                 .iter()
@@ -3200,9 +3375,22 @@ impl Shell {
         cx.notify();
     }
 
-    fn activate_spaces_menu_row(&mut self, row: SpacesMenuRow, cx: &mut Context<Self>) {
+    pub(super) fn activate_spaces_menu_row(&mut self, row: SpacesMenuRow, cx: &mut Context<Self>) {
         match row {
-            SpacesMenuRow::Space(id) => self.open_project_tab(Some(id), cx),
+            SpacesMenuRow::AllProjects => {
+                self.session_overview = false;
+                self.route = Route::Chat;
+                self.settings.sidebar_all_projects = true;
+                self.close_spaces_menu(cx);
+                self.schedule_save(cx);
+                cx.notify();
+            }
+            SpacesMenuRow::Space(id) => {
+                self.settings.sidebar_all_projects = false;
+                self.open_project_tab(Some(id), cx);
+                self.schedule_save(cx);
+                cx.notify();
+            }
             SpacesMenuRow::AddSpace => {
                 self.close_spaces_menu(cx);
                 self.open_add_space(cx);
@@ -3357,6 +3545,9 @@ impl Shell {
         match row {
             SidebarViewRow::ByProject => {
                 self.settings.sidebar_organization = SidebarOrganization::ByProject
+            }
+            SidebarViewRow::ByStatus => {
+                self.settings.sidebar_organization = SidebarOrganization::ByStatus
             }
             SidebarViewRow::Compact => {
                 self.settings.sidebar_compact = !self.settings.sidebar_compact
@@ -3555,11 +3746,19 @@ impl Shell {
         let sort = self.settings.sidebar_sort;
         let layout = SidebarViewMenuLayout::new(self.settings.sidebar_compact);
 
-        let labels = ["By device", "By project", "None", "Last called", "Created"];
+        let labels = [
+            "By device",
+            "By project",
+            "None",
+            "By status",
+            "Last called",
+            "Created",
+        ];
         let icons = [
             icons::LAPTOP,
             icons::FOLDER,
             icons::LIST,
+            icons::BELL,
             icons::CLOCK_CIRCLE,
             icons::CALENDAR,
         ];
@@ -3567,12 +3766,13 @@ impl Shell {
             organization == SidebarOrganization::ByDevice,
             organization == SidebarOrganization::ByProject,
             organization == SidebarOrganization::InOneList,
+            organization == SidebarOrganization::ByStatus,
             sort == SidebarSort::LastUpdated,
             sort == SidebarSort::Created,
         ];
         let values = [
-            labels[selected[..3].iter().position(|v| *v).unwrap_or(0)].to_string(),
-            labels[3 + selected[3..5].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[selected[..4].iter().position(|v| *v).unwrap_or(0)].to_string(),
+            labels[4 + selected[4..6].iter().position(|v| *v).unwrap_or(0)].to_string(),
         ];
         let mut groups: Vec<AnyElement> = Vec::new();
         for (group, (label, range)) in SIDEBAR_VIEW_GROUPS.iter().enumerate() {
@@ -3914,6 +4114,148 @@ impl Shell {
     }
 
     /// The list-end creation row used when this project has no sections.
+    /// The sidebar's space-filter row: current filter ("All projects" or the
+    /// space's name) + chevron, the dropdown floating beneath while open.
+    /// Sits OUTSIDE the sidebar's scroll region so the float never clips.
+    pub(super) fn render_spaces_filter(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let filter = self.project_sidebar_filter(cx);
+        // Name + the dropdown rows' "@ device" tag on the trigger itself, so
+        // the filtered space's host reads without opening the picker.
+        let (label, device_tag): (SharedString, Option<(SharedString, bool)>) = {
+            let state = self.state.read(cx);
+            match filter.as_deref().and_then(|id| state.space_row(id)) {
+                Some(space) => {
+                    let (tag, offline) = state.space_device_tag(space, Utc::now());
+                    (
+                        space.display_name().to_string().into(),
+                        Some((tag.into(), offline)),
+                    )
+                }
+                None if filter.is_none() => (SharedString::from(ALL_PROJECTS_LABEL), None),
+                None => (self.session_name(None, cx).into(), None),
+            }
+        };
+        let open = self.spaces_menu.is_open();
+
+        let trigger = div()
+            .id("spaces-filter")
+            .debug_selector(|| "spaces-filter".into())
+            .flex_1()
+            .min_w_0()
+            .h(px(29.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(Theme::SPACE_SM))
+            .rounded(px(8.0))
+            .px(px(Theme::SPACE_SM))
+            .text_size(crate::typography::ui_rems(13.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(motion::hover_blend(
+                "spaces-filter",
+                theme.text.opacity(0.8),
+                theme.text,
+            ))
+            .bg(if open {
+                theme.glass_hover()
+            } else {
+                motion::hover_blend(
+                    "spaces-filter",
+                    theme.glass_hover().opacity(0.0),
+                    theme.glass_hover(),
+                )
+            })
+            .on_hover(motion::hover_listener("spaces-filter"))
+            .cursor_pointer()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                // A press that found the menu open closes it (the card's
+                // mouse-down-out already began the close) — never reopen.
+                if this.spaces_menu.take_press_was_open() {
+                    this.close_spaces_menu(cx);
+                } else {
+                    this.open_spaces_menu(window, cx);
+                }
+            }))
+            // flex_1 pushes the caret to the trigger's right edge and gives
+            // long space names a bound to fade against; the "@ device"
+            // tag hugs the name inside it rather than sitting by the caret.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(super::sidebar_faded_label(
+                        "spaces-filter-label".into(),
+                        false,
+                        label,
+                    ))
+                    .when_some(device_tag, |el, (tag, offline)| {
+                        el.child(super::sidebar_faded_label(
+                            "spaces-filter-device".into(),
+                            false,
+                            div()
+                                .text_size(crate::typography::ui_rems(10.0))
+                                .font_weight(gpui::FontWeight::NORMAL)
+                                .text_color(theme.text_muted.opacity(0.45))
+                                .child(tag),
+                        ))
+                        // Disconnected glyph, not the word (user request).
+                        .when(offline, |el| {
+                            el.child(
+                                icon(icons::WIFI_OFF)
+                                    .size(px(12.0))
+                                    .flex_none()
+                                    .text_color(theme.warning.opacity(0.8)),
+                            )
+                        })
+                    }),
+            )
+            .child(
+                icon(icons::ALT_ARROW_DOWN)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted.opacity(0.6)),
+            );
+        let trigger = if self.spaces_menu.get().is_some() {
+            let closing = self.spaces_menu.closing_since();
+            let menu = self.render_spaces_menu(theme, cx);
+            trigger.relative().child(popover::anchored_menu_below(
+                "spaces-filter-menu",
+                menu,
+                closing,
+            ))
+        } else {
+            trigger
+        };
+
+        let view_trigger = self.render_sidebar_view_options(theme, cx);
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(Theme::SPACE_SM))
+            .pt(px(8.0))
+            .pb(px(4.0))
+            .child(trigger)
+            .child(self.render_sidebar_search_trigger(theme, cx))
+            .child(view_trigger)
+            .child(self.render_all_sessions_button("all-sessions", theme, cx))
+            .into_any_element()
+    }
+
     pub(super) fn render_sidebar_new_tab(
         &mut self,
         theme: &Theme,
@@ -4070,7 +4412,8 @@ impl Shell {
         };
         let rows = self.spaces_menu_rows(cx);
         let scrollbar = popover::rail(self, "spaces-menu-scrollbar", theme, cx);
-        let filter = self.settings.space_filter.clone();
+        let all_projects = self.sidebar_lists_all_projects();
+        let filter = self.settings.space_filter.clone().filter(|_| !all_projects);
         // Keep the host tag so projects with the same name on different
         // devices remain distinguishable. Consume `rows` to avoid cloning
         // the list children per frame.
@@ -4084,6 +4427,13 @@ impl Shell {
             let state = self.state.read(cx);
             rows.into_iter()
                 .map(|row| match row {
+                    SpacesMenuRow::AllProjects => (
+                        SpacesMenuRow::AllProjects,
+                        SharedString::from(ALL_PROJECTS_LABEL),
+                        None,
+                        false,
+                        all_projects,
+                    ),
                     SpacesMenuRow::Space(id) => {
                         let selected = filter.as_deref() == Some(id.as_str());
                         match state.space_row(&id) {
@@ -4117,10 +4467,14 @@ impl Shell {
         let add_index = details.len();
         // Where the away-device group starts, so it can say so once. Not when it starts the list: every
         // row would then carry the glyph and a caption above all of them says nothing.
+        let first_project = usize::from(matches!(
+            details.first(),
+            Some((SpacesMenuRow::AllProjects, ..))
+        ));
         let first_offline = details
             .iter()
             .position(|(_, _, _, offline, _)| *offline)
-            .filter(|&ix| ix > 0);
+            .filter(|&ix| ix > first_project);
 
         let list = popover::menu_scroll_host("spaces-menu-list-host")
             .on_hover(cx.listener(Self::on_spaces_menu_list_hover))
@@ -4297,20 +4651,33 @@ impl Shell {
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
         let state = self.state.read(cx);
+        let now = Utc::now();
+        let mut statuses = std::collections::HashMap::new();
         let mut chats: Vec<harness_proto::Chat> = state
-            .sidebar_chats(Utc::now(), filter.as_deref())
+            .sidebar_chats(now, filter.as_deref())
             .into_iter()
-            .map(|(_, chat)| chat.clone())
+            .map(|(status, chat)| {
+                statuses.insert(chat.id.clone(), status);
+                chat.clone()
+            })
             .collect();
         chats.sort_by(|left, right| compare_sidebar_chats(self.settings.sidebar_sort, left, right));
+        let status_of = |id: &str| statuses.get(id).copied().unwrap_or(ChatIndicator::Idle);
         let (pinned_chats, chats): (Vec<_>, Vec<_>) = chats
             .into_iter()
             .partition(|chat| pinned_order.contains(&chat.id));
         let ordered = if self.settings.sidebar_organization != SidebarOrganization::InOneList {
             let mut groups: Vec<(Option<(String, String)>, Vec<harness_proto::Chat>)> = Vec::new();
             for chat in chats {
+                let status = status_of(&chat.id);
                 let key = Some((
-                    if self.settings.sidebar_organization == SidebarOrganization::ByProject {
+                    if needs_you(status) {
+                        NEEDS_YOU_GROUP.to_string()
+                    } else if self.settings.sidebar_organization == SidebarOrganization::ByStatus {
+                        status_group(status, chat.last_message_at.unwrap_or(chat.created_at), now)
+                            .0
+                            .to_string()
+                    } else if self.settings.sidebar_organization == SidebarOrganization::ByProject {
                         chat.space_id
                             .clone()
                             .unwrap_or_else(|| format!("home:{}", chat.device_id))
@@ -4328,9 +4695,24 @@ impl Shell {
             if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
                 promote_local_device_group(&mut groups, state.local_device_id.as_deref());
             }
+            groups.sort_by_key(|(group, _)| {
+                sidebar_group_rank(group.as_ref().map(|(key, _)| key.as_str()))
+            });
             groups
                 .into_iter()
-                .flat_map(|(_, rows)| rows)
+                .flat_map(|(group, rows)| {
+                    let key = group.map_or_else(String::new, |(key, _)| key);
+                    if self.sidebar_group_folds(&key) {
+                        let selected = state.selected_chat.as_deref();
+                        fold_sidebar_group(rows, |chat| {
+                            status_of(&chat.id) != ChatIndicator::Idle
+                                || selected == Some(chat.id.as_str())
+                        })
+                        .0
+                    } else {
+                        rows
+                    }
+                })
                 .map(|chat| chat.id)
                 .collect::<Vec<_>>()
         } else {
@@ -4344,7 +4726,7 @@ impl Shell {
         let mut visible = project_pinned_first(&ordered, pinned_order);
         if !self.sessions_open
             && self.settings.sidebar_organization == SidebarOrganization::InOneList
-            && self.active_project(cx).is_none()
+            && !self.sidebar_shows_one_project(cx)
         {
             visible.retain(|id| pinned_order.contains(id));
         }
@@ -4385,14 +4767,42 @@ impl Shell {
             .map(str::to_string)
             .filter(|_| self.settings.sidebar_show_branch);
         let group = match self.settings.sidebar_organization {
-            SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
-            SidebarOrganization::ByProject => Some((
-                chat.space_id
-                    .clone()
-                    .unwrap_or_else(|| format!("home:{}", chat.device_id)),
-                project,
-            )),
             SidebarOrganization::InOneList => None,
+            _ if needs_you(status) => Some((NEEDS_YOU_GROUP.into(), "Needs you".into())),
+            SidebarOrganization::ByStatus => {
+                let (key, label) = status_group(
+                    status,
+                    chat.last_message_at.unwrap_or(chat.created_at),
+                    Utc::now(),
+                );
+                Some((key.to_string(), label.to_string()))
+            }
+            SidebarOrganization::ByDevice => Some((chat.device_id.clone(), device)),
+            SidebarOrganization::ByProject => {
+                let is_local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
+                let (name, tag) = match (space, chat.space_id.as_deref()) {
+                    (Some(space), _) => {
+                        let shared = state
+                            .spaces
+                            .iter()
+                            .filter(|other| other.display_name() == space.display_name())
+                            .count()
+                            > 1;
+                        (
+                            Some(project.as_str()),
+                            shared.then(|| state.space_device_tag(space, Utc::now()).0),
+                        )
+                    }
+                    (None, None) => (None, (!is_local).then(|| format!("@ {device}"))),
+                    (None, Some(_)) => (Some(project.as_str()), None),
+                };
+                Some((
+                    chat.space_id
+                        .clone()
+                        .unwrap_or_else(|| format!("home:{}", chat.device_id)),
+                    project_group_label(name, tag.as_deref()),
+                ))
+            }
         };
         ActiveChatRow {
             status,
@@ -4401,6 +4811,41 @@ impl Shell {
             branch,
             group,
         }
+    }
+
+    /// Whether this group folds its older rows. A project can hold hundreds of
+    /// finished chats, and one busy project shouldn't bury the others.
+    fn sidebar_group_folds(&self, key: &str) -> bool {
+        matches!(
+            self.settings.sidebar_organization,
+            SidebarOrganization::ByProject | SidebarOrganization::ByDevice
+        ) && key != NEEDS_YOU_GROUP
+            && !self.sidebar_unfolded_groups.contains(&sidebar_collapse_key(
+                self.settings.sidebar_organization,
+                key,
+            ))
+    }
+
+    /// The rows worth rendering this frame, or `None` to render them all: on
+    /// the first frame (nothing placed yet), and while rows move (a drag, a
+    /// return, a group opening or closing).
+    pub(super) fn sidebar_row_window(&self) -> Option<SidebarRowWindow> {
+        let viewport = self.sidebar_scroll.bounds();
+        let moving = self.sidebar_session_transfer.is_some()
+            || self.sidebar_session_return.is_some()
+            || self.pinned_session_drag.is_some()
+            || self
+                .sidebar_disclosure_motion
+                .values()
+                .any(|motion| motion.animating());
+        if moving || viewport.size.height <= px(0.0) || self.sidebar_row_tops.borrow().is_empty() {
+            return None;
+        }
+        let offset = f32::from(self.sidebar_scroll.offset().y);
+        Some(SidebarRowWindow {
+            lo: f32::from(viewport.top()) - SIDEBAR_ROW_OVERSCAN - offset,
+            hi: f32::from(viewport.bottom()) + SIDEBAR_ROW_OVERSCAN - offset,
+        })
     }
 
     pub(super) fn render_active_rows(
@@ -4429,6 +4874,10 @@ impl Shell {
             chats.sort_by(|left, right| {
                 compare_sidebar_chats(self.settings.sidebar_sort, &left.1, &right.1)
             });
+            self.sidebar_marks_remote = marks_remote_chats(
+                state.local_device_id.as_deref(),
+                chats.iter().map(|(_, chat)| chat.device_id.as_str()),
+            );
             chats
                 .into_iter()
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
@@ -4456,12 +4905,20 @@ impl Shell {
             .collect::<HashSet<_>>()
             .len();
         let regular_rows = rows.split_off(pinned_count);
+        // Forget rows that left the list.
+        self.sidebar_row_tops
+            .borrow_mut()
+            .retain(|id, _| active.contains(id.as_str()));
+        let row_window = self.sidebar_row_window();
+        let row_tops = self.sidebar_row_tops.clone();
+        let sidebar_scroll = self.sidebar_scroll.clone();
+        let sidebar_pane = self.sidebar_pane.entity_id();
         let pinned_rows = rows;
         self.sidebar_pinned_heights = pinned_rows
             .iter()
             .map(|row| {
                 sidebar_row_height(
-                    self.settings.sidebar_show_project_label,
+                    sidebar_row_shows_project(&self.settings, row.status),
                     row.branch.is_some(),
                     self.settings.sidebar_show_updated,
                     (self.settings.sidebar_show_harness && row.chat.config.is_some())
@@ -4490,6 +4947,35 @@ impl Shell {
         if self.settings.sidebar_organization == SidebarOrganization::ByDevice {
             let local_device_id = self.state.read(cx).local_device_id.clone();
             promote_local_device_group(&mut regular_groups, local_device_id.as_deref());
+        }
+        regular_groups.sort_by_key(|(group, _)| {
+            sidebar_group_rank(group.as_ref().map(|(key, _)| key.as_str()))
+        });
+        let mut fold_rows: std::collections::HashMap<String, (String, usize)> =
+            std::collections::HashMap::new();
+        {
+            let selected = self.state.read(cx).selected_chat.clone();
+            let keep = |row: &ActiveChatRow| {
+                row.status != ChatIndicator::Idle
+                    || selected.as_deref() == Some(row.chat.id.as_str())
+            };
+            for (group, rows) in &mut regular_groups {
+                let Some((key, _)) = group else { continue };
+                let collapse_key = sidebar_collapse_key(self.settings.sidebar_organization, key);
+                if self.sidebar_group_folds(key) {
+                    let (visible, hidden) = fold_sidebar_group(std::mem::take(rows), keep);
+                    *rows = visible;
+                    if hidden > 0 {
+                        fold_rows.insert(key.clone(), (collapse_key, hidden));
+                    }
+                } else if key != NEEDS_YOU_GROUP
+                    && self.sidebar_unfolded_groups.contains(&collapse_key)
+                    && fold_sidebar_group(rows.iter().collect::<Vec<_>>(), |row| keep(row)).1 > 0
+                {
+                    // Unfolded by "Show more": offer the way back.
+                    fold_rows.insert(key.clone(), (collapse_key, 0));
+                }
+            }
         }
         let mut sections = Vec::with_capacity(regular_groups.len() + usize::from(pinned_count > 0));
         if !pinned_rows.is_empty() {
@@ -4520,7 +5006,7 @@ impl Shell {
                 };
                 drag.source_index = index;
                 drag.row_height = sidebar_row_height(
-                    self.settings.sidebar_show_project_label,
+                    sidebar_row_shows_project(&self.settings, rows[index].status),
                     rows[index].branch.is_some(),
                     self.settings.sidebar_show_updated,
                     (self.settings.sidebar_show_harness && rows[index].chat.config.is_some())
@@ -4636,7 +5122,7 @@ impl Shell {
                     .then(|| chat.config.as_ref().map(|c| c.harness))
                     .flatten();
                 let height = sidebar_row_height(
-                    self.settings.sidebar_show_project_label,
+                    sidebar_row_shows_project(&self.settings, status),
                     branch.is_some(),
                     self.settings.sidebar_show_updated,
                     harness.is_some() || self.settings.sidebar_show_project_icon,
@@ -4680,32 +5166,43 @@ impl Shell {
                     .filter(|drag| drag.payload.chat_id == chat.id)
                     .map_or(0.0, |drag| drag.collapsed_height);
                 let slot_height = height - removed;
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(&crate::state::chat_label(
-                        &chat,
-                        &provisional,
-                        "New session",
-                    ))
-                    .into(),
-                    time_ago,
-                    folder.into(),
-                    branch.map(SharedString::from),
-                    None,
-                    harness,
-                    status,
-                    is_selected,
-                    false,
-                    is_moving,
-                    if is_moving { None } else { drag },
-                    jump_label,
-                    None,
-                    theme,
-                    cx,
-                );
+                // Far off screen on the last frame: keep the slot's height, skip
+                // the row (`sidebar_row_window`).
+                let skipped = row_window.is_some_and(|window| {
+                    !window.keeps(row_tops.borrow().get(&chat.id).copied(), slot_height)
+                });
+                let element = if skipped {
+                    div().into_any_element()
+                } else {
+                    self.render_chat_row(
+                        chat.id.clone(),
+                        transcript::single_line(&crate::state::chat_label(
+                            &chat,
+                            &provisional,
+                            "New session",
+                        ))
+                        .into(),
+                        time_ago,
+                        folder.into(),
+                        branch.map(SharedString::from),
+                        None,
+                        harness,
+                        status,
+                        is_selected,
+                        false,
+                        is_moving,
+                        if is_moving { None } else { drag },
+                        jump_label,
+                        None,
+                        theme,
+                        cx,
+                    )
+                };
                 // The source slot shrinks when its vacancy moves across sections.
                 // Its zero-height anchor still tracks the live activity position.
-                let element = if let Some(origin) = origin {
+                let element = if skipped {
+                    element
+                } else if let Some(origin) = origin {
                     moving_row = Some((element, height));
                     div()
                         .child(div().h(px(slot_height.max(0.0))))
@@ -4731,6 +5228,14 @@ impl Shell {
                     .mb(px(slot_height.min(0.0)))
                     .flex_none()
                     .child(element)
+                    .child(sidebar_row_recorder(
+                        chat.id.clone(),
+                        slot_height,
+                        skipped,
+                        row_tops.clone(),
+                        sidebar_scroll.clone(),
+                        sidebar_pane,
+                    ))
                     .on_drag_move::<SidebarSessionDrag>(cx.listener(
                         move |this, event: &gpui::DragMoveEvent<SidebarSessionDrag>, _, cx| {
                             if !event.bounds.contains(&event.event.position)
@@ -4767,12 +5272,24 @@ impl Shell {
                     .into_any_element();
                 rendered_rows.push((format!("c:{}", chat.id), slot_height, element));
             }
+            let mut group_total = rendered_rows.len();
+            if let Some((key, _)) = &group
+                && let Some((collapse_key, hidden)) = fold_rows.remove(key)
+            {
+                group_total += hidden;
+                rendered_rows.push((
+                    format!("fold:{collapse_key}"),
+                    SIDEBAR_FOLD_ROW_HEIGHT,
+                    self.render_sidebar_fold_row(collapse_key, hidden, theme, cx),
+                ));
+            }
 
             // The session switcher already names the selected project. Keep
             // its drag group, but do not repeat that name as a disclosure.
             // User-created sections still keep their own headings.
             let group = group.filter(|(key, _)| {
                 key.starts_with("section:")
+                    || key == NEEDS_YOU_GROUP
                     || filter.is_none()
                     || self.settings.sidebar_organization != SidebarOrganization::ByProject
             });
@@ -4794,12 +5311,7 @@ impl Shell {
                 }
                 continue;
             };
-            let organization = match self.settings.sidebar_organization {
-                SidebarOrganization::ByDevice => "device",
-                SidebarOrganization::ByProject => "project",
-                SidebarOrganization::InOneList => "list",
-            };
-            let collapse_key = format!("{organization}:{key}");
+            let collapse_key = sidebar_collapse_key(self.settings.sidebar_organization, &key);
             let motion_key = format!("group:{collapse_key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
             let row_count = rendered_rows.len();
@@ -4827,15 +5339,22 @@ impl Shell {
                     )
                 });
             let visible_label: SharedString = if collapsed {
-                format!("{label} ({row_count})").into()
+                format!("{label} ({group_total})").into()
             } else {
                 label.into()
             };
             let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
             let toggle_key = collapse_key.clone();
             let toggle_motion_key = motion_key.clone();
+            let new_session = (self.settings.sidebar_organization
+                == SidebarOrganization::ByProject
+                && !key.starts_with("home:")
+                && key != NEEDS_YOU_GROUP)
+                .then(|| self.render_project_group_new_session(&key, &collapse_key, theme, cx));
             let header = sidebar_disclosure_header(theme, visible_label, chevron)
                 .id(SharedString::from(format!("sidebar-group-{collapse_key}")))
+                .group(format!("sidebar-group-{collapse_key}"))
+                .children(new_session)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
                     this.begin_sidebar_disclosure_motion(
@@ -4874,6 +5393,85 @@ impl Shell {
             pinned_count,
             moving_row,
         }
+    }
+
+    /// "Show 12 more" under a folded group, or "Show less" under an open one.
+    fn render_sidebar_fold_row(
+        &self,
+        collapse_key: String,
+        hidden: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selector = format!("sidebar-fold-{collapse_key}");
+        let (rest, hover) = (theme.text_muted.opacity(0.7), theme.text);
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .h(px(SIDEBAR_FOLD_ROW_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(Theme::SPACE_SM))
+            .rounded(px(6.0))
+            .role(gpui::Role::Button)
+            .cursor_pointer()
+            .text_size(crate::typography::ui_rems(12.0))
+            .text_color(rest)
+            .hover(move |s| s.text_color(hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.sidebar_unfolded_groups.remove(&collapse_key) {
+                    this.sidebar_unfolded_groups.insert(collapse_key.clone());
+                }
+                cx.notify();
+            }))
+            .child(SharedString::from(if hidden > 0 {
+                format!("Show {hidden} more")
+            } else {
+                "Show less".to_string()
+            }))
+            .into_any_element()
+    }
+
+    /// A project heading's + (shown while the heading is hovered): a new
+    /// session in that project, whichever project is open now.
+    fn render_project_group_new_session(
+        &self,
+        project: &str,
+        hover_group: &str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let target = project.to_string();
+        let selector = format!("project-group-new-session-{project}");
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .size(px(20.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .role(gpui::Role::Button)
+            .aria_label("New session in this project")
+            .opacity(0.0)
+            .group_hover(hover_group.to_string(), |s| s.opacity(1.0))
+            .hover(|s| s.bg(theme.glass_hover()))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.create_workspace_session_in_project(target.clone(), cx);
+                cx.stop_propagation();
+            }))
+            .child(
+                icon(icons::PLUS)
+                    .size(px(13.0))
+                    .text_color(theme.text_muted),
+            )
+            .into_any_element()
     }
 
     pub(super) fn render_pinned_section(
@@ -4944,7 +5542,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.settings.sidebar_organization != SidebarOrganization::InOneList
-            || self.active_project(cx).is_some()
+            || self.sidebar_shows_one_project(cx)
         {
             return content;
         }

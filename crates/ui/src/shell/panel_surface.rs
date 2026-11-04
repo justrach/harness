@@ -1,10 +1,11 @@
-//! One contour owns the selected horizontal tab and its panel. GPUI's native
-//! blur primitive only accepts rounded rectangles, so the contour's shadow is
-//! integrated from narrow, Gaussian-weighted strokes before its opaque fill.
-//! This avoids two overlapping shadows and a dark line across the tab's foot.
+//! One contour owns the selected horizontal tab and its panel. Its fill and
+//! edge are paths, but its shadow is two blurred rectangles under that opaque
+//! fill, which hides the line across the tab's foot. Every batch of paths costs
+//! a full-window multisampled pass, so a shadow stroked from paths would be
+//! paid for on each keystroke.
 
 use crate::theme::Theme;
-use gpui::{Bounds, PathBuilder, Pixels, Point, Window, point, px};
+use gpui::{Bounds, Corners, PathBuilder, Pixels, Point, Window, point, px};
 
 pub(super) const BODY_RADIUS: f32 = 10.0;
 const CAP_RADIUS: f32 = 10.0;
@@ -115,39 +116,33 @@ pub(super) fn paint_surface_shadow(
     let body = body.inset(px(0.5));
     let active = active.and_then(|tab| tab.visible_on(body));
     let dark = theme.appearance.is_dark();
-    for (offset_y, sigma, opacity) in [
+    let shadows = [
         (3.0, 4.8, if dark { 0.20 } else { 0.055 }),
         (1.0, 1.4, if dark { 0.18 } else { 0.060 }),
-    ] {
-        paint_contour_shadow(body, active, offset_y, sigma, opacity, window);
-    }
-}
-
-fn paint_contour_shadow(
-    body: Bounds<Pixels>,
-    active: Option<TabGeometry>,
-    offset_y: f32,
-    sigma: f32,
-    opacity: f32,
-    window: &mut Window,
-) {
-    let offset = point(px(0.0), px(offset_y));
-    let body = body + offset;
-    let active = active.map(|tab| tab.translated(offset));
-    // A logical pixel between samples avoids a coarse stack of visible rings
-    // at both 1x and 2x. Interior contributions are covered by the surface fill.
-    let extent = (sigma * 2.5).ceil() as usize;
-    let density = |radius: f32| opacity * (-radius * radius / (2.0 * sigma * sigma)).exp();
-    let mut accumulated = 0.0;
-    for radius in (1..=extent).rev() {
-        let target = density(radius as f32 - 0.5);
-        let alpha = ((target - accumulated) / (1.0 - accumulated)).clamp(0.0, 1.0);
-        accumulated = target;
-        let mut shadow = PathBuilder::stroke(px(radius as f32 * 2.0));
-        outline(&mut shadow, body, active);
-        if let Ok(path) = shadow.build() {
-            window.paint_path(path, gpui::black().opacity(alpha));
-        }
+    ]
+    .map(
+        |(offset_y, sigma, opacity): (f32, f32, f32)| gpui::BoxShadow {
+            // A blurred edge starts at half its color, and falls off faster than
+            // a Gaussian measured from the edge.
+            color: gpui::black().opacity(opacity * 2.0),
+            offset: point(px(0.0), px(offset_y)),
+            blur_radius: px(sigma * 1.6),
+            spread_radius: px(0.0),
+            inset: false,
+        },
+    );
+    window.paint_drop_shadows(body, Corners::all(px(BODY_RADIUS)), &shadows);
+    if let Some(tab) = active {
+        let cap = px(CAP_RADIUS).min((body.top() - tab.top) / 2.0);
+        window.paint_drop_shadows(
+            Bounds::from_corners(point(tab.left, tab.top), point(tab.right, body.top())),
+            Corners {
+                top_left: cap,
+                top_right: cap,
+                ..Corners::default()
+            },
+            &shadows,
+        );
     }
 }
 

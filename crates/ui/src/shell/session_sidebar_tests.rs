@@ -815,6 +815,269 @@ fn workspace_session_sidebar_icon_picker_search_tabs_clear_and_keyboard_work(
     assert_icon(cx, None);
 }
 
+/// Task view off, as people get it; the shared fixture defaults to task view.
+fn conversation_sidebar(
+    cx: &mut gpui::TestAppContext,
+) -> (tempfile::TempDir, gpui::WindowHandle<Shell>) {
+    let (dir, host) = chat_tabs::navigation_tests::fixture(cx, false, None);
+    host.update(cx, |shell, _, cx| {
+        shell.debug_gate = Some(GatePhase::Ready);
+        shell.boot_restored = true;
+        shell.reduced_motion = true;
+        crate::settings::set_sidebar_task_view(false, cx);
+        shell.sync_independent_settings(cx);
+        shell.settings.sidebar_all_projects = true;
+        shell.ensure_workspace_sessions(cx);
+        shell.sync_panel_workspace(cx);
+        cx.notify();
+    })
+    .unwrap();
+    (dir, host)
+}
+
+fn redraw(visual: &mut gpui::VisualTestContext) {
+    visual.run_until_parked();
+    // Cached sidebar paint replays its scene, but GPUI's test debug selectors
+    // are recorded only during a fresh paint.
+    visual.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+}
+
+fn listed(shell: &Shell, cx: &Context<Shell>) -> Vec<String> {
+    let mut order = shell.sidebar_visible_order(cx);
+    order.sort();
+    order
+}
+
+#[test]
+fn conversation_sidebar_and_all_projects_are_what_a_saved_profile_opens_to() {
+    // A profile saved before these settings existed has neither key.
+    let saved: crate::settings::UiSettings = serde_json::from_str("{}").unwrap();
+    assert!(saved.sidebar_all_projects);
+    assert_eq!(saved.sidebar_organization, SidebarOrganization::ByProject);
+    assert_eq!(
+        saved.sidebar_sort,
+        crate::settings::SidebarSort::LastUpdated
+    );
+}
+
+#[test]
+fn remote_marker_appears_only_when_it_tells_rows_apart() {
+    use super::super::spaces::marks_remote_chats;
+    let mixed = marks_remote_chats(Some("here"), ["there", "here"].into_iter());
+    assert!(mixed, "this computer's chats are listed with another's");
+    let all_elsewhere = marks_remote_chats(Some("here"), ["there", "away"].into_iter());
+    assert!(!all_elsewhere, "it would be on every row");
+    assert!(!marks_remote_chats(None, ["there"].into_iter()));
+}
+
+#[test]
+fn project_headings_name_a_computer_only_when_the_name_is_ambiguous() {
+    use super::super::spaces::project_group_label;
+    assert_eq!(project_group_label(Some("harness"), None), "harness");
+    assert_eq!(
+        project_group_label(Some("harness"), Some("@ Studio")),
+        "harness @ Studio"
+    );
+    assert_eq!(project_group_label(None, None), "No project");
+    assert_eq!(
+        project_group_label(None, Some("@ Studio")),
+        "No project @ Studio"
+    );
+}
+
+#[gpui::test]
+fn open_workspace_rows_skip_chats_the_list_already_shows(cx: &mut gpui::TestAppContext) {
+    let (_dir, host) = conversation_sidebar(cx);
+    host.update(cx, |shell, window, cx| {
+        shell.open_chat_in_tab("target".into(), window, cx);
+        cx.notify();
+    })
+    .unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), cx);
+    visual.simulate_resize(gpui::size(px(980.0), px(760.0)));
+    redraw(&mut visual);
+    assert!(
+        visual.debug_bounds("sidebar-open-sessions").is_none(),
+        "both workspaces hold one listed chat"
+    );
+
+    // A workspace with nothing in the list stays reachable from a row, and the
+    // rows sit under the filter so opening one doesn't move it.
+    let filter = visual.debug_bounds("spaces-filter").unwrap();
+    host.update(cx, |shell, _, cx| {
+        shell.create_workspace_session(cx);
+        cx.notify();
+    })
+    .unwrap();
+    redraw(&mut visual);
+    let open = visual.debug_bounds("sidebar-open-sessions").unwrap();
+    let moved = visual.debug_bounds("spaces-filter").unwrap();
+    assert_eq!(moved, filter);
+    assert!(open.top() >= moved.bottom());
+
+    // Naming a workspace keeps its row even when it holds one listed chat.
+    let named = host
+        .update(cx, |shell, _, cx| {
+            let tab = shell
+                .chat_tabs
+                .iter_mut()
+                .find(|tab| tab.selected.as_deref() == Some("target"))
+                .unwrap();
+            tab.title = Some("Release".into());
+            let id = tab.id.clone();
+            cx.notify();
+            id
+        })
+        .unwrap();
+    redraw(&mut visual);
+    let selector: &'static str = Box::leak(format!("workspace-session-{named}").into_boxed_str());
+    assert!(visual.debug_bounds(selector).is_some());
+}
+
+#[gpui::test]
+fn compact_rows_mark_remote_chats_only_beside_this_computers(cx: &mut gpui::TestAppContext) {
+    let (_dir, host) = conversation_sidebar(cx);
+    let set_elsewhere = |shell: &mut Shell, ids: &[&str], cx: &mut Context<Shell>| {
+        shell.state.update(cx, |state, _| {
+            let mut chats: Vec<harness_proto::Chat> = state.chats.iter().cloned().collect();
+            for chat in &mut chats {
+                if ids.contains(&chat.id.as_str()) {
+                    chat.device_id = "elsewhere".into();
+                }
+            }
+            state.chats = chats.into();
+        });
+        cx.notify();
+    };
+    host.update(cx, |shell, _, cx| {
+        shell.settings.sidebar_compact = true;
+        set_elsewhere(shell, &["target"], cx);
+    })
+    .unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), cx);
+    visual.simulate_resize(gpui::size(px(980.0), px(760.0)));
+    redraw(&mut visual);
+    assert!(visual.debug_bounds("chat-target-corner").is_some());
+    assert!(visual.debug_bounds("chat-current-corner").is_none());
+
+    host.update(cx, |shell, _, cx| {
+        set_elsewhere(shell, &["current", "peer", "parked"], cx);
+    })
+    .unwrap();
+    redraw(&mut visual);
+    assert!(visual.debug_bounds("chat-target-corner").is_none());
+    assert!(visual.debug_bounds("chat-time-target").is_some());
+}
+
+#[gpui::test]
+fn conversation_sidebar_lists_all_projects_until_one_is_picked(cx: &mut gpui::TestAppContext) {
+    use super::super::spaces::SpacesMenuRow;
+    let (_dir, host) = conversation_sidebar(cx);
+    let everything = ["current", "parked", "peer", "target"];
+    host.update(cx, |shell, window, cx| {
+        assert_eq!(shell.settings.space_filter.as_deref(), Some("a"));
+        assert_eq!(shell.project_sidebar_filter(cx), None);
+        assert_eq!(shell.sidebar_scope(), None, "search covers every project");
+        assert_eq!(listed(shell, cx), everything);
+
+        shell.open_spaces_menu(window, cx);
+        assert!(matches!(
+            shell.spaces_menu_rows(cx).first(),
+            Some(SpacesMenuRow::AllProjects)
+        ));
+        shell.activate_spaces_menu_row(SpacesMenuRow::Space("a".into()), cx);
+        assert_eq!(listed(shell, cx), ["current", "peer"]);
+        assert_eq!(shell.sidebar_scope(), Some("a"));
+
+        shell.open_spaces_menu(window, cx);
+        shell.activate_spaces_menu_row(SpacesMenuRow::AllProjects, cx);
+        assert_eq!(listed(shell, cx), everything);
+        assert!(!shell.spaces_menu.is_open());
+
+        // Opening a chat elsewhere moves the window there and keeps the list.
+        shell.open_chat_in_tab("target".into(), window, cx);
+        assert_eq!(
+            shell.state.read(cx).selected_chat.as_deref(),
+            Some("target")
+        );
+        assert_eq!(shell.settings.space_filter.as_deref(), Some("b"));
+        assert_eq!(listed(shell, cx), everything);
+        cx.notify();
+    })
+    .unwrap();
+
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), cx);
+    visual.simulate_resize(gpui::size(px(980.0), px(760.0)));
+    redraw(&mut visual);
+    for selector in [
+        "spaces-filter",
+        "sidebar-search-toggle",
+        "sidebar-view-options",
+        "sidebar-session-create",
+        "session-slot-current",
+        "session-slot-target",
+        "all-sessions",
+    ] {
+        assert!(visual.debug_bounds(selector).is_some(), "{selector}");
+    }
+    assert!(visual.debug_bounds("session-switcher").is_none());
+
+    // Task view is the workspace sidebar, one project at a time.
+    host.update(cx, |shell, window, cx| {
+        crate::settings::set_sidebar_task_view(true, cx);
+        shell.sync_independent_settings(cx);
+        assert!(shell.settings.sidebar_task_view);
+        assert_eq!(shell.sidebar_scope(), Some("b"));
+        shell.open_spaces_menu(window, cx);
+        assert!(!matches!(
+            shell.spaces_menu_rows(cx).first(),
+            Some(SpacesMenuRow::AllProjects)
+        ));
+        shell.close_spaces_menu(cx);
+        cx.notify();
+    })
+    .unwrap();
+    redraw(&mut visual);
+    assert!(visual.debug_bounds("session-switcher").is_some());
+    assert!(visual.debug_bounds("spaces-filter").is_none());
+}
+
+#[gpui::test]
+fn project_headings_start_a_session_in_their_own_project(cx: &mut gpui::TestAppContext) {
+    let (_dir, host) = conversation_sidebar(cx);
+    let opened = host
+        .update(cx, |shell, _, cx| {
+            shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+            cx.notify();
+            shell.chat_tabs.len()
+        })
+        .unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(host.into(), cx);
+    visual.simulate_resize(gpui::size(px(980.0), px(760.0)));
+    redraw(&mut visual);
+    assert!(visual.debug_bounds("project-group-new-session-a").is_some());
+    let plus = visual.debug_bounds("project-group-new-session-b").unwrap();
+    visual.simulate_mouse_move(plus.center(), None, Default::default());
+    visual.simulate_click(plus.center(), Default::default());
+    visual.run_until_parked();
+    host.update(cx, |shell, _, _| {
+        assert_eq!(shell.chat_tabs.len(), opened + 1);
+        assert_eq!(
+            shell.chat_tabs[shell.chat_tab].project.as_deref(),
+            Some("b")
+        );
+        assert!(shell.sidebar_lists_all_projects());
+        assert!(
+            !shell.sidebar_collapsed_groups.contains("project:b"),
+            "the + doesn't also fold the heading"
+        );
+    })
+    .unwrap();
+}
+
 #[test]
 fn workspace_session_sidebar_legacy_metadata_has_safe_defaults() {
     let old: crate::settings::SavedChatTab =

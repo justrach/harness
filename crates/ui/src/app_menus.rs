@@ -234,7 +234,7 @@ pub(crate) fn close_tab_in(window: gpui::WindowHandle<shell::Shell>, cx: &mut Ap
 
 fn close_tab_in_with_archive(
     window: gpui::WindowHandle<shell::Shell>,
-    _archive: bool,
+    archive: bool,
     cx: &mut App,
 ) {
     window
@@ -242,11 +242,17 @@ fn close_tab_in_with_archive(
             // The right pane's active surface (the tab the user just opened),
             // then the focused split pane or chat tab, Ghostty-style, then
             // the chat itself, back to a new session.
+            if archive && shell.close_focused_panel_chat_by_shortcut(window, cx) {
+                return;
+            }
             if shell.workspace_close_focused(window, cx) || shell.close_active_surface(window, cx) {
                 return;
             }
-            // Closing a local placement is always recoverable through History.
-            shell.close_chat_view_with_archive(false, window, cx);
+            if archive {
+                shell.close_chat_view_by_shortcut(window, cx);
+            } else {
+                shell.close_chat_view_with_archive(false, window, cx);
+            }
         })
         .ok();
 }

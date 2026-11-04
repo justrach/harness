@@ -188,6 +188,7 @@ impl InactiveComposer {
 
 impl Render for InactiveComposer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::transcript::record_view_frame("inactive-composer");
         let theme = Theme::of(cx).clone();
         let pill_width = (self.width - 2.0 * Theme::SPACE_LG - PILL_BORDER_V).max(1.0);
         let compact_input_width = docked_compact_input_width(self.width, self.snapshot.dictation);

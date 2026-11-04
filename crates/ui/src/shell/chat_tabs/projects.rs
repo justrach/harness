@@ -21,6 +21,9 @@ impl Shell {
     }
 
     pub(in crate::shell) fn project_sidebar_filter(&self, cx: &App) -> Option<String> {
+        if self.sidebar_lists_all_projects() {
+            return None;
+        }
         self.active_project(cx)
             .or_else(|| self.state.read(cx).no_project.then(|| String::new()))
     }

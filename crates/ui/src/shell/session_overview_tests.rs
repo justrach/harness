@@ -259,7 +259,7 @@ fn overview_retains_final_details_until_the_dashboard_closes(cx: &mut gpui::Test
                     .find(|chat| chat.id == "target")
                     .unwrap()
                     .last_message_at = Some(Utc::now());
-                state.set_subagent_snapshot("target".into(), vec![completed_plan()]);
+                state.set_peer_chat_snapshot("target".into(), vec![completed_plan()]);
             });
             let _ = shell.render_session_overview(window, cx);
             assert!(shell.peer_chat_views.contains_key("target"));
@@ -362,4 +362,126 @@ fn overview_question_survives_empty_replay_until_explicit_resolution(
             gpui::div()
         },
     );
+}
+
+/// Six sessions as people get them, through the real render: one waiting on a
+/// question, one working, one never used.
+fn sections_window(
+    cx: &mut gpui::TestAppContext,
+) -> (
+    tempfile::TempDir,
+    gpui::WindowHandle<Shell>,
+    gpui::VisualTestContext,
+) {
+    let (dir, window) = chat_tabs::navigation_tests::fixture(cx, false, None);
+    window
+        .update(cx, |shell, window, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.boot_restored = true;
+            shell.reduced_motion = true;
+            admit_overview_session(shell, "old", "a", &[], cx);
+            admit_overview_session(shell, "busy", "a", &["peer"], cx);
+            admit_overview_session(shell, "waiting", "b", &["target"], cx);
+            shell.state.update(cx, |state, _| {
+                state.sessions.push(working_session("peer"));
+                state.set_subagent_snapshot(
+                    "target".into(),
+                    vec![assistant(
+                        vec![MessagePart::Input {
+                            id: "input".into(),
+                            request_id: "question".into(),
+                            questions: vec![UserInputQuestion {
+                                id: "format".into(),
+                                header: "Date format".into(),
+                                question: "Which date format should be used?".into(),
+                                options: vec!["Original".into(), "ISO".into()],
+                                multi_select: false,
+                                prefill: None,
+                                multiline: false,
+                            }],
+                            resolved: false,
+                        }],
+                        MessageStatus::Streaming,
+                    )],
+                );
+            });
+            shell.open_session_overview(window, cx);
+            cx.notify();
+        })
+        .unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(gpui::size(px(1200.0), px(900.0)));
+    redraw_overview(&mut visual);
+    (dir, window, visual)
+}
+
+fn redraw_overview(visual: &mut gpui::VisualTestContext) {
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+}
+
+#[gpui::test]
+fn the_screen_opens_on_what_needs_you_and_old_sessions_are_rows(cx: &mut gpui::TestAppContext) {
+    let (_dir, _window, mut visual) = sections_window(cx);
+    let waiting = visual.debug_bounds("overview-session-waiting").unwrap();
+    let working = visual.debug_bounds("overview-session-busy").unwrap();
+    let old = visual.debug_bounds("overview-row-old").unwrap();
+    assert!(
+        waiting.bottom() <= working.top(),
+        "working sits under its own heading, below what needs you"
+    );
+    assert!(working.bottom() <= old.top());
+    assert!(
+        old.size.height < px(40.0),
+        "an unused session is one line, not a card"
+    );
+    assert!(
+        working.size.height < px(240.0),
+        "a card is as tall as what it says, was {:?}",
+        working.size.height
+    );
+}
+
+#[gpui::test]
+fn the_answer_button_stays_here_and_a_card_opens_its_chat(cx: &mut gpui::TestAppContext) {
+    let _selection = crate::markdown::selection::test_state_lock();
+    let (_dir, window, mut visual) = sections_window(cx);
+    let answer = visual
+        .debug_bounds("overview-answer-waiting")
+        .unwrap()
+        .center();
+    visual.simulate_click(answer, Default::default());
+    redraw_overview(&mut visual);
+    window
+        .update(cx, |shell, window, cx| {
+            assert!(shell.session_overview, "the card's click didn't also fire");
+            assert_eq!(
+                shell
+                    .session_overview_runtime
+                    .question
+                    .as_ref()
+                    .map(|question| question.chat.as_str()),
+                Some("target")
+            );
+            shell.close_overview_question(window, cx);
+        })
+        .unwrap();
+    redraw_overview(&mut visual);
+
+    let card = visual
+        .debug_bounds("overview-session-busy")
+        .unwrap()
+        .center();
+    visual.simulate_click(card, Default::default());
+    redraw_overview(&mut visual);
+    window
+        .update(cx, |shell, _, cx| {
+            assert!(!shell.session_overview);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
+        })
+        .unwrap();
 }

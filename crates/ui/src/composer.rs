@@ -6787,6 +6787,11 @@ impl Composer {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_parked_draft_for_test(&mut self, chat: &str, text: &str) {
+        self.drafts.insert(chat.to_owned(), text.to_owned());
+    }
+
     pub(crate) fn parked_chat_input(&self, chat: &str, cx: &App) -> crate::pickers::CanvasInput {
         crate::pickers::CanvasInput {
             text: if self.current_key == chat {
@@ -7271,6 +7276,18 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // As in `add_paths`: the drop may have just selected this chat, and
+        // the mention must not land in the draft of the one before it.
+        if self
+            .state
+            .read(cx)
+            .selected_chat
+            .as_deref()
+            .unwrap_or_default()
+            != self.current_key
+        {
+            self.on_state_changed(cx);
+        }
         let inserted = self.input.update(cx, |input, cx| {
             input.insert_dropped_mention(path, is_directory, cx)
         });

@@ -336,12 +336,7 @@ impl Shell {
                 let choice = rows
                     .iter()
                     .enumerate()
-                    .filter(|(_, row)| {
-                        this.settings
-                            .space_filter
-                            .as_ref()
-                            .is_none_or(|project| row.project.as_ref() == Some(project))
-                    })
+                    .filter(|(_, row)| this.session_row_in_sidebar(row))
                     .nth(jump.0)
                     .map(|(ix, _)| ix);
                 if let Some(choice) = choice {
@@ -356,11 +351,7 @@ impl Shell {
             .track_scroll(&self.session_quick_switcher.scroll);
         let mut shortcut_slot = 0;
         for (ix, row) in rows.iter().enumerate() {
-            let matches_filter = self
-                .settings
-                .space_filter
-                .as_ref()
-                .is_none_or(|project| row.project.as_ref() == Some(project));
+            let matches_filter = self.session_row_in_sidebar(row);
             let shortcut = if matches_filter && shortcut_slot < JUMP_SLOTS {
                 let shortcut = settings::shortcut_badge(cx, ShortcutId::JumpSession(shortcut_slot));
                 shortcut_slot += 1;

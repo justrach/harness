@@ -102,27 +102,49 @@ fn new_tab_shortcut_stays_in_the_focused_panel_and_session(cx: &mut gpui::TestAp
     }
 }
 
+/// Two sessions in project A and one in project B, each showing one chat.
+fn seed_sessions(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.boot_restored = true;
+    shell.ensure_workspace_sessions(cx);
+    shell.chat_tabs.clear();
+    for (id, project, chat) in [
+        ("one", "a", "current"),
+        ("two", "a", "peer"),
+        ("three", "b", "target"),
+    ] {
+        shell.chat_tabs.push(ChatTab {
+            id: id.into(),
+            title: Some(id.into()),
+            project: Some(project.into()),
+            selected: Some(chat.into()),
+            ..Default::default()
+        });
+        let mut layout = workspace_panels::WorkspaceLayout::default();
+        layout.panels[0].tabs = vec![workspace_panels::PanelTab::Chat(chat.into())];
+        shell.workspace_panels.layouts.insert(id.into(), layout);
+    }
+    shell.chat_tab = 0;
+}
+
+fn active_session(shell: &Shell) -> &str {
+    &shell.chat_tabs[shell.chat_tab].id
+}
+
 #[gpui::test]
 fn session_jump_shortcuts_stay_in_the_current_project(cx: &mut gpui::TestAppContext) {
-    for split in [false, true] {
-        let (_dir, window) = navigation_tests::fixture(cx, split, None);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.boot_restored = true;
-                shell.persist_chat_tabs(cx);
-                let slot = shell
-                    .sidebar_visible_order(cx)
-                    .iter()
-                    .position(|id| id == "peer")
-                    .unwrap();
-                shell.jump_to_session(slot, window, cx);
-                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
-                assert_eq!(shell.chat_tab_labels(cx), [SharedString::from("A")]);
-                assert_eq!(shell.chat_tabs.len(), 1);
-                assert_eq!(shell.settings.space_filter.as_deref(), Some("a"));
-            })
-            .unwrap();
-    }
+    let (_dir, window) = navigation_tests::fixture(cx, false, None);
+    window
+        .update(cx, |shell, window, cx| {
+            seed_sessions(shell, cx);
+            shell.jump_to_session(1, window, cx);
+            assert_eq!(active_session(shell), "two");
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
+            assert_eq!(shell.settings.space_filter.as_deref(), Some("a"));
+            // Slot 2 would be project B's session, which this list doesn't show.
+            shell.jump_to_session(2, window, cx);
+            assert_eq!(active_session(shell), "two");
+        })
+        .unwrap();
 }
 
 #[gpui::test]
@@ -130,17 +152,22 @@ fn session_cycle_stays_scoped_and_project_cycle_restores_selection(cx: &mut gpui
     let (_dir, window) = navigation_tests::fixture(cx, false, None);
     window
         .update(cx, |shell, window, cx| {
-            shell.boot_restored = true;
-            shell.persist_chat_tabs(cx);
+            seed_sessions(shell, cx);
             shell.cycle_session(true, window, cx);
+            assert_eq!(active_session(shell), "two");
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
-            assert_eq!(shell.chat_tabs.len(), 1);
-            shell.open_project_tab(Some("b".into()), cx);
+            // Wraps within project A rather than reaching project B.
+            shell.cycle_session(true, window, cx);
+            assert_eq!(active_session(shell), "one");
+            shell.cycle_session(false, window, cx);
+            assert_eq!(active_session(shell), "two");
+            shell.cycle_chat_tab(true, window, cx);
+            assert_eq!(active_session(shell), "three");
+            assert_eq!(shell.settings.space_filter.as_deref(), Some("b"));
             shell.cycle_chat_tab(false, window, cx);
+            assert_eq!(active_session(shell), "two");
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
             assert_eq!(shell.settings.space_filter.as_deref(), Some("a"));
-            shell.cycle_chat_tab(true, window, cx);
-            assert_eq!(shell.settings.space_filter.as_deref(), Some("b"));
         })
         .unwrap();
 }

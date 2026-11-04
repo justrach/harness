@@ -44,6 +44,30 @@ impl Shell {
             })
     }
 
+    /// The conversation sidebar is set to every project. Task view always
+    /// follows the active session's project.
+    pub(super) fn sidebar_lists_all_projects(&self) -> bool {
+        !self.settings.sidebar_task_view && self.settings.sidebar_all_projects
+    }
+
+    /// The conversation list is limited to the active session's project.
+    pub(super) fn sidebar_shows_one_project(&self, cx: &App) -> bool {
+        !self.sidebar_lists_all_projects() && self.active_project(cx).is_some()
+    }
+
+    /// The project the sidebar's rows and search are limited to, if any.
+    pub(super) fn sidebar_scope(&self) -> Option<&str> {
+        self.settings
+            .space_filter
+            .as_deref()
+            .filter(|_| !self.sidebar_lists_all_projects())
+    }
+
+    pub(super) fn session_row_in_sidebar(&self, row: &SessionSidebarRow) -> bool {
+        self.sidebar_scope()
+            .is_none_or(|project| row.project.as_deref() == Some(project))
+    }
+
     pub(super) fn workspace_session_sidebar_rows(&self, cx: &App) -> Vec<SessionSidebarRow> {
         let mut rows: Vec<_> = self
             .chat_tabs
@@ -184,6 +208,15 @@ impl Shell {
             self.focus_composer(cx);
             cx.notify();
         }
+    }
+
+    pub(super) fn create_workspace_session_in_project(
+        &mut self,
+        project: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.space_filter = Some(project);
+        self.create_workspace_session(cx);
     }
 
     pub(super) fn create_workspace_session(&mut self, cx: &mut Context<Self>) {

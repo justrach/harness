@@ -72,6 +72,7 @@ pub mod rail;
 pub(crate) mod screen_access;
 pub mod settings;
 pub mod shell;
+mod sidebar_motion;
 pub mod sound;
 pub mod stall_watch;
 pub(crate) mod starters;

@@ -21,6 +21,8 @@ pub(super) struct OverviewActivity {
     pub completed_steps: usize,
     pub total_steps: usize,
     pub pending_question: bool,
+    /// The choices the waiting question offers, so a card can show them.
+    pub options: Vec<String>,
     pub updated_at: Option<DateTime<Utc>>,
     pub age_label: String,
 }
@@ -84,6 +86,16 @@ pub(super) fn overview_activity(
         .collect();
     let completed_steps = checklist.iter().filter(|step| step.done).count();
     let total_steps = checklist.len();
+    let options = pending
+        .as_ref()
+        .and_then(|(_, questions)| questions.first())
+        .map_or_else(Vec::new, |question| {
+            question
+                .options
+                .iter()
+                .filter_map(|option| nonempty_line(option))
+                .collect()
+        });
     let question = pending.and_then(|(_, questions)| {
         questions.into_iter().find_map(|question| {
             nonempty_line(&question.question).or_else(|| nonempty_line(&question.header))
@@ -97,8 +109,13 @@ pub(super) fn overview_activity(
             _ => None,
         })
     });
+    // What it is doing right now says more than what it last said. Only the
+    // action is shown: its output stays in the conversation.
+    let working_entry = latest_entry.filter(|_| indicator == ChatIndicator::Working);
     let update = question
+        .or_else(|| working_entry.and_then(running_tool))
         .or(assistant_update)
+        .or_else(|| working_entry.and_then(last_tool))
         .unwrap_or_else(|| match indicator {
             ChatIndicator::Working => "Working on this task.".into(),
             ChatIndicator::AwaitingInput => "Waiting for your input.".into(),
@@ -133,9 +150,63 @@ pub(super) fn overview_activity(
         completed_steps,
         total_steps,
         pending_question,
+        options,
         updated_at,
         age_label: age_label(updated_at, now),
     }
+}
+
+/// The tool the agent is in the middle of, when that is the last thing it did.
+fn running_tool(entry: &SessionMessageEntry) -> Option<String> {
+    match entry
+        .parts
+        .iter()
+        .rev()
+        .find(|part| !matches!(part, MessagePart::Reasoning { .. }))?
+    {
+        MessagePart::Tool {
+            call,
+            resolved: false,
+            ..
+        } => tool_activity(call),
+        _ => None,
+    }
+}
+
+fn last_tool(entry: &SessionMessageEntry) -> Option<String> {
+    entry.parts.iter().rev().find_map(|part| match part {
+        MessagePart::Tool { call, .. } => tool_activity(call),
+        _ => None,
+    })
+}
+
+/// One line for a monitoring card. A plan update isn't an action.
+fn tool_activity(call: &ToolCall) -> Option<String> {
+    let line = |verb: &str, target: &str| nonempty_line(target).map(|t| format!("{verb} {t}"));
+    match call {
+        ToolCall::Exec { command } => line("Running", command),
+        ToolCall::ReadFile { path } => line("Reading", short_path(path)),
+        ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => {
+            line("Editing", short_path(path))
+        }
+        ToolCall::ApplyPatch { path: Some(path) } => line("Editing", short_path(path)),
+        ToolCall::ApplyPatch { path: None } => Some("Editing files".into()),
+        ToolCall::Search { pattern, .. } | ToolCall::Glob { pattern } => {
+            line("Searching for", pattern)
+        }
+        ToolCall::WebFetch { url, .. } => line("Fetching", url),
+        ToolCall::WebSearch { query } => line("Searching the web for", query),
+        ToolCall::Mcp { tool, .. } => line("Using", tool),
+        ToolCall::Unknown { name, .. } => line("Using", name),
+        _ => None,
+    }
+}
+
+/// The file and its folder: enough to recognize in a narrow card.
+fn short_path(path: &str) -> &str {
+    let mut separators = path.rmatch_indices('/');
+    separators.next();
+    separators.next().map_or(path, |(ix, _)| &path[ix + 1..])
 }
 
 fn nonempty_line(text: &str) -> Option<String> {
@@ -262,6 +333,67 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    fn tool(call: serde_json::Value, resolved: bool) -> MessagePart {
+        serde_json::from_value(serde_json::json!({
+            "kind": "tool", "id": "tool", "resolved": resolved, "call": call
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_working_card_says_what_the_agent_is_doing_now() {
+        let activity = |parts| {
+            overview_activity(&chat(), ChatIndicator::Working, &[assistant(parts)], now()).update
+        };
+        let edit = serde_json::json!({"kind": "editFile", "path": "/repo/crates/ui/src/lib.rs"});
+        let exec = serde_json::json!({"kind": "exec", "command": "cargo test\n  --locked"});
+        assert_eq!(
+            activity(vec![text("Starting."), tool(edit.clone(), false)]),
+            "Editing src/lib.rs"
+        );
+        assert_eq!(
+            activity(vec![tool(exec, false)]),
+            "Running cargo test --locked"
+        );
+        // Finished: what it said since then, or else the last thing it did.
+        assert_eq!(
+            activity(vec![tool(edit.clone(), true), text("All green.")]),
+            "All green."
+        );
+        assert_eq!(
+            activity(vec![tool(edit.clone(), true)]),
+            "Editing src/lib.rs"
+        );
+        // A plan update isn't an action.
+        assert_eq!(
+            activity(vec![text("Starting."), todo(&[("One", false)])]),
+            "Starting."
+        );
+        // Only a running agent has a current action.
+        let done = overview_activity(
+            &chat(),
+            ChatIndicator::Completed,
+            &[assistant(vec![text("Finished."), tool(edit, false)])],
+            now(),
+        );
+        assert_eq!(done.update, "Finished.");
+    }
+
+    #[test]
+    fn a_waiting_card_carries_the_question_and_its_choices() {
+        let activity = overview_activity(
+            &chat(),
+            ChatIndicator::AwaitingInput,
+            &[assistant(vec![
+                tool(serde_json::json!({"kind": "exec", "command": "ls"}), false),
+                input(),
+            ])],
+            now(),
+        );
+        assert_eq!(activity.update, "How should dates be exported?");
+        assert_eq!(activity.options, ["ISO", "Original"]);
     }
 
     fn input() -> MessagePart {

@@ -7,6 +7,7 @@ use gpui_base::ElementExt as _;
 use std::collections::{HashMap, HashSet};
 mod device_picker;
 mod recovery;
+mod sidebar_chat_drop;
 mod tab_metadata;
 #[cfg(feature = "appshots-fixture")]
 mod attention_import_fixture;
@@ -20,6 +21,10 @@ mod shared_header;
 mod shared_header_fixture;
 #[cfg(feature = "appshots-fixture")]
 mod tab_insertion_fixture;
+#[cfg(test)]
+mod panel_render_cost_tests;
+#[cfg(test)]
+mod sidebar_chat_drop_tests;
 #[cfg(test)]
 mod window_transfer_tests;
 #[cfg(test)]
@@ -43,6 +48,8 @@ const PANEL_HEADER_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PA
 const STACKED_CLEARANCE: f32 = (PANEL_HEADER_HEIGHT - PANEL_TAB_HEIGHT) / 2.0;
 const STACKED_HEADER_HEIGHT: f32 = PANEL_TAB_HEIGHT + STACKED_CLEARANCE;
 const TAB_SHOULDER: f32 = 8.0;
+/// The new-tab button and its gap, when it follows the last tab.
+const INLINE_ADD_WIDTH: f32 = 27.0;
 
 // A stacked chat still needs its header, actions, composer and model/status
 // controls. Height-based limits keep that bottom stack usable.
@@ -1599,6 +1606,10 @@ impl Shell {
         let id = self.workspace_panels.seq;
         self.workspace_panels.terminals.insert(id, terminal);
         self.workspace_panels.terminal_keys.insert(id, tab_key);
+        // The new terminal takes the keyboard. A composer still waiting to
+        // focus would take it back on its next render.
+        self.composer
+            .update(cx, |composer, _| composer.focus_pending = false);
         let target = self.workspace_panels.target.take();
         let layout = self.panel_layout_mut(cx);
         let target = target.unwrap_or_else(|| layout.add_panel(layout.focused));
@@ -1925,6 +1936,8 @@ impl Shell {
         if !matches!(self.route, Route::Chat) {
             return false;
         }
+        // A close that went ahead some other way answers nothing.
+        self.archive_choice_prompt = false;
         let Some(layout) = self.panel_layout(cx) else {
             return false;
         };
@@ -2408,7 +2421,7 @@ impl Shell {
             }
         }
         for tab in tabs {
-            self.close_workspace_tab(panel, tab, window, cx);
+            self.close_workspace_tab_by_button(panel, tab, window, cx);
         }
         let layout = self.panel_layout_mut(cx);
         if layout.panel(panel).is_some_and(|p| p.tabs.is_empty()) {
@@ -2628,7 +2641,7 @@ impl Shell {
             }
             MenuAction::CloseTab => {
                 if let Some(tab) = menu.tab {
-                    self.close_workspace_tab(menu.panel, tab, window, cx);
+                    self.close_workspace_tab_by_button(menu.panel, tab, window, cx);
                 }
             }
         }
@@ -2871,7 +2884,24 @@ impl Shell {
         }
         let controls_t = motion::hover_t(&fade_key);
         let can_close = self.panel_layout(cx).is_some_and(|l| l.panels.len() > 1);
-        let control_count = if can_close { 4.0 } else { 3.0 };
+        let tab_width = panel_tab_width(width - leading_inset - (trailing_inset - 4.0), panel.tabs.len());
+        // New tab sits right after the last tab, where the next one will open.
+        // Where the hover controls would cover it, it stays with them instead.
+        let other_controls: f32 = if can_close { 3.0 } else { 2.0 };
+        let add_after_tabs = panel.tabs.len() as f32 * tab_width
+            + panel.tabs.len().saturating_sub(1) as f32 * 3.0
+            + TAB_SHOULDER
+            + INLINE_ADD_WIDTH
+            + other_controls * 24.0
+            + (other_controls - 1.0) * 2.0
+            + 8.0
+            + 3.0
+            <= width - leading_inset - trailing_inset;
+        let control_count = match (can_close, add_after_tabs) {
+            (true, false) => 4.0,
+            (true, true) | (false, false) => 3.0,
+            (false, true) => 2.0,
+        };
         let controls_width = control_count * 24.0 + (control_count - 1.0) * 2.0 + 8.0;
         let restore_inset = if expanded {
             24.0 + if can_close { 26.0 } else { 0.0 } + 3.0
@@ -2926,7 +2956,6 @@ impl Shell {
             });
         let attention_inset = if attention_hidden { 44.0 } else { 0.0 };
         let controls_inset = controls_inset + attention_inset;
-        let tab_width = panel_tab_width(width - leading_inset - (trailing_inset - 4.0), panel.tabs.len());
         self.workspace_panels
             .active_tab_bounds
             .borrow_mut()
@@ -3089,8 +3118,7 @@ impl Shell {
                         } else if this.workspace_panels.hovered_tab.as_deref() == Some(&hover_key) {
                             this.workspace_panels.hovered_tab = None;
                         }
-                        window.refresh();
-                        cx.notify();
+                        window.redraw_root();
                     }))
                     .on_mouse_down(MouseButton::Left, |_, window, cx| {
                         window.prevent_default();
@@ -3125,7 +3153,7 @@ impl Shell {
                     .on_mouse_down(
                         MouseButton::Middle,
                         cx.listener(move |this, _, window, cx| {
-                            this.close_workspace_tab(id, close.clone(), window, cx);
+                            this.close_workspace_tab_by_button(id, close.clone(), window, cx);
                             cx.stop_propagation();
                         }),
                     )
@@ -3278,7 +3306,7 @@ impl Shell {
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
-                                        this.close_workspace_tab(
+                                        this.close_workspace_tab_by_button(
                                             id,
                                             button_close.clone(),
                                             window,
@@ -3343,14 +3371,14 @@ impl Shell {
             .gap(px(2.0))
             // The toolbar occludes the panel's hover hitbox. Keep its own
             // hover state so moving onto a button does not hide the toolbar.
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                 let workspace = this.workspace_layout_key(cx);
                 this.workspace_panels
                     .headers
                     .entry((workspace, id))
                     .or_default()
                     .controls_hovered = *hovered;
-                cx.notify();
+                window.redraw_root();
             }))
             .when(controls_t > 0.0, |s| s.occlude())
             .when(controls_t == 0.0 && !expanded, |s| s.invisible());
@@ -3427,6 +3455,9 @@ impl Shell {
                         }
                     }),
                 )
+                .when(!placement && add_after_tabs, |s| {
+                    s.mt(px((PANEL_TAB_HEIGHT - 24.0) / 2.0))
+                })
                 .tooltip(move |_, cx| cx.new(|_| SurfaceTabTooltip { text: label.into() }).into())
                 .child(icon(glyph).size(px(14.0)).text_color(theme.text_muted))
                 .child(
@@ -3437,7 +3468,11 @@ impl Shell {
                     .absolute()
                     .inset_0(),
                 );
-            controls = controls.child(add);
+            if !placement && add_after_tabs {
+                strip = strip.child(add);
+            } else {
+                controls = controls.child(add);
+            }
         }
 
         let expand_shortcut_applies = expanded
@@ -3504,14 +3539,14 @@ impl Shell {
             .opacity(if expanded { 1.0 } else { controls_t })
             .when(!expanded && controls_t == 0.0, |s| s.invisible())
             .when(expanded, |s| s.occlude())
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                 let workspace = this.workspace_layout_key(cx);
                 this.workspace_panels
                     .headers
                     .entry((workspace, id))
                     .or_default()
                     .expand_hovered = *hovered;
-                cx.notify();
+                window.redraw_root();
             })),
         );
         if can_close {
@@ -3952,7 +3987,13 @@ impl Shell {
                     .relative()
                     .w(px(composer_width))
                     .mx_auto()
-                    .child(preview)
+                    // Every keystroke redraws the shell. This panel's composer
+                    // shows none of it, and costs a text layout per panel.
+                    .child(
+                        preview.cached_measured(
+                            gpui::StyleRefinement::default().w(px(composer_width)),
+                        ),
+                    )
                     .child(
                         div()
                             .id(("inactive-composer-activate", panel))
@@ -4284,6 +4325,7 @@ impl Shell {
         self.sync_panel_workspace(cx);
         self.park_workspace_draft(cx);
         if !cx.has_active_drag() {
+            self.split_drop_session = None;
             self.clear_window_tab_drag(cx);
             self.workspace_panels.blocked_split = false;
             self.workspace_panels.dragging_tab.set(false);
@@ -4538,6 +4580,16 @@ impl Shell {
                 self.render_workspace_content(panel, content_width, content_height, window, cx);
             let panel_id = panel.id;
             let active_drop = cx.has_active_drag() && self.workspace_panels.dragging_tab.get();
+            let selected_tab = panel.selected().cloned();
+            let takes_files = sidebar_chat_drop::panel_body_takes_files(
+                selected_tab.as_ref(),
+                self.state.read(cx).selected_chat.as_deref(),
+                layout.focused == panel.id,
+            );
+            let chat_drop_zones = self
+                .split_drop_session
+                .is_some()
+                .then(|| self.render_panel_chat_drop_zones(panel_id, &theme, cx));
             let body = div()
                 .id(("workspace-panel-content", panel_id))
                 .flex_1()
@@ -4558,7 +4610,40 @@ impl Shell {
                     },
                 ))
                 .drag_over::<PanelTabDrag>(move |s, _, _, _| s.border_color(theme.accent))
+                .when(takes_files, |body| {
+                    let path_tab = selected_tab.clone();
+                    body.on_drop(cx.listener(
+                        move |this, paths: &gpui::ExternalPaths, window, cx| {
+                            this.drop_paths_on_panel(
+                                panel_id,
+                                selected_tab.clone(),
+                                paths.paths().to_vec(),
+                                window,
+                                cx,
+                            );
+                        },
+                    ))
+                    .on_drop(cx.listener(
+                        move |this, path: &crate::files::WorkspacePathDrag, window, cx| {
+                            this.drop_workspace_path_on_panel(
+                                panel_id,
+                                path_tab.clone(),
+                                path,
+                                window,
+                                cx,
+                            );
+                        },
+                    ))
+                })
                 .child(content)
+                .when(takes_files, |body| {
+                    body.child(
+                        chat_split::attachment_drop_veil(("panel-file-drop", panel_id), &theme)
+                            .drag_over::<crate::files::WorkspacePathDrag>(|style, _, _, _| {
+                                style.opacity(1.0)
+                            }),
+                    )
+                })
                 .when(active_drop, |body| {
                     body.child(
                         div()
@@ -4580,22 +4665,20 @@ impl Shell {
                     )
                 });
             let bounds = self.workspace_panels.panel_bounds.clone();
-            let active_tab_bounds = self.workspace_panels.active_tab_bounds.clone();
-            let flush_left_tab = panel.active == 0;
-            let surface_workspace = workspace.clone();
-            let surface_theme = theme.clone();
             let column = div()
                 .id(("workspace-panel", panel_id))
                 .debug_selector(move || format!("workspace-panel-{panel_id}"))
                 .group(format!("workspace-panel-{panel_id}"))
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                // Header hover is chrome this render draws, so it redraws the
+                // shell alone: crossing panels must not rebuild their contents.
+                .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                     let workspace = this.workspace_layout_key(cx);
                     this.workspace_panels
                         .headers
                         .entry((workspace, panel_id))
                         .or_default()
                         .hovered = *hovered;
-                    cx.notify();
+                    window.redraw_root();
                 }))
                 .absolute()
                 .left(px(frame.x))
@@ -4614,34 +4697,7 @@ impl Shell {
                         .left_0()
                         .right_0()
                         .bottom_0()
-                        .top(px(frame.header_height))
-                        .child(
-                            gpui::canvas(
-                                |_, _, _| (),
-                                move |rect, _, window, _| {
-                                    // All prepaint callbacks have run, including the selected
-                                    // tab's recorder later in this panel's child list.
-                                    let selected = active_tab_bounds
-                                        .borrow()
-                                        .get(&(surface_workspace.clone(), panel_id))
-                                        .copied()
-                                        .map(|bounds| {
-                                            super::panel_surface::TabGeometry::from_bounds(
-                                                bounds,
-                                                flush_left_tab,
-                                            )
-                                        });
-                                    super::panel_surface::paint_surface(
-                                        rect,
-                                        selected,
-                                        &surface_theme,
-                                        window,
-                                    );
-                                },
-                            )
-                            .absolute()
-                            .inset_0(),
-                        ),
+                        .top(px(frame.header_height)),
                 )
                 .child(header)
                 .child(body)
@@ -4652,6 +4708,7 @@ impl Shell {
                     frame.header_height,
                     &theme,
                 ))
+                .children(chat_drop_zones)
                 .child(
                     gpui::canvas(
                         move |rect, _, _| {
@@ -4790,6 +4847,7 @@ impl Shell {
                         ),
                     ),
                 };
+                let mut surfaces = Vec::with_capacity(shadow_panels.len());
                 window.with_content_mask(Some(mask), |window| {
                     let bounds = shadow_bounds.borrow();
                     let tabs = shadow_tabs.borrow();
@@ -4812,6 +4870,15 @@ impl Shell {
                             &shadow_theme,
                             window,
                         );
+                        surfaces.push((body, selected));
+                    }
+                });
+                // Painted together: each run of paths is its own full-window
+                // multisampled pass, and a panel's contents cover its fill.
+                // All prepaint callbacks have run, so the tabs are recorded.
+                window.with_content_mask(Some(gpui::ContentMask { bounds: viewport }), |window| {
+                    for (body, selected) in surfaces {
+                        super::panel_surface::paint_surface(body, selected, &shadow_theme, window);
                     }
                 });
             },
@@ -5714,6 +5781,38 @@ mod interaction_tests {
         (shell, cx)
     }
     #[gpui::test]
+    fn panel_workspace_new_tab_button_follows_the_last_tab_on_hover(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        shell.update_in(cx, |s, _, cx| {
+            let panel = s.panel_layout_mut(cx).panel_mut(0).unwrap();
+            panel.tabs = vec![PanelTab::Terminal(1), PanelTab::Terminal(3)];
+            panel.active = 0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // The same hover state hides the button; a hidden element still records
+        // its own bounds, but children of the hidden controls record none.
+        assert!(cx.debug_bounds("panel-placement-0").is_none());
+        let body = cx.debug_bounds("workspace-panel-body-0").unwrap();
+        let last = cx.debug_bounds("panel-tab-0-1").unwrap();
+        cx.simulate_mouse_move(body.center(), None, Default::default());
+        cx.run_until_parked();
+        let add = cx.debug_bounds("panel-add-tab-0").unwrap();
+        let placement = cx.debug_bounds("panel-placement-0").unwrap();
+        assert!(add.left() >= last.right());
+        assert!(add.left() - last.right() <= px(4.0));
+        assert!(add.right() < placement.left());
+        // Against the tab's content: its box extends down to join the panel.
+        let icon = cx.debug_bounds("panel-tab-icon-0-1").unwrap();
+        assert_eq!(add.center().y, icon.center().y);
+        assert_eq!(
+            cx.debug_bounds("panel-tab-0-1").unwrap(),
+            last,
+            "showing it doesn't move the tabs"
+        );
+    }
+
+    #[gpui::test]
     fn panel_workspace_first_tab_shares_the_panel_left_edge(cx: &mut TestAppContext) {
         let (shell, cx) = setup(cx);
         let mut icon_inset = None;
@@ -6038,6 +6137,8 @@ mod interaction_tests {
             for split in [false, true] {
                 let (_dir, window) =
                     super::super::chat_tabs::navigation_tests::fixture(cx, false, Some(false));
+                // Already answered, so ⌘W closes instead of asking first.
+                cx.update(|cx| crate::settings::set_archive_sessions_on_close(false, cx));
                 let parked = window
                     .update(cx, |shell, window, cx| {
                         window.activate_window();

@@ -3,7 +3,7 @@
 use super::session_icon_catalog::{self, IconChoice, IconPickerTab};
 use super::session_icon_grid::{COLUMNS, IconPickerGrid, IconPickerRow};
 use super::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 #[path = "session_icon_picker.rs"]
 mod icon_picker;
@@ -33,6 +33,9 @@ pub(super) const SESSION_ICONS: &[(&str, &str, &str)] = &[
     ("document", "Document", icons::DOCUMENT),
     ("calendar", "Calendar", icons::CALENDAR),
 ];
+
+/// About eight rows; more scroll so the conversation list keeps the column.
+const OPEN_SESSIONS_MAX_HEIGHT: f32 = 240.0;
 
 pub(super) fn session_icon_glyph(key: Option<&str>) -> &'static str {
     SESSION_ICONS
@@ -600,7 +603,10 @@ impl Shell {
         cx.notify();
     }
 
-    fn render_workspace_session_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_workspace_session_menu(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let menu = self.session_sidebar.menu.clone()?;
         if !self.chat_tabs.iter().any(|tab| tab.id == menu.id) {
             self.session_sidebar.menu = None;
@@ -832,7 +838,7 @@ impl Shell {
                 } else if this.session_sidebar.hovered.as_ref() == Some(&hover_id) {
                     this.session_sidebar.hovered = None;
                 }
-                cx.notify();
+                this.sidebar_pane.update(cx, |_, cx| cx.notify());
             }))
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 if !event.standard_click() {
@@ -1132,6 +1138,116 @@ impl Shell {
             .into_any_element()
     }
 
+    fn session_rows_in_sidebar(&mut self, cx: &mut Context<Self>) -> Vec<SessionSidebarRow> {
+        let rows: Vec<_> = self
+            .workspace_session_sidebar_rows(cx)
+            .into_iter()
+            .filter(|row| self.session_row_in_sidebar(row))
+            .collect();
+        if self
+            .session_sidebar
+            .rename
+            .as_ref()
+            .is_some_and(|rename| !rows.iter().any(|row| row.id == rename.id))
+        {
+            self.session_sidebar.rename = None;
+        }
+        rows
+    }
+
+    /// A workspace holding one chat from the list below needs no second row:
+    /// clicking that chat returns to it, and the list highlights it. One the
+    /// person named, pinned or gave an icon keeps its row.
+    fn workspace_session_repeats_listed_chat(&self, id: &str, listed: &HashSet<&str>) -> bool {
+        let Some(tab) = self.chat_tabs.iter().find(|tab| tab.id == id) else {
+            return false;
+        };
+        if tab.pinned || tab.title.is_some() || tab.session_icon.is_some() {
+            return false;
+        }
+        match self.workspace_panels.layouts.get(id) {
+            Some(layout) => {
+                let mut tabs = layout.panels.iter().flat_map(|panel| panel.tabs.iter());
+                matches!(
+                    (tabs.next(), tabs.next()),
+                    (Some(super::workspace_panels::PanelTab::Chat(chat)), None)
+                        if listed.contains(chat.as_str())
+                )
+            }
+            None => matches!(tab.chats().as_slice(), [chat] if listed.contains(chat.as_str())),
+        }
+    }
+
+    /// The open workspaces below the conversation sidebar's project filter,
+    /// where they can grow without moving it. One open workspace needs no
+    /// row: the window already shows it.
+    pub(super) fn render_open_session_rows(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let rows = self.session_rows_in_sidebar(cx);
+        if rows.len() < 2 {
+            return None;
+        }
+        let filter = self.project_sidebar_filter(cx);
+        let rows: Vec<_> = {
+            let state = self.state.read(cx);
+            let listed: HashSet<&str> = state
+                .sidebar_chats(Utc::now(), filter.as_deref())
+                .into_iter()
+                .map(|(_, chat)| chat.id.as_str())
+                .collect();
+            rows.into_iter()
+                .filter(|row| !self.workspace_session_repeats_listed_chat(&row.id, &listed))
+                .collect()
+        };
+        if rows.is_empty() {
+            return None;
+        }
+        let mut list = div()
+            .id("sidebar-open-sessions")
+            .debug_selector(|| "sidebar-open-sessions".into())
+            .flex_none()
+            .max_h(px(OPEN_SESSIONS_MAX_HEIGHT))
+            .overflow_y_scroll()
+            .px(px(SIDEBAR_GUTTER))
+            .pt(px(6.0))
+            .flex()
+            .flex_col()
+            .gap(px(SIDEBAR_LIST_GAP));
+        for row in rows {
+            list = list.child(self.render_workspace_session_row(row, theme, window, cx));
+        }
+        Some(list.into_any_element())
+    }
+
+    pub(super) fn render_session_sidebar_footer(
+        &mut self,
+        user_menu: AnyElement,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .h(px(44.0))
+            .px(px(SIDEBAR_GUTTER))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(user_menu)
+            .child(div().flex_1())
+            .when(!self.chat_history_in_titlebar(), |el| {
+                el.child(
+                    self.render_chat_history_button("sidebar-chat-history", theme, cx)
+                        .size(px(26.0))
+                        .mr(px(6.0)),
+                )
+            })
+            .child(self.render_workspace_session_new(theme, cx))
+            .into_any_element()
+    }
+
     pub(super) fn render_workspace_session_sidebar(
         &mut self,
         theme: &Theme,
@@ -1145,24 +1261,7 @@ impl Shell {
         if self.boot_restored {
             self.ensure_workspace_sessions(cx);
         }
-        let rows: Vec<_> = self
-            .workspace_session_sidebar_rows(cx)
-            .into_iter()
-            .filter(|row| {
-                self.settings
-                    .space_filter
-                    .as_ref()
-                    .is_none_or(|project| row.project.as_ref() == Some(project))
-            })
-            .collect();
-        if self
-            .session_sidebar
-            .rename
-            .as_ref()
-            .is_some_and(|rename| !rows.iter().any(|row| row.id == rename.id))
-        {
-            self.session_sidebar.rename = None;
-        }
+        let rows = self.session_rows_in_sidebar(cx);
         let mut list = div()
             .id("workspace-session-list")
             .debug_selector(|| "workspace-session-list".into())
@@ -1268,24 +1367,7 @@ impl Shell {
                         .child(notice),
                 )
             })
-            .child(
-                div()
-                    .h(px(44.0))
-                    .px(px(SIDEBAR_GUTTER))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(user_menu)
-                    .child(div().flex_1())
-                    .when(!self.chat_history_in_titlebar(), |el| {
-                        el.child(
-                            self.render_chat_history_button("sidebar-chat-history", theme, cx)
-                                .size(px(26.0))
-                                .mr(px(6.0)),
-                        )
-                    })
-                    .child(self.render_workspace_session_new(theme, cx)),
-            )
+            .child(self.render_session_sidebar_footer(user_menu, theme, cx))
             .when_some(session_menu, |el, menu| el.child(menu))
             .into_any_element()
     }

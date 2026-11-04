@@ -170,7 +170,7 @@ fn split_from_projectless_session_does_not_inherit_another_folder(cx: &mut TestA
 fn a_sidebar_drop_still_splits_after_a_mid_drag_chats_frame(cx: &mut TestAppContext) {
     struct Host(Entity<Shell>);
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.0.update(cx, |shell, cx| {
                 let theme = Theme::default();
                 div()
@@ -184,7 +184,7 @@ fn a_sidebar_drop_still_splits_after_a_mid_drag_chats_frame(cx: &mut TestAppCont
                         div()
                             .w(px(280.0))
                             .h_full()
-                            .child(shell.render_chat_sidebar(&theme, cx)),
+                            .child(shell.render_chat_sidebar(&theme, window, cx)),
                     )
                     .child(
                         div()

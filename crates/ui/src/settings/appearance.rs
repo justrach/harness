@@ -3020,6 +3020,7 @@ impl Render for AppearancePage {
         let current_background = ui_settings.new_thread_composer_background;
         let current_background_effect = ui_settings.new_thread_background_effect;
         let compact_mode = ui_settings.transcript_compact_mode;
+        let task_view = ui_settings.sidebar_task_view;
         let cards = AppearanceMode::ALL
             .into_iter()
             .map(|mode| {
@@ -3334,6 +3335,34 @@ impl Render for AppearancePage {
                         .cursor_pointer()
                         .on_click(cx.listener(move |_, _, _, cx| {
                             crate::settings::set_transcript_compact_mode(!compact_mode, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::WIDGET))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Task view"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(
+                                        "Show open workspaces in the sidebar, with the All sessions dashboard, instead of your conversations.",
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, task_view)
+                        .id("sidebar-task-view-toggle")
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_sidebar_task_view(!task_view, cx);
                             cx.notify();
                         })),
                 )

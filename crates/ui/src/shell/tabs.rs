@@ -100,12 +100,7 @@ impl Shell {
         let rows = self.workspace_session_sidebar_rows(cx);
         let order: Vec<_> = rows
             .iter()
-            .filter(|row| {
-                self.settings
-                    .space_filter
-                    .as_ref()
-                    .is_none_or(|project| row.project.as_ref() == Some(project))
-            })
+            .filter(|row| self.session_row_in_sidebar(row))
             .map(|row| row.id.clone())
             .collect();
         let selected = self.chat_tabs.get(self.chat_tab).map(|tab| tab.id.clone());

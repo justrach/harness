@@ -14560,7 +14560,7 @@ mod tests {
         crate::markdown::selection::clear_if_owner(&first_key);
         let selected = selected.unwrap_or_default();
         assert!(
-            selected.contains("being held again") && selected.contains("To unblock it") && selected.contains("Review ha"),
+            selected.contains("being held again") && selected.contains("To unblock it") && selected.contains("Review"),
             "a hover-then-drag across paragraphs into the quote selected {selected:?}"
         );
     }

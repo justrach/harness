@@ -52,6 +52,7 @@ use crate::settings::{
     TERMINAL_MIN_HEIGHT, UiSettings, badge_combo, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
+use crate::sidebar_motion::MotionKind;
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
     format_time_ago, org_name_valid, parse_orgs, sort_memberships,
@@ -107,8 +108,12 @@ mod reconciliation_design_fixture;
 #[cfg(feature = "appshots-fixture")]
 mod window_transfer_fixture;
 mod workspace_session_persistence;
+#[cfg(test)]
+mod sidebar_motion_tests;
 mod sidebar_pins;
 mod sidebar_search;
+#[cfg(test)]
+mod sidebar_sections_tests;
 mod spaces;
 mod stale_input;
 mod tabs;
@@ -1938,14 +1943,19 @@ impl Render for SidebarPane {
         crate::transcript::record_view_frame("sidebar");
         #[cfg(test)]
         SIDEBAR_RENDERS.with(|n| n.set(n.get() + 1));
+        let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
         let inner = shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
+            shell.sidebar_motion_slots.borrow_mut().begin_frame();
             let inner = match shell.route {
                 Route::Settings(section) => shell.render_settings_nav(section, &theme, window, cx),
-                Route::Chat => shell.render_workspace_session_sidebar(&theme, window, cx),
+                Route::Chat if shell.settings.sidebar_task_view => {
+                    shell.render_workspace_session_sidebar(&theme, window, cx)
+                }
+                Route::Chat => shell.render_chat_sidebar(&theme, window, cx),
             };
             shell.drive_sidebar_context_motion(window);
             inner
@@ -1970,6 +1980,13 @@ pub struct Shell {
     /// A live handoff has installed resources but has not validated its first draw.
     window_transfer_preparing: bool,
     sidebar_pane: Entity<SidebarPane>,
+    /// The sidebar's spinners, painted beside it so their ticks don't
+    /// re-render it (`sidebar_motion.rs`).
+    sidebar_motion: Entity<crate::sidebar_motion::SidebarMotion>,
+    sidebar_motion_slots: crate::sidebar_motion::SharedMotionSlots,
+    /// Where each session row sat on the last frame (`shell/spaces.rs`,
+    /// `sidebar_row_window`): rows far off screen render as empty slots.
+    sidebar_row_tops: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, f32>>>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
     /// Measured height of the bottom chrome stack (status strip + composer +
@@ -1998,6 +2015,8 @@ pub struct Shell {
     pub(super) archived_shown: usize,
     /// Ephemeral collapsed project/device sections, keyed by organization + id.
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    /// Groups whose older rows were opened with "Show more".
+    pub(super) sidebar_unfolded_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Sessions and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
@@ -2269,6 +2288,9 @@ pub struct Shell {
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the §1.6 resort glide.
     sidebar_prev_order: Vec<(String, f32)>,
+    /// Compact rows mark other computers' chats only when this one's are
+    /// listed too (`spaces::marks_remote_chats`).
+    sidebar_marks_remote: bool,
     /// Per-key paint offsets of the resort in flight, keyed elements restart on
     /// `resort_epoch` bumps.
     sidebar_resort: std::collections::HashMap<String, f32>,
@@ -2596,10 +2618,20 @@ impl Shell {
         #[cfg(test)]
         let graff_notice_task: Option<Task<()>> = None;
         let shell = cx.entity();
-        let sidebar_pane = cx.new(|cx| SidebarPane {
-            shell: shell.downgrade(),
-            _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
+        let sidebar_pane = cx.new(|cx| {
+            let view = cx.entity_id();
+            cx.on_release(move |_, _| motion::release_hover_owner(view))
+                .detach();
+            SidebarPane {
+                shell: shell.downgrade(),
+                _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
+            }
         });
+        let sidebar_motion_slots = crate::sidebar_motion::SharedMotionSlots::default();
+        let sidebar_motion = {
+            let slots = sidebar_motion_slots.clone();
+            cx.new(|_| crate::sidebar_motion::SidebarMotion::new(slots))
+        };
         // Only a cold start waits for the engine. A window reopened from the
         // Dock (or a notification) around a ready engine must not replay the
         // setup splash and look like a restart (#369).
@@ -2612,6 +2644,9 @@ impl Shell {
             window_id: uuid::Uuid::new_v4().to_string(),
             window_transfer_preparing: false,
             sidebar_pane,
+            sidebar_motion,
+            sidebar_motion_slots,
+            sidebar_row_tops: Default::default(),
             transcript,
             composer,
             // Seed with the compact composer stack's rough height so the
@@ -2627,6 +2662,7 @@ impl Shell {
             recents_open: false,
             archived_shown: 0,
             sidebar_collapsed_groups: std::collections::HashSet::new(),
+            sidebar_unfolded_groups: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
             terminal: None,
@@ -2786,6 +2822,7 @@ impl Shell {
             active_chat: String::new(),
             last_appshot_chat: None,
             sidebar_prev_order: Vec::new(),
+            sidebar_marks_remote: false,
             sidebar_resort: std::collections::HashMap::new(),
             sidebar_new_keys: std::collections::HashSet::new(),
             resort_epoch: 0,
@@ -5282,6 +5319,7 @@ impl Shell {
             target.code_font_family = current.code_font_family.clone();
             target.code_font_size = current.code_font_size;
             target.transcript_width = current.transcript_width;
+            target.sidebar_task_view = current.sidebar_task_view;
             if target.skill_completion_by_harness != current.skill_completion_by_harness {
                 target.skill_completion_by_harness = current.skill_completion_by_harness.clone();
             }
@@ -6101,12 +6139,7 @@ impl Shell {
         let rows = self.workspace_session_sidebar_rows(cx);
         let Some(row) = rows
             .into_iter()
-            .filter(|row| {
-                self.settings
-                    .space_filter
-                    .as_ref()
-                    .is_none_or(|project| row.project.as_ref() == Some(project))
-            })
+            .filter(|row| self.session_row_in_sidebar(row))
             .nth(slot)
         else {
             return;
@@ -7434,6 +7467,11 @@ impl Shell {
         out
     }
 
+    /// A sidebar animation's slot, painted by [`Self::sidebar_motion`].
+    fn sidebar_motion_slot(&self, key: impl Into<SharedString>, kind: MotionKind) -> AnyElement {
+        crate::sidebar_motion::slot(&self.sidebar_motion_slots, key, kind)
+    }
+
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is part of the resolved theme. A second fixed-Harness
         // palette here made imported families look split in half and froze
@@ -7465,6 +7503,9 @@ impl Shell {
                     .pt(px(self.content_header_height(cx)))
                     .child(inner),
             )
+            // After the sidebar, outside it: paints its spinners into the
+            // slots it placed, so a tick leaves the cached sidebar alone.
+            .child(self.sidebar_motion.clone())
             .into_any_element()
     }
 
@@ -7772,7 +7813,7 @@ impl Shell {
         // not in session rows in the sidebar (including drag previews).
         let change_request = change_request.filter(|_| palette);
         let compact = !palette && self.settings.sidebar_compact;
-        let show_label = palette || self.settings.sidebar_show_project_label;
+        let show_label = palette || spaces::sidebar_row_shows_project(&self.settings, status);
         let remote = self
             .state
             .read(cx)
@@ -7782,6 +7823,7 @@ impl Shell {
             .is_some_and(|chat| {
                 self.state.read(cx).local_device_id.as_deref() != Some(chat.device_id.as_str())
             });
+        let remote = remote && (palette || self.sidebar_marks_remote);
         let project_icon = (!palette && self.settings.sidebar_show_project_icon)
             .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
@@ -7838,16 +7880,20 @@ impl Shell {
         let working = status == harness_proto::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = compact.then(|| {
             let glyph = if build_waiting {
-                loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx).into_any_element()
-            } else if working {
-                loaders::mini_glyph_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    theme.glyph,
-                    self.sidebar_pane.entity_id(),
-                    cx,
+                self.sidebar_motion_slot(
+                    format!("{row_id}-wait"),
+                    MotionKind::WaitDot {
+                        color: theme.text_muted,
+                    },
                 )
-                .into_any_element()
+            } else if working {
+                self.sidebar_motion_slot(
+                    format!("{row_id}-working"),
+                    MotionKind::Spinner {
+                        cell_px: 2.0,
+                        tints: theme.glyph.rows(),
+                    },
+                )
             } else if status == harness_proto::ChatIndicator::Completed && !queued && !undelivered {
                 icon(icons::CHECK)
                     .size(px(11.0))
@@ -7964,17 +8010,20 @@ impl Shell {
                             .text_color(status_color)
                             .into_any_element()
                     } else if build_waiting {
-                        loaders::build_wait_dot(theme, self.sidebar_pane.entity_id(), cx)
-                            .into_any_element()
-                    } else if working {
-                        loaders::mini_glyph_spinner(
-                            format!("{row_id}-working"),
-                            2.0,
-                            theme.glyph,
-                            self.sidebar_pane.entity_id(),
-                            cx,
+                        self.sidebar_motion_slot(
+                            format!("{row_id}-wait"),
+                            MotionKind::WaitDot {
+                                color: theme.text_muted,
+                            },
                         )
-                        .into_any_element()
+                    } else if working {
+                        self.sidebar_motion_slot(
+                            format!("{row_id}-working"),
+                            MotionKind::Spinner {
+                                cell_px: 2.0,
+                                tints: theme.glyph.rows(),
+                            },
+                        )
                     } else {
                         div()
                             .size(px(6.0))
@@ -8127,21 +8176,28 @@ impl Shell {
                     let hover_id = row_id.clone();
                     cx.listener(move |this, hovered: &bool, window, cx| {
                         fade_hover(hovered, window, cx);
+                        // The row is all that shows this, not the session.
                         if *hovered {
                             if this.chat_status_hover.as_deref() != Some(hover_id.as_str()) {
                                 this.chat_status_hover = Some(hover_id.clone());
-                                cx.notify();
+                                this.sidebar_pane.update(cx, |_, cx| cx.notify());
                             }
                         } else if this.chat_status_hover.as_deref() == Some(hover_id.as_str()) {
                             this.chat_status_hover = None;
-                            cx.notify();
+                            this.sidebar_pane.update(cx, |_, cx| cx.notify());
                         }
                     })
                 })
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_chat_in_tab(select_id.clone(), window, cx);
-                }))
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        if event.modifiers().alt {
+                            this.open_sidebar_chat_to_the_right(&select_id, window, cx);
+                        } else {
+                            this.open_chat_in_tab(select_id.clone(), window, cx);
+                        }
+                    }),
+                )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -8480,10 +8536,13 @@ impl Shell {
                 };
                 (
                     caption.into(),
-                    loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
+                    self.sidebar_motion_slot(
+                        "chat-sync-spinner",
+                        MotionKind::Spinner {
+                            cell_px: 2.0,
+                            tints: [theme.text_muted; 3],
+                        },
+                    ),
                 )
             }
             S::Offline => (
@@ -8496,14 +8555,13 @@ impl Shell {
             ),
             S::Reconnecting => (
                 "Reconnecting…".into(),
-                loaders::mini_mono_spinner(
+                self.sidebar_motion_slot(
                     "connection-spinner",
-                    2.0,
-                    theme.text_muted,
-                    self.sidebar_pane.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
+                    MotionKind::Spinner {
+                        cell_px: 2.0,
+                        tints: [theme.text_muted; 3],
+                    },
+                ),
             ),
         };
         Some(
@@ -8530,7 +8588,16 @@ impl Shell {
         )
     }
 
-    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_chat_sidebar(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.focus_sidebar_search(window, cx);
+        if self.boot_restored {
+            self.ensure_workspace_sessions(cx);
+        }
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -8767,10 +8834,7 @@ impl Shell {
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
-        let filter_row = div().flex().items_center()
-            .child(self.render_project_picker(theme, cx))
-            .child(self.render_sidebar_search_trigger(theme, cx))
-            .child(self.render_sidebar_view_options(theme, cx));
+        let filter_row = self.render_spaces_filter(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let regular_items = pinned_items.split_off(pinned_count);
@@ -8880,10 +8944,13 @@ impl Shell {
         // rode the previous frame's offset, so the last frame of a content
         // shrink (row archived while scrolled) left a phantom fade stuck
         // over an unscrollable list (user report).
-        // A chat split adds a strip of pane cards above the list.
-        // With tabs, the strip moves under its own tab (taken below).
-        let mut pane_strip = self.render_pane_strip(theme, cx);
-        let chat_tabs = self.render_chat_tabs(theme, cx);
+        // Results replace the list while searching, and these rows with it.
+        let open_sessions = self
+            .sidebar_search
+            .is_none()
+            .then(|| self.render_open_session_rows(theme, window, cx))
+            .flatten();
+        let session_menu = self.render_workspace_session_menu(cx);
         let sidebar_lists = crate::edge_fade::edge_faded(
             SIDEBAR_GLASS_FADE_BAND,
             true,
@@ -8946,10 +9013,9 @@ impl Shell {
             .flex_col()
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
-            .children(chat_tabs)
-            .children(pane_strip)
             .child(filter_row)
             .children(search_controls)
+            .children(open_sessions)
             .child(sidebar_lists)
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
@@ -8986,7 +9052,8 @@ impl Shell {
             .when_some(self.render_cloud_sandbox_strip(theme, cx), |el, strip| {
                 el.child(strip)
             })
-            .child(div().p(px(Theme::SPACE_SM)).flex_none().child(user_menu))
+            .child(self.render_session_sidebar_footer(user_menu, theme, cx))
+            .when_some(session_menu, |el, menu| el.child(menu))
             .into_any_element()
     }
 
@@ -10333,6 +10400,7 @@ impl Shell {
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
+            let split_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let delete_id = chat_id.clone();
             let menu = popover::popover_card(&theme)
@@ -10361,6 +10429,31 @@ impl Shell {
                             }))
                             .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
                             .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" })),
+                    )
+                    .child(
+                        popover::menu_row(&theme, false, format!("chat-menu-split-{chat_id}"))
+                            .id("chat-menu-split")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.close_chat_menu(cx);
+                                this.open_sidebar_chat_to_the_right(&split_id, window, cx);
+                            }))
+                            .child(
+                                icon(icons::SPLIT_COLUMNS)
+                                    .size(px(16.0))
+                                    .text_color(theme.text_muted),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(SharedString::from("Open to the right")),
+                            )
+                            .child(div().text_color(theme.text_muted).child(SharedString::from(
+                                if cfg!(target_os = "macos") {
+                                    "⌥ click"
+                                } else {
+                                    "Alt click"
+                                },
+                            ))),
                     )
                     .child(
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
@@ -13223,7 +13316,12 @@ impl Render for Shell {
                 WorkspaceCommand::Model => self
                     .composer
                     .update(cx, |c, cx| c.open_model_menu(window, cx)),
-                WorkspaceCommand::New => self.workspace_new_chat(cx),
+                WorkspaceCommand::New => {
+                    if !matches!(self.route, Route::Chat) {
+                        self.close_settings(cx);
+                    }
+                    self.workspace_new_chat(cx);
+                }
                 WorkspaceCommand::Resume => self.toggle_resume_palette(window, cx),
                 WorkspaceCommand::Settings => {
                     let section = self.remembered_settings_section();
@@ -14098,15 +14196,14 @@ impl Render for Shell {
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
         let hover_fading = motion::hover_fades_active();
-        if hover_fading || motion::hover_fades_held() {
-            // The sidebar is a cached view: unnotified, its rows would read
-            // their fade once and keep that first frame's color, and a fade
-            // left unread through a frame (a menu animating over a hovered
-            // trigger) is pruned as unmounted.
+        // The sidebar, the transcript and the composer are cached views:
+        // unnotified, their rows would read a fade once and keep that first
+        // frame's color. Each is notified only for fades of its own, so a
+        // hovered sidebar row rebuilds no transcript and a hovered panel no
+        // sidebar.
+        if motion::hover_needs_frame(self.sidebar_pane.entity_id()) {
             self.sidebar_pane.update(cx, |_, cx| cx.notify());
         }
-        // The transcript and composer are cached too, but notified only for
-        // fades of their own: a hovered sidebar row must not rebuild them.
         if motion::hover_needs_frame(self.transcript.entity_id()) {
             self.transcript.update(cx, |_, cx| cx.notify());
         }
@@ -14123,8 +14220,12 @@ impl Render for Shell {
                 peer.transcript.update(cx, |_, cx| cx.notify());
             }
         }
-        if self.motion_active.get() | hover_fading {
+        if self.motion_active.get() {
             window.request_animation_frame();
+        } else if hover_fading {
+            // A fade is a color on chrome this render already rebuilds. Notifying
+            // would tell every cached view that the session changed, each frame.
+            window.on_next_frame(|window, _| window.redraw_root());
         }
 
         // Boot splash overlay: visible → crossfades out on Ready → removed.
@@ -15146,12 +15247,12 @@ mod tests {
 
     #[test]
     fn cluster_clearance_clears_the_overlay_buttons() {
-        // Linux: buttons at 10..86; a 16px-padded header needs 78 more px to
-        // put content at 86 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 0, 16.0), 78.0);
-        assert_eq!(cluster_clearance(false, false, 0, 10.0), 84.0);
+        // Linux: buttons at 10..34; a 16px-padded header needs 26 more px to
+        // put content at 34 + 8 breathing room.
+        assert_eq!(cluster_clearance(false, false, 0, 16.0), 26.0);
+        assert_eq!(cluster_clearance(false, false, 0, 10.0), 32.0);
         // Linux with a left-side close caption: everything shifts one slot.
-        assert_eq!(cluster_clearance(false, false, 1, 16.0), 78.0 + 26.0);
+        assert_eq!(cluster_clearance(false, false, 1, 16.0), 26.0 + 26.0);
         // macOS: buttons start at the 88px traffic-light cluster start.
         assert_eq!(
             cluster_clearance(true, false, 0, 16.0),
@@ -15759,7 +15860,8 @@ mod exit_regressions {
                     crate::appshots::AppshotDestination::NewSession;
                 shell.receive_appshot(crate::appshots::tests::shot(), window, cx);
                 assert!(shell.state.read(cx).selected_chat.is_none());
-                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("b"));
+                // Delivering to the last session moved the view to its project.
+                assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("a"));
                 assert_eq!(shell.composer.read(cx).appshots[""].len(), 1);
             })
             .unwrap();
@@ -16085,39 +16187,75 @@ mod exit_regressions {
                 cx,
             )
         });
-        let mut drawer_window = None;
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, _| {
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "terminal-session", "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now(),
+                        }))
+                        .unwrap(),
+                    ];
+                });
+                shell.boot_restored = true;
+                shell.ensure_workspace_sessions(cx);
+            })
+            .unwrap();
+        // The boot/connection gate hides the shell's own panels from a test draw,
+        // so mount each terminal in its own window, like the composer test below.
+        let mut drawer: Option<(Entity<TerminalPanel>, gpui::WindowHandle<TerminalPanel>)> = None;
         for embedded in [false, false, true] {
             let panel = window
                 .update(cx, |shell, window, cx| {
                     shell.open_chat("terminal-session".into(), cx);
                     shell.active_chat = "terminal-session".into();
-                    let panel = if embedded {
+                    if embedded {
                         shell.add_terminal_surface(cx);
-                        shell.right_terminal.clone().unwrap()
                     } else {
-                        shell.toggle_terminal(window, cx);
-                        shell.terminal.clone().unwrap()
+                        assert!(shell.toggle_workspace_tool(true, window, cx));
+                    }
+                    let layout = shell.panel_layout(cx).unwrap();
+                    let tab = layout
+                        .panels
+                        .iter()
+                        .find(|panel| panel.id == layout.focused)
+                        .and_then(|panel| panel.selected());
+                    let Some(workspace_panels::PanelTab::Terminal(id)) = tab else {
+                        panic!("the opened terminal must be the focused tab, got {tab:?}");
                     };
                     assert!(!shell.composer.read(cx).focus_pending);
+                    let panel = shell.workspace_panels.terminals[id].clone();
+                    if !embedded {
+                        assert!(panel.read(cx).focus_handle().is_focused(window));
+                    }
                     panel
                 })
                 .unwrap();
-            let terminal_window = if !embedded && drawer_window.is_some() {
-                drawer_window.unwrap()
+            // Hiding keeps the terminal: the next toggle brings back the same one.
+            let reopened = !embedded && drawer.is_some();
+            if reopened {
+                let (first, _) = drawer.as_ref().unwrap();
+                assert_eq!(first.entity_id(), panel.entity_id());
+            }
+            let terminal_window = if reopened {
+                drawer.as_ref().unwrap().1
             } else {
                 let handle = cx.update(|cx| {
                     cx.open_window(gpui::WindowOptions::default(), |_, _| panel.clone())
                         .unwrap()
                 });
                 if !embedded {
-                    drawer_window = Some(handle);
+                    drawer = Some((panel.clone(), handle));
                 }
                 handle
             };
             cx.update_window(terminal_window.into(), |_, window, cx| {
                 window.draw(cx).clear();
+                // A reopened terminal was focused in the shell's window above;
+                // a new one claims focus when it first mounts.
                 assert!(
-                    panel.read(cx).focus_handle().is_focused(window),
+                    reopened || panel.read(cx).focus_handle().is_focused(window),
                     "embedded: {embedded}"
                 );
                 // Ordinary redraws must not steal focus from another control.
@@ -16130,7 +16268,7 @@ mod exit_regressions {
             if !embedded {
                 window
                     .update(cx, |shell, window, cx| {
-                        shell.toggle_terminal(window, cx);
+                        assert!(shell.toggle_workspace_tool(true, window, cx));
                         assert!(shell.composer.focus_handle(cx).is_focused(window));
                     })
                     .unwrap();
@@ -16451,17 +16589,19 @@ mod exit_regressions {
                 // A render syncs the Settings page's pick into the shell's copy.
                 shell.sync_independent_settings(cx);
                 assert_eq!(shell.archive_closed_session("a".into(), window, cx), CloseArchive::StillOpen);
-                // ⌘D parks "a" in the pane to the left: still open there.
-                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                // ⌘D leaves "a" in the panel to the left: still open there.
+                shell.boot_restored = true;
+                shell.ensure_workspace_sessions(cx);
+                shell.sync_panel_workspace(cx);
+                shell.workspace_split(SplitAxis::Horizontal, cx);
                 assert_eq!(shell.archive_closed_session("a".into(), window, cx), CloseArchive::StillOpen);
                 assert_eq!(shell.archive_closed_session("busy".into(), window, cx), CloseArchive::Running);
                 assert_eq!(shell.archive_closed_session("idle".into(), window, cx), CloseArchive::Archived);
-                // ⌘W on "a"'s pane: nothing else shows it, so it is archived.
-                shell.focus_chat_pane(0, window, cx);
-                assert_eq!(
-                    shell.close_focused_chat_pane_archiving(window, cx),
-                    (true, Some(CloseArchive::Archived))
-                );
+                // Closing "a"'s tab: nothing else shows it, so it is archived.
+                let tab = workspace_panels::PanelTab::Chat("a".into());
+                let (panel, _) = shell.panel_layout(cx).unwrap().location(&tab).unwrap();
+                shell.close_workspace_tab(panel, tab, window, cx);
+                assert_eq!(shell.archive_closed_session("a".into(), window, cx), CloseArchive::Archived);
             })
             .unwrap();
     }
@@ -16621,8 +16761,11 @@ mod exit_regressions {
                 let project = |shell: &Shell, cx: &App| shell.state.read(cx).selected_space.clone();
                 assert_eq!(project(shell, cx).as_deref(), Some("harness"));
 
-                // ⌘D from the harness chat, then pick folio in the new pane.
-                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                // ⌘D from the harness chat, then pick folio in the new panel.
+                shell.boot_restored = true;
+                shell.ensure_workspace_sessions(cx);
+                shell.sync_panel_workspace(cx);
+                shell.workspace_split(SplitAxis::Horizontal, cx);
                 assert!(shell.state.read(cx).selected_chat.is_none());
                 assert_eq!(
                     project(shell, cx).as_deref(),
@@ -16633,26 +16776,26 @@ mod exit_regressions {
                     .state
                     .update(cx, |state, cx| state.select_space(Some("folio".into()), cx));
 
-                // Visiting the harness pane moves the project to harness...
-                shell.focus_chat_pane(0, window, cx);
+                // Visiting the harness panel moves the project to harness...
+                focus_workspace_panel_for_test(shell, 0, window, cx);
                 assert_eq!(project(shell, cx).as_deref(), Some("harness"));
                 // ...and coming back restores the canvas's own pick.
-                shell.focus_chat_pane(1, window, cx);
+                focus_workspace_panel_for_test(shell, 1, window, cx);
                 assert_eq!(
                     project(shell, cx).as_deref(),
                     Some("folio"),
                     "the new pane used to come back as harness (user report)"
                 );
-                // Same across tabs.
-                shell.new_chat_tab(Some("harness-chat".into()), window, cx);
-                assert_eq!(project(shell, cx).as_deref(), Some("harness"));
+                // Same across sessions.
+                shell.create_workspace_session(cx);
+                assert_eq!(shell.chat_tab, 1);
                 shell.switch_chat_tab(0, window, cx);
                 assert_eq!(project(shell, cx).as_deref(), Some("folio"));
             })
             .unwrap();
     }
 
-    fn focus_workspace_panel_for_test(
+    pub(in crate::shell) fn focus_workspace_panel_for_test(
         shell: &mut Shell,
         index: usize,
         window: &mut Window,
@@ -17970,9 +18113,6 @@ mod exit_regressions {
         });
         let weak = window
             .update(cx, |shell, window, cx| {
-                // A fresh-session canvas never accumulates ownerless tabs.
-                shell.add_browser_surface(None, window, cx);
-                assert!(shell.browsers.is_empty());
                 shell.active_chat = "first-session".into();
                 shell.add_browser_surface(None, window, cx);
                 let first = shell.browser_seq;

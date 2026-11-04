@@ -4,7 +4,7 @@
 //! --reorder exercises a real pointer drag and captures hover, active drag, and saved order.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
 use harness_ui::*;
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, time::Duration};
 
 const PROJECTS: [(&str, &str, Option<&str>); 6] = [
     ("studio", "Studio", Some("studio-settings")),
@@ -118,7 +118,11 @@ fn transcript(
     }
     serde_json::from_value(serde_json::json!([{
         "id": format!("{chat}-assistant"), "role": "assistant", "parts": parts,
-        "createdAt": (now - chrono::Duration::minutes(2)).timestamp_millis(),
+        "createdAt": (now - match chat {
+            "atlas-review" => chrono::Duration::days(8),
+            "beacon-search" => chrono::Duration::hours(2),
+            _ => chrono::Duration::minutes(2),
+        }).timestamp_millis(),
         "deviceId": "preview-device",
         "status": if ["studio-settings", "orbit-export", "harbor-preview"].contains(&chat) {
             "streaming"
@@ -166,6 +170,108 @@ fn pointer_move(
     })
 }
 
+fn session_order(
+    window: gpui::WindowHandle<shell::Shell>,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<Vec<String>> {
+    Ok(window
+        .update(cx, |shell, _, cx| shell.fixture_overview_project_order(cx))?
+        .into_iter()
+        .flatten()
+        .collect())
+}
+
+/// Where a selector was painted in the latest frame. Nothing here depends on
+/// fixed coordinates, so the layout can change without breaking the drag.
+async fn painted_bounds(
+    handle: gpui::AnyWindowHandle,
+    cx: &mut AsyncApp,
+    selector: &str,
+) -> anyhow::Result<gpui::Bounds<gpui::Pixels>> {
+    handle.update(cx, |_, window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    })?;
+    handle
+        .update(cx, |_, window, _| window.debug_bounds(selector))?
+        .ok_or_else(|| anyhow::anyhow!("{selector} was not painted"))
+}
+
+async fn press_grip(
+    handle: gpui::AnyWindowHandle,
+    cx: &mut AsyncApp,
+    session: &str,
+) -> anyhow::Result<gpui::Point<gpui::Pixels>> {
+    let start = painted_bounds(handle, cx, &format!("overview-reorder-{session}"))
+        .await?
+        .center();
+    pointer_move(handle, cx, start, false)?;
+    // Let the grip's reveal finish while staying below the tooltip delay.
+    cx.background_executor()
+        .timer(Duration::from_millis(220))
+        .await;
+    handle.update(cx, |_, window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                position: start,
+                button: gpui::MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            }),
+            cx,
+        );
+    })?;
+    Ok(start)
+}
+
+async fn drag_through(
+    handle: gpui::AnyWindowHandle,
+    cx: &mut AsyncApp,
+    start: gpui::Point<gpui::Pixels>,
+    destination: gpui::Point<gpui::Pixels>,
+) -> anyhow::Result<()> {
+    for step in 1..=4 {
+        let t = step as f32 / 4.0;
+        let position = gpui::point(
+            start.x + (destination.x - start.x) * t,
+            start.y + (destination.y - start.y) * t,
+        );
+        pointer_move(handle, cx, position, true)?;
+        cx.background_executor()
+            .timer(Duration::from_millis(80))
+            .await;
+        anyhow::ensure!(
+            cx.update(|cx| cx.has_active_drag()),
+            "the grip did not start or keep a real drag"
+        );
+    }
+    Ok(())
+}
+
+async fn release(
+    handle: gpui::AnyWindowHandle,
+    cx: &mut AsyncApp,
+    position: gpui::Point<gpui::Pixels>,
+) -> anyhow::Result<()> {
+    handle.update(cx, |_, window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                position,
+                button: gpui::MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            }),
+            cx,
+        );
+    })?;
+    settle(cx).await;
+    anyhow::ensure!(
+        !cx.update(|cx| cx.has_active_drag()),
+        "the drag stayed active after the drop"
+    );
+    Ok(())
+}
+
 async fn verify_reorder(
     window: gpui::WindowHandle<shell::Shell>,
     cx: &mut AsyncApp,
@@ -176,84 +282,61 @@ async fn verify_reorder(
         window.resize(size(px(1440.), px(1000.)));
     })?;
     settle(cx).await;
-    let before: Vec<Option<String>> = PROJECTS
-        .iter()
-        .map(|(id, _, _)| Some((*id).into()))
-        .collect();
+    let handle: gpui::AnyWindowHandle = window.into();
+    let initial = session_order(window, cx)?;
+    let live = |order: &[String]| order.iter().take(4).cloned().collect::<Vec<_>>();
     anyhow::ensure!(
-        window.update(cx, |shell, _, cx| shell.fixture_overview_project_order(cx))? == before,
-        "unexpected initial overview order"
+        live(&initial)
+            == [
+                "session-orbit",
+                "session-studio",
+                "session-harbor",
+                "session-beacon"
+            ],
+        "unexpected initial overview order: {initial:?}"
     );
 
     // Hovering the sheet body must leave every grip hidden. Only the
     // separate project heading above a sheet reveals its grip.
-    let handle: gpui::AnyWindowHandle = window.into();
-    pointer_move(handle, cx, gpui::point(px(466.), px(200.)), false)?;
+    let studio_card = painted_bounds(handle, cx, "overview-session-session-studio").await?;
+    pointer_move(handle, cx, studio_card.center(), false)?;
     settle(cx).await;
-    capture(handle, cx, output, &format!("overview-body-hover-{appearance}-1440"))?;
-    let start = gpui::point(px(43.), px(71.));
-    pointer_move(handle, cx, start, false)?;
-    // Let the grip's reveal finish while staying below the tooltip delay.
-    cx.background_executor()
-        .timer(Duration::from_millis(220))
-        .await;
-    capture(handle, cx, output, &format!("overview-hover-{appearance}-1440"))?;
+    capture(
+        handle,
+        cx,
+        output,
+        &format!("overview-body-hover-{appearance}-1440"),
+    )?;
 
-    // These coordinates belong to this synthetic 1440px fixture: x32 card
-    // gutter, heading y60..82, and a 22px grip to the left of "Studio".
-    // GPUI debug-selector bounds are internal, so use the deterministic
-    // layout and fail if the real drag does not activate.
-    handle.update(cx, |_, window, cx| {
-        window.dispatch_event(
-            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                position: start,
-                button: gpui::MouseButton::Left,
-                click_count: 1,
-                ..Default::default()
-            }),
-            cx,
-        );
-    })?;
-    let destination = gpui::point(px(1180.), px(300.));
-    for position in [
-        gpui::point(px(56.), px(71.)),
-        gpui::point(px(260.), px(155.)),
-        gpui::point(px(700.), px(210.)),
-        gpui::point(px(1100.), px(250.)),
-        destination,
-    ] {
-        pointer_move(handle, cx, position, true)?;
-        cx.background_executor()
-            .timer(Duration::from_millis(80))
-            .await;
-        anyhow::ensure!(
-            cx.update(|cx| cx.has_active_drag()),
-            "project grip did not start or retain a real GPUI drag"
-        );
-    }
-    capture(handle, cx, output, &format!("overview-drag-{appearance}-1440"))?;
-    handle.update(cx, |_, window, cx| {
-        window.dispatch_event(
-            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                position: destination,
-                button: gpui::MouseButton::Left,
-                click_count: 1,
-                ..Default::default()
-            }),
-            cx,
-        );
-    })?;
-    settle(cx).await;
+    // Within a section: Studio past Harbor, both Working.
+    let start = press_grip(handle, cx, "session-studio").await?;
+    capture(
+        handle,
+        cx,
+        output,
+        &format!("overview-hover-{appearance}-1440"),
+    )?;
+    let destination = painted_bounds(handle, cx, "overview-session-session-harbor")
+        .await?
+        .center();
+    drag_through(handle, cx, start, destination).await?;
+    capture(
+        handle,
+        cx,
+        output,
+        &format!("overview-drag-{appearance}-1440"),
+    )?;
+    release(handle, cx, destination).await?;
+    let order = session_order(window, cx)?;
     anyhow::ensure!(
-        !cx.update(|cx| cx.has_active_drag()),
-        "project drag remained active after the drop"
-    );
-    let mut expected = before;
-    let studio = expected.remove(0);
-    expected.insert(2, studio);
-    anyhow::ensure!(
-        window.update(cx, |shell, _, cx| shell.fixture_overview_project_order(cx))? == expected,
-        "dropping Studio on Beacon did not produce Orbit, Beacon, Studio"
+        live(&order)
+            == [
+                "session-orbit",
+                "session-harbor",
+                "session-studio",
+                "session-beacon"
+            ],
+        "dropping Studio on Harbor did not swap them: {order:?}"
     );
 
     // Reopening exercises saved layout restoration, not just the live order.
@@ -263,89 +346,120 @@ async fn verify_reorder(
     })?;
     settle(cx).await;
     anyhow::ensure!(
-        window.update(cx, |shell, _, cx| shell.fixture_overview_project_order(cx))? == expected,
-        "project order did not survive closing and reopening the overview"
+        session_order(window, cx)? == order,
+        "the order did not survive closing and reopening the overview"
     );
-    pointer_move(handle, cx, gpui::point(px(1420.), px(70.)), false)?;
-    settle(cx).await;
-    capture(handle, cx, output, &format!("overview-reordered-{appearance}-1440"))?;
+    capture(
+        handle,
+        cx,
+        output,
+        &format!("overview-reordered-{appearance}-1440"),
+    )?;
 
-    // In two columns the last row sits below the fold. Holding a drag near
-    // the viewport edge must reveal it, even without further mouse movement.
+    // Across sections: nothing moves, and the card doesn't light up.
+    let start = press_grip(handle, cx, "session-studio").await?;
+    let destination = painted_bounds(handle, cx, "overview-session-session-orbit")
+        .await?
+        .center();
+    drag_through(handle, cx, start, destination).await?;
+    capture(
+        handle,
+        cx,
+        output,
+        &format!("overview-cross-section-{appearance}-1440"),
+    )?;
+    release(handle, cx, destination).await?;
+    let after = session_order(window, cx)?;
+    anyhow::ensure!(
+        after == order,
+        "dropping Studio on another section changed the order: {after:?}"
+    );
+
+    // One column: Studio starts cut off by the fold. Holding a drag near the
+    // edge has to scroll it up, even without further mouse movement.
     window.update(cx, |_, window, _| {
-        window.resize(size(px(760.), px(1000.)));
+        window.resize(size(px(520.), px(420.)));
     })?;
     settle(cx).await;
     let height = window.update(cx, |_, window, _| f32::from(window.viewport_size().height))?;
-    let start = gpui::point(px(43.), px(71.));
-    pointer_move(handle, cx, start, false)?;
-    cx.background_executor()
-        .timer(Duration::from_millis(220))
-        .await;
-    handle.update(cx, |_, window, cx| {
-        window.dispatch_event(
-            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                position: start,
-                button: gpui::MouseButton::Left,
-                click_count: 1,
-                ..Default::default()
-            }),
-            cx,
-        );
-    })?;
-    for position in [
-        gpui::point(px(56.), px(71.)),
-        gpui::point(px(650.), px(300.)),
-        gpui::point(px(650.), px(height - 10.)),
-    ] {
-        pointer_move(handle, cx, position, true)?;
-        cx.background_executor()
-            .timer(Duration::from_millis(80))
-            .await;
-        anyhow::ensure!(
-            cx.update(|cx| cx.has_active_drag()),
-            "narrow project drag did not start or remain active"
-        );
+    let harbor = "overview-reorder-session-harbor";
+    for _ in 0..12 {
+        if f32::from(painted_bounds(handle, cx, harbor).await?.top()) < 120.0 {
+            break;
+        }
+        handle.update(cx, |_, window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                    position: gpui::point(px(260.), px(300.)),
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-80.))),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })?;
+        settle(cx).await;
     }
-    cx.background_executor()
-        .timer(Duration::from_millis(1200))
-        .await;
+    let target = "overview-session-session-studio";
+    let below = painted_bounds(handle, cx, target).await?;
+    anyhow::ensure!(
+        f32::from(below.bottom()) > height,
+        "Studio should start cut off by the fold: {below:?} in {height}"
+    );
+    let start = press_grip(handle, cx, "session-harbor").await?;
+    let edge = gpui::point(px(260.), px(height - 10.));
+    drag_through(handle, cx, start, edge).await?;
+    // Scrolling is quick, so watch for Studio rather than hold for a fixed time.
+    let mut revealed = below;
+    for _ in 0..60 {
+        cx.background_executor()
+            .timer(Duration::from_millis(30))
+            .await;
+        revealed = painted_bounds(handle, cx, target).await?;
+        if f32::from(revealed.center().y) < height - 100.0 {
+            break;
+        }
+    }
     anyhow::ensure!(
         cx.update(|cx| cx.has_active_drag()),
-        "edge scrolling unexpectedly ended the project drag"
+        "edge scrolling ended the drag"
     );
-    // After scrolling, this point is inside New project's final-row sheet.
-    // At the initial scroll offset it hits an earlier row, including when
-    // the requested 1000px height is not clamped by the physical display.
-    let destination = gpui::point(px(650.), px(height - 240.));
+    anyhow::ensure!(
+        revealed.top() < below.top(),
+        "holding at the edge did not scroll: {revealed:?} was {below:?}"
+    );
+    // Leaving the scroll zone stops the scrolling, so the card stays put.
+    let destination = gpui::point(px(260.), revealed.center().y);
     pointer_move(handle, cx, destination, true)?;
     settle(cx).await;
-    capture(handle, cx, output, &format!("overview-scroll-drag-{appearance}-760"))?;
-    handle.update(cx, |_, window, cx| {
-        window.dispatch_event(
-            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                position: destination,
-                button: gpui::MouseButton::Left,
-                click_count: 1,
-                ..Default::default()
-            }),
-            cx,
-        );
-    })?;
-    settle(cx).await;
+    let landed = painted_bounds(handle, cx, target).await?;
     anyhow::ensure!(
-        !cx.update(|cx| cx.has_active_drag()),
-        "narrow project drag remained active after the drop"
+        landed.contains(&destination),
+        "the pointer missed Studio at {destination:?}: {landed:?}, height {height}"
     );
-    let orbit = expected.remove(0);
-    expected.push(orbit);
+    capture(
+        handle,
+        cx,
+        output,
+        &format!("overview-scroll-drag-{appearance}-520"),
+    )?;
+    release(handle, cx, destination).await?;
+    let order = session_order(window, cx)?;
     anyhow::ensure!(
-        window.update(cx, |shell, _, cx| shell.fixture_overview_project_order(cx))? == expected,
-        "edge drag failed to reach the last row and move Orbit to the end"
+        live(&order)
+            == [
+                "session-orbit",
+                "session-studio",
+                "session-harbor",
+                "session-beacon"
+            ],
+        "the edge drag did not reach Studio: {order:?}"
     );
-    pointer_move(handle, cx, gpui::point(px(740.), px(70.)), false)?;
-    settle(cx).await;
-    capture(handle, cx, output, &format!("overview-reordered-{appearance}-760"))?;
+    capture(
+        handle,
+        cx,
+        output,
+        &format!("overview-reordered-{appearance}-520"),
+    )?;
     Ok(())
 }
 
@@ -366,8 +480,6 @@ fn main() -> anyhow::Result<()> {
     let _runtime = runtime.enter();
     let temporary = tempfile::tempdir()?;
     let data = temporary.path().to_path_buf();
-    let failure = Arc::new(std::sync::Mutex::new(None));
-    let result = failure.clone();
 
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
         gpui_tokio::init(cx);
@@ -375,7 +487,8 @@ fn main() -> anyhow::Result<()> {
         let mut settings = settings::UiSettings::default();
         settings.project_tabs_version = 1;
         settings.chat_tabs = PROJECTS.iter().map(|(id, _, chat)| settings::SavedChatTab {
-            project: Some((*id).into()), selected: chat.map(str::to_owned), layout: None,
+            id: format!("session-{id}"), project: Some((*id).into()),
+            selected: chat.map(str::to_owned), ..Default::default()
         }).collect();
         settings.chat_tab = 0;
         settings.last_space_id = Some("studio".into());
@@ -421,7 +534,12 @@ fn main() -> anyhow::Result<()> {
                 serde_json::from_value(serde_json::json!({
                     "id": id, "spaceId": project, "deviceId": "preview-device", "title": title,
                     "archived": false, "createdAt": now - chrono::Duration::hours(index as i64 + 1),
-                    "lastMessagePreview": preview, "lastMessageAt": now - chrono::Duration::minutes(2),
+                    "lastMessagePreview": preview,
+                    "lastMessageAt": now - match *id {
+                        "atlas-review" => chrono::Duration::days(8),
+                        "beacon-search" => chrono::Duration::hours(2),
+                        _ => chrono::Duration::minutes(2),
+                    },
                     "lastPromptAt": now - chrono::Duration::minutes(10), "lastSeenAt": now,
                     "config": {"harness": "graff", "model": null, "reasoning": null, "sandbox": "workspace-write"}
                 })).expect("valid synthetic chat")
@@ -433,7 +551,7 @@ fn main() -> anyhow::Result<()> {
             ].into_iter().map(|(id, status)| harness_proto::Session {
                 chat_id: id.into(), device_id: "preview-device".into(), status,
                 started_at: Some(now - chrono::Duration::minutes(5)), updated_at: now,
-                last_completed_turn: None,
+                last_completed_turn: None, last_completed_peer_only: false,
             }).collect();
             state
         });
@@ -474,6 +592,10 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 settle(cx).await;
+                window.update(cx, |shell, _, cx| {
+                    let sessions: Vec<_> = PROJECTS.iter().map(|(id, _, chat)| (*id, *chat)).collect();
+                    shell.fixture_overview_sessions(&sessions, cx)
+                })?;
                 window.update(cx, |shell, window, cx| shell.fixture_session_overview(true, window, cx))?;
                 settle(cx).await;
                 let appearance = if dark { "dark" } else { "light" };
@@ -534,13 +656,14 @@ fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }.await;
-            if let Err(error) = run { *result.lock().unwrap() = Some(format!("{error:#}")); }
+            if let Err(error) = run {
+                // Quitting ends the process on macOS, before `main` can return this.
+                eprintln!("session-overview-fixture failed: {error:#}");
+                std::process::exit(1);
+            }
             let _ = window.update(cx, |_, window, _| window.remove_window());
             cx.update(|cx| cx.quit());
         }).detach();
     });
-    if let Some(error) = failure.lock().unwrap().take() {
-        anyhow::bail!(error);
-    }
     Ok(())
 }

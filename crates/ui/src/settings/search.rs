@@ -138,6 +138,11 @@ const ENTRIES: &[SettingsEntry] = &[
     ),
     entry(
         S::Appearance,
+        "Task view",
+        "sidebar workspaces sessions dashboard overview tasks",
+    ),
+    entry(
+        S::Appearance,
         "Reduce motion",
         "animation animations accessibility motion",
     ),

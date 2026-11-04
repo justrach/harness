@@ -508,6 +508,14 @@ pub fn set_archive_sessions_on_close(enabled: bool, cx: &mut App) {
     });
 }
 
+pub fn set_sidebar_task_view(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.sidebar_task_view = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
@@ -618,6 +626,8 @@ pub enum SidebarOrganization {
     ByDevice,
     #[default]
     InOneList,
+    /// "Needs you", "Today" and "Earlier": chats waiting on you first.
+    ByStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1043,6 +1053,12 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// The conversation sidebar lists every project's sessions. Separate from
+    /// `space_filter`, which follows the active session and so can't hold it.
+    pub sidebar_all_projects: bool,
+    /// The sidebar lists open workspaces instead of conversations, with the
+    /// All sessions dashboard beside the project switcher.
+    pub sidebar_task_view: bool,
     /// The chat that was open at quit; launch reopens it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_chat_id: Option<String>,
@@ -1215,7 +1231,7 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
-            sidebar_organization: SidebarOrganization::InOneList,
+            sidebar_organization: SidebarOrganization::ByProject,
             sidebar_sort: SidebarSort::LastUpdated,
             sidebar_compact: true,
             sidebar_show_project_label: false,
@@ -1229,6 +1245,10 @@ impl Default for UiSettings {
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
+            sidebar_all_projects: true,
+            // The conversation sidebar is the default. Tests and capture
+            // fixtures written for the workspace sidebar keep rendering it.
+            sidebar_task_view: cfg!(any(test, feature = "appshots-fixture")),
             last_chat_id: None,
             chat_layout: None,
             archive_sessions_on_close: false,
@@ -3326,6 +3346,8 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            sidebar_all_projects: true,
+            sidebar_task_view: true,
             last_chat_id: Some("b".into()),
             chat_layout: Some(SavedChatLayout {
                 vertical: false,

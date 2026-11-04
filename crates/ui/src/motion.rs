@@ -925,10 +925,6 @@ impl ScopedHoverFades {
         unowned | self.scopes.iter().any(|(owner, fades)| owner.is_some()
             && fades.entries.values().any(|entry| !entry.settled(now, fades.duration())))
     }
-
-    fn any_held(&self) -> bool {
-        self.scopes.values().any(HoverFades::any_held)
-    }
 }
 
 thread_local! {
@@ -1021,11 +1017,15 @@ pub fn hover_listener(
     let owner = HOVER_OWNER.with(Cell::get);
     move |hovered, window, cx| {
         set_hover_for(owner, &key, *hovered, reduced_motion(cx));
-        // Event-dispatch context: `request_animation_frame` is draw-phase-only
-        // (it resolves the current view) — `refresh` marks the whole window
-        // dirty, the root render re-evaluates the blend and keeps frames
-        // coming via its tail while the fade is mid-flight.
-        window.refresh();
+        // Only the view reading this fade redraws. `refresh` would rebuild every
+        // cached view in the window, and with several panels open that is
+        // every transcript each time the pointer crosses a button. The root
+        // render re-evaluates the blend and keeps frames coming via its tail
+        // while the fade is mid-flight.
+        match owner {
+            Some(owner) => cx.notify(owner),
+            None => window.redraw_root(),
+        }
     }
 }
 
@@ -1035,12 +1035,6 @@ pub fn hover_fades_active() -> bool {
     let now = Instant::now();
     let reveals = HOVER_REVEALS.with(|reveals| reveals.borrow_mut().tick_at(now));
     HOVER_FADES.with(|fades| fades.borrow_mut().tick_unowned_at(now)) | reveals
-}
-
-/// Something is hovered (see [`HoverFades::any_held`]); call after
-/// [`hover_fades_active`] in the same frame.
-pub fn hover_fades_held() -> bool {
-    HOVER_FADES.with(|fades| fades.borrow().any_held())
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component

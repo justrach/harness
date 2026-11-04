@@ -180,7 +180,11 @@ impl Shell {
         })
     }
 
-    fn finish_history_chat_deletion(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+    pub(in crate::shell) fn finish_history_chat_deletion(
+        &mut self,
+        chat_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let browsers: Vec<_> = self.right_tabs.get(chat_id).into_iter().flatten().filter_map(|surface| {
             if let RightSurface::Browser(id) = surface { Some(*id) } else { None }
         }).collect();

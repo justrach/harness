@@ -86,6 +86,13 @@ fn setup<'a>(
     (shell, cx)
 }
 
+/// The real workspace session a ⌘D splits, as a restored window has it.
+fn seed_workspace_session(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.boot_restored = true;
+    shell.ensure_workspace_sessions(cx);
+    shell.sync_panel_workspace(cx);
+}
+
 fn assert_single_header(shell: &Entity<Shell>, cx: &mut VisualTestContext, title: &str) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("chat-tab-0").is_some());
@@ -129,9 +136,11 @@ fn project_tab_name_stays_stable_across_chats_and_canvas(cx: &mut TestAppContext
 fn top_tab_survives_split_and_tab_closure(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = setup(cx, dir.path());
-    cx.update(|window, cx| {
+    cx.update(|_, cx| {
         shell.update(cx, |shell, cx| {
-            shell.split_chat(SplitAxis::Horizontal, window, cx)
+            seed_workspace_session(shell, cx);
+            shell.workspace_split(SplitAxis::Horizontal, cx);
+            assert_eq!(shell.panel_layout(cx).unwrap().panels.len(), 2);
         });
     });
     assert_single_header(&shell, cx, "A");
@@ -139,15 +148,18 @@ fn top_tab_survives_split_and_tab_closure(cx: &mut TestAppContext) {
     assert_eq!(header.size.height, px(NAV_ITEM_HEIGHT));
     assert!(cx.debug_bounds("chat-tab-group-0").is_none());
     assert!(cx.debug_bounds("chat-pane-card-0").is_none());
-    // Cmd+W removes the extra Cmd+D pane; the header must not disappear.
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            assert!(shell.close_focused_chat_pane(window, cx));
-            assert!(shell.chat_split.is_none());
+    // Cmd+W removes the extra Cmd+D panel's tab, then the emptied panel; the
+    // header must not disappear at either step.
+    for panels in [2, 1] {
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                assert!(shell.workspace_close_focused(window, cx));
+                assert_eq!(shell.panel_layout(cx).unwrap().panels.len(), panels);
+            });
         });
-    });
-    assert_single_header(&shell, cx, "A");
-    cx.update(|window, cx| {
+        assert_single_header(&shell, cx, "A");
+    }
+    cx.update(|_, cx| {
         shell.update(cx, |shell, cx| shell.open_project_tab(Some("b".into()), cx));
     });
     cx.run_until_parked();
@@ -278,19 +290,25 @@ fn top_strip_reveals_the_selected_tab_when_it_overflows(cx: &mut TestAppContext)
 fn pane_focus_updates_one_top_tab_instead_of_adding_subtabs(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = setup(cx, dir.path());
-    cx.update(|window, cx| {
+    cx.update(|_, cx| {
         shell.update(cx, |shell, cx| {
+            seed_workspace_session(shell, cx);
             for _ in 0..7 {
-                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                shell.workspace_split(SplitAxis::Horizontal, cx);
             }
         });
     });
     assert_single_header(&shell, cx, "A");
     assert!(cx.debug_bounds("chat-pane-card-7").is_none());
-    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.focus_chat_pane(0, window, cx)));
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            crate::shell::exit_regressions::focus_workspace_panel_for_test(shell, 0, window, cx)
+        })
+    });
     assert_single_header(&shell, cx, "A");
-    shell.read_with(cx, |shell, _| {
-        assert_eq!(shell.chat_split.as_ref().unwrap().panes.len(), 8);
-        assert_eq!(shell.chat_split.as_ref().unwrap().focus, 0);
+    shell.read_with(cx, |shell, cx| {
+        let layout = shell.panel_layout(cx).unwrap();
+        assert_eq!(layout.panels.len(), 8);
+        assert_eq!(layout.focused, layout.panels[0].id);
     });
 }

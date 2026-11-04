@@ -172,6 +172,20 @@ impl WindowInvalidator {
         }
     }
 
+    /// Like [`Self::invalidate_view`], without notifying the view's observers.
+    fn redraw_view(&self, entity: EntityId) {
+        let mut inner = self.inner.borrow_mut();
+        inner.update_count += 1;
+        inner.dirty_views.insert(entity);
+        if inner.draw_phase == DrawPhase::None {
+            Self::record_frame_dirty(&mut inner);
+            inner.dirty = true;
+            if let Some(request) = &inner.frame_requester {
+                request();
+            }
+        }
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.inner.borrow().dirty
     }
@@ -2074,6 +2088,15 @@ impl Window {
     /// Obtain a handle to the window that belongs to this context.
     pub fn window_handle(&self) -> AnyWindowHandle {
         self.handle
+    }
+
+    /// Redraw the root view on the next frame, for a change only its own
+    /// render shows. Unlike [`Self::refresh`] cached views keep their last
+    /// frame, and unlike notifying the root its observers do not run.
+    pub fn redraw_root(&self) {
+        if let Some(root) = &self.root {
+            self.invalidator.redraw_view(root.entity_id());
+        }
     }
 
     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.

@@ -15,6 +15,7 @@ mod reorder_tests;
 #[derive(Clone)]
 struct OverviewSessionDrag {
     session: String,
+    section: OverviewSection,
     title: SharedString,
 }
 
@@ -28,6 +29,7 @@ struct OverviewThread {
 
 struct OverviewSession {
     id: String,
+    pinned: bool,
     project: Option<String>,
     panel_count: usize,
     tab_count: usize,
@@ -56,6 +58,10 @@ struct OverviewQuestion {
     request: Option<String>,
     focus_pending: bool,
 }
+
+/// A question can offer a dozen choices. These are enough to tell what it's
+/// about; the rest are one click away.
+const OVERVIEW_OPTIONS_SHOWN: usize = 3;
 
 fn priority(indicator: harness_proto::ChatIndicator) -> u8 {
     use harness_proto::ChatIndicator::*;
@@ -91,6 +97,94 @@ fn status_style(
         Completed => (icons::CHECK, theme.success),
         Idle => (icons::CLOCK_CIRCLE, theme.text_muted),
     }
+}
+
+/// Where a session sits on the screen. People open this view to find what is
+/// stuck on them, so that comes first. A session nobody has touched in weeks
+/// doesn't get the same space as a question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OverviewSection {
+    NeedsYou,
+    Working,
+    Done,
+    Earlier,
+}
+
+impl OverviewSection {
+    fn of(indicator: Option<harness_proto::ChatIndicator>) -> Self {
+        use harness_proto::ChatIndicator::*;
+        match indicator {
+            Some(AwaitingInput | Errored) => Self::NeedsYou,
+            Some(Working) => Self::Working,
+            Some(Completed) => Self::Done,
+            Some(Idle) | None => Self::Earlier,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "Needs you",
+            Self::Working => "Working",
+            Self::Done => "Done",
+            Self::Earlier => "Earlier",
+        }
+    }
+}
+
+impl OverviewSession {
+    fn section(&self) -> OverviewSection {
+        OverviewSection::of(self.threads.first().map(|thread| thread.indicator))
+    }
+
+    fn updated_at(&self) -> Option<chrono::DateTime<Utc>> {
+        self.threads
+            .iter()
+            .filter_map(|thread| thread.activity.updated_at)
+            .max()
+    }
+}
+
+/// The order on screen. Live sections keep the order people dragged them into.
+/// Earlier rows have no handle: pinned first, then the most recent.
+fn overview_display_order(mut sessions: Vec<OverviewSession>) -> Vec<OverviewSession> {
+    sessions.sort_by_key(|session| {
+        let section = session.section();
+        if section == OverviewSection::Earlier {
+            (
+                section,
+                !session.pinned,
+                std::cmp::Reverse(session.updated_at()),
+            )
+        } else {
+            (section, false, std::cmp::Reverse(None))
+        }
+    });
+    sessions
+}
+
+/// The session arrow keys reorder `session` past. Sections are what's on
+/// screen, so a key never reaches across a heading.
+fn overview_neighbor(
+    order: &[(String, OverviewSection)],
+    session: &str,
+    delta: isize,
+) -> Option<String> {
+    let section = order.iter().find(|(id, _)| id == session)?.1;
+    let same: Vec<_> = order
+        .iter()
+        .filter(|(_, other)| *other == section)
+        .map(|(id, _)| id)
+        .collect();
+    let index = same.iter().position(|id| *id == session)?;
+    same.get(index.checked_add_signed(delta)?)
+        .map(|id| (*id).clone())
+}
+
+/// A section's position comes from status, so a card only has a place to land
+/// among its own section. Anywhere else it would rewrite the saved order with
+/// nothing to show for it.
+fn overview_accepts_drop(dragged: (&str, OverviewSection), card: (&str, OverviewSection)) -> bool {
+    dragged.0 != card.0 && dragged.1 == card.1
 }
 
 fn overview_columns(width: f32) -> usize {
@@ -129,7 +223,7 @@ impl Shell {
         self.close_sidebar_view_menu(cx);
         self.session_overview_return_focus = window.focused(cx);
         self.session_overview = true;
-        self.prepare_overview(cx);
+        self.prepare_overview(window, cx);
         window.focus(&self.session_overview_focus, cx);
         cx.notify();
     }
@@ -360,6 +454,7 @@ impl Shell {
                     .unwrap_or_else(|| "No activity yet.".into());
                 Some(OverviewSession {
                     id,
+                    pinned: row.pinned,
                     project: row.project.clone(),
                     name: row.title.clone(),
                     threads,
@@ -412,9 +507,31 @@ impl Shell {
         cx.notify();
     }
 
+    /// Open one workspace session per `(project, chat)` pair.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_overview_sessions(
+        &mut self,
+        sessions: &[(&str, Option<&str>)],
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_tabs = sessions
+            .iter()
+            .map(|(project, chat)| chat_tabs::ChatTab {
+                id: format!("session-{project}"),
+                project: Some((*project).into()),
+                selected: chat.map(str::to_owned),
+                ..Default::default()
+            })
+            .collect();
+        // The active tab follows the selection, and none is selected.
+        self.chat_tab = self.chat_tabs.len().saturating_sub(1);
+        self.session_overview_runtime.sessions.clear();
+        cx.notify();
+    }
+
     #[cfg(feature = "appshots-fixture")]
     pub fn fixture_overview_project_order(&self, cx: &App) -> Vec<Option<String>> {
-        self.overview_sessions(cx)
+        overview_display_order(self.overview_sessions(cx))
             .into_iter()
             .map(|session| Some(session.id))
             .collect()
@@ -497,15 +614,18 @@ impl Shell {
             .collect()
     }
 
-    fn prepare_overview(&mut self, cx: &mut Context<Self>) {
+    fn prepare_overview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.session_overview_runtime.active {
             return;
         }
         self.session_overview_runtime.active = true;
+        // The open question draws the composer inside this view. Redraw without
+        // notifying: every shell notification also notifies the composer, so
+        // notifying from here would loop forever while a question is open.
         self.session_overview_runtime.composer_observer =
-            Some(cx.observe(&self.composer, |this, _, cx| {
+            Some(cx.observe_in(&self.composer, window, |this, _, window, _| {
                 if this.session_overview_runtime.question.is_some() {
-                    cx.notify();
+                    window.redraw_root();
                 }
             }));
         self.session_overview_runtime.text_observer = Some(cx.subscribe(
@@ -569,7 +689,7 @@ impl Shell {
         // presentation moves; answers still use the existing request pipeline.
         self.open_chat_in_tab(chat.clone(), window, cx);
         self.session_overview = true;
-        self.prepare_overview(cx);
+        self.prepare_overview(window, cx);
         self.session_overview_runtime.question = Some(OverviewQuestion {
             chat,
             request: None,
@@ -827,6 +947,7 @@ impl Shell {
                 gpui::FontWeight::MEDIUM
             })
             .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
                 this.overview_open_session_chat(&session, id.clone(), window, cx)
             }))
             .on_key_down(
@@ -861,12 +982,123 @@ impl Shell {
             .into_any_element()
     }
 
+    /// One line for a session with nothing going on.
+    fn render_overview_earlier_row(
+        &mut self,
+        session: &OverviewSession,
+        width: f32,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let focus = self
+            .session_overview_controls
+            .entry(format!("session:{}", session.id))
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
+        let open_id = session.id.clone();
+        let keyboard_id = session.id.clone();
+        let selector = format!("overview-row-{}", session.id);
+        let update: SharedString = session
+            .threads
+            .first()
+            .map_or_else(
+                || session.summary.clone(),
+                |thread| thread.activity.update.clone(),
+            )
+            .into();
+        let age = session
+            .threads
+            .iter()
+            .max_by_key(|thread| thread.activity.updated_at)
+            .map(|thread| {
+                thread
+                    .activity
+                    .age_label
+                    .trim_start_matches("Updated ")
+                    .to_owned()
+            })
+            .unwrap_or_default();
+        let project = session.project.as_ref().and_then(|project| {
+            self.state
+                .read(cx)
+                .space_row(project)
+                .map(|space| transcript::single_line(space.display_name()))
+        });
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .h(px(36.0))
+            .px(px(12.0))
+            .rounded(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(14.0))
+            .role(gpui::Role::Button)
+            .aria_label(format!("Open {}. {update}", session.name))
+            .track_focus(&self.overview_background_focus(focus))
+            .focus_visible(|el| el.bg(theme.element_hover))
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.element_hover.opacity(0.6)))
+            .text_size(crate::typography::ui_rems(13.0))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.close_session_overview(window, cx);
+                this.activate_workspace_session(&open_id, cx);
+            }))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.close_session_overview(window, cx);
+                        this.activate_workspace_session(&keyboard_id, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .when(width >= 760.0, |el| el.w(gpui::relative(0.32)).flex_none())
+                    .when(width < 760.0, |el| el.flex_1())
+                    .truncate()
+                    .child(session.name.clone()),
+            )
+            .when(width >= 760.0, |el| {
+                el.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_muted)
+                        .child(update),
+                )
+            })
+            .children(project.map(|project| {
+                div()
+                    .flex_none()
+                    .max_w(px(160.0))
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(project)
+            }))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(58.0))
+                    .flex()
+                    .justify_end()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .child(age),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_session_overview(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.prepare_overview(cx);
+        self.prepare_overview(window, cx);
         let admitted = self.overview_sessions(cx);
         self.session_overview_runtime.sessions =
             admitted.iter().map(|session| session.id.clone()).collect();
@@ -898,8 +1130,17 @@ impl Shell {
             }
         }
         let now = std::time::Instant::now();
-        let mut cards = Vec::new();
-        for session in sessions {
+        let mut groups: Vec<(OverviewSection, Vec<AnyElement>)> = Vec::new();
+        for session in overview_display_order(sessions) {
+            let section = session.section();
+            if groups.last().map(|(group, _)| *group) != Some(section) {
+                groups.push((section, Vec::new()));
+            }
+            let (_, cards) = groups.last_mut().expect("just pushed");
+            if section == OverviewSection::Earlier {
+                cards.push(self.render_overview_earlier_row(&session, width, &theme, cx));
+                continue;
+            }
             let session_id = session.id.clone();
             let keyboard_session = session_id.clone();
             let drop_session = session_id.clone();
@@ -954,6 +1195,7 @@ impl Shell {
                         el.on_drag(
                             OverviewSessionDrag {
                                 session: session_id.clone(),
+                                section,
                                 title: name.clone(),
                             },
                             |payload, _, _, cx| {
@@ -976,13 +1218,13 @@ impl Shell {
                             "down" => columns as isize,
                             _ => return,
                         };
-                        let order = this.overview_sessions(cx);
-                        if let Some(index) = order.iter().position(|row| row.id == session_id)
-                            && let Some(target) = index
-                                .checked_add_signed(delta)
-                                .and_then(|next| order.get(next))
-                        {
-                            this.move_overview_session(&session_id, &target.id, cx);
+                        let order: Vec<_> = this
+                            .overview_sessions(cx)
+                            .iter()
+                            .map(|session| (session.id.clone(), session.section()))
+                            .collect();
+                        if let Some(target) = overview_neighbor(&order, &session_id, delta) {
+                            this.move_overview_session(&session_id, &target, cx);
                         }
                         cx.stop_propagation();
                     }
@@ -1007,6 +1249,16 @@ impl Shell {
                 indicator,
                 harness_proto::ChatIndicator::AwaitingInput | harness_proto::ChatIndicator::Errored
             );
+            let status_phase =
+                if indicator == harness_proto::ChatIndicator::Working && !self.reduced_motion {
+                    motion::pulse_delta_slow(&motion::HARNESS_PULSE, cx.entity_id(), cx)
+                } else {
+                    0.0
+                };
+            // The section heading already says what this is. A failure is the
+            // one state its section doesn't name.
+            let status_word = (indicator == harness_proto::ChatIndicator::Errored)
+                .then(|| status_label(indicator));
             let heading = div()
                 .id(SharedString::from(format!("overview-heading-{key}")))
                 // Only the strip above the sheet reveals the handle. Card
@@ -1038,13 +1290,18 @@ impl Shell {
                                 .min_w_0()
                                 .truncate()
                                 .role(gpui::Role::Button)
-                                .aria_label(format!("Open {}. {}", session.name, session.summary))
+                                .aria_label(format!(
+                                    "Open {}. {}. {}",
+                                    session.name,
+                                    status_label(indicator),
+                                    session.summary
+                                ))
                                 .track_focus(&self.overview_background_focus(focus))
                                 .focus_visible(|el| el.bg(theme.element_hover))
                                 .cursor_pointer()
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.text_muted)
+                                .text_color(theme.text)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.close_session_overview(window, cx);
                                     this.activate_workspace_session(&session_id, cx);
@@ -1073,10 +1330,23 @@ impl Shell {
                         .gap(px(4.0))
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(color)
-                        .child(icon(glyph).size(px(13.0)).text_color(color))
-                        .child(status_label(indicator)),
+                        .child(
+                            icon(glyph)
+                                .size(px(13.0))
+                                .text_color(color)
+                                .with_transformation(gpui::Transformation::rotate(
+                                    gpui::percentage(status_phase),
+                                )),
+                        )
+                        .children(status_word),
                 );
-            let mut content = div().relative().size_full().p(px(20.0)).flex().flex_col();
+            let mut content = div()
+                .relative()
+                .w_full()
+                .flex_grow_1()
+                .p(px(18.0))
+                .flex()
+                .flex_col();
             if let Some(thread) = primary {
                 let signature = format!(
                     "{}:{:?}:{:?}",
@@ -1097,17 +1367,19 @@ impl Shell {
                 if animate {
                     self.motion_active.set(true);
                 }
+                // The heading above already names a session's only task.
+                let show_title = thread.activity.title != session.name;
+                let indent = if show_title { 25.0 } else { 0.0 };
                 let summary_tip: SharedString = thread.activity.update.clone().into();
                 let summary = div()
                     .id(SharedString::from(format!("overview-status-{}", thread.id)))
-                    .ml(px(25.0))
-                    .mt(px(6.0))
-                    .h(px(38.0))
-                    .min_h(px(38.0))
+                    .ml(px(indent))
+                    .when(show_title, |el| el.mt(px(6.0)))
                     .overflow_hidden()
                     .text_size(crate::typography::ui_rems(13.0))
                     .line_height(px(19.0))
-                    .text_color(theme.text_muted)
+                    // A waiting question is what the card is for.
+                    .text_color(if needs { theme.text } else { theme.text_muted })
                     .tooltip(move |_, cx| {
                         cx.new(|_| SurfaceTabTooltip {
                             text: summary_tip.clone(),
@@ -1116,7 +1388,7 @@ impl Shell {
                     })
                     .child(
                         div()
-                            .line_clamp(2)
+                            .line_clamp(if needs { 4 } else { 2 })
                             .text_ellipsis()
                             .child(thread.activity.update.clone()),
                     )
@@ -1125,16 +1397,56 @@ impl Shell {
                             .top(px(4.0 * (1.0 - progress)))
                             .opacity(0.4 + 0.6 * progress)
                     });
-                content = content
-                    .child(
+                if show_title {
+                    content = content.child(
                         div()
                             .min_h(px(22.0))
                             .flex_none()
                             .child(self.overview_task_button(thread, false, &theme, cx)),
-                    )
-                    .child(summary);
+                    );
+                }
+                content = content.child(summary);
+                // The choices say what's being decided, without opening it.
+                let options = &thread.activity.options;
+                if !options.is_empty() {
+                    let more = options.len().saturating_sub(OVERVIEW_OPTIONS_SHOWN);
+                    content = content.child(
+                        div()
+                            .ml(px(indent))
+                            .mt(px(8.0))
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .line_height(px(18.0))
+                            .text_color(theme.text_muted)
+                            .children(options.iter().take(OVERVIEW_OPTIONS_SHOWN).map(|option| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .size(px(4.0))
+                                            .flex_none()
+                                            .rounded_full()
+                                            .bg(theme.text_muted.opacity(0.6)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .line_clamp(1)
+                                            .text_ellipsis()
+                                            .child(option.clone()),
+                                    )
+                            }))
+                            .when(more > 0, |el| el.child(format!("+{more} more"))),
+                    );
+                }
                 let mut steps = div()
-                    .ml(px(25.0))
+                    .ml(px(indent))
                     .mt(px(12.0))
                     .flex_none()
                     .flex()
@@ -1214,7 +1526,9 @@ impl Shell {
                             ),
                     );
                 }
-                content = content.child(steps);
+                if options.is_empty() && !thread.activity.checklist.is_empty() {
+                    content = content.child(steps);
+                }
                 let mut bottom = div()
                     .mt_auto()
                     .pt(px(14.0))
@@ -1246,6 +1560,10 @@ impl Shell {
                         .id(SharedString::from(format!(
                             "overview-answer-{action_session}-{id}"
                         )))
+                        .debug_selector({
+                            let session = action_session.clone();
+                            move || format!("overview-answer-{session}")
+                        })
                         .role(gpui::Role::Button)
                         .aria_label(format!("{label}: {}", thread.activity.title))
                         .track_focus(&self.overview_background_focus(focus))
@@ -1262,6 +1580,7 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|el| el.opacity(0.9))
                         .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             if is_question {
                                 this.open_overview_session_question(
                                     &action_session,
@@ -1300,7 +1619,23 @@ impl Shell {
                                 }
                             },
                         ));
-                    bottom = bottom.child(div().ml(px(25.0)).flex().child(button));
+                    bottom = bottom.child(
+                        div()
+                            .ml(px(indent))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .child(button)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(thread.activity.age_label.clone()),
+                            ),
+                    );
                 } else if let Some(other) = session.threads.get(1) {
                     bottom = bottom
                         .border_t_1()
@@ -1315,56 +1650,40 @@ impl Shell {
                                 .child(other.activity.update.clone()),
                         );
                 }
-                content = content.child(bottom).child(
-                    div()
-                        .mt(px(13.0))
-                        .ml(px(25.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .child(thread.activity.age_label.clone()),
-                        ),
-                );
-            } else {
-                content = content
-                    .justify_center()
-                    .items_center()
-                    .text_center()
-                    .child(
-                        icon(icons::CHAT_ROUND_LINE)
-                            .size(px(28.0))
-                            .mb(px(14.0))
-                            .text_color(theme.text_muted.opacity(0.55)),
-                    )
-                    .child(
+                content = content.child(bottom);
+                if !needs {
+                    let age = div()
+                        .min_w_0()
+                        .truncate()
+                        .child(thread.activity.age_label.clone());
+                    content = content.child(
                         div()
-                            .text_size(crate::typography::ui_rems(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .mt(px(10.0))
+                            .ml(px(indent))
+                            .flex_none()
+                            .flex()
+                            .justify_end()
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
-                            .child("No tasks yet"),
-                    )
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .w_full()
-                            .max_w(px(230.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(18.0))
-                            .text_color(theme.text_muted)
-                            .child("Open this session to start a conversation."),
+                            .child(age),
                     );
+                }
             }
+            // Clicking a card does what its one button would.
+            let open = primary.map(|thread| {
+                (
+                    thread.session.clone(),
+                    thread.id.clone(),
+                    thread.activity.pending_question,
+                )
+            });
             cards.push(
                 div()
                     .id(SharedString::from(format!("overview-session-{key}")))
+                    .debug_selector({
+                        let session = session.id.clone();
+                        move || format!("overview-session-{session}")
+                    })
                     .w(px(card_width))
                     .flex_none()
                     .flex()
@@ -1372,7 +1691,12 @@ impl Shell {
                     .on_drop(
                         cx.listener(move |this, payload: &OverviewSessionDrag, _, cx| {
                             cx.stop_propagation();
-                            this.move_overview_session(&payload.session, &drop_session, cx);
+                            if overview_accepts_drop(
+                                (&payload.session, payload.section),
+                                (&drop_session, section),
+                            ) {
+                                this.move_overview_session(&payload.session, &drop_session, cx);
+                            }
                         }),
                     )
                     .child(heading)
@@ -1380,20 +1704,46 @@ impl Shell {
                         div()
                             .id(SharedString::from(format!("overview-card-{key}")))
                             .debug_selector(|| "overview-card".into())
-                            .h(px(312.0))
+                            .min_h(px(if needs { 148.0 } else { 104.0 }))
                             .w_full()
-                            .flex_none()
+                            .flex_grow_1()
+                            .flex()
+                            .flex_col()
                             .relative()
                             .rounded(px(12.0))
                             .overflow_hidden()
                             .bg(theme.composer_bg())
                             .shadow(theme.composer_shadows())
                             .drag_over::<OverviewSessionDrag>(move |style, payload, _, _| {
-                                if payload.session == highlight_session {
-                                    style
-                                } else {
+                                if overview_accepts_drop(
+                                    (&payload.session, payload.section),
+                                    (&highlight_session, section),
+                                ) {
                                     style.border_1().border_color(theme.accent)
+                                } else {
+                                    style
                                 }
+                            })
+                            .when_some(open, |el, (session, id, is_question)| {
+                                el.cursor_pointer().on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        if is_question {
+                                            this.open_overview_session_question(
+                                                &session,
+                                                id.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        } else {
+                                            this.overview_open_session_chat(
+                                                &session,
+                                                id.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                ))
                             })
                             .when(needs, |el| {
                                 el.child(
@@ -1418,26 +1768,6 @@ impl Shell {
                             .gap(px(6.0))
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_muted)
-                            .child(
-                                icon(icons::SPLIT_COLUMNS)
-                                    .size(px(12.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(format!(
-                                "{} {} · {} {}",
-                                session.panel_count,
-                                if session.panel_count == 1 {
-                                    "panel"
-                                } else {
-                                    "panels"
-                                },
-                                session.tab_count,
-                                if session.tab_count == 1 {
-                                    "tab"
-                                } else {
-                                    "tabs"
-                                }
-                            ))
                             .when_some(
                                 session.project.as_ref().and_then(|project| {
                                     self.state
@@ -1445,12 +1775,36 @@ impl Shell {
                                         .space_row(project)
                                         .map(|space| transcript::single_line(space.display_name()))
                                 }),
-                                |el, project| {
-                                    el.child(div().flex_1())
-                                        .child(div().min_w_0().truncate().child(project))
-                                },
-                            ),
-                    ),
+                                |el, project| el.child(div().min_w_0().truncate().child(project)),
+                            )
+                            // "1 panel · 1 tab" says nothing about a session
+                            // laid out the usual way.
+                            .when(session.panel_count > 1 || session.tab_count > 1, |el| {
+                                el.child(div().flex_1())
+                                    .child(
+                                        icon(icons::SPLIT_COLUMNS)
+                                            .size(px(12.0))
+                                            .flex_none()
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child(div().flex_none().child(format!(
+                                        "{} {} · {} {}",
+                                        session.panel_count,
+                                        if session.panel_count == 1 {
+                                            "panel"
+                                        } else {
+                                            "panels"
+                                        },
+                                        session.tab_count,
+                                        if session.tab_count == 1 {
+                                            "tab"
+                                        } else {
+                                            "tabs"
+                                        }
+                                    )))
+                            }),
+                    )
+                    .into_any_element(),
             );
         }
         let new_focus = self
@@ -1532,7 +1886,6 @@ impl Shell {
             })
             .children(
                 [
-                    (working, "working", theme.accent),
                     (
                         attention,
                         if attention == 1 {
@@ -1542,6 +1895,7 @@ impl Shell {
                         },
                         theme.warning,
                     ),
+                    (working, "working", theme.accent),
                     (completed, "done", theme.text_muted),
                 ]
                 .into_iter()
@@ -1590,37 +1944,69 @@ impl Shell {
             .child(div().flex_1())
             .child(new_project);
         let header = self.titlebar_drag_region("session-overview-titlebar", header, cx);
-        let mut root = div()
-            .id("session-overview")
-            .debug_selector(|| "session-overview".into())
-            .size_full()
-            .bg(crate::theme::mix(theme.bg, theme.glass(), 0.4))
-            .text_color(theme.text)
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(
-                div()
-                    .id("session-overview-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.session_overview_scroll)
-                    .on_drag_move::<OverviewSessionDrag>(cx.listener(|this, event, _, cx| {
-                        this.track_overview_drag_scroll(event, cx);
-                    }))
-                    .px(px(32.0))
-                    .pt(px(22.0))
-                    .pb(px(32.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_start()
-                            .gap(px(20.0))
-                            .children(cards),
-                    ),
-            );
+        let mut root =
+            div()
+                .id("session-overview")
+                .debug_selector(|| "session-overview".into())
+                .size_full()
+                .bg(crate::theme::mix(theme.bg, theme.glass(), 0.4))
+                .text_color(theme.text)
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(
+                    div()
+                        .id("session-overview-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.session_overview_scroll)
+                        .on_drag_move::<OverviewSessionDrag>(cx.listener(|this, event, _, cx| {
+                            this.track_overview_drag_scroll(event, cx);
+                        }))
+                        .px(px(32.0))
+                        .pt(px(22.0))
+                        .pb(px(32.0))
+                        .child(div().flex().flex_col().gap(px(26.0)).children(
+                            groups.into_iter().map(|(section, items)| {
+                                let count = items.len();
+                                let heading = div()
+                                    .mb(px(10.0))
+                                    .px(px(3.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(if section == OverviewSection::NeedsYou {
+                                        theme.warning
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .child(section.label())
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::NORMAL)
+                                            .text_color(theme.text_muted.opacity(0.7))
+                                            .child(count.to_string()),
+                                    );
+                                let body = if section == OverviewSection::Earlier {
+                                    div()
+                                        .p(px(4.0))
+                                        .rounded(px(12.0))
+                                        .bg(theme.composer_bg())
+                                        .flex()
+                                        .flex_col()
+                                } else {
+                                    // Cards in a row match the tallest, so the
+                                    // grid stays even without reserving a
+                                    // screenful for each one.
+                                    div().flex().flex_wrap().items_stretch().gap(px(20.0))
+                                };
+                                div().child(heading).child(body.children(items))
+                            }),
+                        )),
+                );
         if self.command_palette.is_none()
             && self.add_space.is_none()
             && let Some(overlay) = self.overview_question_overlay(window, cx)
@@ -1705,6 +2091,109 @@ mod tests {
                 assert_eq!(empty.summary, "No activity yet.");
             })
             .unwrap();
+    }
+
+    fn session(
+        id: &str,
+        indicator: Option<harness_proto::ChatIndicator>,
+        pinned: bool,
+        days_ago: i64,
+    ) -> OverviewSession {
+        let updated_at = Some(Utc::now() - chrono::Duration::days(days_ago));
+        OverviewSession {
+            id: id.into(),
+            pinned,
+            project: None,
+            panel_count: 1,
+            tab_count: 1,
+            name: id.into(),
+            summary: String::new(),
+            threads: indicator
+                .into_iter()
+                .map(|indicator| OverviewThread {
+                    id: format!("{id}-chat"),
+                    session: id.into(),
+                    indicator,
+                    activity: OverviewActivity {
+                        title: id.into(),
+                        update: String::new(),
+                        update_key: None,
+                        checklist: Vec::new(),
+                        completed_steps: 0,
+                        total_steps: 0,
+                        pending_question: false,
+                        options: Vec::new(),
+                        updated_at,
+                        age_label: String::new(),
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    fn ids(sessions: Vec<OverviewSession>) -> Vec<String> {
+        sessions.into_iter().map(|session| session.id).collect()
+    }
+
+    #[test]
+    fn a_card_only_lands_among_its_own_section() {
+        use OverviewSection::*;
+        assert!(overview_accepts_drop(("a", Working), ("b", Working)));
+        assert!(!overview_accepts_drop(("a", Working), ("b", NeedsYou)));
+        assert!(!overview_accepts_drop(("a", Working), ("a", Working)));
+    }
+
+    #[test]
+    fn what_needs_you_comes_first_and_old_sessions_last() {
+        use harness_proto::ChatIndicator::*;
+        let order = overview_display_order(vec![
+            session("old", Some(Idle), false, 24),
+            session("empty", None, false, 0),
+            session("done", Some(Completed), false, 1),
+            session("busy-b", Some(Working), false, 3),
+            session("recent", Some(Idle), false, 2),
+            session("failed", Some(Errored), false, 9),
+            session("busy-a", Some(Working), false, 0),
+            session("question", Some(AwaitingInput), false, 30),
+            session("pinned-old", Some(Idle), true, 40),
+        ]);
+        assert_eq!(
+            ids(order),
+            [
+                // Saved order within what's live, however old each one is.
+                "failed",
+                "question",
+                "busy-b",
+                "busy-a",
+                "done",
+                // Earlier: pinned, then newest. Never opened goes last.
+                "pinned-old",
+                "recent",
+                "old",
+                "empty",
+            ]
+        );
+    }
+
+    #[test]
+    fn arrow_keys_reorder_within_a_section() {
+        use OverviewSection::*;
+        let order: Vec<_> = [("a", NeedsYou), ("b", Working), ("c", Working), ("d", Done)]
+            .map(|(id, section)| (id.to_string(), section))
+            .into();
+        assert_eq!(overview_neighbor(&order, "b", 1).as_deref(), Some("c"));
+        assert_eq!(overview_neighbor(&order, "c", -1).as_deref(), Some("b"));
+        assert_eq!(
+            overview_neighbor(&order, "b", -1),
+            None,
+            "not across a heading"
+        );
+        assert_eq!(
+            overview_neighbor(&order, "c", 1),
+            None,
+            "not across a heading"
+        );
+        assert_eq!(overview_neighbor(&order, "missing", 1), None);
     }
 
     #[test]

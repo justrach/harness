@@ -662,6 +662,13 @@ impl Shell {
                 .as_ref()
                 .is_some_and(|split| split.panes.iter().any(|id| id.as_deref() == Some(chat_id)))
             || self.chat_in_other_tab(chat_id).is_some()
+            || self.workspace_panels.layouts.values().any(|layout| {
+                layout.panels.iter().any(|panel| {
+                    panel.tabs.iter().any(
+                        |tab| matches!(tab, workspace_panels::PanelTab::Chat(id) if id == chat_id),
+                    )
+                })
+            })
     }
 
     /// The ✕-button archive path, under the archive-on-close setting.
@@ -673,8 +680,10 @@ impl Shell {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> CloseArchive {
-        let _ = (chat_id, window, cx);
-        CloseArchive::Off
+        if !settings::archive_sessions_on_close(cx) {
+            return CloseArchive::Off;
+        }
+        self.archive_closed_session_if_idle(chat_id, window, cx)
     }
 
     /// Shared safety checks for a saved preference or an explicit close choice.
@@ -1774,37 +1783,80 @@ mod tests {
                 shell.route = Route::Chat;
                 shell.state.update(cx, |state, _| {
                     state.chats = ["keep", "closing", "pane"].map(archive_test_chat).into();
-                    state.selected_chat = Some("pane".into());
+                    state.selected_chat = Some("closing".into());
                     state.set_test_engine(engine);
                 });
-                shell.chat_tabs = vec![
-                    ChatTab {
-                        selected: Some("keep".into()),
-                        ..Default::default()
-                    },
-                    ChatTab {
-                        selected: Some("closing".into()),
-                        ..Default::default()
-                    },
-                ];
+                shell.boot_restored = true;
+                shell.chat_tabs = [("keep-session", "keep"), ("closing-session", "closing")]
+                    .map(|(id, chat)| {
+                        let mut layout = workspace_panels::WorkspaceLayout::default();
+                        layout.panels[0].tabs = vec![workspace_panels::PanelTab::Chat(chat.into())];
+                        shell.workspace_panels.layouts.insert(id.into(), layout);
+                        ChatTab {
+                            id: id.into(),
+                            selected: Some(chat.into()),
+                            ..Default::default()
+                        }
+                    })
+                    .into();
                 shell.chat_tab = 1;
-                shell.chat_split = chat_split::ChatSplit::split(
-                    None,
-                    SplitAxis::Horizontal,
-                    Some("closing".into()),
-                    Some("pane".into()),
+                shell.workspace_split(SplitAxis::Horizontal, cx);
+                let layout = shell.panel_layout_mut(cx);
+                let panel = layout
+                    .panels
+                    .iter_mut()
+                    .rfind(|panel| !panel.tabs.is_empty());
+                let panel = panel.unwrap();
+                panel.tabs = vec![workspace_panels::PanelTab::Chat("pane".into())];
+                panel.active = 0;
+                let panel = panel.id;
+                shell.focus_workspace_tab(
+                    panel,
+                    workspace_panels::PanelTab::Chat("pane".into()),
+                    window,
+                    cx,
                 );
             })
             .unwrap();
-        // Close the split pane, its tab, then the last chat to a canvas.
-        // Repeating the shortcut on that canvas must leave the window open.
-        for expected in [Some("closing"), Some("keep"), None, None] {
+        // Close the split panel's tab, the emptied panel, then its neighbor's
+        // last chat. Repeating the shortcut on the final empty panel must leave
+        // the window and both sessions open. Selection is only pinned where the
+        // focused panel is empty.
+        for expected_panels in [
+            vec![vec!["closing"], vec![]],
+            vec![vec!["closing"]],
+            vec![vec![]],
+            vec![vec![]],
+        ] {
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseTabWithoutArchiving));
             cx.run_until_parked();
             window
                 .update(cx, |shell, _, cx| {
-                    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), expected);
-                    assert!(shell.chat_split.is_none());
+                    let layout = shell.panel_layout(cx).unwrap();
+                    let panels: Vec<Vec<&str>> = layout
+                        .panels
+                        .iter()
+                        .map(|panel| {
+                            panel
+                                .tabs
+                                .iter()
+                                .map(|tab| match tab {
+                                    workspace_panels::PanelTab::Chat(id) => id.as_str(),
+                                    other => panic!("unexpected tab {other:?}"),
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    assert_eq!(panels, expected_panels);
+                    if panels.last().unwrap().is_empty() {
+                        assert_eq!(shell.state.read(cx).selected_chat, None);
+                    }
+                    assert_eq!(shell.chat_tabs.len(), 2);
+                    assert_eq!(shell.chat_tabs[shell.chat_tab].id, "closing-session");
+                    assert_eq!(
+                        shell.workspace_panels.layouts["keep-session"].panels[0].tabs,
+                        [workspace_panels::PanelTab::Chat("keep".into())]
+                    );
                     assert!(shell.state.read(cx).chats.iter().all(|chat| !chat.archived));
                     assert!(settings::archive_sessions_on_close(cx));
                     assert!(shell.sidebar_notice.is_none());
@@ -1819,9 +1871,6 @@ mod tests {
                 );
             }
         }
-        window
-            .update(cx, |shell, _, _| assert!(shell.chat_tabs.is_empty()))
-            .unwrap();
     }
 
     #[test]
@@ -1838,7 +1887,8 @@ mod tests {
         assert_eq!(tab.chats(), ["a", "gone"]);
         let kept = tab.clone().without_deleted(|id| id == "a").unwrap();
         assert_eq!(kept.chats(), ["a"]);
-        assert!(tab.without_deleted(|_| false).is_none());
+        // A session outlives its chats.
+        assert!(tab.without_deleted(|_| false).unwrap().chats().is_empty());
         // Its old place, or the end once the list is shorter.
         assert_eq!(reopen_index(1, 3), 1);
         assert_eq!(reopen_index(4, 2), 2);
