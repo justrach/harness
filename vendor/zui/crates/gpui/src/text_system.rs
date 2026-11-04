@@ -16,7 +16,7 @@ use crate::{
     Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
     StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
 };
-use anyhow::{Context as _, anyhow};
+use anyhow::Context as _;
 use collections::FxHashMap;
 use core::fmt;
 use derive_more::{Add, Deref, FromStr, Sub};
@@ -50,12 +50,21 @@ pub const SUBPIXEL_VARIANTS_Y: u8 = 1;
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
-    font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId>>>,
+    font_ids_by_font: RwLock<FxHashMap<Font, CachedFont>>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
     font_runs_pool: Mutex<Vec<Vec<FontRun>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
+}
+
+/// What a requested font resolved to, so a missing font doesn't ask the
+/// platform for itself and its whole fallback stack again on every lookup.
+#[derive(Clone, Copy)]
+enum CachedFont {
+    Direct(FontId),
+    Fallback(FontId),
+    Missing,
 }
 
 impl TextSystem {
@@ -100,32 +109,13 @@ impl TextSystem {
 
     /// Add a font's data to the text system.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
-        self.platform_text_system.add_fonts(fonts)
-    }
-
-    /// Get the FontId for the configure font family and style.
-    fn font_id(&self, font: &Font) -> Result<FontId> {
-        fn clone_font_id_result(font_id: &Result<FontId>) -> Result<FontId> {
-            match font_id {
-                Ok(font_id) => Ok(*font_id),
-                Err(err) => Err(anyhow!("{err}")),
-            }
-        }
-
-        let font_id = self
-            .font_ids_by_font
-            .read()
-            .get(font)
-            .map(clone_font_id_result);
-        if let Some(font_id) = font_id {
-            font_id
-        } else {
-            let font_id = self.platform_text_system.font_id(font);
-            self.font_ids_by_font
-                .write()
-                .insert(font.clone(), clone_font_id_result(&font_id));
-            font_id
-        }
+        let result = self.platform_text_system.add_fonts(fonts);
+        // A new font can be one that was missing: ask again. Those that were
+        // found stay, so `get_font_for_id` keeps naming them.
+        self.font_ids_by_font
+            .write()
+            .retain(|_, cached| matches!(cached, CachedFont::Direct(_)));
+        result
     }
 
     /// Get the Font for the Font Id.
@@ -133,7 +123,7 @@ impl TextSystem {
         let lock = self.font_ids_by_font.read();
         lock.iter()
             .filter_map(|(font, result)| match result {
-                Ok(font_id) if *font_id == id => Some(font.clone()),
+                CachedFont::Direct(font_id) if *font_id == id => Some(font.clone()),
                 _ => None,
             })
             .next()
@@ -146,23 +136,71 @@ impl TextSystem {
     ///
     /// Panics if the font and none of the fallbacks can be resolved.
     pub fn resolve_font(&self, font: &Font) -> FontId {
-        if let Ok(font_id) = self.font_id(font) {
+        if let Some(CachedFont::Direct(font_id) | CachedFont::Fallback(font_id)) =
+            self.font_ids_by_font.read().get(font).copied()
+        {
             return font_id;
         }
-        for fallback in &self.fallback_font_stack {
-            if let Ok(font_id) = self.font_id(fallback) {
-                return font_id;
-            }
-        }
+        self.resolve_font_uncached(font)
+    }
 
-        panic!(
-            "failed to resolve font '{}' or any of the fallbacks: {}",
-            font.family,
-            self.fallback_font_stack
-                .iter()
-                .map(|fallback| &fallback.family)
-                .join(", ")
-        );
+    fn resolve_font_uncached(&self, font: &Font) -> FontId {
+        let mut errors = Vec::new();
+        let font_id = {
+            let mut font_ids = self.font_ids_by_font.upgradable_read();
+            if let Some(CachedFont::Direct(font_id) | CachedFont::Fallback(font_id)) =
+                font_ids.get(font)
+            {
+                return *font_id;
+            }
+
+            let mut lookup_font = |font: &Font| {
+                if let Some(cached) = font_ids.get(font) {
+                    return match cached {
+                        CachedFont::Direct(font_id) => Some(*font_id),
+                        CachedFont::Fallback(_) | CachedFont::Missing => None,
+                    };
+                }
+
+                let result = self.platform_text_system.font_id(font);
+                let font_id = result.as_ref().ok().copied();
+                font_ids.with_upgraded(|font_ids| {
+                    font_ids.insert(
+                        font.clone(),
+                        font_id.map_or(CachedFont::Missing, CachedFont::Direct),
+                    );
+                });
+                if let Err(error) = result {
+                    errors.push((font.clone(), error));
+                }
+                font_id
+            };
+
+            if let Some(font_id) = lookup_font(font) {
+                Some(font_id)
+            } else {
+                let font_id = self.fallback_font_stack.iter().find_map(lookup_font);
+                if let Some(font_id) = font_id {
+                    font_ids.with_upgraded(|font_ids| {
+                        font_ids.insert(font.clone(), CachedFont::Fallback(font_id));
+                    });
+                }
+                font_id
+            }
+        };
+        for (font, error) in errors {
+            log::warn!("failed to load font {font:?}: {error:#}");
+        }
+        font_id.unwrap_or_else(|| {
+            panic!(
+                "failed to resolve font '{}' or any of the fallbacks: {}",
+                font.family,
+                self.fallback_font_stack
+                    .iter()
+                    .map(|fallback| &fallback.family)
+                    .join(", ")
+            );
+        })
     }
 
     /// Get the bounding box for the given font and font size.
@@ -1202,5 +1240,50 @@ pub fn font_name_with_fallbacks_shared<'a>(
         ".ZedSans" | "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod font_resolution_tests {
+    use super::*;
+    use crate::NoopTextSystem;
+
+    fn with_missing_requested(text_system: &TextSystem, requested: &Font) {
+        let mut font_ids = text_system.font_ids_by_font.write();
+        font_ids.insert(requested.clone(), CachedFont::Missing);
+        for fallback in &text_system.fallback_font_stack {
+            font_ids.insert(fallback.clone(), CachedFont::Missing);
+        }
+        font_ids.insert(font("Arial"), CachedFont::Direct(FontId(42)));
+    }
+
+    #[test]
+    fn caches_resolved_font_fallbacks() {
+        let mut text_system = TextSystem::new(Arc::new(NoopTextSystem::new()));
+        let requested = font("Missing Font").bold().italic();
+        with_missing_requested(&text_system, &requested);
+
+        assert_eq!(text_system.resolve_font(&requested), FontId(42));
+        assert_eq!(text_system.get_font_for_id(FontId(42)), Some(font("Arial")));
+
+        // The fallback is remembered: the stack isn't walked again.
+        text_system.fallback_font_stack.clear();
+        assert_eq!(text_system.resolve_font(&requested), FontId(42));
+    }
+
+    #[test]
+    fn adding_fonts_retries_missing_fonts_and_keeps_found_ones() {
+        let text_system = TextSystem::new(Arc::new(NoopTextSystem::new()));
+        let requested = font("Missing Font");
+        with_missing_requested(&text_system, &requested);
+        assert_eq!(text_system.resolve_font(&requested), FontId(42));
+
+        text_system.add_fonts(Vec::new()).unwrap();
+
+        let font_ids = text_system.font_ids_by_font.read();
+        assert!(!font_ids.contains_key(&requested));
+        assert!(!font_ids.contains_key(&font("Helvetica")));
+        drop(font_ids);
+        assert_eq!(text_system.get_font_for_id(FontId(42)), Some(font("Arial")));
     }
 }
