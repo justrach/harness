@@ -210,7 +210,7 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(target_os = "macos")]
                 if std::env::var_os("HARNESS_BROWSER_GESTURES_FIXTURE_ONLY").is_some() {
                     navigation_gestures::exercise(window, &_origin, cx).await?;
-                    std::fs::write(output.join("result.txt"), "PASS: native browser swipe-navigation setting enabled; Back/Forward history availability and navigation verified. Physical trackpad gesture not synthesized.\n")?;
+                    std::fs::write(output.join("result.txt"), "PASS: native browser swipe-navigation setting; empty/end history boundaries, reload, SPA entries, forward-branch replacement, tab isolation/restore/close, and isolated document/saved-view exclusions verified. Physical trackpad gesture not synthesized.\n")?;
                     return Ok(());
                 }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -529,12 +529,18 @@ fn main() -> anyhow::Result<()> {
                 std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
+            let failed = run.is_err();
             if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
             let _ = window.update(cx, |shell, window, cx| shell.fixture_blur_browser(window, cx));
             pause(cx, 200).await;
             drop(state);
             let _ = window.update(cx, |_, window, _| window.remove_window());
             pause(cx, 100).await;
+            // AppKit termination exits before Application::run returns. Do not
+            // let it turn a failed fixture into a successful process exit.
+            if failed {
+                std::process::exit(1);
+            }
             cx.update(|cx| cx.quit());
         }).detach();
     });

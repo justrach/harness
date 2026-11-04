@@ -822,6 +822,16 @@ impl BrowserSurface {
             .fixture_navigation_gestures_enabled()
     }
     #[cfg(target_os = "macos")]
+    pub fn fixture_saved_view_navigation_gestures(
+        &self,
+        kind: harness_proto::ToolViewKind,
+        window: &Window,
+    ) -> anyhow::Result<bool> {
+        let native = native::NativePage::new_view(window, kind, self.native_tx.clone())
+            .map_err(anyhow::Error::msg)?;
+        Ok(native.fixture_navigation_gestures_enabled())
+    }
+    #[cfg(target_os = "macos")]
     pub fn fixture_focused(&self) -> bool {
         self.native.as_ref().unwrap().fixture_focused()
     }
