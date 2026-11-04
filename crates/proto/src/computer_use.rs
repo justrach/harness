@@ -56,6 +56,8 @@ impl ComputerUseStatus {
             "busy" => "nanocua's window is already waiting for an answer.",
             "quiet" => "Just denied: try again in a few seconds.",
             "unreachable" => "Couldn't reach nanocua.",
+            "already_on" => "It's already on: there's nothing to answer.",
+            "already_allowed" => "macOS already allows it.",
             "opened" => "macOS's prompt or its settings should be open: turn nanocua on there.",
             _ => return None,
         })
@@ -153,6 +155,11 @@ mod tests {
         assert_eq!(status.pending.as_deref(), Some("whole_screen"));
         assert_eq!(status.summary(), "Acting");
         assert_eq!(status.outcome_text(), Some("Allowed."));
+        let already = ComputerUseStatus {
+            outcome: Some("already_on".into()),
+            ..Default::default()
+        };
+        assert!(already.outcome_text().unwrap().contains("already on"));
     }
 
     #[test]
