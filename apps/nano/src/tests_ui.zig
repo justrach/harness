@@ -1272,7 +1272,7 @@ test "Settings › GitHub CI: the concurrent-jobs stepper stays within 1…8; Di
 fn openAgents(h: *Harness) void {
     @import("view_settings.zig").open(&h.a);
     h.a.settings.section = .harnesses;
-    h.t.resize(1200, 1400);
+    h.t.resize(1200, 1600);
     h.t.settle(1);
 }
 
