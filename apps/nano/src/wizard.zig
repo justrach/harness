@@ -28,6 +28,11 @@ pub const Wizard = struct {
     typed: []std.ArrayList(u8),
     /// When a single-choice pick moves on by itself.
     advance_at: ?f64 = null,
+    /// The page its panel last showed: a new one starts at the top.
+    shown_page: ?usize = null,
+    /// The answer box and buttons as last laid out: the question scrolls in
+    /// what they leave of the panel.
+    chrome_h: ?f32 = null,
 
     pub fn init(gpa: Allocator, request_id: []const u8, source: []const tr.Question) !Wizard {
         const arena = try gpa.create(std.heap.ArenaAllocator);

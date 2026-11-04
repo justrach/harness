@@ -257,7 +257,34 @@ pub fn spaceListHeight(content: f32, window: f32, chrome: f32) f32 {
     return @min(content, std.math.clamp(window - 2 * 8 - chrome, 0, 224));
 }
 
+/// The most an agent's question may take of the height its chat has
+/// (composer.rs, the inline cap): a little over half, so the transcript
+/// stays in sight, but enough for a question in a short window.
+pub fn questionCap(available: f32) f32 {
+    return @max(@min(@max(available * 0.55, 220), available - 16), 120);
+}
+
+/// The answer box's lines, in the 45% of the panel GPUI leaves it
+/// (`answer_cap`): the question and buttons keep the rest.
+pub fn questionAnswerLines(cap: f32, line: f32) u16 {
+    return std.math.clamp(@as(u16, @intFromFloat(cap * 0.45 / line)), 1, 8);
+}
+
 const testing = std.testing;
+
+test "a question takes a little over half the chat, more when that's short, and always fits" {
+    try testing.expectEqual(@as(f32, 550), questionCap(1000));
+    try testing.expectEqual(@as(f32, 220), questionCap(300));
+    try testing.expectEqual(@as(f32, 184), questionCap(200));
+    try testing.expectEqual(@as(f32, 120), questionCap(100));
+}
+
+test "the answer box gives way in a short panel" {
+    try testing.expectEqual(@as(u16, 8), questionAnswerLines(550, 20));
+    try testing.expectEqual(@as(u16, 4), questionAnswerLines(184, 20));
+    try testing.expectEqual(@as(u16, 2), questionAnswerLines(120, 20));
+    try testing.expectEqual(@as(u16, 1), questionAnswerLines(10, 20));
+}
 
 test "a project list takes what it needs, 224 at most, and never more than the window leaves" {
     try testing.expectEqual(@as(f32, 92), spaceListHeight(92, 800, 49));

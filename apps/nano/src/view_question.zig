@@ -8,7 +8,17 @@ const ui = nanoui.ui;
 const theme = @import("theme.zig");
 const icons = @import("icons.zig");
 const kit = @import("view_kit.zig");
+const rules = @import("rules.zig");
 const App = @import("app.zig").App;
+
+/// The status strip under the chat, which the composer's padding clears.
+const status_strip: f32 = 24;
+/// The answer box's line, at its 14 points.
+const answer_line: f32 = 20;
+/// The answer box and buttons before they've been laid out.
+const chrome_guess: f32 = 130;
+/// The question's viewport however short the window gets.
+const body_floor: f32 = 40;
 
 pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const wz = if (a.wizard) |*x| x else return;
@@ -24,11 +34,26 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         .back => a.wizardBack(),
         .dismiss => a.wizardDismiss(),
     };
-    const box = kit.shadowLg(ui.div(c).column().w(w).bg(k.composer).border(k.border).borderW(1).rounded(26));
+    const transcript_view = @import("view_transcript.zig");
+    const chat_h = transcript_view.paneHeight(c, a) orelse c.size.h - @import("view_sidebar.zig").titlebar_h;
+    const cap = rules.questionCap(chat_h - status_strip);
+    const box = kit.shadowLg(ui.div(c).column().w(w).bg(k.composer).border(k.border).borderW(1).rounded(26).clip());
     defer box.end();
     {
-        const body = ui.div(c).column().wFull().px(16).pt(16).pb(12);
-        defer body.end();
+        // However long the question, it scrolls here: the options with it,
+        // the answer and buttons never (`render_wizard`'s question-body).
+        ui.key(c, "question-body");
+        ui.scroll(c, .{
+            .width = .fill,
+            .max_height = @max(cap - (wz.chrome_h orelse chrome_guess), body_floor),
+            .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 12 },
+            .scrollbar = .{ .overlay = k.faint.alpha(0.5) },
+        });
+        defer ui.end(c);
+        if (wz.shown_page != wz.page) {
+            c.scroll.put(c.gpa, c.node(c.stack.items[c.stack.items.len - 1]).id, 0) catch {};
+            wz.shown_page = wz.page;
+        }
         {
             const head = ui.div(c).row().gap(10).itemsCenter();
             defer head.end();
@@ -70,6 +95,16 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             }
         }
     }
+    const chrome = ui.div(c).column().wFull();
+    defer chrome.end();
+    // What this reads is the last layout, so a change needs one more frame
+    // to reach the question's height, and so does the first, with none yet.
+    if (c.rects.get(c.node(chrome.index).id)) |r| {
+        if (wz.chrome_h != r.h) {
+            wz.chrome_h = r.h;
+            c.animating = true;
+        }
+    } else c.animating = true;
     {
         const editor = ui.div(c).column().wFull().px(16);
         defer editor.end();
@@ -83,7 +118,7 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             .bare = true,
             .size = 14,
             .multiline = true,
-            .max_lines = 8,
+            .max_lines = rules.questionAnswerLines(cap, answer_line),
         });
         if (r.submitted) act = .advance;
     }
