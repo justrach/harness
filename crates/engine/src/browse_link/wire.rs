@@ -6,6 +6,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use p256::ecdsa::signature::{Signer as _, Verifier as _};
 use p256::ecdsa::{DerSignature, Signature, SigningKey, VerifyingKey};
+use p256::elliptic_curve::Generate as _;
 use rand_core::{OsRng, RngCore as _};
 use sha2::{Digest as _, Sha256};
 
@@ -33,12 +34,13 @@ pub fn nonce() -> String {
 }
 
 pub fn new_key() -> SigningKey {
-    SigningKey::random(&mut OsRng)
+    // From the OS's secure RNG (p256's `getrandom` feature).
+    SigningKey::generate()
 }
 
 /// Base64 (standard, padded) of the X9.63 uncompressed point, 65 bytes.
 pub fn public_key_b64(key: &SigningKey) -> String {
-    B64.encode(key.verifying_key().to_encoded_point(false).as_bytes())
+    B64.encode(key.verifying_key().to_sec1_point(false).as_bytes())
 }
 
 pub fn parse_public_key(b64: &str) -> Option<VerifyingKey> {

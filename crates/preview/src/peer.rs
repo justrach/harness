@@ -18,6 +18,7 @@ use webrtc::{
     peer_connection::{
         PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCConfigurationBuilder,
         RTCIceGatheringState, RTCIceServer, RTCPeerConnectionState, RTCSessionDescription,
+        SettingEngineBuilder,
     },
 };
 
@@ -128,7 +129,11 @@ impl Peers {
                 .with_handler(handler.clone())
                 .with_udp_addrs(vec!["0.0.0.0:0"])
                 .with_data_channel_send_buffer_limit(256 * 1024)
-                .with_sctp_receive_buffer_size(512 * 1024)
+                .with_setting_engine(
+                    SettingEngineBuilder::new()
+                        .with_sctp_max_receive_buffer_size(512 * 1024)
+                        .build(),
+                )
                 .build()
                 .await?,
         );

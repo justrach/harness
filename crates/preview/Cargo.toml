@@ -25,7 +25,7 @@ bytes = "1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
-webrtc = "0.20.2"
+webrtc = "0.21.1"
 
 [dev-dependencies]
 tempfile.workspace = true
