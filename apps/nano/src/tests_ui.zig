@@ -1873,22 +1873,127 @@ test "the context ring sits at the footer's right; resting on it opens the card 
     try testing.expect(!h.t.hasText("Context"));
     h.t.advance(0.3);
     h.snap("context-card");
-    for ([_][]const u8{ "Context", "reading", "46k", "of 200k", "Files", "9.0k", "Commands", "2.0k", "System & other", "153k free of 200k", "24k", "saved by graff", "46,200 / 200,000 tokens", "153,800 tokens remaining" }) |t|
+    for ([_][]const u8{ "Context", "Files", "9.0k", "Commands", "2.0k", "System & other", "Free", "Compact" }) |t|
         if (!h.t.hasText(t)) {
             std.debug.print("missing {s}\n", .{t});
             return error.MissingText;
         };
+    try testing.expect(h.t.containsText("23% (46k / 200k)") or h.t.containsText("46k / 200k"));
+    try testing.expect(h.t.containsText("saved by graff"));
     // It stays while the pointer crosses into it, and goes half a second
     // after the pointer leaves both.
     const card = h.a.view.context.card orelse return error.NoCard;
     h.t.moveTo(card.x + card.w / 2, card.y + card.h / 2);
     h.t.advance(0.7);
-    try testing.expect(h.t.hasText("saved by graff"));
+    try testing.expect(h.t.hasText("Compact"));
     h.t.moveTo(20, 400);
     h.t.advance(0.2);
-    try testing.expect(h.t.hasText("saved by graff"));
+    try testing.expect(h.t.hasText("Compact"));
     h.t.advance(0.4);
-    try testing.expect(!h.t.hasText("saved by graff"));
+    try testing.expect(!h.t.hasText("Compact"));
+}
+
+fn padThread(h: *Harness) !void {
+    const sentence = "The parser notes go on, and the thread keeps every revision. ";
+    var n: usize = 0;
+    while (n < 40_000) : (n += sentence.len) {
+        try h.a.transcript.entries.items[0].parts.items[0].text.appendSlice(testing.allocator, sentence);
+    }
+}
+
+test "the context card's grid and legend, Compact sends /compact, and a running compaction shows in the transcript" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"QueueCommand\":{}}", .{});
+    h.a.engine.state = .connected;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Read the parser and summarize the long thread"}]},
+        \\ {"id":"r","role":"assistant","status":"streaming","parts":[
+        \\  {"id":"f","kind":"tool","resolved":true,"call":{"kind":"readFile","path":"src/parser.rs"},"outputBytes":36000},
+        \\  {"id":"d","kind":"text","text":"The parser is in good shape."}]}],
+        \\ "contextUsage":{"tokens":144000,"window":200000}}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    try padThread(&h);
+    h.t.settle(1);
+    const pct = h.t.findText("72%") orelse return error.NoRing;
+    h.t.moveTo(pct.x + 2, pct.y + 4);
+    h.t.advance(0.6);
+    try testing.expect(h.t.hasText("Context"));
+    try testing.expect(h.t.hasText("Files"));
+    try testing.expect(h.t.hasText("Free"));
+    try testing.expect(h.t.containsText("72% (144k / 200k)"));
+    h.t.ctx.focus = 0;
+    h.snap("context-meter-rest");
+    h.a.dark = false;
+    h.t.ctx.focus = 0;
+    h.t.frame();
+    h.snap("context-meter-rest-light");
+    h.a.dark = true;
+    h.t.frame();
+    // A running compaction: the chip's meter is in the transcript, and the
+    // card says it is compacting, before the pointer has to find the ring.
+    var running = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Read the parser and summarize the long thread"}]},
+        \\ {"id":"r","role":"assistant","status":"streaming","parts":[
+        \\  {"id":"f","kind":"tool","resolved":true,"call":{"kind":"readFile","path":"src/parser.rs"},"outputBytes":36000},
+        \\  {"id":"c","kind":"tool","resolved":false,"call":{"kind":"unknown","name":"Compact context","input":{"kind":"summary","tokensBefore":144000}}}]}],
+        \\ "contextUsage":{"tokens":144000,"window":200000}}
+    , .{});
+    defer running.deinit();
+    try h.a.transcript.apply(running.value);
+    try padThread(&h);
+    h.t.moveTo(20, 400);
+    h.a.view.context.open = false;
+    h.a.view.context.hover_since = null;
+    h.t.advance(0.35);
+    // The card is closed: "compacting" is the meter's, beside the chip.
+    try testing.expect(@import("view_context.zig").inlineShown(&h.a));
+    try testing.expect(h.t.hasText("compacting"));
+    try testing.expect(!h.t.hasText("Compacting…"));
+    h.a.view.context.open = true;
+    h.t.frame();
+    try testing.expect(h.t.hasText("Compacting…"));
+    h.t.ctx.focus = 0;
+    h.snap("context-meter-compacting");
+    h.a.dark = false;
+    h.t.ctx.focus = 0;
+    h.t.frame();
+    h.snap("context-meter-compacting-light");
+    h.a.dark = true;
+    h.t.frame();
+    var done = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"t","kind":"text","text":"Read the parser and summarize the long thread"}]},
+        \\ {"id":"r","role":"assistant","status":"complete","parts":[
+        \\  {"id":"c","kind":"tool","resolved":true,"call":{"kind":"unknown","name":"Compact context","input":{"kind":"summary","tokensBefore":144000,"tokensAfter":18000}},"outputBytes":2000},
+        \\  {"id":"d","kind":"text","text":"Summarized."}]}],
+        \\ "contextUsage":{"tokens":18000,"window":200000}}
+    , .{});
+    defer done.deinit();
+    try h.a.transcript.apply(done.value);
+    h.t.advance(0.7);
+    h.a.view.context.open = true;
+    h.t.frame();
+    try testing.expect(!@import("view_context.zig").inlineShown(&h.a));
+    try testing.expect(h.t.containsText("9% (18k / 200k)"));
+    try testing.expect(!h.t.hasText("Compacting…"));
+    h.t.ctx.focus = 0;
+    h.snap("context-meter-after");
+    h.a.dark = false;
+    h.t.ctx.focus = 0;
+    h.t.frame();
+    h.snap("context-meter-after-light");
+    h.a.dark = true;
+    h.a.view.context.open = true;
+    h.t.frame();
+    try h.t.clickText("Compact");
+    var sent = false;
+    for (h.a.engine.sent.items) |frame| if (std.mem.indexOf(u8, frame, "/compact") != null) {
+        sent = true;
+    };
+    try testing.expect(sent);
 }
 
 test "answering a question keeps its text alive through the frame that drew it" {

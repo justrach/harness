@@ -348,6 +348,7 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
             } else false;
             kit.activityText(c, k, tools.label(lb, work), st, active);
         }
+        if (!open) compactionMeter(c, a, k, work);
     }
     if (!open) return;
     const reveal = ui.motion.frame(c, (ui.motion.MotionSpec{ .duration_ms = 140, .curve = ui.motion.Easing.css_ease_out }).animate(.{ .opacity = 0.65, .y = -2 }, .{ .opacity = 1, .y = 0 }));
@@ -358,6 +359,13 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
 
 const row_h: f32 = 32;
 const tree_w: f32 = 48;
+
+/// The small context meter, on a closed work line that is compacting.
+fn compactionMeter(c: *ui.Context, a: *App, k: theme.Colors, parts: []const tr.Part) void {
+    for (parts) |p| if (p.compaction != null and !p.resolved) {
+        return @import("view_context.zig").inlineMeter(c, a, k);
+    };
+}
 
 /// A run of tool calls and reasoning, folded under one line; it opens on
 /// its own while it is the tail of a streaming reply.
@@ -378,6 +386,7 @@ fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts: []
             if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
         } else false;
         kit.activityText(c, k, tools.label(lb, parts), kit.style(c, 12, 18, .{ .color = if (h.hovered()) k.text else k.muted }), active);
+        if (!open) compactionMeter(c, a, k, parts);
     }
     if (!open) return;
     const reveal = ui.motion.frame(c, (ui.motion.MotionSpec{ .duration_ms = 120, .curve = ui.motion.Easing.css_ease_out }).animate(.{ .opacity = 0.65, .y = -2 }, .{ .opacity = 1, .y = 0 }));
@@ -437,6 +446,7 @@ fn treeRow(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
             const d = firstLine(if (p.agent and p.text.items.len == 0) p.subagent_title else p.text.items);
             if (p.path.len > 0) fileBadge(c, k, p.path, p.is_error) else kit.fadeText(c, d, .{ .size = 12, .mono = p.tool == .exec, .color = if (p.is_error) k.danger else k.muted }, 560);
             if (linked) icons.icon(c, .@"arrow-up-right", 12, k.faint, 0);
+            if (p.compaction != null and !p.resolved) @import("view_context.zig").inlineMeter(c, a, k);
         }
     }
     if (p.kind == .reasoning) {

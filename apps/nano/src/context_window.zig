@@ -192,6 +192,104 @@ pub fn breakdown(tokens_in: ?u64, window_in: ?u64, savings: ?tr.Savings, entries
     };
 }
 
+/// The card's dot matrix: ten rows of twenty, one dot per slice of the
+/// window. Free space is the last cell, so a layout's cells sum to the
+/// grid exactly.
+pub const grid_cols: usize = 20;
+pub const grid_rows: usize = 10;
+pub const grid_dots: usize = grid_cols * grid_rows;
+
+/// Dots per category, then free. Largest-remainder rounding of each
+/// share of the window; a category that holds anything keeps a dot, and
+/// the cells sum to `grid_dots`.
+pub fn gridLayout(items: [Slot.all.len]u64, window: u64) [Slot.all.len + 1]usize {
+    const cells = Slot.all.len + 1;
+    var weight: [cells]u64 = @splat(0);
+    var used: u64 = 0;
+    for (items, 0..) |t, i| {
+        weight[i] = t;
+        used += t;
+    }
+    const total = @max(@max(used, window), 1);
+    weight[Slot.all.len] = total - used;
+    var floor_n: [cells]usize = @splat(0);
+    var rem: [cells]f64 = @splat(-1);
+    var assigned: usize = 0;
+    for (weight, 0..) |wt, i| {
+        const q = @as(f64, @floatFromInt(wt)) / @as(f64, @floatFromInt(total)) * @as(f64, @floatFromInt(grid_dots));
+        const whole: usize = @intFromFloat(@floor(q));
+        floor_n[i] = whole;
+        rem[i] = q - @floor(q);
+        assigned += whole;
+    }
+    if (assigned > grid_dots) {
+        var over = assigned - grid_dots;
+        while (over > 0) {
+            var donor: usize = 0;
+            for (floor_n, 0..) |c, i| if (c > floor_n[donor]) {
+                donor = i;
+            };
+            if (floor_n[donor] == 0) break;
+            floor_n[donor] -= 1;
+            over -= 1;
+        }
+        assigned = grid_dots;
+    }
+    var left = grid_dots - assigned;
+    while (left > 0) {
+        var best: usize = 0;
+        var best_rem: f64 = -2;
+        for (rem, 0..) |r, i| if (r > best_rem) {
+            best = i;
+            best_rem = r;
+        };
+        floor_n[best] += 1;
+        rem[best] = -1;
+        left -= 1;
+    }
+    // A non-zero category keeps a dot, taken from the fullest cell that
+    // can spare one. Free is a cell too, so the grid still sums.
+    for (weight, 0..) |wt, i| {
+        if (wt == 0 or floor_n[i] > 0) continue;
+        var donor: usize = 0;
+        var donor_n: usize = 0;
+        for (floor_n, 0..) |c, j| if (c > donor_n and (weight[j] == 0 or c > 1)) {
+            donor = j;
+            donor_n = c;
+        };
+        if (donor_n > 1) {
+            floor_n[donor] -= 1;
+            floor_n[i] = 1;
+        }
+    }
+    return floor_n;
+}
+
+/// The category dots of a layout (free is the last cell).
+pub fn gridCounts(b: Breakdown) [Slot.all.len]usize {
+    const laid = gridLayout(b.items, b.window);
+    var out: [Slot.all.len]usize = undefined;
+    @memcpy(&out, laid[0..Slot.all.len]);
+    return out;
+}
+
+/// What a compaction is expected to leave of the grid: older chat
+/// (history, and the recent tail it rewrites) shrinks, so free grows.
+/// The real layout replaces this when the chip resolves.
+pub fn projectCompact(counts: [Slot.all.len]usize) [Slot.all.len]usize {
+    var out = counts;
+    const hi = @intFromEnum(Slot.history);
+    const ri = @intFromEnum(Slot.recent);
+    if (out[hi] > 2) out[hi] = @max(1, out[hi] / 5);
+    if (out[ri] > 1) out[ri] = 1;
+    return out;
+}
+
+/// Whether compaction frees this category's dots.
+pub fn freedSlot(s: Slot) bool {
+    return s == .history or s == .recent;
+}
+
 /// Segments each slot fills, in bar order (`segment_counts`). A slot with
 /// tokens gets at least one; the total never passes `segments`.
 pub fn segmentCounts(b: Breakdown) [Slot.all.len]usize {
@@ -426,6 +524,39 @@ test "compaction replaces older chat with its summary; a sealed block is sized w
     try testing.expect(running.compacting);
     fba.reset();
     try testing.expectEqualStrings("Compacting older chat into a sealed item", statusLine(fba.allocator(), running));
+}
+
+test "the dot grid sums exactly and a non-zero category keeps a dot" {
+    var items: [Slot.all.len]u64 = @splat(0);
+    items[@intFromEnum(Slot.history)] = 1;
+    items[@intFromEnum(Slot.files)] = 24_000;
+    items[@intFromEnum(Slot.system)] = 16_000;
+    const laid = gridLayout(items, 200_000);
+    var sum: usize = 0;
+    for (laid) |n| sum += n;
+    try testing.expectEqual(grid_dots, sum);
+    try testing.expect(laid[@intFromEnum(Slot.history)] >= 1);
+    try testing.expect(laid[@intFromEnum(Slot.files)] > laid[@intFromEnum(Slot.history)]);
+    try testing.expectEqual(@as(usize, 0), laid[@intFromEnum(Slot.commands)]);
+    try testing.expect(laid[Slot.all.len] > grid_dots / 2);
+    // Largest remainder, not truncation: 1 and 2 of 3, over 200 dots.
+    var even: [Slot.all.len]u64 = @splat(0);
+    even[@intFromEnum(Slot.files)] = 1;
+    even[@intFromEnum(Slot.tools)] = 2;
+    const split = gridLayout(even, 3);
+    try testing.expectEqual(grid_dots, split[@intFromEnum(Slot.files)] + split[@intFromEnum(Slot.tools)] + split[Slot.all.len]);
+    try testing.expectEqual(@as(usize, 67), split[@intFromEnum(Slot.files)]);
+    try testing.expectEqual(@as(usize, 133), split[@intFromEnum(Slot.tools)]);
+    const empty = gridLayout(@splat(0), 200_000);
+    try testing.expectEqual(grid_dots, empty[Slot.all.len]);
+    var crowded: [Slot.all.len]usize = @splat(0);
+    crowded[@intFromEnum(Slot.history)] = 40;
+    crowded[@intFromEnum(Slot.recent)] = 10;
+    crowded[@intFromEnum(Slot.files)] = 20;
+    const shrunk = projectCompact(crowded);
+    try testing.expect(shrunk[@intFromEnum(Slot.history)] >= 1 and shrunk[@intFromEnum(Slot.history)] < 40);
+    try testing.expectEqual(@as(usize, 1), shrunk[@intFromEnum(Slot.recent)]);
+    try testing.expectEqual(@as(usize, 20), shrunk[@intFromEnum(Slot.files)]);
 }
 
 test "segments never overflow and small slots stay visible (segments_never_overflow_and_small_slots_stay_visible)" {

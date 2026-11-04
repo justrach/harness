@@ -1073,6 +1073,30 @@ pub const App = struct {
             }
             return a.redraw();
         }
+        if (a.queueRun(prompt)) {
+            // Sent: the prompt is no one's draft any more.
+            attachments.clear(a);
+            a.composer.clear();
+            a.view.stick_end = true;
+        }
+    }
+
+    /// Queues `prompt` on the open chat the way the composer does: a
+    /// queued message while a turn runs, otherwise a `run` command. The
+    /// composer is left alone, so a card can send `/compact` without
+    /// dropping a draft.
+    pub fn sendPrompt(a: *App, prompt: []const u8) void {
+        if (prompt.len == 0 or a.engine.state != .connected) return;
+        if (a.queues()) {
+            queue_mod.queueMessage(a, prompt);
+            return a.redraw();
+        }
+        _ = a.queueRun(prompt);
+    }
+
+    /// Mints a run for `prompt` and queues it. False when it couldn't be
+    /// prepared; the caller keeps the draft.
+    fn queueRun(a: *App, prompt: []const u8) bool {
         var chat_buf: [36]u8 = undefined;
         var message_buf: [36]u8 = undefined;
         const message_id = uuid(a.io, &message_buf);
@@ -1105,7 +1129,8 @@ pub const App = struct {
         const feedback = @import("app_send_feedback.zig");
         const pending = feedback.begin(a, chat_id, message_id, prompt) catch {
             a.setNotice("Couldn't prepare the message. Please try again.");
-            return a.redraw();
+            a.redraw();
+            return false;
         };
         a.request(requests.run(chat_id, message_id, .{
             .prompt = prompt,
@@ -1114,15 +1139,12 @@ pub const App = struct {
             .reasoning = reasoning,
             .cwd = cwd,
         }), .of(feedback.Pending, pending, feedback.Pending.onReply));
-        // Sent: the prompt is no one's draft any more.
-        attachments.clear(a);
-        a.composer.clear();
-        a.view.stick_end = true;
         if (a.selected == null) {
             a.tabs.setCurrent(chat_id);
             a.select(chat_id, null);
         }
         a.redraw();
+        return true;
     }
 
     /// Stops the open chat's turn.
