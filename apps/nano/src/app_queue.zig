@@ -1,9 +1,10 @@
 //! The open chat's message queue, driven as the desktop drives it
 //! (crates/ui/src/queue.rs): a message typed while the agent works is
-//! queued (`QueueMessage`, held for the turn's end); a row can be removed,
-//! sent now (which interrupts the turn), or edited in the composer under a
-//! lease the host grants and the editor renews every 20 seconds. The
-//! host-only calls name the chat's device when it isn't this one.
+//! queued (`QueueMessage`, held for the turn's end) or, with ⌘↩, steers the
+//! run; a row can be removed, sent now (which interrupts the turn), or
+//! edited in the composer under a lease the host grants and the editor
+//! renews every 20 seconds. The host-only calls name the chat's device when
+//! it isn't this one.
 const std = @import("std");
 const rpc = @import("rpc.zig");
 const requests = @import("requests.zig");
@@ -50,7 +51,12 @@ const renew_s = 20.0;
 fn host(a: *const App) ?[]const u8 {
     const id = a.selected orelse return null;
     const ch = a.findChat(id) orelse return null;
-    const dev = ch.device_id orelse return null;
+    return foreign(a, ch.device_id);
+}
+
+/// `device`, unless it's this one.
+fn foreign(a: *const App, device: ?[]const u8) ?[]const u8 {
+    const dev = device orelse return null;
     if (a.device_id) |mine| if (std.mem.eql(u8, mine, dev)) return null;
     return dev;
 }
@@ -76,6 +82,8 @@ pub fn stop(a: *App) void {
 pub fn deinit(a: *App) void {
     if (a.queue_edit) |*e| e.deinit(a.gpa);
     a.queue_edit = null;
+    for (a.steers.items) |s| s.free();
+    a.steers.deinit(a.gpa);
     a.queue.deinit();
     if (a.queue_begin) |b| a.gpa.free(b);
 }
@@ -101,6 +109,134 @@ pub fn queues(a: *const App) bool {
 pub fn queueMessage(a: *App, text: []const u8) void {
     const chat = a.selected orelse return;
     a.request(requests.queueMessage(chat, text), .of(App, a, App.onNotice));
+}
+
+/// What a message does while a run is live (`FollowUpAction`).
+pub const FollowUp = enum { queue, steer };
+
+/// Why a message can't steer the run, in the desktop's words
+/// (`steer_unavailable`, `steer_reason`).
+pub fn steerBlocked(live: bool, has_text: bool, has_attachments: bool, actions: bool, steers: bool) ?[]const u8 {
+    if (!live) return "Steer is available while a run is active";
+    if (!has_text) return "Steer needs text in the composer";
+    if (has_attachments) return "Steer only supports text; remove attachments or screenshots";
+    if (!actions) return "Update Harness on this device and the chat host to use this action";
+    if (!steers) return "This agent does not support steering during a turn";
+    return null;
+}
+
+/// This device's catalog says the chat's agent steers mid-turn; another
+/// device's agents aren't in it (`catalog_supports_chat_steering`).
+fn chatSteers(a: *const App) bool {
+    if (host(a) != null) return false;
+    const id = a.selected orelse return false;
+    const harness = (a.findChat(id) orelse return false).harness orelse return false;
+    for (a.harnesses.items) |h| if (std.mem.eql(u8, h.id, harness)) return h.steers;
+    return false;
+}
+
+fn steerBlock(a: *const App) ?[]const u8 {
+    const has_text = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0;
+    return steerBlocked(a.queues(), has_text, @import("app_attachments.zig").count(a) > 0, a.caps.actions, chatSteers(a));
+}
+
+/// Settings › Shortcuts' follow-up behaviour, in the file both apps share.
+fn behavior(a: *const App) FollowUp {
+    const v = a.settings.text("followUpBehavior") orelse return .queue;
+    return if (std.mem.eql(u8, v, "steer")) .steer else .queue;
+}
+
+/// What Enter does with a run live: the setting, or the queue where it
+/// can't steer (`main_action`).
+pub fn mainFollowUp(a: *const App) FollowUp {
+    return if (behavior(a) == .steer and steerBlock(a) == null) .steer else .queue;
+}
+
+/// ⌘↩ with a run live: whichever the setting doesn't choose, so by default
+/// it steers. Where it can't, the draft stays and the composer says why.
+pub fn sendOpposite(a: *App) void {
+    if (a.queue_edit != null) return;
+    if (behavior(a) == .steer) return a.sendAs(.queue);
+    if (steerBlock(a)) |why| {
+        a.setNotice(why);
+        return a.redraw();
+    }
+    a.sendAs(.steer);
+}
+
+/// A message on its way to steer a run: queued first for its row's id, then
+/// promoted (`SteerQueuedMessageNow`), as the desktop's composer does.
+pub const Steer = struct {
+    app: *App,
+    chat: []u8,
+    text: []u8,
+
+    fn free(s: *Steer) void {
+        const gpa = s.app.gpa;
+        gpa.free(s.chat);
+        gpa.free(s.text);
+        gpa.destroy(s);
+    }
+
+    fn finish(s: *Steer) void {
+        const a = s.app;
+        for (a.steers.items, 0..) |x, i| if (x == s) {
+            _ = a.steers.swapRemove(i);
+            break;
+        };
+        s.free();
+        a.redraw();
+    }
+
+    fn onQueued(s: *Steer, _: u64, r: rpc.Reply) void {
+        const a = s.app;
+        const row: ?[]const u8 = switch (r) {
+            .ok => |v| if (v == .object) str(v.object, "id") else null,
+            .err, .done => null,
+            .item => return,
+        };
+        if (row == null or row.?.len == 0) {
+            // Nothing was queued: the prompt is still the user's draft.
+            a.setNotice("Couldn't send that message");
+            if (a.selected != null and std.mem.eql(u8, a.selected.?, s.chat) and a.composer.text().len == 0) a.composer.set(s.text);
+            return s.finish();
+        }
+        const host_id: ?[]const u8 = if (a.selected != null and std.mem.eql(u8, a.selected.?, s.chat)) host(a) else if (a.findChat(s.chat)) |ch| foreign(a, ch.device_id) else null;
+        // The reply can come before this returns: nothing touches `s` after.
+        a.request(requests.steerQueuedNow(s.chat, row.?, host_id), .of(Steer, s, onSteered));
+    }
+
+    fn onSteered(s: *Steer, _: u64, r: rpc.Reply) void {
+        switch (r) {
+            .ok => |v| if (!acked(v, "sent")) s.app.setNotice("Message queued, but it couldn't steer the run. Check the queue."),
+            .err, .done => s.app.setNotice("Message queued, but it couldn't steer the run. Check the queue."),
+            .item => return,
+        }
+        s.finish();
+    }
+};
+
+/// Sends `text` (it may be the composer's own) to steer the open chat's run,
+/// and takes it out of the composer.
+pub fn steer(a: *App, text: []const u8) void {
+    const chat = a.selected orelse return;
+    const s = newSteer(a, chat, text) catch return a.setNotice("Couldn't send that message");
+    @import("app_attachments.zig").clear(a);
+    a.composer.clear();
+    a.view.stick_end = true;
+    a.request(requests.queueMessage(s.chat, s.text), .of(Steer, s, Steer.onQueued));
+}
+
+fn newSteer(a: *App, chat: []const u8, text: []const u8) !*Steer {
+    const s = try a.gpa.create(Steer);
+    errdefer a.gpa.destroy(s);
+    const owned_chat = try a.gpa.dupe(u8, chat);
+    errdefer a.gpa.free(owned_chat);
+    const owned_text = try a.gpa.dupe(u8, text);
+    errdefer a.gpa.free(owned_text);
+    s.* = .{ .app = a, .chat = owned_chat, .text = owned_text };
+    try a.steers.append(a.gpa, s);
+    return s;
 }
 
 pub fn remove(a: *App, row: []const u8) void {
@@ -252,6 +388,15 @@ fn onRenewed(a: *App, _: u64, r: rpc.Reply) void {
         .err => a.setNotice("Edit protection expired; review this message before sending"),
         else => {},
     }
+}
+
+test "steering: a live run, text alone, a host and an agent that can" {
+    try std.testing.expect(steerBlocked(true, true, false, true, true) == null);
+    try std.testing.expectEqualStrings("Steer is available while a run is active", steerBlocked(false, true, false, true, true).?);
+    try std.testing.expectEqualStrings("Steer needs text in the composer", steerBlocked(true, false, false, true, true).?);
+    try std.testing.expectEqualStrings("Steer only supports text; remove attachments or screenshots", steerBlocked(true, true, true, true, true).?);
+    try std.testing.expectEqualStrings("Update Harness on this device and the chat host to use this action", steerBlocked(true, true, false, false, true).?);
+    try std.testing.expectEqualStrings("This agent does not support steering during a turn", steerBlocked(true, true, false, true, false).?);
 }
 
 test "capabilities are read by name" {

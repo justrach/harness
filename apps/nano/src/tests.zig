@@ -82,6 +82,7 @@ test {
     _ = @import("tests_ui_archived.zig");
     _ = @import("tests_ui_devices.zig");
     _ = @import("tests_ui_project_scroll.zig");
+    _ = @import("tests_ui_steer.zig");
     _ = @import("tests_ui_hover.zig");
     _ = @import("themes.zig");
     _ = @import("model_color.zig");

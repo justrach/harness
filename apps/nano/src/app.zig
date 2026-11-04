@@ -305,6 +305,8 @@ pub const App = struct {
     w_queue: Watch = .{},
     caps: queue_mod.Caps = .{},
     queue_edit: ?queue_mod.Edit = null,
+    /// Messages on their way to steer a run, until the engine has answered.
+    steers: std.ArrayList(*queue_mod.Steer) = .empty,
     queue_begin: ?[]u8 = null,
     /// This window's editor id for queue edit leases.
     instance: [36]u8 = undefined,
@@ -1038,6 +1040,12 @@ pub const App = struct {
 
     /// Sends what the composer holds: to the open chat, or to a new one.
     pub fn send(a: *App) void {
+        a.sendAs(null);
+    }
+
+    /// `follow_up`: what the message does if a run is live; null, what the
+    /// settings choose.
+    pub fn sendAs(a: *App, follow_up: ?queue_mod.FollowUp) void {
         if (a.queue_edit != null) return queue_mod.finishEdit(a, .commit);
         const attachments = @import("app_attachments.zig");
         const text = std.mem.trim(u8, a.composer.text(), " \n\t");
@@ -1055,9 +1063,14 @@ pub const App = struct {
         }
         if (prompt.len == 0 or a.engine.state != .connected) return;
         if (a.queues()) {
-            queue_mod.queueMessage(a, prompt);
-            attachments.clear(a);
-            a.composer.clear();
+            switch (follow_up orelse queue_mod.mainFollowUp(a)) {
+                .queue => {
+                    queue_mod.queueMessage(a, prompt);
+                    attachments.clear(a);
+                    a.composer.clear();
+                },
+                .steer => queue_mod.steer(a, prompt),
+            }
             return a.redraw();
         }
         var chat_buf: [36]u8 = undefined;

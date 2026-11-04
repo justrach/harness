@@ -233,7 +233,16 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
             a.composer.want_caret = r.caret + 1;
         }
     }
-    if (!on_enter and (std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0) and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) a.send();
+    // With a run live, Enter's ⌘↩ and either mode's ⌘⌥↩ do what the plain
+    // send doesn't: by default that steers it (`on_modified_submit`,
+    // `on_follow_up_shortcut`).
+    if (std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0) {
+        const opposite = a.queues() and a.queue_edit == null;
+        if (c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) {
+            if (on_enter and opposite) @import("app_queue.zig").sendOpposite(a) else a.send();
+        }
+        if (c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true, .alt = true }) and opposite) @import("app_queue.zig").sendOpposite(a);
+    }
     recall(c, a, c.node(@intCast(at)).id);
     keepFocus(c, a, c.node(@intCast(at)).id);
     // ⌘↩ with nothing typed sends the newest queued message now.
