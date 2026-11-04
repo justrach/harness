@@ -297,7 +297,7 @@ fn deviceName(a: *const App, id: ?[]const u8) ?[]const u8 {
     return null;
 }
 
-fn revealRow(c: *ui.Context, scroll_id: u64, d: ui.Div) void {
+pub fn revealRow(c: *ui.Context, scroll_id: u64, d: ui.Div) void {
     const box = c.rects.get(scroll_id) orelse return;
     const r = c.rects.get(c.node(d.index).id) orelse return;
     const now = c.scroll.get(scroll_id) orelse 0;

@@ -12,6 +12,11 @@ const account = @import("app_account.zig");
 const kit = @import("view_kit.zig");
 const App = @import("app.zig").App;
 
+/// The new session's project menu: a row, and what isn't its list (the
+/// panel's inset and border, its gaps, the divider and Add folder…).
+const space_row: f32 = 30;
+const space_chrome: f32 = 2 * (4 + 1) + 2 + 7 + space_row;
+
 pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
     const v = &a.view;
     if (!v.account_menu and !v.space_menu) return;
@@ -26,15 +31,23 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
     if (v.space_menu) if (v.space_anchor) |r| {
-        const m = panel(c, k, r.x, r.y + r.h + 4, 240);
+        const count: f32 = @floatFromInt(a.spaces.items.len);
+        const list_h = rules.spaceListHeight(count * (space_row + 1) - 1, c.size.h, space_chrome);
+        const y = rules.snapToWindow(r.y + r.h + 4, list_h + space_chrome, c.size.h, 8);
+        const m = panel(c, k, r.x, y, 240);
         defer m.end();
         const current = a.newChatSpace();
-        for (a.spaces.items) |s| {
-            ui.key(c, c.print("space-{s}", .{s.id}));
-            const on = current != null and std.mem.eql(u8, current.?.id, s.id);
-            if (item(c, k, .folder, s.name, on)) {
-                a.select(null, s.id);
-                v.space_menu = false;
+        {
+            // The projects scroll; Add folder… stays under them.
+            ui.scroll(c, .{ .width = .fill, .max_height = list_h, .direction = .column, .gap = 1, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } });
+            defer ui.end(c);
+            for (a.spaces.items) |s| {
+                ui.key(c, c.print("space-{s}", .{s.id}));
+                const on = current != null and std.mem.eql(u8, current.?.id, s.id);
+                if (item(c, k, .folder, s.name, on)) {
+                    a.select(null, s.id);
+                    v.space_menu = false;
+                }
             }
         }
         divider(c, k);
@@ -129,7 +142,7 @@ fn panel(c: *ui.Context, k: theme.Colors, x: f32, y: f32, w: f32) ui.Div {
 }
 
 fn item(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8, on: bool) bool {
-    var r = ui.div(c).row().wFull().h(30).px(8).gap(8).itemsCenter().rounded(7).hover(k.hover);
+    var r = ui.div(c).row().wFull().h(space_row).px(8).gap(8).itemsCenter().rounded(7).hover(k.hover);
     if (on) r = r.bg(k.selected);
     defer r.end();
     const clicked = r.clicked();

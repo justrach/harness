@@ -251,7 +251,20 @@ pub fn snapToWindow(pos: f32, size: f32, limit: f32, margin: f32) f32 {
     return @round(at);
 }
 
+/// How tall a menu's project list is: all of it, up to 224 points and what
+/// the window leaves 8 points clear of its edges (`list_budget`).
+pub fn spaceListHeight(content: f32, window: f32, chrome: f32) f32 {
+    return @min(content, std.math.clamp(window - 2 * 8 - chrome, 0, 224));
+}
+
 const testing = std.testing;
+
+test "a project list takes what it needs, 224 at most, and never more than the window leaves" {
+    try testing.expectEqual(@as(f32, 92), spaceListHeight(92, 800, 49));
+    try testing.expectEqual(@as(f32, 224), spaceListHeight(1860, 800, 49));
+    try testing.expectEqual(@as(f32, 135), spaceListHeight(1860, 200, 49));
+    try testing.expectEqual(@as(f32, 0), spaceListHeight(1860, 40, 49));
+}
 
 test "lightness moves in HSL, hue and saturation kept" {
     const c = shiftLightness(.hex(0x3a8a5c), 0.12, 0.15, 0.95);

@@ -25,6 +25,8 @@ pub const State = struct {
     query: ui.TextBuffer = .{},
     /// The project menu's highlighted row: its rows, then New project.
     active: usize = 0,
+    /// The keys moved it: the list brings it into view.
+    reveal: bool = false,
     focus: bool = false,
     /// The view menu's group under the pointer or keys, and the one whose
     /// menu is open beside it (Organize, Sort, Show; 3 is Compact).
@@ -86,8 +88,14 @@ pub fn keys(c: *ui.Context, a: *App) void {
         if (a.view.menus.ctx_at != null) return;
         const rows = projectRows(a, c.alloc()) catch return;
         const m = &a.view.menus;
-        if (c.shortcut(.{ .key = S.down })) m.active = rules.menuStep(m.active, rows.len + 1, 1) orelse 0;
-        if (c.shortcut(.{ .key = S.up })) m.active = rules.menuStep(m.active, rows.len + 1, -1) orelse 0;
+        if (c.shortcut(.{ .key = S.down })) {
+            m.active = rules.menuStep(m.active, rows.len + 1, 1) orelse 0;
+            m.reveal = true;
+        }
+        if (c.shortcut(.{ .key = S.up })) {
+            m.active = rules.menuStep(m.active, rows.len + 1, -1) orelse 0;
+            m.reveal = true;
+        }
         if (c.shortcut(.{ .key = S.enter }) or c.shortcut(.{ .key = S.enter, .cmd = true }))
             activate(a, if (m.active < rows.len) rows[m.active] else .add);
     } else if (a.view.more_menu) {
@@ -238,7 +246,10 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
             m.focus = false;
         }
         // Typing starts the highlight over.
-        if (res.changed) m.active = 0;
+        if (res.changed) {
+            m.active = 0;
+            m.reveal = true;
+        }
     }
     _ = c.leaf(.{ .height = .{ .px = 4 - 2 } }, .none, null);
     const rows = projectRows(a, c.alloc()) catch return;
@@ -248,6 +259,8 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         if (@hasField(ui.Style, "scrollbar")) list_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
         ui.scroll(c, list_style);
         defer ui.end(c);
+        const list_id = c.node(c.stack.items[c.stack.items.len - 1]).id;
+        defer m.reveal = false;
         const now = a.nowMs();
         // The away devices' caption, once, unless they start the list.
         var caption_at: ?usize = null;
@@ -265,6 +278,7 @@ fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
             const selected = sameFilter(a, row);
             const it = menuRow(c, k, selected, i == m.active);
             defer it.end();
+            if (m.reveal and i == m.active) @import("view_sidebar_search.zig").revealRow(c, list_id, it);
             if (it.clicked()) picked = row;
             // A project's own menu, where it's right-clicked.
             if (row == .space and kit.secondaryClicked(it)) {
