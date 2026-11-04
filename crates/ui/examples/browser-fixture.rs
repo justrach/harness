@@ -9,6 +9,9 @@ mod saved_views;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[cfg(target_os = "macos")]
+#[path = "browser-fixture/zoom.rs"]
+mod zoom;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -35,6 +38,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
         let window = app
             .keyWindow()
             .or_else(|| app.mainWindow())
+            .or_else(|| app.windows().into_iter().find(|window| window.isVisible()))
             .ok_or_else(|| anyhow::anyhow!("fixture window is not available"))?;
         std::process::Command::new("/usr/sbin/screencapture")
             .args(["-x", "-o", "-l", &window.windowNumber().to_string()])
@@ -204,6 +208,12 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("HARNESS_BROWSER_ZOOM_FIXTURE_ONLY").is_some() {
+                    zoom::exercise(window, &_origin, cx).await?;
+                    std::fs::write(output.join("result.txt"), "PASS: native/address zoom shortcuts, Caps Lock and shifted plus; navigation/reload/history, repeated isolated preview rebuilds, independent tab zoom and restore/close, empty-tab app-font fallback; native keyboard focus and app text size preserved.\n")?;
+                    return Ok(());
+                }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if std::env::var_os("HARNESS_HTML_PREVIEW_FIXTURE_ONLY").is_some() {
                     html_preview::exercise(window, cx).await?;
@@ -520,12 +530,18 @@ fn main() -> anyhow::Result<()> {
                 std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
+            let failed = run.is_err();
             if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
             let _ = window.update(cx, |shell, window, cx| shell.fixture_blur_browser(window, cx));
             pause(cx, 200).await;
             drop(state);
             let _ = window.update(cx, |_, window, _| window.remove_window());
             pause(cx, 100).await;
+            // AppKit termination exits before Application::run returns. Do not
+            // let it turn a failed fixture into a successful process exit.
+            if failed {
+                std::process::exit(1);
+            }
             cx.update(|cx| cx.quit());
         }).detach();
     });

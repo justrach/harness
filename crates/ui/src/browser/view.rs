@@ -101,6 +101,17 @@ impl BrowserSurface {
         cx.stop_propagation();
     }
 
+    #[cfg(target_os = "macos")]
+    fn zoom(&self, zoom: super::macos::PageZoom, cx: &mut Context<Self>) {
+        if self.presentation == super::model::Presentation::Live
+            && let Some(native) = &self.native
+        {
+            native.zoom(zoom);
+        } else {
+            cx.propagate();
+        }
+    }
+
     fn preview_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let snapshot = &self.previews;
         let available = snapshot.error.is_none();
@@ -659,7 +670,7 @@ impl Render for BrowserSurface {
         });
         #[cfg(not(target_os = "macos"))]
         let reclaim_keyboard: Option<gpui::Div> = None;
-        div().id("browser-surface").size_full().relative().flex().flex_col().track_focus(&self.focus)
+        let surface = div().id("browser-surface").size_full().relative().flex().flex_col().track_focus(&self.focus)
             .children(reclaim_keyboard)
             .key_context("Browser").on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(|this,event: &gpui::KeyUpEvent,w,cx| {
@@ -686,6 +697,26 @@ impl Render for BrowserSurface {
             .child(body)
             .when(external, |el| el.child(div().h(px(26.0)).px(px(10.0)).flex().items_center().gap(px(5.0)).border_t_1().border_color(theme.border)
                 .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_faint)
-                .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0))).child("Opens in your default browser")))
+                .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0))).child("Opens in your default browser")));
+        // Address/toolbar focus stays in GPUI. Use the same page zoom as native
+        // WebKit focus instead of letting these actions resize the app's text.
+        #[cfg(target_os = "macos")]
+        let surface = surface
+            .on_action(
+                cx.listener(|this, _: &crate::app_menus::IncreaseFontSize, _, cx| {
+                    this.zoom(super::macos::PageZoom::In, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::app_menus::DecreaseFontSize, _, cx| {
+                    this.zoom(super::macos::PageZoom::Out, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::app_menus::ResetFontSize, _, cx| {
+                    this.zoom(super::macos::PageZoom::Reset, cx);
+                }),
+            );
+        surface
     }
 }

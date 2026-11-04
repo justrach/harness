@@ -109,6 +109,8 @@ pub struct BrowserSurface {
     fixture_preview_open: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
     presentation: Presentation,
     #[cfg(target_os = "macos")]
+    page_zoom: f64,
+    #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
     #[cfg(target_os = "macos")]
     right_occlusion: gpui::Pixels,
@@ -190,6 +192,8 @@ impl BrowserSurface {
             #[cfg(feature = "browser-fixture")]
             fixture_preview_open: Default::default(),
             presentation: Presentation::Hidden,
+            #[cfg(target_os = "macos")]
+            page_zoom: 1.0,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
             #[cfg(target_os = "macos")]
@@ -435,6 +439,31 @@ impl BrowserSurface {
         cx.notify();
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn reset_document_host(&mut self) {
+        // Zoom belongs to the tab, not the isolated document's storage or JS.
+        #[cfg(target_os = "macos")]
+        if let Some(native) = &self.native {
+            self.page_zoom = native.zoom_factor();
+        }
+        self.native = None;
+        self.context = BrowserContext::default();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn create_document_host(
+        &self,
+        html: &str,
+        window: &Window,
+    ) -> Result<native::NativePage, String> {
+        let mut native = native::NativePage::new_document(window, self.native_tx.clone())?;
+        #[cfg(target_os = "macos")]
+        native.set_zoom_factor(self.page_zoom);
+        native.present(self.presentation);
+        native.load_html(html)?;
+        Ok(native)
+    }
+
     /// Read only through the originating chat's workspace/device RPC. Every
     /// reload destroys the old page and its state before asking for new bytes.
     pub fn read_preview(
@@ -452,10 +481,7 @@ impl BrowserSurface {
         self.previews_task = None;
         self.clear_favicon(cx);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        {
-            self.native = None;
-            self.context = BrowserContext::default();
-        }
+        self.reset_document_host();
         self.page = PageState {
             url: Some(request.path.clone()),
             title: request
@@ -493,9 +519,7 @@ impl BrowserSurface {
                 let result: Result<(), String> = result.and_then(|document| {
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
                     {
-                        let mut native = native::NativePage::new_document(window, this.native_tx.clone())?;
-                        native.present(this.presentation);
-                        native.load_html(&document.html)?;
+                        let native = this.create_document_host(&document.html, window)?;
                         this.document = Some(document);
                         this.native = Some(native);
                         Ok(())
@@ -773,10 +797,8 @@ impl BrowserSurface {
         let document = document::HtmlDocument::new(&request, content)?;
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            self.native = None;
-            let mut native = native::NativePage::new_document(window, self.native_tx.clone())?;
-            native.present(self.presentation);
-            native.load_html(&document.html)?;
+            self.reset_document_host();
+            let native = self.create_document_host(&document.html, window)?;
             self.page.url = Some(document.path.clone());
             self.page.title = document.title.clone();
             self.page.loading = true;
@@ -817,6 +839,33 @@ impl BrowserSurface {
     #[cfg(target_os = "macos")]
     pub fn fixture_focused(&self) -> bool {
         self.native.as_ref().unwrap().fixture_focused()
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_page_zoom(&self) -> f64 {
+        self.native.as_ref().unwrap().fixture_page_zoom()
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_zoom_key(&self, key: &str, shift: bool) {
+        self.native.as_ref().unwrap().fixture_zoom_key(key, shift);
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_zoom_key_with_modifiers(
+        &self,
+        key: &str,
+        modifiers: gpui::Modifiers,
+        caps_lock: bool,
+    ) {
+        self.native
+            .as_ref()
+            .unwrap()
+            .fixture_zoom_key_with_modifiers(key, modifiers, caps_lock);
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_address_state(&self, window: &Window, cx: &App) -> (String, bool) {
+        (
+            self.address.read(cx).text().to_owned(),
+            self.address.focus_handle(cx).is_focused(window),
+        )
     }
     #[cfg(target_os = "macos")]
     pub fn fixture_overlay_at(&self, x: f64, y: f64) -> bool {
