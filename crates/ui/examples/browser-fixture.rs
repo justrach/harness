@@ -211,7 +211,7 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(target_os = "macos")]
                 if std::env::var_os("HARNESS_BROWSER_ZOOM_FIXTURE_ONLY").is_some() {
                     zoom::exercise(window, &_origin, cx).await?;
-                    std::fs::write(output.join("result.txt"), "PASS: native browser zoom keys and address-focus routing; native keyboard focus and app text size preserved.\n")?;
+                    std::fs::write(output.join("result.txt"), "PASS: native/address zoom shortcuts, Caps Lock and shifted plus; navigation/reload/history, repeated isolated preview rebuilds, independent tab zoom and restore/close, empty-tab app-font fallback; native keyboard focus and app text size preserved.\n")?;
                     return Ok(());
                 }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -530,12 +530,18 @@ fn main() -> anyhow::Result<()> {
                 std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
+            let failed = run.is_err();
             if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
             let _ = window.update(cx, |shell, window, cx| shell.fixture_blur_browser(window, cx));
             pause(cx, 200).await;
             drop(state);
             let _ = window.update(cx, |_, window, _| window.remove_window());
             pause(cx, 100).await;
+            // AppKit termination exits before Application::run returns. Do not
+            // let it turn a failed fixture into a successful process exit.
+            if failed {
+                std::process::exit(1);
+            }
             cx.update(|cx| cx.quit());
         }).detach();
     });
