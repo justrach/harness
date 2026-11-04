@@ -298,6 +298,9 @@ pub mod methods {
     // disable|login`); per-device like the sign-ins above.
     pub const LIST_MCP_SERVERS: &str = "ListMcpServers";
     pub const MCP_SERVER_ACTION: &str = "McpServerAction";
+    // nanocua on a device (`nanocua ctl`): the app and its grants are per device.
+    pub const GET_COMPUTER_USE: &str = "GetComputerUse";
+    pub const COMPUTER_USE_ACTION: &str = "ComputerUseAction";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";

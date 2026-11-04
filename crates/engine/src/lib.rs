@@ -33,6 +33,7 @@ pub mod instance_lock;
 pub mod keep_awake;
 pub mod local_import;
 pub mod localhost_view;
+pub mod computer_use;
 pub mod mcp_servers;
 mod model_catalogs;
 pub mod profile;
