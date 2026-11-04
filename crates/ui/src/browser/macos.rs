@@ -593,10 +593,13 @@ impl NativePage {
             let Ok(keystroke) = gpui::Keystroke::parse(&combo) else {
                 return event.as_ptr();
             };
-            let browser_key = matches!(
-                combo.as_str(),
-                "cmd-l" | "cmd-t" | "cmd-w" | "cmd-[" | "cmd-]" | "cmd-shift-r" | "cmd-k" | "cmd-,"
-            );
+            let browser_key = is_browser_shortcut(&combo);
+            // Zoom belongs to this page, even when the same chord is an app
+            // text-size shortcut. Do not send it to GPUI or move first responder.
+            if let Some(zoom) = PageZoom::from_shortcut(&combo) {
+                zoom.apply_to(&monitor_view);
+                return std::ptr::null_mut();
+            }
             let app_key = monitor_shortcuts
                 .borrow()
                 .iter()
@@ -675,6 +678,9 @@ impl NativePage {
         }
         host.observer.changed();
     }
+    pub fn zoom(&self, zoom: PageZoom) {
+        zoom.apply_to(&self.0.borrow().view);
+    }
     pub fn history(&self, forward: bool) {
         let host = self.0.borrow();
         unsafe {
@@ -734,6 +740,79 @@ impl NativePage {
                 Some(&completion),
             );
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PageZoom {
+    In,
+    Out,
+    Reset,
+}
+
+impl PageZoom {
+    fn from_shortcut(combo: &str) -> Option<Self> {
+        match combo {
+            "cmd-=" | "cmd-+" | "cmd-shift-=" | "cmd-shift-+" => Some(Self::In),
+            "cmd--" => Some(Self::Out),
+            "cmd-0" => Some(Self::Reset),
+            _ => None,
+        }
+    }
+
+    fn factor(self, current: f64) -> f64 {
+        match self {
+            Self::In => (current * 1.1).min(5.0),
+            Self::Out => (current / 1.1).max(0.25),
+            Self::Reset => 1.0,
+        }
+    }
+
+    fn apply_to(self, view: &WKWebView) {
+        unsafe {
+            view.setPageZoom(self.factor(view.pageZoom()));
+        }
+    }
+}
+
+fn is_browser_shortcut(combo: &str) -> bool {
+    PageZoom::from_shortcut(combo).is_some()
+        || matches!(
+            combo,
+            "cmd-l" | "cmd-t" | "cmd-w" | "cmd-[" | "cmd-]" | "cmd-shift-r" | "cmd-k" | "cmd-,"
+        )
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn browser_zoom_shortcuts_stay_in_browser() {
+        for combo in [
+            "cmd-=",
+            "cmd-+",
+            "cmd-shift-=",
+            "cmd-shift-+",
+            "cmd--",
+            "cmd-0",
+        ] {
+            assert!(is_browser_shortcut(combo), "{combo} escaped the browser");
+        }
+        for combo in ["cmd-alt--", "cmd-ctrl-=", "cmd-shift-0", "-"] {
+            assert!(!is_browser_shortcut(combo), "{combo} was intercepted");
+        }
+    }
+
+    #[test]
+    fn browser_zoom_steps_reverse_clamp_and_reset() {
+        let larger = PageZoom::In.factor(1.0);
+        assert!(larger > 1.0);
+        assert!((PageZoom::Out.factor(larger) - 1.0).abs() < 1e-10);
+        assert!(PageZoom::Out.factor(1.0) < 1.0);
+        assert_eq!(PageZoom::In.factor(5.0), 5.0);
+        assert_eq!(PageZoom::Out.factor(0.25), 0.25);
+        assert_eq!(PageZoom::Reset.factor(2.0), 1.0);
     }
 }
 
@@ -1006,6 +1085,34 @@ impl NativePage {
     }
     pub fn fixture_focused(&self) -> bool {
         has_focus(&self.0.borrow().view)
+    }
+    pub fn fixture_page_zoom(&self) -> f64 {
+        unsafe { self.0.borrow().view.pageZoom() }
+    }
+    pub fn fixture_zoom_key(&self, key: &str, shift: bool) {
+        let host = self.0.borrow();
+        let window = host.view.window().unwrap();
+        let mut flags = NSEventModifierFlags::Command;
+        if shift {
+            flags |= NSEventModifierFlags::Shift;
+        }
+        let key = NSString::from_str(key);
+        unsafe {
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                objc2_app_kit::NSEventType::KeyDown,
+                objc2_foundation::NSPoint::ZERO,
+                flags,
+                0.0,
+                window.windowNumber(),
+                None,
+                &key,
+                &key,
+                false,
+                0,
+            ).unwrap();
+            objc2_app_kit::NSApplication::sharedApplication(host.view.mtm())
+                .postEvent_atStart(&event, false);
+        }
     }
     pub fn fixture_overlay_at(&self, x: f64, y: f64) -> bool {
         let host = self.0.borrow();

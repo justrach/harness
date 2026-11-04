@@ -9,6 +9,9 @@ mod saved_views;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[cfg(target_os = "macos")]
+#[path = "browser-fixture/zoom.rs"]
+mod zoom;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -35,6 +38,7 @@ fn capture(directory: &std::path::Path, name: &str) -> anyhow::Result<()> {
         let window = app
             .keyWindow()
             .or_else(|| app.mainWindow())
+            .or_else(|| app.windows().into_iter().find(|window| window.isVisible()))
             .ok_or_else(|| anyhow::anyhow!("fixture window is not available"))?;
         std::process::Command::new("/usr/sbin/screencapture")
             .args(["-x", "-o", "-l", &window.windowNumber().to_string()])
@@ -204,6 +208,12 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("HARNESS_BROWSER_ZOOM_FIXTURE_ONLY").is_some() {
+                    zoom::exercise(window, &_origin, cx).await?;
+                    std::fs::write(output.join("result.txt"), "PASS: native browser zoom keys and address-focus routing; native keyboard focus and app text size preserved.\n")?;
+                    return Ok(());
+                }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if std::env::var_os("HARNESS_HTML_PREVIEW_FIXTURE_ONLY").is_some() {
                     html_preview::exercise(window, cx).await?;

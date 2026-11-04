@@ -819,6 +819,14 @@ impl BrowserSurface {
         self.native.as_ref().unwrap().fixture_focused()
     }
     #[cfg(target_os = "macos")]
+    pub fn fixture_page_zoom(&self) -> f64 {
+        self.native.as_ref().unwrap().fixture_page_zoom()
+    }
+    #[cfg(target_os = "macos")]
+    pub fn fixture_zoom_key(&self, key: &str, shift: bool) {
+        self.native.as_ref().unwrap().fixture_zoom_key(key, shift);
+    }
+    #[cfg(target_os = "macos")]
     pub fn fixture_overlay_at(&self, x: f64, y: f64) -> bool {
         self.native.as_ref().unwrap().fixture_overlay_at(x, y)
     }
