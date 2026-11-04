@@ -9,6 +9,9 @@ mod saved_views;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[cfg(target_os = "macos")]
+#[path = "browser-fixture/navigation_gestures.rs"]
+mod navigation_gestures;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -204,6 +207,12 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("HARNESS_BROWSER_GESTURES_FIXTURE_ONLY").is_some() {
+                    navigation_gestures::exercise(window, &_origin, cx).await?;
+                    std::fs::write(output.join("result.txt"), "PASS: native browser swipe-navigation setting enabled; Back/Forward history availability and navigation verified. Physical trackpad gesture not synthesized.\n")?;
+                    return Ok(());
+                }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if std::env::var_os("HARNESS_HTML_PREVIEW_FIXTURE_ONLY").is_some() {
                     html_preview::exercise(window, cx).await?;

@@ -815,6 +815,13 @@ impl BrowserSurface {
         self.native.as_ref().unwrap().fixture_focus();
     }
     #[cfg(target_os = "macos")]
+    pub fn fixture_navigation_gestures_enabled(&self) -> bool {
+        self.native
+            .as_ref()
+            .unwrap()
+            .fixture_navigation_gestures_enabled()
+    }
+    #[cfg(target_os = "macos")]
     pub fn fixture_focused(&self) -> bool {
         self.native.as_ref().unwrap().fixture_focused()
     }

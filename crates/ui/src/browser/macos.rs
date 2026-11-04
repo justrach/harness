@@ -489,6 +489,9 @@ impl NativePage {
             .with_webview_configuration(configuration)
             .with_visible(false)
             .with_focused(false)
+            // Let WebKit arbitrate two-finger history swipes against ordinary
+            // page scrolling. Isolated documents/views have no browser history.
+            .with_back_forward_navigation_gestures(view_page.is_none() && !document)
             .with_new_window_req_handler(move |url, _| {
                 // A view page never opens anything else.
                 if view_page.is_none() && !document && allowed_navigation(&url) {
@@ -1003,6 +1006,9 @@ impl NativePage {
     }
     pub fn fixture_focus(&self) {
         let _ = self.0.borrow().web.focus();
+    }
+    pub fn fixture_navigation_gestures_enabled(&self) -> bool {
+        unsafe { self.0.borrow().view.allowsBackForwardNavigationGestures() }
     }
     pub fn fixture_focused(&self) -> bool {
         has_focus(&self.0.borrow().view)
