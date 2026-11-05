@@ -1106,9 +1106,9 @@ fn main() -> anyhow::Result<()> {
                                 if reconciliation_design {
                                     for (width, height) in [(1440., 900.), (980., 700.)] {
                                         window.update(cx, |_, window, _| window.resize(size(px(width), px(height))))?;
-                                        for variant in ["attention-strip", "attention-strip-closed", "attention-single", "attention-a", "attention-b", "attention-c", "focus-minimal", "focus-top", "focus-full", "focus-loud", "cloud-a", "cloud-b", "cloud-c", "cloud-states", "newtab-links", "newtab-tiles"] {
+                                        for variant in ["attention-strip", "attention-strip-closed", "attention-strip-folder", "attention-single", "attention-a", "attention-b", "attention-c", "focus-minimal", "focus-top", "focus-full", "focus-loud", "cloud-a", "cloud-b", "cloud-c", "cloud-states", "newtab-links", "newtab-tiles"] {
                                             if std::env::var_os("HARNESS_DESIGN_ATTENTION_ONLY").is_some() && !variant.starts_with("attention-") { continue; }
-                                            if std::env::var_os("HARNESS_DESIGN_STRIP_ONLY").is_some() && !matches!(variant, "attention-strip" | "attention-strip-closed" | "attention-single") { continue; }
+                                            if std::env::var_os("HARNESS_DESIGN_STRIP_ONLY").is_some() && !matches!(variant, "attention-strip" | "attention-strip-closed" | "attention-strip-folder" | "attention-single") { continue; }
                                             window.update(cx, |shell, window, cx| shell.fixture_reconciliation_design(variant, window, cx))?;
                                             pause(cx, 350).await;
                                             window.update(cx, |_, _, cx| cx.refresh_windows())?;

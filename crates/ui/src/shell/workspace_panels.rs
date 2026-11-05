@@ -896,6 +896,8 @@ enum MenuAction {
     NewTab,
     ToggleExpand,
     ClosePanel,
+    SetFolder(Option<String>),
+    NewFolder,
 }
 #[derive(Clone)]
 pub(super) struct PanelMenu {
@@ -906,10 +908,13 @@ pub(super) struct PanelMenu {
     rows: Vec<(SharedString, &'static str, MenuAction)>,
     selected: usize,
     focus: FocusHandle,
+    /// Where Escape puts the keyboard, when that isn't the panel's own control.
+    return_focus: Option<FocusHandle>,
 }
 
 #[derive(Default)]
 pub(super) struct PanelWorkspaces {
+    menu_scroll: gpui::ScrollHandle,
     pub(super) needs_persist: bool,
     pub layouts: HashMap<String, WorkspaceLayout>,
     pub(super) menu: Option<PanelMenu>,
@@ -2731,6 +2736,7 @@ impl Shell {
             rows,
             selected: 0,
             focus,
+            return_focus: None,
         });
         cx.notify();
     }
@@ -2835,6 +2841,11 @@ impl Shell {
                 };
             }
             MenuAction::ClosePanel => self.close_workspace_panel(menu.panel, window, cx),
+            MenuAction::SetFolder(space) => self.set_panel_folder(menu.panel, space, window, cx),
+            MenuAction::NewFolder => {
+                self.focus_strip_slot(menu.panel, window, cx);
+                self.open_add_space(cx);
+            }
         }
         self.workspace_panels.target = None;
         cx.notify();
@@ -2850,7 +2861,11 @@ impl Shell {
             .min(self.viewport_height - (menu.rows.len() as f32 * 32.0 + 16.0))
             .max(8.0);
         let mut card = popover::popover_card(&theme)
+            .id("workspace-panel-menu-card")
             .w(px(234.0))
+            .max_h(px((self.viewport_height - 16.0).max(32.0)))
+            .overflow_y_scroll()
+            .track_scroll(&self.workspace_panels.menu_scroll)
             .track_focus(&menu.focus)
             .flex()
             .flex_col()
@@ -2884,6 +2899,8 @@ impl Shell {
                                 break;
                             }
                         }
+                        let selected = menu.selected;
+                        this.workspace_panels.menu_scroll.scroll_to_item(selected);
                     }
                     "enter" | "space" => {
                         let ix = menu.selected;
@@ -2899,7 +2916,9 @@ impl Shell {
                             },
                             menu.panel
                         );
-                        if menu.tab.is_none() {
+                        if let Some(focus) = menu.return_focus.clone() {
+                            window.focus(&focus, cx);
+                        } else if menu.tab.is_none() {
                             if let Some(focus) = this.workspace_panels.controls.get(&control) {
                                 window.focus(focus, cx);
                             }
@@ -2943,8 +2962,13 @@ impl Shell {
                         .into()
                     })
                 })
-                .child(icon(glyph).size(px(15.0)).text_color(theme.text_muted))
-                .child(div().flex_1().child(title.clone())),
+                .child(
+                    icon(glyph)
+                        .size(px(15.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(title.clone())),
             );
         }
         #[cfg(feature = "browser-fixture")]

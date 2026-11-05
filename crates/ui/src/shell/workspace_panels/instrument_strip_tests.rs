@@ -299,6 +299,177 @@ fn one_panel_names_its_device_beside_its_tabs(cx: &mut gpui::TestAppContext) {
     assert!(tabs.right() <= device.left(), "{tabs:?} {device:?}");
 }
 
+/// Projects to pick from, in a real session: the app's layouts belong to a
+/// session, so they stay put when a new chat's folder changes.
+fn add_projects(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) {
+    shell.update(cx, |shell, cx| {
+        shell.boot_restored = true;
+        shell.ensure_workspace_sessions(cx);
+        shell.state.update(cx, |state, _| {
+            state.spaces = [("alpha", "local"), ("beta", "local"), ("gamma", "studio")]
+                .into_iter()
+                .map(|(id, device)| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": device, "path": format!("/made/up/{id}"),
+                        "createdAt": "2026-09-05T00:00:00Z"
+                    }))
+                    .unwrap()
+                })
+                .collect();
+        });
+        cx.notify();
+    });
+}
+
+fn pick_folder(shell: &Entity<Shell>, panel: u64, name: &str, cx: &mut gpui::VisualTestContext) {
+    let button = at(cx, format!("instrument-slot-folder-{panel}")).expect("folder button");
+    cx.simulate_mouse_down(button.center(), MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(button.center(), MouseButton::Left, Default::default());
+    cx.run_until_parked();
+    let row = shell.read_with(cx, |shell, _| {
+        let menu = shell.workspace_panels.menu.as_ref().expect("folder menu");
+        menu.rows
+            .iter()
+            .position(|row| &*row.0 == name)
+            .expect(name)
+    });
+    shell.update_in(cx, |shell, window, cx| {
+        shell.activate_panel_menu(row, window, cx)
+    });
+    settle(cx);
+}
+
+fn folder_of(shell: &Entity<Shell>, panel: u64, cx: &mut gpui::VisualTestContext) -> String {
+    shell.read_with(cx, |shell, cx| {
+        let panel = shell.panel_layout(cx).unwrap().panel(panel).unwrap();
+        shell
+            .panel_folder(panel, cx)
+            .expect("a folder")
+            .0
+            .to_string()
+    })
+}
+
+/// The ask: split, start a new chat, change its folder at the top.
+#[gpui::test]
+fn a_new_chats_slot_changes_its_folder(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (_, second, _) = three_panels(&shell, cx);
+    add_projects(&shell, cx);
+    shell.update(cx, |shell, cx| shell.workspace_new_tab_in_panel(second, cx));
+    settle(cx);
+
+    let button = at(cx, format!("instrument-slot-folder-{second}")).expect("folder button");
+    cx.simulate_mouse_down(button.center(), MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(button.center(), MouseButton::Left, Default::default());
+    cx.run_until_parked();
+    let titles = shell.read_with(cx, |shell, _| {
+        let menu = shell.workspace_panels.menu.as_ref().expect("folder menu");
+        menu.rows
+            .iter()
+            .map(|row| row.0.to_string())
+            .collect::<Vec<_>>()
+    });
+    assert!(titles.iter().any(|title| title == "alpha"), "{titles:?}");
+    assert!(titles.iter().any(|title| title == "beta"), "{titles:?}");
+    assert!(
+        !titles.iter().any(|title| title == "gamma"),
+        "another computer's project can't be picked here: {titles:?}"
+    );
+    assert_eq!(titles.last().map(String::as_str), Some("New project…"));
+    shell.read_with(cx, |shell, _| {
+        let menu = shell.workspace_panels.menu.as_ref().unwrap();
+        assert_eq!(
+            menu.position,
+            button.bottom_left(),
+            "it hangs under the button"
+        );
+    });
+    shell.update(cx, |shell, cx| {
+        shell.workspace_panels.menu = None;
+        cx.notify();
+    });
+    settle(cx);
+
+    pick_folder(&shell, second, "beta", cx);
+    assert_eq!(folder_of(&shell, second, cx), "beta");
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.panel_layout(cx).unwrap().focused, second);
+        assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("beta"));
+        assert_eq!(
+            shell.settings.space_filter, None,
+            "the sidebar stays as it was"
+        );
+    });
+
+    // Starting the chat keeps it, and the composer sends there.
+    shell.update_in(cx, |shell, window, cx| {
+        shell.activate_workspace_empty(second, 0, window, cx)
+    });
+    settle(cx);
+    assert_eq!(folder_of(&shell, second, cx), "beta");
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("beta"));
+    });
+
+    // Opting out works, and the button stays.
+    pick_folder(&shell, second, "Don't work in a project", cx);
+    assert_eq!(folder_of(&shell, second, cx), "No project");
+    assert!(at(cx, format!("instrument-slot-folder-{second}")).is_some());
+}
+
+/// Two new chats side by side each keep their own folder.
+#[gpui::test]
+fn each_new_chat_keeps_its_own_folder(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (first, second, _) = three_panels(&shell, cx);
+    add_projects(&shell, cx);
+    for panel in [first, second] {
+        shell.update_in(cx, |shell, window, cx| {
+            shell.workspace_panels.target = Some(panel);
+            shell.workspace_new_chat(cx);
+            let _ = (window, cx);
+        });
+    }
+    settle(cx);
+    pick_folder(&shell, first, "alpha", cx);
+    pick_folder(&shell, second, "beta", cx);
+    assert_eq!(folder_of(&shell, first, cx), "alpha");
+    assert_eq!(folder_of(&shell, second, cx), "beta");
+    shell.update_in(cx, |shell, window, cx| {
+        shell.focus_strip_slot(first, window, cx)
+    });
+    settle(cx);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(
+            shell.state.read(cx).selected_space.as_deref(),
+            Some("alpha")
+        );
+    });
+    assert_eq!(folder_of(&shell, second, cx), "beta");
+}
+
+/// A chat that has started can't move, so it only says where it is.
+#[gpui::test]
+fn a_started_chat_names_its_folder_without_offering_to_change_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (_, second, _) = three_panels(&shell, cx);
+    add_projects(&shell, cx);
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            let chat = state.chats.iter_mut().find(|chat| chat.id == "chat-3");
+            chat.unwrap().space_id = Some("alpha".into());
+        });
+        cx.notify();
+    });
+    settle(cx);
+    assert!(at(cx, format!("instrument-slot-folder-name-{second}")).is_some());
+    assert!(at(cx, format!("instrument-slot-folder-{second}")).is_none());
+}
+
 #[gpui::test]
 fn each_panel_gets_one_slot_and_no_tab_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

@@ -53,6 +53,140 @@ impl Shell {
             )
     }
 
+    /// The folder a panel works in, and whether it can still change. A chat
+    /// can't move once it has started; a new one can until its first message.
+    pub(super) fn panel_folder(
+        &self,
+        panel: &WorkspacePanel,
+        cx: &App,
+    ) -> Option<(SharedString, bool)> {
+        let state = self.state.read(cx);
+        let named = |id: Option<&str>| -> SharedString {
+            id.and_then(|id| state.space_row(id))
+                .map_or_else(
+                    || "No project".to_string(),
+                    |space| space.display_name().to_string(),
+                )
+                .into()
+        };
+        let focused = self
+            .panel_layout(cx)
+            .is_some_and(|layout| layout.focused == panel.id);
+        match panel.selected() {
+            Some(PanelTab::Chat(id)) => state
+                .chats
+                .iter()
+                .find(|chat| &chat.id == id)
+                .and_then(|chat| chat.space_id.as_deref())
+                .map(|space| (named(Some(space)), false)),
+            // The focused draft's pick lives in the app state until it is parked.
+            Some(PanelTab::Draft(_)) if focused && state.selected_chat.is_none() => {
+                Some((named(state.selected_space.as_deref()), true))
+            }
+            None | Some(PanelTab::Draft(_) | PanelTab::New(_) | PanelTab::Empty) => {
+                let target = self
+                    .workspace_panel_device(panel.id, cx)
+                    .canvas_target(state);
+                Some((named(target.space.as_deref()), true))
+            }
+            _ => None,
+        }
+    }
+
+    /// Point a panel's new chat at a folder. The panel takes focus: picking a
+    /// folder is the start of working there, and the rest of the app reads the
+    /// new chat's destination from the focused panel.
+    pub(super) fn set_panel_folder(
+        &mut self,
+        panel: u64,
+        space: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_strip_slot(panel, window, cx);
+        let remote = self.workspace_panel_device(panel, cx).remote;
+        self.set_workspace_panel_device(
+            panel,
+            device_picker::PanelDeviceContext {
+                remote,
+                owner: crate::state::canvas_panel_key(space.as_deref()),
+            },
+            cx,
+        );
+        if self.state.read(cx).selected_chat.is_none() {
+            let pickers = self.composer.read(cx).pickers().clone();
+            pickers.update(cx, |pickers, cx| match space {
+                Some(id) => pickers.pick_space(id, cx),
+                None => pickers.pick_no_project(cx),
+            });
+        }
+        self.park_workspace_draft(cx);
+        cx.notify();
+    }
+
+    pub(super) fn open_strip_folder_menu(
+        &mut self,
+        id: u64,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.park_workspace_draft(cx);
+        self.workspace_panels.target = None;
+        let device = self.workspace_panel_device(id, cx);
+        let state = self.state.read(cx);
+        let device = device.full_id(state);
+        let current = self
+            .panel_layout(cx)
+            .and_then(|layout| layout.panel(id))
+            .and_then(|panel| self.panel_folder(panel, cx))
+            .map(|(name, _)| name);
+        // Only this computer's projects: a chat runs where its folder is.
+        let mut rows: Vec<(SharedString, &'static str, MenuAction)> = state
+            .spaces_sorted()
+            .into_iter()
+            .filter(|space| device.as_deref().is_none_or(|id| space.device_id == id))
+            .map(|space| {
+                let name = SharedString::from(space.display_name().to_string());
+                let glyph = if current.as_ref() == Some(&name) {
+                    icons::CHECK
+                } else {
+                    icons::FOLDER
+                };
+                (name, glyph, MenuAction::SetFolder(Some(space.id.clone())))
+            })
+            .collect();
+        let selected = rows
+            .iter()
+            .position(|row| row.1 == icons::CHECK)
+            .unwrap_or(0);
+        rows.push((
+            "Don't work in a project".into(),
+            icons::CLOSE,
+            MenuAction::SetFolder(None),
+        ));
+        rows.push(("New project…".into(), icons::PLUS, MenuAction::NewFolder));
+        let return_focus = self
+            .workspace_panels
+            .controls
+            .get(&format!("instrument-slot-folder-{id}"))
+            .cloned();
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.workspace_panels.menu_scroll.scroll_to_item(selected);
+        self.workspace_panels.menu = Some(PanelMenu {
+            panel: id,
+            tab: None,
+            placement: false,
+            position,
+            rows,
+            selected,
+            focus,
+            return_focus,
+        });
+        cx.notify();
+    }
+
     pub(super) fn render_instrument_strip(
         &mut self,
         layout: &WorkspaceLayout,
@@ -194,10 +328,98 @@ impl Shell {
         let drag_source = cx.weak_entity();
         let drag_outside = self.workspace_panels.drag_preview_visible.clone();
         let device = self.panel_device_label(id, cx);
-        let tooltip_title = match attention {
-            Some(attention) => format!("{title} · {device} · {}", attention.label()),
-            None => format!("{title} · {device}"),
+        let folder = self.panel_folder(panel, cx);
+        let place = match &folder {
+            Some((name, _)) => format!("{device} · {name}"),
+            None => device.to_string(),
         };
+        let tooltip_title = match attention {
+            Some(attention) => format!("{title} · {place} · {}", attention.label()),
+            None => format!("{title} · {place}"),
+        };
+        let folder = folder.map(|(name, changeable)| {
+            if !changeable {
+                return div()
+                    .debug_selector(move || format!("instrument-slot-folder-name-{id}"))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.0))
+                    .child(
+                        icon(icons::FOLDER)
+                            .size(px(10.0))
+                            .flex_none()
+                            .text_color(theme.text_muted),
+                    )
+                    .child(div().min_w_0().truncate().child(name))
+                    .into_any_element();
+            }
+            let focus = self
+                .workspace_panels
+                .controls
+                .entry(format!("instrument-slot-folder-{id}"))
+                .or_insert_with(|| cx.focus_handle().tab_stop(true))
+                .clone();
+            // The menu hangs under the button, however it was opened.
+            let measured =
+                std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
+            let mouse_bounds = measured.clone();
+            let key_bounds = measured.clone();
+            div()
+                .id(("instrument-slot-folder", id))
+                .debug_selector(move || format!("instrument-slot-folder-{id}"))
+                .relative()
+                .track_focus(&focus)
+                .min_w_0()
+                .h(px(14.0))
+                .px(px(3.0))
+                .rounded(px(3.0))
+                .flex()
+                .items_center()
+                .gap(px(3.0))
+                .cursor_pointer()
+                .role(gpui::Role::Button)
+                .aria_label(format!("Folder for this new chat: {name}. Change folder"))
+                .hover(|style| style.bg(theme.ink(0.10)).text_color(theme.text))
+                .focus_visible(|style| style.bg(theme.ink(0.10)).text_color(theme.text))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        let position = mouse_bounds.get().bottom_left();
+                        this.open_strip_folder_menu(id, position, window, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_key_down(
+                    cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            let position = key_bounds.get().bottom_left();
+                            this.open_strip_folder_menu(id, position, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }),
+                )
+                .child(
+                    icon(icons::FOLDER)
+                        .size(px(10.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(div().min_w_0().truncate().child(name))
+                .child(
+                    icon(icons::ALT_ARROW_DOWN)
+                        .size(px(9.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    gpui::canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                )
+                .into_any_element()
+        });
         let shortcut = (ix < 6)
             .then(|| settings::badge_combo(&format!("cmd-alt-{}", ix + 1)))
             .unwrap_or_default();
@@ -382,11 +604,22 @@ impl Shell {
                             .line_height(px(14.0))
                             .child(title),
                     )
-                    .child(device_label(
-                        format!("instrument-slot-device-{id}"),
-                        device,
-                        &theme,
-                    )),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(crate::typography::ui_rems(10.0))
+                            .line_height(px(12.0))
+                            .text_color(theme.text_muted)
+                            .child(device_label(
+                                format!("instrument-slot-device-{id}"),
+                                device,
+                                &theme,
+                            ))
+                            .children(folder),
+                    ),
             )
             .child(add_button)
             .child(menu_button)
@@ -556,6 +789,7 @@ impl Shell {
                 0
             },
             focus,
+            return_focus: None,
         });
         cx.notify();
     }
@@ -620,6 +854,32 @@ impl Shell {
                 .collect();
             panel.active = 0;
         }
+        let new_chat = layout_panel_id(self, 2, cx);
         self.focus_workspace_tab(0, PanelTab::Chat(chats[0].into()), window, cx);
+        self.workspace_new_tab_in_panel(new_chat, cx);
     }
+
+    /// The same four panels, with the new chat's folder menu open.
+    #[cfg(feature = "appshots-fixture")]
+    pub(in crate::shell) fn fixture_strip_folder_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fixture_instrument_strip(window, cx);
+        let panel = layout_panel_id(self, 2, cx);
+        // Nothing has been drawn yet in this arrangement: four equal panels.
+        let sidebar = self.sidebar_now();
+        let left = sidebar + (self.viewport_width - sidebar) / 2.0;
+        let position = point(px(left + 70.0), px(Theme::TITLEBAR_HEIGHT));
+        self.open_strip_folder_menu(panel, position, window, cx);
+    }
+}
+
+#[cfg(feature = "appshots-fixture")]
+fn layout_panel_id(shell: &Shell, index: usize, cx: &App) -> u64 {
+    shell
+        .panel_layout(cx)
+        .and_then(|layout| layout.panels.get(index))
+        .map_or(0, |panel| panel.id)
 }

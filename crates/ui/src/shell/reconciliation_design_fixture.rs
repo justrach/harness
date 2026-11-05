@@ -140,6 +140,9 @@ impl Shell {
         if variant == "attention-single" {
             self.fixture_single_panel_tabs(window, cx);
         }
+        if variant == "attention-strip-folder" {
+            self.fixture_strip_folder_menu(window, cx);
+        }
         cx.set_global(DesignPreview(variant.into()));
         cx.notify();
     }
@@ -201,7 +204,7 @@ impl Shell {
                     bounds.origin + gpui::point(px(2.), px(2.)),
                     gpui::size(bounds.size.width - px(4.), px(30.)),
                 );
-                if mode != "attention-a" && mode != "attention-strip" && mode != "attention-single" {
+                if mode != "attention-a" && !mode.starts_with("attention-strip") && mode != "attention-single" {
                     result.push(
                         frame(rect)
                             .rounded(px(7.))
