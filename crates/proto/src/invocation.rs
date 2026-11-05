@@ -205,13 +205,18 @@ pub fn validate_harness_invocations(text: &str, harness: crate::HarnessId) -> Re
     Ok(())
 }
 
-/// Keep selected skill identity intact until Codex builds native input blocks.
-/// Other providers receive readable Markdown and their advertised command text.
+/// Keep selection identity until Codex builds native input blocks or Graff
+/// attaches explicit command intent to its ACP request. Other providers receive
+/// readable Markdown and their advertised command text.
 pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
     let text = crate::file_mentions::file_mention_prompt(text);
-    if harness == crate::HarnessId::Codex {
+    if matches!(harness, crate::HarnessId::Codex | crate::HarnessId::Graff) {
         return text;
     }
+    resolved_harness_prompt(&text, harness)
+}
+
+fn resolved_harness_prompt(text: &str, harness: crate::HarnessId) -> String {
     let mut result = String::new();
     let mut at = 0;
     for (range, invocation) in invocation_links(&text) {
@@ -248,6 +253,29 @@ pub fn harness_prompt(text: &str, harness: crate::HarnessId) -> String {
     }
     result.push_str(&text[at..]);
     result
+}
+
+/// Decode Graff selections only at the ACP boundary, alongside their intent.
+/// A slash in ordinary text (even a known command) never selects a command.
+pub fn graff_command_prompt(text: &str) -> (String, bool) {
+    let selected = invocation_links(text)
+        .into_iter()
+        .any(|(range, invocation)| {
+            text[..range.start]
+                .trim_matches([' ', '\t', '\r', '\n'])
+                .is_empty()
+                && match invocation {
+                    Invocation::Command { .. } => true,
+                    Invocation::Skill {
+                        command: Some(command),
+                        ..
+                    } => command.harness == crate::HarnessId::Graff,
+                    _ => false,
+                }
+        });
+    let prompt = resolved_harness_prompt(text, crate::HarnessId::Graff);
+    let selected = selected && leading_command(&prompt).is_some();
+    (prompt, selected)
 }
 
 pub fn invocation_prompt(text: &str) -> String {
@@ -303,6 +331,62 @@ mod tests {
         crate::HarnessId::Opencode,
         crate::HarnessId::Exo,
     ];
+
+    #[test]
+    fn graff_keeps_explicit_selection_until_acp_delivery() {
+        let selected = Invocation::Command {
+            name: "goal".into(),
+        }
+        .link();
+        let prompt = format!("{selected} inspect a synthetic parser");
+        assert_eq!(harness_prompt(&prompt, crate::HarnessId::Graff), prompt);
+        assert_eq!(
+            harness_prompt("/goal is ordinary prose", crate::HarnessId::Graff),
+            "/goal is ordinary prose"
+        );
+    }
+
+    #[test]
+    fn graff_command_intent_requires_a_leading_selected_invocation() {
+        let selected = Invocation::Command {
+            name: "help".into(),
+        }
+        .link();
+        for literal in [
+            "/",
+            "/ widgets are prose",
+            "/help",
+            "/unknown task",
+            "/goal explain a parser",
+            "\n/goal multiline\nprose",
+        ] {
+            assert_eq!(graff_command_prompt(literal), (literal.into(), false));
+        }
+        assert_eq!(graff_command_prompt(&selected), ("/help".into(), true));
+        assert_eq!(
+            graff_command_prompt(&format!("  {selected} args")),
+            ("  /help args".into(), true)
+        );
+        assert_eq!(
+            graff_command_prompt(&format!("Discuss {selected}")),
+            ("Discuss /help".into(), false)
+        );
+        for raw in [format!("    {selected}"), format!("`{selected}`")] {
+            assert_eq!(graff_command_prompt(&raw), (raw.clone(), false));
+        }
+        let skill = Invocation::Skill {
+            name: "inspect".into(),
+            path: "harness-skill:inspect".into(),
+            command: Some(SkillCommand {
+                name: "review".into(),
+                harness: crate::HarnessId::Graff,
+            }),
+        };
+        assert_eq!(
+            graff_command_prompt(&skill.link()),
+            ("/review".into(), true)
+        );
+    }
 
     #[test]
     fn leading_commands_respect_markdown_indentation() {

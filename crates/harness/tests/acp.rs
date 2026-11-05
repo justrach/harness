@@ -101,6 +101,50 @@ fn dones(events: &[AgentEvent]) -> Vec<(DoneStatus, Option<String>)> {
 }
 
 #[tokio::test]
+async fn graff_acp_only_dispatches_explicitly_selected_commands() {
+    use harness_proto::invocation::{Invocation, harness_prompt};
+    let selected = Invocation::Command {
+        name: "help".into(),
+    }
+    .link();
+    for (raw, expected) in [
+        (
+            "/ widgets are prose scenario:command-intent".to_owned(),
+            "literal prompt",
+        ),
+        ("/help scenario:command-intent".to_owned(), "literal prompt"),
+        (
+            format!("{selected} scenario:command-intent"),
+            "selected command",
+        ),
+        (
+            format!("Discuss {selected} scenario:command-intent"),
+            "literal prompt",
+        ),
+    ] {
+        let (ctl, steer, _) = controls();
+        drop(steer);
+        let events = run_to_end(
+            &AcpHarness::graff().with_executable(fixture_path()),
+            request(&harness_prompt(&raw, HarnessId::Graff)),
+            ctl,
+        )
+        .await;
+        assert!(
+            events.contains(&AgentEvent::TextDelta {
+                text: expected.into()
+            }),
+            "{raw}: {events:?}"
+        );
+        assert_eq!(
+            dones(&events),
+            vec![(DoneStatus::Completed, None)],
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn reauth_required_preserves_route_through_prompt_dispatch_and_eof() {
     for (scenario, provider) in [
         (
@@ -2246,7 +2290,11 @@ async fn antigravity_spawn_failure_returns_an_error_for_the_engine_to_surface() 
 }
 
 fn lifecycle_fixture() -> AcpHarness {
-    AcpHarness::hermes()
+    lifecycle_fixture_for(AcpHarness::hermes())
+}
+
+fn lifecycle_fixture_for(harness: AcpHarness) -> AcpHarness {
+    harness
         .with_executable(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-lifecycle-acp.sh"),
         )
@@ -2306,6 +2354,71 @@ async fn acp_failed_load_announces_lost_context() {
     let events = run_to_end(&lifecycle_fixture(), req, ctl).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("without the previous context"))));
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SessionStarted { session_id, .. } if session_id == "pi-session"
+    )));
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "reply:fresh".into()
+    }));
+}
+
+#[tokio::test]
+async fn acp_failed_load_graff_stops_without_losing_context() {
+    let workspace = tempfile::tempdir().unwrap();
+    let requests_path = workspace.path().join("acp-requests.jsonl");
+    std::fs::write(&requests_path, "").unwrap();
+    let harness = lifecycle_fixture_for(AcpHarness::graff());
+    let (ctl, steer, _) = controls();
+    drop(steer);
+    let mut req = request("retry with the previous context");
+    req.cwd = workspace.path().display().to_string();
+    req.model = None;
+    req.resume = Some("missing".into());
+    let events = run_to_end(&harness, req, ctl).await;
+
+    let requests: Vec<serde_json::Value> = std::fs::read_to_string(requests_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let methods: Vec<_> = requests
+        .iter()
+        .map(|request| request["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        vec!["session/load"],
+        "a failed restore must not create a replacement session or send the retry"
+    );
+    assert_eq!(requests[0]["params"]["sessionId"], "missing");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AgentEvent::SessionStarted { .. } | AgentEvent::TextDelta { .. }
+        )),
+        "{events:?}"
+    );
+    let done = dones(&events);
+    assert_eq!(done.len(), 1, "{events:?}");
+    assert_eq!(done[0].0, DoneStatus::Errored, "{events:?}");
+    let error = done[0].1.as_deref().expect("visible restore error");
+    for expected in [
+        "could not restore",
+        "session missing",
+        "not sent",
+        "previous session reference",
+        "new chat",
+    ] {
+        assert!(error.contains(expected), "missing {expected:?}: {error}");
+    }
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        AgentEvent::Done {
+            session_id: Some(_),
+            ..
+        }
+    )));
 }
 
 #[tokio::test]

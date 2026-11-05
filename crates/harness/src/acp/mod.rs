@@ -3026,11 +3026,18 @@ fn prompt_turn(
     allowed: Vec<String>,
     images: bool,
     prompt_id: Option<String>,
+    harness: HarnessId,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
         // A room delivery's tag line becomes `_meta["harness/room"]`, so the
         // agent can tell another agent's post from the user's words.
         let (text, room) = harness_proto::room_delivery::lift(&text);
+        let (text, command) = if harness == HarnessId::Graff {
+            let (text, selected) = harness_proto::invocation::graff_command_prompt(&text);
+            (text, Some(selected))
+        } else {
+            (text, None)
+        };
         let prompt = prompt_images::prompt_blocks(text, &extra, &allowed, images).await;
         let mut params = json!({
             "sessionId": session_id,
@@ -3041,6 +3048,9 @@ fn prompt_turn(
         }
         if let Some(room) = room {
             params["_meta"]["harness/room"] = room;
+        }
+        if let Some(command) = command {
+            params["_meta"]["harness/command"] = command.into();
         }
         client.request("session/prompt", params).await
     })
@@ -3736,7 +3746,17 @@ async fn run_session(session: Session) {
                         "{agent_name} isn't signed in. Use Settings → Agents → Sign in."
                     )));
                 }
-                // A missing/foreign session falls back to a fresh one.
+                Err(e) if harness == HarnessId::Graff => {
+                    // Never send a retry without its native conversation context
+                    // or replace the stored reference with an empty session.
+                    return Err(HarnessError::Protocol(format!(
+                        "{agent_name} could not restore the previous session; your message was \
+                         not sent and the previous session reference was kept. Restore the \
+                         saved session and retry, or explicitly start a new chat without the \
+                         previous context. Restore error: {e}"
+                    )));
+                }
+                // Other agents retain their missing/foreign-session fallback.
                 Err(e) => {
                     tracing::debug!(
                         target: "harness_adapters::acp",
@@ -4132,6 +4152,7 @@ async fn run_session(session: Session) {
             allowed_images.clone(),
             images_supported,
             current_prompt_id.clone(),
+            harness,
         )
     });
     // Steers waiting for the turn boundary (agents without the extension, or
@@ -4345,7 +4366,7 @@ async fn run_session(session: Session) {
                     prompt_stall_deadline = prompt_stall.map(|d| tokio::time::Instant::now() + d);
                     turn = Some(prompt_turn(
                         client.clone(), session_id.clone(), clarification_resume::PROMPT.into(),
-                        Vec::new(), allowed_images.clone(), images_supported, current_prompt_id.clone(),
+                        Vec::new(), allowed_images.clone(), images_supported, current_prompt_id.clone(), harness,
                     ));
                     continue 'main;
                 }
@@ -4430,6 +4451,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if !steering_open {
                     break 'main;
@@ -4791,6 +4813,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 }
                 while let Some(next_text) = steer_backlog.pop_front() {
@@ -4848,6 +4871,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if turn.is_none() && !steering_open {
                     // Mailbox closed while the flush waited: nothing left.
@@ -4925,6 +4949,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                 } else if !steering_open {
                     // Mirror the normal turn-settled exit: mailbox closed
@@ -4990,6 +5015,7 @@ async fn run_session(session: Session) {
                         allowed_images.clone(),
                         images_supported,
                         current_prompt_id.clone(),
+                        harness,
                     ));
                     } else if steer_ext {
                         // Mid-turn injection via the `_session/steering`
