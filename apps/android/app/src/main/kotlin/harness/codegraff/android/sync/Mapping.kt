@@ -170,8 +170,10 @@ private fun ToolFieldRecord.items(): List<String>? = when (this) {
 
 private fun UserInputQuestionRecord.toModel() = UserInputQuestion(id, header, question, options, multiSelect)
 
-fun MessagePartRecord.toModel(): MessagePart = when (this) {
+/** Null for a part Android doesn't show yet: thinking is iOS and desktop only for now. */
+fun MessagePartRecord.toModel(): MessagePart? = when (this) {
     is MessagePartRecord.Text -> MessagePart.Text(id, text)
+    is MessagePartRecord.Reasoning -> null
     is MessagePartRecord.Image -> MessagePart.Image(id, path, name, mimeType)
     is MessagePartRecord.Tool -> MessagePart.Tool(
         id,
@@ -194,7 +196,7 @@ fun MessageEntryRecord.toModel() = MessageEntry(
         MessageRoleRecord.ASSISTANT -> MessageRole.Assistant
         MessageRoleRecord.SYSTEM -> MessageRole.System
     },
-    parts = parts.map { it.toModel() },
+    parts = parts.mapNotNull { it.toModel() },
     createdAt = createdAt,
     deviceId = deviceId,
     status = when (status) {

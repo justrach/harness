@@ -17,6 +17,14 @@ struct TranscriptView: View {
     /// The name of the computer the chat runs on, for the reconnect row and sheet. Passed in, so
     /// the transcript needs no app model in its environment.
     var hostName = "the execution device"
+    /// iPhone Duo: tool groups as chips with a diff card (DuoChat).
+    var duoChat = false
+    /// Open a group's changes in the Inspect pane, where there is one.
+    var inspectDiff: ((DiffSummary) -> Void)? = nil
+    /// Open one tool call in the Inspect pane (flat Duo).
+    var inspectTool: ((ToolItem) -> Void)? = nil
+    /// Row padding, and how far the transcript reaches past the safe area beside a vertical bar (CoverLayout).
+    var rowInsets: CoverLayout.RowInsets = .standard
 
     static let maxContentWidth: CGFloat = 736
     static let stickThreshold: CGFloat = 70
@@ -25,6 +33,8 @@ struct TranscriptView: View {
     @State var folds = ToolGroupFolds()
     @State private var userExpansionHeights: [String: CGFloat] = [:]
     @State private var reauthRequest: AgentReauthRequest?
+    /// Beside another column the page is lifted (ContentPlane).
+    @Environment(\.liftedPlane) private var liftedPlane
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.colorScheme) private var colorScheme
@@ -44,21 +54,29 @@ struct TranscriptView: View {
             bottomSpacing: verticalSizeClass == .compact ? 8 : 24,
             reduceMotion: reduceMotion,
             configurationID: store.expandedUserMessages.hashValue ^ dynamicTypeSize.hashValue
-                ^ colorScheme.hashValue) { row in
+                ^ colorScheme.hashValue ^ duoChat.hashValue ^ (inspectDiff != nil).hashValue
+                ^ (inspectTool != nil).hashValue &* 31 ^ rowInsets.hashValue) { row in
                 AnyView(rowView(row, earlier: earlierErrors.contains(row.id))
                     .modifier(TranscriptTailProbe(rowID: row.id,
                         isTail: row.id == rows.last?.id || (row.entryId == runway && row.turnStart),
                         chatId: chatId))
                     .environment(\.dynamicTypeSize, dynamicTypeSize)
                     .environment(\.colorScheme, ThemeStore.shared.colorScheme)
+                    .environment(\.duoChat, duoChat)
+                    .environment(\.inspectDiff, inspectDiff)
+                    .environment(\.inspectTool, inspectTool)
                     .environment(\.openURL, OpenURLAction { url in
                         guard let link = HostLink.classify(url, cwd: cwd) else { return .systemAction }
                         onHostLink(link)
                         return .handled
                     }))
             }
+            // Beside a vertical bar the table reaches into the bar's empty edge, so its scroll indicator
+            // sits in that gutter rather than over the text.
+            .padding(.leading, -rowInsets.bleedLeading)
+            .padding(.trailing, -rowInsets.bleedTrailing)
             .modifier(TranscriptViewportProbe(chatId: chatId))
-            .background(Theme.bg)
+            .background(Theme.sessionPage(lifted: liftedPlane))
             .overlay(alignment: .bottom) {
                 if scroll.showJump {
                     Button {
@@ -186,7 +204,8 @@ struct TranscriptView: View {
             }
         }
         .padding(.top, row.topGap)
-        .padding(.horizontal, 20)
+        .padding(.leading, rowInsets.leading)
+        .padding(.trailing, rowInsets.trailing)
         .frame(maxWidth: Self.maxContentWidth)
         .frame(maxWidth: .infinity)
     }
@@ -500,57 +519,35 @@ struct MarkdownRowView: View {
     }
 
     var body: some View {
-        if streaming, isVeilable, !reduceMotion {
-            // Reattaching a row must never fade already-visible text to black.
-            let veil = veils.veil(for: row.id, seededLength: textLength)
-            TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !fading)) { _ in
-                veiledText(veil: veil)
-            }
-            .onChange(of: textLength) { _, _ in
-                fading = veil.isFading
-            }
-            .task(id: textLength) {
-                // Stop frame work when the last appended span has settled.
-                // A new chunk cancels this task and starts a new deadline.
-                try? await Task.sleep(for: .milliseconds(600))
-                while !Task.isCancelled, veil.isFading {
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-                guard !Task.isCancelled else { return }
-                fading = false
-            }
-            .onAppear { fading = veil.isFading }
-            .transaction { $0.animation = nil }
-        } else {
-            MarkdownBlockView(block: block, cacheKey: row.id)
+        // Keep the same native text view through the streaming → settled
+        // handoff so finishing a response doesn't throw away its selection.
+        let veil = streaming && isVeilable && !reduceMotion
+            ? veils.veil(for: row.id, seededLength: textLength) : nil
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: veil == nil || !fading)) { _ in
+            MarkdownBlockView(block: block, cacheKey: row.id, veil: veil)
         }
+        .onChange(of: textLength) { _, _ in
+            fading = veil?.isFading ?? false
+        }
+        .task(id: textLength) {
+            guard let veil else { return }
+            // Stop frame work when the last appended span has settled.
+            // A new chunk cancels this task and starts a new deadline.
+            try? await Task.sleep(for: .milliseconds(600))
+            while !Task.isCancelled, veil.isFading {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard !Task.isCancelled else { return }
+            fading = false
+        }
+        .onAppear { fading = veil?.isFading ?? false }
+        .transaction { $0.animation = nil }
     }
 
     private var isVeilable: Bool {
         switch block {
         case .paragraph, .heading: return true
         default: return false
-        }
-    }
-
-    @ViewBuilder
-    private func veiledText(veil: RowVeil) -> some View {
-        switch block {
-        case .paragraph(let runs):
-            runs.styledVeiled(veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(MD.lineHeight - MD.textSize - 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        case .heading(let level, let runs):
-            let m = MD.headingMetrics(level)
-            runs.styledVeiled(size: m.size, weight: .semibold, veil: veil)
-                .textRenderer(InlineCodeRenderer())
-                .lineSpacing(m.line - m.size - 4)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        default:
-            MarkdownBlockView(block: block, cacheKey: row.id)
         }
     }
 }
@@ -628,6 +625,8 @@ struct ToolGroupView: View {
     let toggle: () -> Void
     var onDetailChanged: () -> Void = {}
     @State private var retainingDetails = false
+    @Environment(\.duoChat) private var duoChat
+    @Environment(\.inspectDiff) private var inspectDiff
 
     /// The tools actually rendered — the tail after the hidden prefix.
     private var visibleTools: ArraySlice<ToolItem> {
@@ -637,16 +636,23 @@ struct ToolGroupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button(action: toggle) {
-                HStack(spacing: 10) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                        .frame(width: 26)
-                    Text(toolGroupSummary(tools))
-                        .font(Theme.sans(14))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    Spacer(minLength: 0)
+                Group {
+                    if duoChat {
+                        // A Duo reads the group as one line of chips (DuoChat).
+                        ToolChipStrip(tools: tools, open: open)
+                    } else {
+                        HStack(spacing: 10) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .rotationEffect(.degrees(open ? 90 : 0))
+                                .frame(width: 26)
+                            Text(toolGroupSummary(tools))
+                                .font(Theme.sans(14))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            Spacer(minLength: 0)
+                        }
+                    }
                 }
                 .foregroundStyle(Theme.textMuted)
                 .frame(minHeight: 44)
@@ -655,6 +661,11 @@ struct ToolGroupView: View {
             .buttonStyle(PressWashButtonStyle(cornerRadius: 8))
             .accessibilityValue(open ? "Expanded" : "Collapsed")
             .accessibilityHint("Shows or hides tool activity")
+
+            if duoChat, let summary = DiffSummary.from(tools) {
+                DiffSummaryCard(summary: summary, onTap: inspectDiff.map { inspect -> () -> Void in { inspect(summary) } })
+                    .padding(.bottom, 6)
+            }
 
             ToolRevealLayout(progress: open ? 1 : 0) {
                 if open || retainingDetails {
@@ -700,9 +711,12 @@ struct ToolChipRow: View {
     var onResize: () -> Void = {}
     @State private var expanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.inspectTool) private var inspectTool
 
     var body: some View {
         Button {
+            // Lying flat on a Duo, the row opens in the Inspect pane beside the chat.
+            if let inspectTool, !tool.call.isThought { inspectTool(tool); return }
             withAnimation(reduceMotion ? nil : Motion.resize) { expanded.toggle() }
             onResize()
         } label: {
@@ -725,10 +739,13 @@ struct ToolChipRow: View {
                         if tool.isError {
                             Text("Failed").font(Theme.sans(12)).foregroundStyle(Theme.danger)
                         } else if !tool.resolved {
-                            Text("Running").font(Theme.sans(12)).foregroundStyle(Theme.textFaint)
+                            Text(tool.call.isThought ? "Thinking" : "Running")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.textFaint)
                         }
                     }
-                    if !tool.call.chipDetail.isEmpty {
+                    if tool.call.isThought {
+                        ThoughtDetail(text: tool.call.chipDetail, live: !tool.resolved, expanded: expanded)
+                    } else if !tool.call.chipDetail.isEmpty {
                         Text(expanded ? tool.call.expandedDetail : tool.call.chipDetail)
                             .font(Theme.mono(13))
                             .foregroundStyle(Theme.text.opacity(0.85))
@@ -746,12 +763,37 @@ struct ToolChipRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-        .accessibilityHint("Shows the full tool details")
+        .accessibilityHint(tool.call.isThought ? "Shows the full thought" : "Shows the full tool details")
         .contextMenu {
             Button("Copy details", systemImage: "doc.on.doc") {
                 UIPasteboard.general.string = tool.call.expandedDetail
             }
         }
+    }
+}
+
+/// A thought's body: prose in the reply's typeface, so it scales with
+/// Dynamic Type like the reply does. Collapsed, it previews two lines, the
+/// newest while the model is still thinking.
+private struct ThoughtDetail: View {
+    let text: String
+    let live: Bool
+    let expanded: Bool
+
+    var body: some View {
+        if !text.isEmpty {
+            Text(Self.inlineMarkdown(expanded ? text : thoughtPreview(text, live: live)))
+                .font(Theme.sans(14))
+                .foregroundStyle(Theme.text.opacity(0.85))
+                .lineLimit(expanded ? nil : 2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private static func inlineMarkdown(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
     }
 }
 
@@ -761,8 +803,9 @@ struct ToolChipRow: View {
 /// instead of truncating, since the useful part of a provider or adapter
 /// error is rarely in its first few words.
 ///
-/// A refusal that signing in fixes (signed out, a usage limit) is labelled so,
-/// like the desktop card, with where to sign in below the message.
+/// A refusal the provider account fixes (signed out, a usage limit, a
+/// rejected API key) is labelled so, like the desktop card, with where to fix
+/// it below the message.
 struct ErrorChipView: View {
     let message: String
     var problem: ProviderProblem? = nil
@@ -773,9 +816,8 @@ struct ErrorChipView: View {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.system(size: 10))
-                    .foregroundStyle(Theme.dangerSoft.opacity(0.8))
                     .frame(width: 20, height: 20)
-                    .background(Theme.danger.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                    .tintedChip(Theme.danger, in: RoundedRectangle(cornerRadius: 6))
                 Text(problem?.label ?? "Error")
                     .font(Theme.sans(12, weight: .medium))
                     .foregroundStyle(Theme.text)

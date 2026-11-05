@@ -1,0 +1,107 @@
+{
+  "comment": "Harness's default themes, Codegraff Dark and Light, as the roles harness-theme derives (crates/theme/src/builtins.rs, lib.rs). Colours are #rrggbb or #rrggbbaa, as harness_theme::Color prints them. Runners: crates/theme/tests/desktop_theme_vectors.rs and apps/nano/src/parity.zig (theme.colors).",
+  "variants": [
+    {
+      "id": "codegraff-dark",
+      "dark": true,
+      "colors": {
+        "background": "#16140f",
+        "shell": "#1f1c16",
+        "raised": "#2a261e",
+        "card": "#1f1c16",
+        "text": "#edeae2",
+        "textMuted": "#9a9384",
+        "textFaint": "#5c564b",
+        "hover": "#ffffff1c",
+        "border": "#ffffff1a",
+        "borderStrong": "#ffffff2e",
+        "danger": "#d2674f",
+        "dangerMuted": "#da8c78",
+        "warning": "#d9a441",
+        "success": "#7fa86b",
+        "solid": "#ebebef",
+        "onSolid": "#000000",
+        "diffAdd": "#7fa86b",
+        "diffDelete": "#d2674f"
+      },
+      "accent": {
+        "primary": "#e8a33d",
+        "wash": "#e8a33d38",
+        "glyph": [
+          "#eebd73",
+          "#e8a33d",
+          "#be8632"
+        ]
+      },
+      "ansi": [
+        "#16140f",
+        "#d2674f",
+        "#7fa86b",
+        "#d9a441",
+        "#8a9bb0",
+        "#bd80e4",
+        "#7fa86b",
+        "#edeae2",
+        "#5c564b",
+        "#d2674f",
+        "#7fa86b",
+        "#e8a33d",
+        "#8a9bb0",
+        "#bd80e4",
+        "#9a9384",
+        "#faf8f3"
+      ]
+    },
+    {
+      "id": "codegraff-light",
+      "dark": false,
+      "colors": {
+        "background": "#faf8f3",
+        "shell": "#f0ece3",
+        "raised": "#e7e1d5",
+        "card": "#f0ece3",
+        "text": "#1a1813",
+        "textMuted": "#6b6557",
+        "textFaint": "#a8a090",
+        "hover": "#0000000f",
+        "border": "#0000001f",
+        "borderStrong": "#00000038",
+        "danger": "#b14228",
+        "dangerMuted": "#873622",
+        "warning": "#9a6e1b",
+        "success": "#5c7e47",
+        "solid": "#232328",
+        "onSolid": "#ffffff",
+        "diffAdd": "#5c7e47",
+        "diffDelete": "#b14228"
+      },
+      "accent": {
+        "primary": "#c77d20",
+        "wash": "#c77d201f",
+        "glyph": [
+          "#d09346",
+          "#c77d20",
+          "#935d18"
+        ]
+      },
+      "ansi": [
+        "#1a1813",
+        "#b14228",
+        "#5c7e47",
+        "#9a6e1b",
+        "#3b6fb0",
+        "#7a4ea3",
+        "#2f8f9d",
+        "#6b6557",
+        "#a8a090",
+        "#b14228",
+        "#5c7e47",
+        "#c77d20",
+        "#3b6fb0",
+        "#7a4ea3",
+        "#2f8f9d",
+        "#1a1813"
+      ]
+    }
+  ]
+}

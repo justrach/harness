@@ -37,6 +37,8 @@ mod devin_models;
 mod elicitation;
 pub mod exo_bridge;
 pub mod graff_client;
+#[cfg(target_os = "macos")]
+mod graff_connections;
 mod graff_models;
 pub use graff_models::{ModelMismatch, parse_model_mismatch};
 pub mod graff_login;
@@ -213,6 +215,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
         Model {
             id: "grok-4.7-build-fast".into(),
@@ -222,6 +225,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
         Model {
             id: "grok-4.6".into(),
@@ -231,6 +235,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
         Model {
             id: "grok-4.5".into(),
@@ -240,6 +245,7 @@ fn grok_static_models() -> Vec<Model> {
             options: Vec::new(),
             maker: None,
             billing: None,
+            context: None,
         },
     ]
 }
@@ -360,6 +366,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "claude-fable-5-1-high".into(),
@@ -369,6 +376,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "adaptive".into(),
@@ -378,6 +386,7 @@ fn devin_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
             ]
         },
@@ -442,6 +451,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "hermes-4-70b".into(),
@@ -451,6 +461,7 @@ fn hermes_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
             ]
         },
@@ -620,6 +631,7 @@ fn exo_spec() -> AcpAgentSpec {
                 options: Vec::new(),
                 maker: None,
                 billing: None,
+                context: None,
             }]
         },
         // One reply per agent-cli exchange: steers queue for the next turn.
@@ -909,6 +921,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
                 Model {
                     id: "gemini-3.1-pro".into(),
@@ -918,6 +931,7 @@ fn antigravity_spec() -> AcpAgentSpec {
                     options: Vec::new(),
                     maker: None,
                     billing: None,
+                    context: None,
                 },
             ]
         },
@@ -1143,7 +1157,8 @@ impl AcpHarness {
     /// sign-in stored.
     pub async fn sign_out(&self) -> Result<(), HarnessError> {
         let home = std::env::var("HOME").ok();
-        let (_scratch, mut child, _stderr) = self.spawn_agent(home.as_deref(), false, &[]).await?;
+        let (_scratch, mut child, _stderr) =
+            self.spawn_agent(home.as_deref(), false, &[], None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1199,6 +1214,7 @@ impl AcpHarness {
             .transpose()?
             .flatten();
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, None);
         cmd.args(args);
         crate::compose_child_path(&mut cmd, &exe);
         self.configure_adapter_environment(&mut cmd, &exe);
@@ -1506,9 +1522,11 @@ impl AcpHarness {
         cwd: Option<&str>,
         block_on_install: bool,
         extra_args: &[String],
+        origin: Option<&crate::RunOrigin>,
     ) -> Result<(Option<ScratchDir>, Child, crate::StderrTail), HarnessError> {
         let (exe, args) = self.resolve_program(block_on_install).await?;
         let mut cmd = Command::new(&exe);
+        crate::apply_run_environment(&mut cmd, origin);
         cmd.args(args);
         cmd.args(extra_args);
         child::configure(&mut cmd);
@@ -1564,7 +1582,7 @@ impl AcpHarness {
         cwd: Option<&std::path::Path>,
     ) -> Result<Vec<SlashCommand>, HarnessError> {
         let (_scratch, mut child, _stderr) = self
-            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[])
+            .spawn_agent(cwd.and_then(|p| p.to_str()), false, &[], None)
             .await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
@@ -1634,7 +1652,7 @@ impl AcpHarness {
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
     async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
-        let (_scratch, mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
+        let (_scratch, mut child, stderr_tail) = self.spawn_agent(None, false, &[], None).await?;
         let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
@@ -1807,6 +1825,7 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
             options,
             maker: None,
             billing: None,
+            context: None,
         }
     };
 
@@ -2183,13 +2202,25 @@ impl Harness for AcpHarness {
             .flatten()
             .filter(|name| harness_proto::graff_worktree::valid_name(name));
         if let Some(name) = &graff_worktree {
-            launch_args.extend(["-w".to_owned(), name.clone()]);
+            let (program, _) = self.resolve_program(true).await?;
+            let spec = request
+                .worktree
+                .as_ref()
+                .expect("named worktree has a spec");
             // "Send now" and other follow-ups rebuild the request from the
-            // chat row, already re-homed into the tree (codegraff#1693).
+            // re-homed row. Normalize before creation too, never nest a tree
+            // inside the chat's existing tree (codegraff#1693).
             request.cwd = harness_proto::graff_worktree::launch_root(&request.cwd).to_owned();
+            graff_worktree::ensure_worktree(&program, &request.cwd, name, &spec.base).await?;
+            launch_args.extend(["-w".to_owned(), name.clone()]);
         }
         let (scratch, mut child, stderr_tail) = self
-            .spawn_agent(Some(&request.cwd), true, &launch_args)
+            .spawn_agent(
+                Some(&request.cwd),
+                true,
+                &launch_args,
+                controls.origin.as_ref(),
+            )
             .await?;
         if let Some(name) = &graff_worktree {
             // session/load only accepts the checkout Graff runs in: the tree.
@@ -2394,6 +2425,11 @@ fn strip_trailing_parenthetical(name: &str) -> &str {
 /// variants in either hint spelling. Exact match first (with the 1M compose
 /// when the run selects the 1M window), then a family-token fallback that
 /// prefers a variant matching the requested context window.
+///
+/// Among family matches, graff's provider-qualified values rank: the
+/// requested id's own provider first (an explicit `anthropic/...` pick stays
+/// Anthropic), then `claude-agent/` (graff's opted-in Claude Agent route,
+/// which serves the same model names) ahead of `anthropic/` and the rest.
 fn pick_model_value(requested: &str, available: &[&str], context_1m: bool) -> Option<String> {
     if context_1m {
         for composed in [format!("{requested}[1m]"), format!("{requested}-1m")] {
@@ -2409,10 +2445,16 @@ fn pick_model_value(requested: &str, available: &[&str], context_1m: bool) -> Op
     let family = ["fable", "opus", "sonnet", "haiku", "gpt"]
         .into_iter()
         .find(|f| norm_id(requested).contains(f))?;
-    let candidates: Vec<&&str> = available
+    let mut candidates: Vec<&&str> = available
         .iter()
         .filter(|v| norm_id(v).contains(family))
         .collect();
+    let requested_provider = requested.split_once('/').map(|(provider, _)| provider);
+    candidates.sort_by_key(|v| match v.split_once('/').map(|(provider, _)| provider) {
+        Some(provider) if Some(provider) == requested_provider => 0,
+        Some("claude-agent") => 1,
+        _ => 2,
+    });
     candidates
         .iter()
         .find(|v| context_hint_1m(v) == context_1m)
@@ -2539,11 +2581,74 @@ fn is_model_config_option(session_response: &Value, config_id: &str) -> bool {
 /// Matched against advertised values and skipped when already current. Pure
 /// so it's testable; the returned value is the request's flattened `value`
 /// payload (select: `{"value": id}`, boolean: `{"type":"boolean","value": b}`).
+/// Full-access mode preferences; runs use [`config_option_sets_with_modes`].
+#[cfg(test)]
 fn config_option_sets(
     session_response: &Value,
     model: Option<&str>,
     efforts: &[&'static str],
     model_options: &serde_json::Map<String, Value>,
+) -> Vec<(String, Value)> {
+    config_option_sets_with_modes(
+        session_response,
+        model,
+        efforts,
+        model_options,
+        FULL_ACCESS_MODES,
+    )
+}
+
+/// The no-prompts session modes, most specific first: the unattended
+/// default (full access).
+const FULL_ACCESS_MODES: &[&str] = &[
+    "bypassPermissions",
+    "bypass_permissions",
+    "bypass",
+    "yolo",
+    "agent-full-access",
+    "danger-full-access",
+    "full-access",
+];
+
+/// Read-only session modes: the agent plans and reads, never writes.
+const READ_ONLY_MODES: &[&str] = &["plan", "read-only", "read_only", "readOnly", "ask"];
+
+/// Workspace session modes: edits in the workspace go through, anything
+/// else asks (claude-agent-acp `acceptEdits`, codex-acp `auto`).
+const WORKSPACE_MODES: &[&str] = &[
+    "acceptEdits",
+    "accept_edits",
+    "auto",
+    "agent",
+    "default",
+];
+
+/// The session modes to prefer for the run's autonomy (see
+/// [`harness_proto::Autonomy`]): full access unless the engine stamped a
+/// restricted level without auto-approve.
+fn autonomy_modes(request: &RunRequest) -> &'static [&'static str] {
+    use harness_proto::SandboxLevel;
+    match (request.auto_approve, request.sandbox) {
+        (false, SandboxLevel::ReadOnly) => READ_ONLY_MODES,
+        (false, SandboxLevel::WorkspaceWrite) => WORKSPACE_MODES,
+        _ => FULL_ACCESS_MODES,
+    }
+}
+
+/// Whether tool permission requests ask the user (a restricted autonomy)
+/// instead of auto-accepting.
+fn asks_permission(request: &RunRequest) -> bool {
+    !request.auto_approve && request.sandbox != harness_proto::SandboxLevel::DangerFullAccess
+}
+
+/// [`config_option_sets`] with the session-mode preference list for the
+/// run's autonomy.
+fn config_option_sets_with_modes(
+    session_response: &Value,
+    model: Option<&str>,
+    efforts: &[&'static str],
+    model_options: &serde_json::Map<String, Value>,
+    modes: &[&str],
 ) -> Vec<(String, Value)> {
     let Some(options) = session_response
         .get("configOptions")
@@ -2589,18 +2694,10 @@ fn config_option_sets(
                 .filter(|c| available.contains(c))
                 .map(|c| Value::String(c.to_owned()))
                 .or_else(|| {
-                    [
-                        "bypassPermissions",
-                        "bypass_permissions",
-                        "bypass",
-                        "yolo",
-                        "agent-full-access",
-                        "danger-full-access",
-                        "full-access",
-                    ]
-                    .into_iter()
-                    .find(|v| available.contains(v))
-                    .map(|v| Value::String(v.to_owned()))
+                    modes
+                        .iter()
+                        .find(|v| available.contains(*v))
+                        .map(|v| Value::String((*v).to_owned()))
                 }),
             ("select", Some("thought_level")) => efforts
                 .iter()
@@ -3067,6 +3164,7 @@ fn handle_server_request_live(
     request_input: &std::sync::Arc<RequestInputFn>,
     session_id: &str,
     answered: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ask_permission: bool,
 ) -> Vec<AgentEvent> {
     if params
         .get("sessionId")
@@ -3093,6 +3191,9 @@ fn handle_server_request_live(
         .cloned()
         .unwrap_or_default();
     if !is_user_question(&options) {
+        if ask_permission {
+            return ask_permission_yes_no(client, id, params, options, request_input);
+        }
         return handle_server_request(client, id, method, params);
     }
     let names: Vec<String> = options
@@ -3145,6 +3246,75 @@ fn handle_server_request_live(
         }
     });
     Vec::new()
+}
+
+/// A tool permission under a restricted autonomy: ask the user yes/no (in a
+/// subtask so the message loop keeps flowing). Yes picks the agent's allow
+/// option for this one call, No its reject option; a dropped resolver
+/// cancels, never a silent allow.
+fn ask_permission_yes_no(
+    client: &RpcClient,
+    id: Value,
+    params: &Value,
+    options: Vec<Value>,
+    request_input: &std::sync::Arc<RequestInputFn>,
+) -> Vec<AgentEvent> {
+    let title = params
+        .get("toolCall")
+        .and_then(|t| t.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    let question = UserInputQuestion {
+        id: new_message_id(),
+        header: "Approve tool".into(),
+        question: match title {
+            Some(title) => format!("The agent wants to run: {title}. Allow it?"),
+            None => "The agent wants to use a tool. Allow it?".into(),
+        },
+        options: vec!["Yes".into(), "No".into()],
+        prefill: None,
+        multiline: false,
+        multi_select: false,
+    };
+    let client = client.clone();
+    let request_input = std::sync::Arc::clone(request_input);
+    tokio::spawn(async move {
+        let answers = (request_input)(vec![question.clone()])
+            .await
+            .unwrap_or_default();
+        let outcome = permission_outcome(&question, &answers, &options);
+        client.respond(&id, json!({ "outcome": outcome }));
+    });
+    Vec::new()
+}
+
+/// The `outcome` for a yes/no permission answer: the allow option (once
+/// before always) on Yes, the reject option on No, cancelled otherwise.
+fn permission_outcome(
+    question: &UserInputQuestion,
+    answers: &[UserInputAnswer],
+    options: &[Value],
+) -> Value {
+    let label = answers
+        .iter()
+        .find(|a| a.question_id == question.id)
+        .and_then(|a| a.labels.first());
+    let kinds: &[&str] = match label {
+        Some(l) if l.eq_ignore_ascii_case("yes") => &["allow_once", "allow_always"],
+        Some(l) if l.eq_ignore_ascii_case("no") => &["reject_once", "reject_always"],
+        _ => &[],
+    };
+    kinds
+        .iter()
+        .find_map(|kind| {
+            options
+                .iter()
+                .find(|o| o.get("kind").and_then(Value::as_str) == Some(*kind))
+        })
+        .and_then(|o| o.get("optionId").and_then(Value::as_str))
+        .map(|option_id| json!({ "outcome": "selected", "optionId": option_id }))
+        .unwrap_or_else(|| json!({ "outcome": "cancelled" }))
 }
 
 /// Show a form elicitation on the engine's input bridge (in a subtask so the
@@ -3285,6 +3455,7 @@ fn group_effort_variants(models: Vec<Model>) -> Vec<Model> {
                 options: first.options.clone(),
                 maker: None,
                 billing: None,
+                context: None,
             })
         })
         .collect()
@@ -3355,11 +3526,26 @@ async fn request_draining(
     method: &'static str,
     params: Value,
 ) -> Result<Value, HarnessError> {
+    request_draining_for_session(client, incoming, method, params, None).await
+}
+
+/// Setup calls such as graff/models and a /model command may receive session
+/// metadata after session/load's response. Retain only the requested session's
+/// bounded metadata while continuing to discard replayed transcript content.
+async fn request_draining_for_session(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    method: &'static str,
+    params: Value,
+    session_id: Option<&str>,
+) -> Result<Value, HarnessError> {
     let loading_session = matches!(method, "session/new" | "session/load");
     let requested_session = params
         .get("sessionId")
         .and_then(Value::as_str)
+        .or(session_id)
         .map(str::to_owned);
+    let retain_metadata = loading_session || session_id.is_some();
     let mut metadata = VecDeque::new();
     let mut handle_incoming = |inc| match inc {
         Incoming::Request { id, method, params } => {
@@ -3372,7 +3558,7 @@ async fn request_draining(
             }
         }
         Incoming::Notification { method, params }
-            if loading_session
+            if retain_metadata
                 && method == "session/update"
                 && matches!(
                     params["update"]["sessionUpdate"].as_str(),
@@ -3509,6 +3695,7 @@ async fn run_session(session: Session) {
         handshake_timeout,
         stderr_tail,
     } = session;
+    let ask_permission = asks_permission(&request);
     let RunControls {
         request_input,
         mut steering,
@@ -3621,9 +3808,22 @@ async fn run_session(session: Session) {
         {
             // session/load restores the saved provider/model, superseding
             // --model. Do not send a turn on a route other than the picker.
-            let catalog =
-                request_draining(&client, &mut incoming, "graff/models", json!({})).await?;
-            graff_models::verify_resumed_model(&catalog, model)?;
+            #[cfg(target_os = "macos")]
+            graff_connections::ensure_resumed_model(
+                &client,
+                &mut incoming,
+                &session_id,
+                &mut session_response,
+                &init_commands,
+                model,
+            )
+            .await?;
+            #[cfg(not(target_os = "macos"))]
+            {
+                let catalog =
+                    request_draining(&client, &mut incoming, "graff/models", json!({})).await?;
+                graff_models::verify_resumed_model(&catalog, model)?;
+            }
         }
         let mut devin_selection = None;
         if harness == HarnessId::Devin
@@ -3722,11 +3922,12 @@ async fn run_session(session: Session) {
         let options_snapshot = session_response;
         let mut initial_effort =
             thought_level_value(&options_snapshot["configOptions"]).map(str::to_owned);
-        for (config_id, payload) in config_option_sets(
+        for (config_id, payload) in config_option_sets_with_modes(
             &options_snapshot,
             requested_model.as_deref(),
             &efforts,
             &request.model_options,
+            autonomy_modes(&request),
         ) {
             if devin_configured
                 && config_id == "speed"
@@ -4138,6 +4339,7 @@ async fn run_session(session: Session) {
                                 &request_input,
                                 &session_id,
                                 &clarification.answered,
+                                ask_permission,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -4414,6 +4616,7 @@ async fn run_session(session: Session) {
                         &request_input,
                         &session_id,
                         &clarification.answered,
+                        ask_permission,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -4532,6 +4735,7 @@ async fn run_session(session: Session) {
                                         &request_input,
                                 &session_id,
                                 &clarification.answered,
+                                ask_permission,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -4969,6 +5173,59 @@ async fn run_session(session: Session) {
     }
 
     child.shutdown(kill_grace).await;
+}
+
+#[cfg(test)]
+mod pick_model_value_tests {
+    use super::pick_model_value;
+
+    #[test]
+    fn family_fallback_prefers_claude_agent_over_anthropic() {
+        let available = [
+            "anthropic/claude-opus-5",
+            "claude-agent/claude-opus-5",
+            "anthropic/claude-sonnet-5",
+        ];
+        // A bare or unrelated request: Claude Agent wins the tie.
+        for requested in ["claude-opus-5-5", "opus", "codegraff/claude-opus-5-5"] {
+            assert_eq!(
+                pick_model_value(requested, &available, false).as_deref(),
+                Some("claude-agent/claude-opus-5"),
+                "{requested}"
+            );
+        }
+        // Listed the other way round, the order is the same.
+        let reversed = ["claude-agent/claude-opus-5", "anthropic/claude-opus-5"];
+        assert_eq!(
+            pick_model_value("opus", &reversed, false).as_deref(),
+            Some("claude-agent/claude-opus-5")
+        );
+        // An explicit Anthropic pick keeps its provider.
+        assert_eq!(
+            pick_model_value("anthropic/claude-opus-5-5", &available, false).as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+        // An exact match is never re-routed.
+        assert_eq!(
+            pick_model_value("anthropic/claude-opus-5", &available, false).as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+        // The context-window preference still applies within the ranking.
+        let windows = [
+            "anthropic/claude-opus-5[1m]",
+            "claude-agent/claude-opus-5",
+            "claude-agent/claude-opus-5[1m]",
+        ];
+        assert_eq!(
+            pick_model_value("opus", &windows, true).as_deref(),
+            Some("claude-agent/claude-opus-5[1m]")
+        );
+        // Unqualified adapters (the Claude adapter's aliases) are unchanged.
+        assert_eq!(
+            pick_model_value("claude-opus-5", &["sonnet", "opus", "opus[1m]"], false).as_deref(),
+            Some("opus")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5503,8 +5760,12 @@ mod tests {
         }));
         assert!(matches!(
             &done[..],
-            [AgentEvent::ToolResult { id, is_error: false, output: Some(text), .. }]
-                if id == "acp-compaction-k1" && text == "Kept the plan."
+            [
+                AgentEvent::ToolCall { call, .. },
+                AgentEvent::ToolResult { id, is_error: false, output: Some(text), .. },
+            ] if id == "acp-compaction-k1"
+                && text == "Kept the plan."
+                && call.compaction().and_then(|meta| meta.item_tokens) == Some(4)
         ));
     }
 
@@ -6043,6 +6304,83 @@ mod tests {
             json!({ "optionId": "b", "name": "Другое", "kind": "other" }),
         ];
         assert!(is_user_question(&mixed));
+    }
+
+    fn autonomy_request(sandbox: &str, auto_approve: bool) -> RunRequest {
+        serde_json::from_value(json!({
+            "prompt": "p", "cwd": "", "sandbox": sandbox, "autoApprove": auto_approve
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn autonomy_picks_the_session_mode() {
+        let response = json!({"configOptions": [{
+            "id": "mode", "type": "select", "category": "mode",
+            "currentValue": "default",
+            "options": [
+                {"value": "default"}, {"value": "acceptEdits"},
+                {"value": "plan"}, {"value": "bypassPermissions"}
+            ]
+        }]});
+        let no_opts = serde_json::Map::new();
+        let mode = |sandbox: &str, auto: bool| {
+            let request = autonomy_request(sandbox, auto);
+            config_option_sets_with_modes(&response, None, &[], &no_opts, autonomy_modes(&request))
+        };
+        assert_eq!(
+            mode("danger-full-access", false),
+            vec![("mode".to_string(), json!({"value": "bypassPermissions"}))]
+        );
+        assert_eq!(
+            mode("workspace-write", false),
+            vec![("mode".to_string(), json!({"value": "acceptEdits"}))]
+        );
+        assert_eq!(
+            mode("read-only", false),
+            vec![("mode".to_string(), json!({"value": "plan"}))]
+        );
+        // Legacy senders stamp workspace-write with auto-approve: unattended.
+        assert_eq!(
+            mode("workspace-write", true),
+            vec![("mode".to_string(), json!({"value": "bypassPermissions"}))]
+        );
+        assert!(asks_permission(&autonomy_request("read-only", false)));
+        assert!(!asks_permission(&autonomy_request("danger-full-access", false)));
+    }
+
+    #[test]
+    fn restricted_permission_answers_map_to_options() {
+        let options = vec![
+            json!({"optionId": "always", "kind": "allow_always", "name": "Always"}),
+            json!({"optionId": "once", "kind": "allow_once", "name": "Allow"}),
+            json!({"optionId": "no", "kind": "reject_once", "name": "Reject"}),
+        ];
+        let question = UserInputQuestion {
+            id: "q".into(),
+            header: "Approve tool".into(),
+            question: "?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            prefill: None,
+            multiline: false,
+            multi_select: false,
+        };
+        let answer = |label: &str| UserInputAnswer {
+            question_id: "q".into(),
+            labels: vec![label.into()],
+        };
+        assert_eq!(
+            permission_outcome(&question, &[answer("Yes")], &options),
+            json!({"outcome": "selected", "optionId": "once"})
+        );
+        assert_eq!(
+            permission_outcome(&question, &[answer("No")], &options),
+            json!({"outcome": "selected", "optionId": "no"})
+        );
+        assert_eq!(
+            permission_outcome(&question, &[], &options),
+            json!({"outcome": "cancelled"})
+        );
     }
 
     #[test]

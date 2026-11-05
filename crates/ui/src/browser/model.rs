@@ -68,6 +68,75 @@ pub fn normalize_address(input: &str) -> Result<String, &'static str> {
     Ok(parsed.into())
 }
 
+/// Resolve text the user submitted in the address field. Links and native
+/// navigation keep using the URL-only paths below; only this entry point may
+/// turn ordinary words into a search.
+pub fn address_or_search(input: &str) -> Result<String, &'static str> {
+    match classify_search_text(input)? {
+        Some(query) => Ok(search_url(query)),
+        None => normalize_address(input),
+    }
+}
+
+/// Search-only input, using the same classification as address submission.
+/// Addresses (including malformed or credential-bearing ones) never reach a
+/// remote suggestion provider. Empty/invalid input has no query either.
+pub fn search_query(input: &str) -> Option<String> {
+    classify_search_text(input)
+        .ok()
+        .flatten()
+        .map(str::to_owned)
+}
+
+/// A selected search suggestion stays a search even if it resembles a domain.
+pub fn search_url(query: &str) -> String {
+    let mut search = url::Url::parse("https://www.google.com/search")
+        .expect("the search endpoint is a valid URL");
+    search.query_pairs_mut().append_pair("q", query);
+    search.into()
+}
+
+fn classify_search_text(input: &str) -> Result<Option<&str>, &'static str> {
+    let text = input.trim();
+    if text.is_empty() {
+        return Err("Enter a search or website address.");
+    }
+    if text.chars().any(char::is_control) {
+        return Err("This address contains invalid characters.");
+    }
+
+    let authority = text.split(['/', '?', '#']).next().unwrap_or(text);
+    let host_port = authority
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()));
+    let scheme = text.split_once(':').map(|(prefix, _)| prefix);
+    let explicit_scheme = !host_port
+        && !text.starts_with('[')
+        && scheme.is_some_and(|prefix| {
+            prefix
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+                && prefix
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+        });
+    let looks_like_host = !authority.chars().any(char::is_whitespace)
+        && (authority.eq_ignore_ascii_case("localhost")
+            || authority.contains('.')
+            || authority.starts_with('[')
+            || authority.contains('@')
+            || host_port
+            || authority.parse::<IpAddr>().is_ok());
+
+    // Never turn a malformed explicit URL, unsupported scheme, or credential
+    // bearing address into a query sent to the search provider.
+    if text.contains("://") || explicit_scheme || looks_like_host {
+        return Ok(None);
+    }
+    Ok(Some(text))
+}
+
 /// Chat links require an explicit web authority; never infer a scheme or
 /// silently strip controls, credentials, malformed escapes or backslashes.
 pub fn transcript_address(input: &str) -> Result<String, &'static str> {
@@ -165,6 +234,109 @@ mod tests {
         }
         assert!(!allowed_navigation("javascript:alert(1)"));
         assert!(!allowed_navigation("https://user@example.com/"));
+    }
+    #[test]
+    fn typed_addresses_keep_web_and_development_destinations() {
+        for (input, expected) in [
+            ("example.com/path", "https://example.com/path"),
+            ("https://example.com/?q=rust", "https://example.com/?q=rust"),
+            ("http://example.com", "http://example.com/"),
+            ("localhost", "http://localhost/"),
+            ("localhost:3000", "http://localhost:3000/"),
+            ("app.localhost:5173/path", "http://app.localhost:5173/path"),
+            ("127.0.0.1:8080", "http://127.0.0.1:8080/"),
+            ("192.168.1.8:3000", "https://192.168.1.8:3000/"),
+            ("[::1]:8080", "http://[::1]:8080/"),
+            ("devbox:3000", "https://devbox:3000/"),
+        ] {
+            assert_eq!(address_or_search(input), Ok(expected.into()), "{input}");
+        }
+    }
+    #[test]
+    fn typed_words_and_phrases_become_one_encoded_search_query() {
+        for input in [
+            "rust",
+            "rust async await",
+            "C++ & Rust # examples?",
+            "100% café 日本語",
+            "what changed in example.com/docs",
+        ] {
+            let resolved = address_or_search(&format!("  {input}  ")).unwrap();
+            let url = url::Url::parse(&resolved).unwrap();
+            assert_eq!(url.scheme(), "https");
+            assert_eq!(url.host_str(), Some("www.google.com"));
+            assert_eq!(url.path(), "/search");
+            assert_eq!(url.fragment(), None);
+            assert_eq!(
+                url.query_pairs().into_owned().collect::<Vec<_>>(),
+                vec![("q".to_owned(), input.to_owned())]
+            );
+        }
+    }
+    #[test]
+    fn typed_invalid_addresses_are_never_sent_to_search() {
+        for input in [
+            "",
+            "https://",
+            "https://bad host.example",
+            "https://example.com:bad/path",
+            "https://user:secret@example.com",
+            "user@example.com",
+            "javascript:alert(1)",
+            "file:///tmp/private.txt",
+            "data:text/html,private",
+            "harness://open/chat/a",
+            "custom:private",
+            "two\nwords",
+        ] {
+            assert!(address_or_search(input).is_err(), "{input}");
+        }
+        assert!(normalize_address("two words").is_err());
+        assert!(transcript_address("rust").is_err());
+        assert!(!allowed_navigation("rust"));
+    }
+    #[test]
+    fn autocomplete_classifies_queries_without_sending_addresses() {
+        for input in [
+            "rust",
+            "rust async await",
+            "C++ & Rust # examples?",
+            "100% café 日本語",
+            "what changed in example.com/docs",
+        ] {
+            let query = search_query(&format!("  {input}  ")).unwrap();
+            assert_eq!(query, input);
+            assert_eq!(address_or_search(input).unwrap(), search_url(&query));
+        }
+        for input in [
+            "",
+            "example.com",
+            "localhost",
+            "localhost:3000/path",
+            "devbox:5173",
+            "127.0.0.1:8080",
+            "[::1]",
+            "https://",
+            "https://bad host.example",
+            "https://example.com:bad/path",
+            "https://user:secret@example.com",
+            "user@example.com",
+            "javascript:alert(1)",
+            "file:///tmp/private.txt",
+            "data:text/html,private",
+            "harness://open/chat/a",
+            "custom:private",
+            "two\nwords",
+        ] {
+            assert_eq!(search_query(input), None, "{input}");
+        }
+    }
+    #[test]
+    fn selected_domain_suggestion_still_searches() {
+        assert_eq!(
+            search_url("example.com"),
+            "https://www.google.com/search?q=example.com"
+        );
     }
     #[test]
     fn native_visibility_never_outlives_its_surface() {

@@ -10,8 +10,19 @@ enum HomeListControls {
     /// The project pill when no project is chosen. "All" alone didn't say all of what.
     static let allProjectsTitle = "All projects"
 
-    /// The project pill's text: the chosen project's name, or All projects.
-    static func scopeTitle(projectName: String?) -> String {
+    /// The saved filter value for sessions outside any project. Space ids are
+    /// never empty or start with "~", so it can't collide with one; "" stays All.
+    static let projectlessFilter = "~projectless"
+    static let projectlessTitle = "No project"
+
+    /// Sessions with no project (desktop `sidebar_chats` with `Some("")`).
+    static func projectless(_ chats: [Chat]) -> [Chat] {
+        chats.filter { $0.spaceId == nil }
+    }
+
+    /// The project pill's text: the chosen project's name, No project, or All projects.
+    static func scopeTitle(projectName: String?, projectless: Bool = false) -> String {
+        if projectless { return projectlessTitle }
         guard let projectName, !projectName.isEmpty else { return allProjectsTitle }
         return projectName
     }
@@ -34,6 +45,7 @@ extension HomeGroupBy {
     /// "Time" read like another filter.
     var pillTitle: String {
         switch self {
+        case .status: return "By status"
         case .none: return "By time"
         case .project: return "By project"
         case .device: return "By device"
@@ -51,27 +63,27 @@ struct HomeControlPill: View {
     let active: Bool
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 6) {
             Image(systemName: symbol)
-                .font(.footnote.weight(.medium))
+                .font(.system(size: 13, weight: .semibold))
                 .accessibilityHidden(true)
             Text(title)
-                .font(Theme.sans(14, weight: active ? .semibold : .medium, relativeTo: .subheadline))
+                .font(Theme.sans(Theme.previewSize, weight: active ? .semibold : .regular, relativeTo: .subheadline))
                 .lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.caption2.weight(.bold))
-                .imageScale(.small)
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Theme.textFaint)
                 .accessibilityHidden(true)
         }
         .foregroundStyle(active ? Theme.text : Theme.textMuted)
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
-        .frame(minHeight: 30)
-        .background(Capsule().fill(active ? Theme.elementActive : Color.clear))
-        .overlay(Capsule().strokeBorder(active ? Color.clear : Theme.border, lineWidth: 1))
-        // A 44pt target around the smaller capsule.
-        .frame(minHeight: 44)
+        .padding(.horizontal, 14)
+        .frame(minHeight: Theme.chipHeight)
+        // Quiet either way: a faint ink fill under glass, a little deeper when
+        // the chip has been changed from its default. No border, no solid fill.
+        .background(Capsule().fill(ink(active ? 0.09 : 0.04)))
+        .glassEffect(.regular.interactive(), in: Capsule())
+        // A 44pt target around the 36pt capsule.
+        .frame(minHeight: Theme.hitTarget)
         .contentShape(Rectangle())
     }
 }

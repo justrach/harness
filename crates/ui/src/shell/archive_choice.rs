@@ -1,7 +1,6 @@
-//! The one-time question the first ⌘W close asks: archive the session, or
-//! just close it. The answer becomes the archive-on-close setting (Settings →
-//! Archived sessions), which ⌘W and the ✕ buttons follow from then on. The
-//! close-without-archiving shortcut (⌘⌥W) and the ✕ buttons never ask.
+//! The first ⌘W chat close asks whether to archive the session or just close it.
+//! The answer becomes the archive-on-close default for ⌘W and ✕ buttons.
+//! The close-without-archiving shortcut (⌘⌥W) and ✕ buttons never ask.
 
 use super::*;
 
@@ -11,20 +10,89 @@ mod tests;
 /// The dialog's copy, given the two shortcuts as displayed.
 pub(super) fn archive_choice_copy(close: &str, close_only: &str) -> (String, String) {
     (
-        format!("When you close a chat with {close}"),
+        format!("What should {close} do when you close a chat?"),
         format!(
-            "Archive it to move an idle session to the archived shelf, or just close it \
-             and keep it in the sidebar. Running sessions are never archived. \
-             {close_only} always just closes. You can change this in Settings \u{2192} \
-             Archived sessions."
+            "Just close it to keep it in the sidebar, or archive it to move an idle session \
+             to the archived shelf. Your choice becomes the default for closing chats. \
+             You can change it in Settings \u{2192} Archived sessions. Sessions that are \
+             running, waiting for input, or still open elsewhere are never archived. \
+             {close_only} always just closes without asking."
         ),
     )
 }
 
 impl Shell {
-    /// ⌘W on a chat pane, tab or the last session. Archives the closed
-    /// session when archive-on-close is on. Until that has been chosen once,
-    /// a ⌘W that would close a session asks first and closes nothing yet.
+    /// The chat ⌘W would close: the one showing in the focused panel. Other
+    /// panel tabs (drafts, terminals, files) have no session to archive.
+    fn focused_panel_chat(&self, cx: &App) -> Option<String> {
+        if !matches!(self.route, Route::Chat) {
+            return None;
+        }
+        let layout = self.panel_layout(cx)?;
+        let panel = layout
+            .panels
+            .iter()
+            .find(|panel| panel.id == layout.focused)?;
+        match panel.selected()? {
+            workspace_panels::PanelTab::Chat(id) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    fn close_focused_panel_chat(
+        &mut self,
+        chat_id: String,
+        may_archive: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_close_focused(window, cx);
+        if may_archive {
+            self.archive_closed_session_if_idle(chat_id, window, cx);
+        }
+    }
+
+    /// ⌘W on a panel showing a chat: the same question and saved default as
+    /// [`Self::close_chat_view_by_shortcut`]. False when no chat is focused.
+    pub(crate) fn close_focused_panel_chat_by_shortcut(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(chat_id) = self.focused_panel_chat(cx) else {
+            return false;
+        };
+        if settings::archive_on_close_chosen(cx) {
+            let archive = settings::archive_sessions_on_close(cx);
+            self.close_focused_panel_chat(chat_id, archive, window, cx);
+        } else {
+            self.archive_choice_prompt = true;
+            cx.notify();
+        }
+        true
+    }
+
+    /// A panel's ✕, middle click or menu close: never asks, and follows the
+    /// saved default ([`Self::archive_closed_session`]).
+    pub(super) fn close_workspace_tab_by_button(
+        &mut self,
+        panel: u64,
+        tab: workspace_panels::PanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let chat_id = match &tab {
+            workspace_panels::PanelTab::Chat(id) => Some(id.clone()),
+            _ => None,
+        };
+        self.close_workspace_tab(panel, tab, window, cx);
+        if let Some(chat_id) = chat_id {
+            self.archive_closed_session(chat_id, window, cx);
+        }
+    }
+
+    /// The first ⌘W chat close asks for a default. Later closes follow the
+    /// saved archive-on-close preference without asking again.
     pub(crate) fn close_chat_view_by_shortcut(
         &mut self,
         window: &mut Window,
@@ -35,11 +103,10 @@ impl Shell {
             cx.notify();
             return false;
         }
-        self.close_chat_view_with_archive(true, window, cx)
+        self.close_chat_view_with_archive(settings::archive_sessions_on_close(cx), window, cx)
     }
 
-    /// The question's answer: save it as the archive-on-close setting, then
-    /// do the close the ⌘W asked for.
+    /// Save the answer as the close default, then apply it to this close.
     pub(crate) fn choose_close_archiving(
         &mut self,
         archive: bool,
@@ -51,10 +118,14 @@ impl Shell {
         }
         settings::set_archive_sessions_on_close(archive, cx);
         self.sync_independent_settings(cx);
-        self.close_chat_view_with_archive(true, window, cx)
+        if let Some(chat_id) = self.focused_panel_chat(cx) {
+            self.close_focused_panel_chat(chat_id, archive, window, cx);
+            return true;
+        }
+        self.close_chat_view_with_archive(archive, window, cx)
     }
 
-    /// Escape: nothing closes and nothing is saved; the next ⌘W asks again.
+    /// Dismiss or Escape: nothing closes and nothing is saved; the next ⌘W asks again.
     pub(super) fn dismiss_archive_choice(&mut self, cx: &mut Context<Self>) -> bool {
         if !std::mem::take(&mut self.archive_choice_prompt) {
             return false;
@@ -75,7 +146,35 @@ impl Shell {
         let (close, close_only) = settings::close_shortcut_badges(cx);
         let (title, body) = archive_choice_copy(&close, &close_only);
         let card = popover::dialog_card(theme)
-            .child(popover::dialog_title(theme, &title))
+            .relative()
+            .debug_selector(|| "archive-choice-card".into())
+            .child(
+                div()
+                    .id("archive-choice-dismiss")
+                    .debug_selector(|| "archive-choice-dismiss".into())
+                    .absolute()
+                    .top(px(8.0))
+                    .right(px(8.0))
+                    .size(px(20.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .aria_label("Dismiss close preference setup")
+                    .hover(|style| style.bg(theme.ink(0.08)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.dismiss_archive_choice(cx);
+                    }))
+                    .child(
+                        crate::icons::icon(crate::icons::CLOSE)
+                            .size(px(12.0))
+                            .text_color(theme.text_muted),
+                    ),
+            )
+            .child(popover::dialog_title(theme, &title).mt(px(12.0)))
             .child(div().mt(px(6.0)).child(popover::dialog_body(theme, body)))
             .child(
                 div()
@@ -85,17 +184,17 @@ impl Shell {
                     .justify_end()
                     .gap(px(8.0))
                     .child(
-                        popover::btn_ghost(theme, "Just close it", "archive-choice-close")
-                            .id("archive-choice-close")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.choose_close_archiving(false, window, cx);
-                            })),
-                    )
-                    .child(
-                        popover::btn_primary(theme, "Archive it")
+                        popover::btn_ghost(theme, "Archive it", "archive-choice-archive")
                             .id("archive-choice-archive")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.choose_close_archiving(true, window, cx);
+                            })),
+                    )
+                    .child(
+                        popover::btn_primary(theme, "Just close it")
+                            .id("archive-choice-close")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.choose_close_archiving(false, window, cx);
                             })),
                     ),
             )

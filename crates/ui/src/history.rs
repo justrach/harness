@@ -1208,36 +1208,16 @@ struct HistoryRefTooltip {
 
 impl Render for HistoryRefTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let longest = self
-            .descriptions
-            .iter()
-            .map(|description| description.chars().count())
-            .max()
-            .unwrap_or_default();
-        let width = (longest as f32 * 6.4 + 16.0).clamp(72.0, 360.0);
-        div()
-            .w(px(width))
-            .px(px(8.0))
-            .py(px(6.0))
+        crate::popover::tooltip_surface(Theme::of(cx))
             .flex()
             .flex_col()
             .gap(px(3.0))
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .children(self.descriptions.iter().cloned().map(|description| {
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .whitespace_nowrap()
-                    .font_family(theme.font_mono.clone())
-                    .child(description)
-            }))
+            .children(
+                self.descriptions
+                    .iter()
+                    .cloned()
+                    .map(|description| div().min_w_0().child(description)),
+            )
     }
 }
 
@@ -1247,22 +1227,7 @@ struct HistoryAuthorTooltip {
 
 impl Render for HistoryAuthorTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let width = (self.name.chars().count() as f32 * 6.2 + 16.0).clamp(72.0, 260.0);
-        div()
-            .w(px(width))
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .truncate()
-            .whitespace_nowrap()
-            .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .child(self.name.clone())
+        crate::popover::tooltip_label(Theme::of(cx), self.name.clone())
     }
 }
 
@@ -1788,7 +1753,7 @@ impl Render for GitHistorySearchControl {
                     .justify_center()
                     .rounded(px(3.5))
                     .cursor_pointer()
-                    .hover(|style| style.bg(crate::theme::ink(0.08)))
+                    .hover(|style| style.bg(theme.element_hover))
                     .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
                         window.prevent_default()
                     })
@@ -1936,6 +1901,16 @@ impl Render for GitHistoryCount {
 }
 
 impl GitHistory {
+    pub(crate) fn rebind_window_state(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        self._observe = cx.observe(&state, |this, _, cx| {
+            if this.started {
+                this.ensure_loaded(cx);
+            }
+        });
+        self.state = state;
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this, _, cx| {
             if this.started {
@@ -3192,30 +3167,23 @@ impl GitHistory {
         let theme = &theme.for_popup();
         let show_name = configured_author_display(cx) == GitHistoryAuthorDisplay::Name;
         popover::popover_card(theme)
-            .w(px(116.0))
-            .p(px(popover::CARD_INSET))
-            .rounded(px(9.0))
+            .w(px(160.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_author_menu(cx)))
             .child(
-                popover::menu_row(theme, false, "history-author-display-name")
+                popover::menu_row(theme, show_name, "history-author-display-name")
                     .id("history-author-display-name")
-                    .gap(px(0.0))
-                    .px(px(7.0))
-                    .py(px(4.0))
-                    .rounded(px(9.0 - popover::CARD_INSET))
-                    .text_size(px(11.5))
                     .on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
                         this.toggle_author_display(cx);
                         this.close_author_menu(cx);
                     }))
                     .child(div().flex_1().child("Name"))
-                    .child(div().w(px(12.0)).flex_none().flex().justify_end().when(
+                    .child(div().w(px(18.0)).flex_none().flex().justify_end().when(
                         show_name,
                         |element| {
                             element.child(
                                 crate::icons::icon(crate::icons::CHECK)
-                                    .size(px(10.0))
+                                    .size(px(14.0))
                                     .text_color(theme.text_muted),
                             )
                         },
@@ -3237,26 +3205,21 @@ impl GitHistory {
              cx: &mut Context<Self>| {
                 popover::menu_row(
                     theme,
-                    false,
+                    checked,
                     SharedString::from(format!("history-column-option-{index}")),
                 )
                 .id(("history-column-option", index))
-                .gap(px(0.0))
-                .px(px(7.0))
-                .py(px(4.0))
-                .rounded(px(9.0 - popover::CARD_INSET))
-                .text_size(px(11.5))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_column(column, cx);
                 }))
                 .child(div().flex_1().child(label))
-                .child(div().w(px(12.0)).flex_none().flex().justify_end().when(
+                .child(div().w(px(18.0)).flex_none().flex().justify_end().when(
                     checked,
                     |element| {
                         element.child(
                             crate::icons::icon(crate::icons::CHECK)
-                                .size(px(10.0))
+                                .size(px(14.0))
                                 .text_color(theme.text_muted),
                         )
                     },
@@ -3268,9 +3231,7 @@ impl GitHistory {
             || order != GitHistoryColumnOrder::default();
 
         popover::popover_card(theme)
-            .w(px(132.0))
-            .p(px(popover::CARD_INSET))
-            .rounded(px(9.0))
+            .w(px(180.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_column_menu(cx)))
             .child(
                 div()
@@ -3287,20 +3248,9 @@ impl GitHistory {
                     .child(option("Date", columns.date, GitHistoryColumn::Date, 1, cx))
                     .child(option("SHA", columns.sha, GitHistoryColumn::Sha, 2, cx))
                     .when(can_reset, |menu| {
-                        menu.child(
-                            div()
-                                .h(px(1.0))
-                                .mx(px(5.0))
-                                .my(px(2.0))
-                                .bg(crate::theme::hairline(0.08)),
-                        )
-                        .child(
+                        menu.child(popover::menu_separator()).child(
                             popover::menu_row(theme, false, "history-columns-reset")
                                 .id("history-columns-reset")
-                                .px(px(7.0))
-                                .py(px(4.0))
-                                .rounded(px(9.0 - popover::CARD_INSET))
-                                .text_size(px(11.5))
                                 .text_color(theme.text_muted)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     cx.stop_propagation();
@@ -3896,7 +3846,7 @@ impl GitHistory {
                     .items_center()
                     .rounded(px(4.0))
                     .cursor_pointer()
-                    .hover(|style| style.bg(crate::theme::ink(0.07)))
+                    .hover(|style| style.bg(theme.element_hover))
                     .font_family(theme.font_mono.clone())
                     .text_size(px(10.5))
                     .text_color(if copied {
@@ -4071,7 +4021,7 @@ impl GitHistory {
             .text_size(px(11.0))
             .cursor_pointer()
             .when_some(focused_row_wash, |element, wash| element.bg(wash))
-            .hover(|style| style.bg(crate::theme::ink(0.025)))
+            .hover(|style| style.bg(theme.element_hover))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 this.set_row_hover((*hovered).then_some(row_hover_path), cx);
             }))
@@ -4214,7 +4164,7 @@ impl Render for GitHistory {
             .opacity(0.0)
             .group_hover("history-column-header", |style| style.opacity(1.0))
             .when(self.column_menu.is_open(), |button| button.opacity(1.0))
-            .hover(|style| style.bg(crate::theme::ink(0.08)))
+            .hover(|style| style.bg(theme.element_hover))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -5261,3 +5211,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("menu_review/history.rs");

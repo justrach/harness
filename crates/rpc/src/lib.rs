@@ -48,7 +48,18 @@ pub mod methods {
     /// window; `null` is graff's own default (80%).
     pub const GET_GRAFF_COMPACT_AT: &str = "GetGraffCompactAt";
     pub const SET_GRAFF_COMPACT_AT: &str = "SetGraffCompactAt";
+    /// Keep the device awake while its agents work. Replies
+    /// `{ enabled, supported }`; `supported: false` where the engine cannot
+    /// hold a sleep assertion (clients hide the setting there).
+    pub const GET_KEEP_AWAKE: &str = "GetKeepAwake";
+    pub const SET_KEEP_AWAKE: &str = "SetKeepAwake";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
+    /// The device's default autonomy (`read-only` / `workspace` /
+    /// `full-access`), stamped onto every run's sandbox and auto-approve.
+    /// Replies `{ autonomy, chosen }`; `chosen: false` is the untouched
+    /// full-access fallback existing installs keep.
+    pub const GET_AUTONOMY: &str = "GetAutonomy";
+    pub const SET_AUTONOMY: &str = "SetAutonomy";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
@@ -158,6 +169,11 @@ pub mod methods {
     /// `{sessions?: [{source, id}], cwd?}` → import those (or, without `sessions`, every
     /// one the list shows for `cwd`) as chats. Returns `{imported, skipped, errors, chatIds}`.
     pub const EXTERNAL_HISTORY_IMPORT: &str = "ExternalHistoryImport";
+    /// `{reference}` → preview a local or archived Codex conversation without importing it.
+    pub const CODEX_CONVERSATION_PREVIEW: &str = "CodexConversationPreview";
+    /// `{reference, cwd?}` → import a Codex conversation for continuation in graff, or reopen it.
+    /// Returns `{chatId, alreadyImported}`.
+    pub const CODEX_CONVERSATION_IMPORT: &str = "CodexConversationImport";
     /// The account's recent CodeGraff PR-agent runs (`GET /v1/jobs`).
     pub const CODEGRAFF_JOBS: &str = "CodegraffJobs";
     /// Cancel one PR-agent run (`POST /v1/jobs/:id/cancel`).
@@ -249,6 +265,13 @@ pub mod methods {
     pub const SHUTDOWN_SIMULATOR: &str = "ShutdownSimulator";
     pub const WATCH_SIMULATOR_SCREEN: &str = "WatchSimulatorScreen";
     pub const SIMULATOR_INPUT: &str = "SimulatorInput";
+    // Pages the target device serves on localhost, rendered there by a
+    // headless browser (ControlRpc, relay-forwardable). WatchLocalhostPage
+    // streams JPEG frames; LocalhostPageInput sends taps, typing and
+    // navigation back; ListLocalhostServers lists what answers HTTP there.
+    pub const WATCH_LOCALHOST_PAGE: &str = "WatchLocalhostPage";
+    pub const LOCALHOST_PAGE_INPUT: &str = "LocalhostPageInput";
+    pub const LIST_LOCALHOST_SERVERS: &str = "ListLocalhostServers";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
@@ -296,6 +319,9 @@ pub mod methods {
     /// Run the release check now instead of waiting for its schedule; the
     /// result arrives on the `UpdateStatus` stream.
     pub const CHECK_FOR_UPDATES: &str = "CheckForUpdates";
+    /// Request one managed-host update, deferred until no chats or terminals
+    /// are active. Never fall back to ApplyUpdate on an older host.
+    pub const QUEUE_UPDATE: &str = "QueueUpdate";
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -48,8 +48,13 @@ macro_rules! icon_assets {
 }
 
 icon_assets![
+    (SESSION_ATTENTION, "session-attention"),
     (PROJECT_DEFAULT, "project-default"),
     (REMOTE_SERVER, "remote-server"),
+    // Original compact cloud-computer glyphs in the shared linear family.
+    (CPU, "cpu"),
+    (MEMORY, "memory"),
+    (PAUSE, "pause"),
     // Service-tier bolt, drawn in the toolbar family's linear weight.
     (FAST_TIER, "fast-tier"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
@@ -128,6 +133,8 @@ icon_assets![
     (SPLIT_COLUMNS, "split-columns"),
     // Long-line wrapping toggle shared by changes and agent Markdown fences.
     (WRAP_TEXT, "wrap-text"),
+    // The changes pane's ignore-whitespace toggle: a space-bar bracket.
+    (WHITESPACE, "whitespace"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),
@@ -185,6 +192,13 @@ icon_assets![
     (TERMINAL, "terminal"),
     (PLUS, "plus"),
     (CLOSE, "close"),
+    // Hand-drawn annotate tools and undo in the Solar Linear style (24px,
+    // 1.5 stroke) for the image annotation toolbar (annotate.rs).
+    (ANNOTATE_TEXT, "annotate-text"),
+    (ANNOTATE_RECT, "annotate-rect"),
+    (UNDO, "undo"),
+    (REDO, "redo"),
+    (ERASER, "eraser"),
     // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
     // restore stacked squares) in the same style as `close` — drawn for the
     // client-side-decoration window controls; no system glyph font exists on
@@ -198,6 +212,8 @@ icon_assets![
     (HARD_DRIVE, "hard-drive"),
     (HOME, "home"),
     (STOP, "stop"),
+    // Hand-drawn padlock for steps that wait on the user ("Asks first").
+    (LOCK, "lock"),
     (CHECK, "check"),
     (COPY, "copy"),
     // Project Action icon family (Solar Linear-compatible strokes).
@@ -238,6 +254,16 @@ icon_assets![
     (MAKER_MINIMAX, "maker-minimax"),
     (MAKER_MISTRAL, "maker-mistral"),
     (MAKER_META, "maker-meta"),
+    (PROVIDER_KILO, "provider-kilo"),
+    (PROVIDER_GROQ, "provider-groq"),
+    (PROVIDER_CEREBRAS, "provider-cerebras"),
+    (PROVIDER_VERCEL, "provider-vercel"),
+    (PROVIDER_OPENROUTER, "provider-openrouter"),
+    (PROVIDER_FUGU, "provider-fugu"),
+    (PROVIDER_FIREWORKS, "provider-fireworks"),
+    (PROVIDER_LMSTUDIO, "provider-lmstudio"),
+    (PROVIDER_MLX, "provider-mlx"),
+    (PROVIDER_OMLX, "provider-omlx"),
 ];
 
 /// Serves both the compact control-icon set and the complete file-identity

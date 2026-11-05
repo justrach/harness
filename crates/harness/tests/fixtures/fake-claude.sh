@@ -13,6 +13,13 @@ emit() { printf '%s\n' "$1"; }
 
 case "$first" in
 
+*scenario:build-wait-env*)
+  # Fixed synthetic paths keep this JSON frame independent of shell escaping.
+  value=${HARNESS_BUILD_WAIT_DIR-unset}
+  emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"build-wait:$value\"}}}"
+  emit '{"type":"result","subtype":"success","result":"checked environment","usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-build-wait"}'
+  ;;
+
 *scenario:command-echo*)
   content=$(printf '%s\n' "$first" | sed 's/.*"content":"\([^"]*\)".*/\1/')
   emit "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"$content\"}}}"
@@ -159,6 +166,9 @@ case "$first" in
   ;;
 
 *'"subtype":"initialize"'*)
+  if [ -f .build-wait-env ]; then
+    printf '%s' "${HARNESS_BUILD_WAIT_DIR-unset}" > .build-wait-env-observed
+  fi
   if [ -f .command-fixture ]; then
     rid=$(printf '%s' "$first" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
     name=$(cat .command-fixture)

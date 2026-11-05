@@ -2,6 +2,8 @@
 //! real workspace. `HARNESS_FIXTURE_CHAT_MODE` picks the stage: `code`, `chat`,
 //! `menu`, `smart` or `unavailable` (see `Pickers::fixture_chat_mode`).
 //! cargo run -p harness-ui --example chat-mode-fixture --features project-palette-fixture
+//! Built with `appshots-fixture` too, `chat-mode-fixture <out.png>` saves a frame from a hidden
+//! window and quits.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use harness_ui::*;
 
@@ -12,6 +14,12 @@ fn main() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let data = temp.path().to_path_buf();
     let stage = std::env::var("HARNESS_FIXTURE_CHAT_MODE").unwrap_or_else(|_| "chat".into());
+    #[cfg(feature = "appshots-fixture")]
+    let output = std::env::args().nth(1);
+    #[cfg(feature = "appshots-fixture")]
+    let hidden = output.is_some();
+    #[cfg(not(feature = "appshots-fixture"))]
+    let hidden = false;
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
         gpui_tokio::init(cx);
         gpui_base::init(cx);
@@ -73,12 +81,16 @@ fn main() -> anyhow::Result<()> {
                         traffic_light_position: Some(gpui::point(px(14.), px(14.))),
                     }),
                     app_owns_titlebar_drag: true,
+                    show: !hidden,
+                    focus: !hidden,
                     ..Default::default()
                 },
                 |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx)),
             )
             .unwrap();
         cx.spawn(async move |cx| {
+            #[cfg(feature = "appshots-fixture")]
+            let mut ticks = 0;
             loop {
                 cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
                 if window
@@ -87,11 +99,31 @@ fn main() -> anyhow::Result<()> {
                 {
                     break;
                 }
+                #[cfg(feature = "appshots-fixture")]
+                if let Some(path) = &output {
+                    ticks += 1;
+                    if ticks == 12 {
+                        // Untyped: drawing updates the Shell, so it can't be leased here.
+                        let any: gpui::AnyWindowHandle = window.into();
+                        let _ = any.update(cx, |_, window, cx| {
+                            window.draw(cx).clear();
+                            let saved = window
+                                .render_to_image()
+                                .and_then(|image| Ok(image.save(path)?));
+                            if let Err(error) = saved {
+                                eprintln!("couldn't save {path}: {error}");
+                            }
+                            cx.quit();
+                        });
+                    }
+                }
             }
         })
         .detach();
         state.update(cx, |_, cx| cx.notify());
-        cx.activate(true);
+        if !hidden {
+            cx.activate(true);
+        }
     });
     Ok(())
 }

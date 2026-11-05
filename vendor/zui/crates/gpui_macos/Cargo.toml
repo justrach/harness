@@ -17,6 +17,7 @@ test-support = ["gpui/test-support"]
 runtime_shaders = []
 font-kit = ["dep:font-kit"]
 screen-capture = ["gpui/screen-capture"]
+scene-capture = ["gpui/scene-capture"]
 
 [dependencies]
 gpui.workspace = true
@@ -80,4 +81,8 @@ gpui = { workspace = true, features = ["test-support"] }
 
 [[test]]
 name = "frame_source_recovery"
+harness = false
+
+[[test]]
+name = "frame_source_idle_cycles"
 harness = false

@@ -160,7 +160,7 @@ fn persist_and_activate(state: &mut ThemeLibraryState, next: CustomThemeLibrary)
 }
 
 fn reconcile_and_refresh(cx: &mut App) {
-    let registry = ThemeRegistry::active();
+    let registry = ThemeRegistry::desktop_active();
     let selected = appearance::themes(cx);
     for appearance_kind in [Appearance::Light, Appearance::Dark] {
         let model = if appearance_kind.is_light() {

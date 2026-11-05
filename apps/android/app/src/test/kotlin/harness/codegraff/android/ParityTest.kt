@@ -615,6 +615,7 @@ class ParityTest {
 
     private fun part(p: harness.codegraff.android.core.MessagePartRecord): String = when (p) {
         is harness.codegraff.android.core.MessagePartRecord.Text -> "text ${p.id} ${p.text}"
+        is harness.codegraff.android.core.MessagePartRecord.Reasoning -> "reasoning ${p.id} ${p.text}"
         is harness.codegraff.android.core.MessagePartRecord.Image -> "image ${p.id} ${p.path} ${p.name} ${p.mimeType}"
         is harness.codegraff.android.core.MessagePartRecord.Tool ->
             "tool ${p.id} ${p.tag} resolved=${p.resolved} error=${p.isError} fields=" +

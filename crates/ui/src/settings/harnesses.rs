@@ -148,7 +148,20 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
+/// `GetKeepAwake` reply: the device's setting, and whether its engine can
+/// hold a sleep assertion at all.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+struct KeepAwake {
+    enabled: bool,
+    supported: bool,
+}
+
 pub struct HarnessesPage {
+    keep_awake: Loadable<KeepAwake>,
+    keep_awake_task: Option<Task<()>>,
+    keep_awake_saving: bool,
+    #[cfg(feature = "appshots-fixture")]
+    keep_awake_fixture: bool,
     graff_draft_subagents: Loadable<bool>,
     graff_draft_subagents_task: Option<Task<()>>,
     graff_draft_subagents_saving: bool,
@@ -159,6 +172,7 @@ pub struct HarnessesPage {
     title_settings: Loadable<TitleSettings>,
     title_models: Loadable<Vec<Model>>,
     title_menu: Option<bool>, // false = harness, true = model
+    title_menu_pressed_open: bool,
     title_task: Option<Task<()>>,
     title_saving: bool,
     /// "Allow" on the Screen Recording row was used: offer the restart and
@@ -231,6 +245,11 @@ impl SignInPhase {
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
+            keep_awake: Loadable::Idle,
+            keep_awake_task: None,
+            keep_awake_saving: false,
+            #[cfg(feature = "appshots-fixture")]
+            keep_awake_fixture: false,
             graff_draft_subagents: Loadable::Idle,
             graff_draft_subagents_task: None,
             graff_draft_subagents_saving: false,
@@ -240,6 +259,7 @@ impl HarnessesPage {
             title_settings: Loadable::Idle,
             title_models: Loadable::Idle,
             title_menu: None,
+            title_menu_pressed_open: false,
             title_task: None,
             title_saving: false,
             screen_access_requested: false,
@@ -282,6 +302,9 @@ impl HarnessesPage {
         }
         self.cancel_sign_in(cx);
         self.title_task = None;
+        self.keep_awake_task = None;
+        self.keep_awake = Loadable::Idle;
+        self.keep_awake_saving = false;
         self.graff_draft_subagents_task = None;
         self.graff_draft_subagents = Loadable::Idle;
         self.graff_draft_subagents_saving = false;
@@ -312,6 +335,7 @@ impl HarnessesPage {
         };
         let params = self.with_target(serde_json::json!({}));
         self.load_titles(None, cx);
+        self.load_keep_awake(None, cx);
         self.load_graff_draft_subagents(None, cx);
         self.load_graff_compact_at(None, cx);
         self.harnesses = Loadable::Loading;
@@ -329,6 +353,138 @@ impl HarnessesPage {
             })
             .ok();
         }));
+    }
+
+    fn load_keep_awake(&mut self, save: Option<bool>, cx: &mut Context<Self>) {
+        if save.is_some()
+            && (self.keep_awake_saving
+                || !matches!(
+                    self.keep_awake,
+                    Loadable::Ready(KeepAwake {
+                        supported: true,
+                        ..
+                    })
+                ))
+        {
+            return;
+        }
+        #[cfg(feature = "appshots-fixture")]
+        if self.keep_awake_fixture {
+            if let Some(enabled) = save {
+                self.keep_awake = Loadable::Ready(KeepAwake {
+                    enabled,
+                    supported: true,
+                });
+                cx.notify();
+            }
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let saving = save.is_some();
+        let method = if saving {
+            methods::SET_KEEP_AWAKE
+        } else {
+            methods::GET_KEEP_AWAKE
+        };
+        let target = self.target_device.clone();
+        let params = self.with_target(match save {
+            Some(enabled) => serde_json::json!({ "enabled": enabled }),
+            None => serde_json::json!({}),
+        });
+        self.keep_awake_saving = saving;
+        if !saving {
+            self.keep_awake = Loadable::Loading;
+        }
+        self.keep_awake_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(method, params)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<KeepAwake>(value).map_err(|e| e.to_string())
+                });
+            this.update(cx, |page, cx| {
+                // A late answer belongs only to the device the user asked about.
+                if page.target_device != target {
+                    return;
+                }
+                match result {
+                    Ok(keep_awake) => {
+                        page.keep_awake = Loadable::Ready(keep_awake);
+                        page.error = None;
+                    }
+                    Err(error) if saving => page.error = Some(error),
+                    Err(error) => page.keep_awake = Loadable::Error(error),
+                }
+                page.keep_awake_saving = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// Hidden until the selected device answers, including old or unsupported engines.
+    fn render_keep_awake(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Loadable::Ready(KeepAwake {
+            enabled,
+            supported: true,
+        }) = self.keep_awake
+        else {
+            return None;
+        };
+        let saving = self.keep_awake_saving;
+        let accent = theme.accent;
+        let label = "Keep this computer awake while agents work";
+        let toggle = div()
+            .id("keep-awake-toggle")
+            .debug_selector(|| "keep-awake-toggle".into())
+            .flex_none()
+            .size(px(40.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.0))
+            .role(gpui::Role::Switch)
+            .aria_label(label)
+            .aria_toggled(if enabled {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
+            .when(saving, |el| el.opacity(0.35).aria_description("Saving"))
+            .when(!saving, |el| {
+                el.tab_index(0)
+                    .focus_visible(move |style| style.border_2().border_color(accent))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_keep_awake(Some(!enabled), cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                        if !event.is_held
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            cx.stop_propagation();
+                            this.load_keep_awake(Some(!enabled), cx);
+                        }
+                    }))
+            })
+            .child(widgets::toggle_switch(theme, enabled));
+        Some(
+            widgets::section_card(theme)
+                .child(
+                    widgets::card_row(theme, true)
+                        .child(div().flex_1().min_w_0().flex().flex_col()
+                            .child(widgets::row_title(theme, label))
+                            .child(widgets::page_subtitle(theme,
+                                "Prevents idle sleep while a chat is working. Display and lid sleep stay unchanged.")
+                                .text_size(crate::typography::ui_rems(12.0))))
+                        .child(toggle))
+                .into_any_element(),
+        )
     }
 
     fn load_graff_draft_subagents(&mut self, save: Option<bool>, cx: &mut Context<Self>) {
@@ -695,6 +851,7 @@ impl HarnessesPage {
             };
             let interactive = !self.title_saving && (!is_model || settings.harness.is_some());
             let mut row = div()
+                .relative()
                 .mt(px(12.0))
                 .child(widgets::row_title(
                     theme,
@@ -713,12 +870,20 @@ impl HarnessesPage {
                         })
                         .when(interactive, |el| {
                             el.cursor_pointer()
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(move |page, _, _, _| {
+                                        page.title_menu_pressed_open =
+                                            page.title_menu == Some(is_model);
+                                    }),
+                                )
                                 .on_click(cx.listener(move |page, _, _, cx| {
-                                    page.title_menu = if page.title_menu == Some(is_model) {
-                                        None
-                                    } else {
-                                        Some(is_model)
-                                    };
+                                    page.title_menu =
+                                        if std::mem::take(&mut page.title_menu_pressed_open) {
+                                            None
+                                        } else {
+                                            Some(is_model)
+                                        };
                                     cx.notify();
                                 }))
                         })
@@ -766,8 +931,14 @@ impl HarnessesPage {
                             }),
                     );
                 }
-                row =
-                    row.child(
+                let popup_theme = theme.for_popup();
+                let menu = popover::popover_card(&popup_theme)
+                    .w(px(280.0))
+                    .on_mouse_down_out(cx.listener(|page, _, _, cx| {
+                        page.title_menu = None;
+                        cx.notify();
+                    }))
+                    .child(
                         div()
                             .id(if is_model {
                                 "title-model-options"
@@ -776,21 +947,45 @@ impl HarnessesPage {
                             })
                             .max_h(px(240.0))
                             .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(px(popover::MENU_GAP))
                             .children(choices.into_iter().enumerate().map(
                                 |(ix, (label, choice))| {
+                                    let selected = &choice == settings;
                                     popover::menu_row(
-                                        theme,
-                                        &choice == settings,
+                                        &popup_theme,
+                                        selected,
                                         format!("title-choice-{is_model}-{ix}"),
                                     )
                                     .id(("title-choice", ix))
                                     .on_click(cx.listener(move |page, _, _, cx| {
+                                        cx.stop_propagation();
                                         page.load_titles(Some(choice.clone()), cx)
                                     }))
-                                    .child(label)
+                                    .child(div().flex_1().min_w_0().truncate().child(label))
+                                    .child(
+                                        div().w(px(18.0)).flex_none().when(selected, |slot| {
+                                            slot.child(
+                                                crate::icons::icon(crate::icons::CHECK)
+                                                    .size(px(14.0))
+                                                    .text_color(popup_theme.accent),
+                                            )
+                                        }),
+                                    )
                                 },
                             )),
-                    );
+                    )
+                    .into_any_element();
+                row = row.child(popover::anchored_menu_below(
+                    if is_model {
+                        "title-model-menu"
+                    } else {
+                        "title-harness-menu"
+                    },
+                    menu,
+                    None,
+                ));
             }
             card = card.child(row);
         }
@@ -1115,7 +1310,7 @@ impl HarnessesPage {
                 } else {
                     gpui::transparent_black()
                 })
-                .when(!open, |el| el.hover(|s| s.bg(crate::theme::ink(0.04))))
+                .when(!open, |el| el.hover(|s| s.bg(theme.element_hover)))
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|this, _, _, _| {
@@ -1575,6 +1770,7 @@ impl Render for HarnessesPage {
         let switcher = self.render_device_switcher(&theme, cx);
         let titles = self.render_titles(&theme, cx);
         let screen_access = self.render_screen_access(&theme, cx);
+        let keep_awake = self.render_keep_awake(&theme, cx);
         let graff_draft_subagents = self.render_graff_draft_subagents(&theme, cx);
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1615,6 +1811,7 @@ impl Render for HarnessesPage {
                             // Above the agent list: a missing grant silently
                             // breaks screenshots for every agent below.
                             .children(screen_access)
+                            .children(keep_awake)
                             .child(body)
                             .child(graff_draft_subagents)
                             .child(titles),
@@ -1730,3 +1927,10 @@ fn install_phase_copy_and_cancel_target_match_install() {
             .starts_with("codex CLI not installed — turn it off or install it.")
     );
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("../menu_review/harnesses.rs");
+
+#[cfg(test)]
+#[path = "harnesses_keep_awake_tests.rs"]
+mod keep_awake_tests;

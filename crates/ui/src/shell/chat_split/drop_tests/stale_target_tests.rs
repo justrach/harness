@@ -158,11 +158,12 @@ fn changing_tabs_invalidates_old_handlers_even_with_identical_chat_ids(
                 enter(cx, position, image);
                 submit_before_repaint(&shell, cx, position, |shell, window, cx| {
                     let tab = ChatTab {
-                        id: uuid::Uuid::new_v4(),
+                        id: uuid::Uuid::new_v4().to_string(),
                         split: shell.chat_split.clone(),
                         selected: shell.state.read(cx).selected_chat.clone(),
                         project: shell.settings.space_filter.clone(),
                         draft: None,
+                        ..Default::default()
                     };
                     shell.chat_tabs = vec![tab.clone(), tab];
                     shell.switch_chat_tab(1, window, cx);
@@ -218,7 +219,7 @@ fn zooming_before_repaint_does_not_reactivate_a_now_hidden_peer(cx: &mut gpui::T
         |shell, image, peer, _, cx| {
             enter(cx, peer, image);
             submit_before_repaint(&shell, cx, peer, |shell, _, cx| {
-                shell.toggle_chat_pane_zoom(cx)
+                zoom_legacy_panes(shell, cx)
             });
             assert_no_new_attachment(&shell, cx);
             shell.read_with(cx, |shell, cx| {

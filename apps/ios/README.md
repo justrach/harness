@@ -31,12 +31,12 @@ scripts/ios-walkthrough.sh --open
 ```
 
 Installs the app fresh on a simulator, walks it the way a new install meets
-it (Home, a session, Settings → Split view → Stacked, the split button, closing
-each pane, typing and sending, rotating) in the offline demo, and writes a
+it (Home, a session, Settings → Split view → Auto, typing and sending,
+rotating) in the offline demo, and writes a
 numbered screenshot per step plus notes on what got in the way to
 `apps/ios/build/walkthrough/<time>/`. Notes don't fail the run; they are for
-reading. `--args "-rollout.stackedSplitDrag off"` walks the other half of a
-rollout, and `--device "iPhone 17"` picks another simulator. The walk itself is
+reading. `--args "-phoneSplit sideBySide"` adds launch arguments, and
+`--device "iPhone 17"` picks another simulator. The walk itself is
 `HarnessUITests/WalkthroughUITests`.
 
 ## TestFlight release
@@ -213,14 +213,11 @@ see [mobile polish and simulator coverage](../../docs/mobile-polish.md).
 ### Shared message queue
 
 Messages submitted during an active turn use the host's shared queue when it
-advertises support. The composer toolbar's **Queue / Steer** menu persists the
-phone's preference; **Queue** remains the default. Steer allows automatic
-mid-turn delivery when the provider supports it. Attachments wait for a turn
-that can accept files.
+advertises support. They wait until the current turn ends, including messages
+with attachments. The phone does not expose a Queue/Steer preference.
 
-Rows offer **Steer** for a host-advertised mid-turn provider and text-only
-messages, or **Send now** (interrupt) otherwise. Unknown provider capabilities
-leave delivery actions unavailable. Edits require a host lease; removal waits
+Rows offer **Send now**, which interrupts the current turn before dispatching
+the selected message. Edits require a host lease; removal waits
 for the host's acknowledgement and keeps the row inert while pending. Failed
 or unconfirmed actions show an error above the composer and trigger sync repair.
 Deleting an actively edited row discards it without first releasing its lease.

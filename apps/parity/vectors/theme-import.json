@@ -1,0 +1,1702 @@
+{
+  "about": "VS Code theme import (crates/theme vscode.rs compile_source): each case's files are written under a fresh folder, `entry` compiled (with `familyId`, `familyName`, `sourceUrl`, revision \"local\", license \"User supplied\"), and the compilation must equal `expected`, the folder's path written as $ROOT. The Rust side writes `expected` (UPDATE_THEME_VECTORS=1 cargo test -p harness-theme --test import_vectors); harness-nano's themes_import.zig runs the same cases.",
+  "cases": [
+    {
+      "entry": "Midnight.json",
+      "expected": {
+        "failures": [],
+        "family": {
+          "id": "custom-midnight",
+          "name": "Midnight",
+          "variants": [
+            {
+              "accent": {
+                "activity": "#82aaff",
+                "caret": "#82aaff",
+                "glyph": [
+                  "#a5c2ff",
+                  "#82aaff",
+                  "#6b8bd1"
+                ],
+                "on": "#000000",
+                "primary": "#82aaff",
+                "selection": "#82aaff59",
+                "strong": "#82aaff",
+                "wash": "#82aaff38"
+              },
+              "appearance": "dark",
+              "colors": {
+                "active": "#8b7cf62e",
+                "background": "#101218",
+                "border": "#ffffff1a",
+                "borderStrong": "#596175",
+                "card": "#0c0e13",
+                "cursor": "#e8e8ea66",
+                "danger": "#ad3939",
+                "dangerMuted": "#f49293",
+                "dialog": "#151516",
+                "diffAdd": "#34d399",
+                "diffDelete": "#f87171",
+                "diffHunk": "#8b7cf614",
+                "hover": "#ffffff10",
+                "input": "#2a2b2f",
+                "onSolid": "#0b1020",
+                "overlay": "#1b1b1c",
+                "raised": "#1f2126",
+                "shell": "#0c0e13",
+                "solid": "#3b82f6",
+                "success": "#34d399",
+                "successMuted": "#61d8ad",
+                "text": "#8f9298",
+                "textFaint": "#85858a",
+                "textMuted": "#8f9298",
+                "warning": "#facc15",
+                "warningMuted": "#f6d34a"
+              },
+              "familyId": "custom-midnight",
+              "id": "custom-midnight",
+              "name": "Midnight Ink",
+              "recommendedSurfaceTreatment": "opaque",
+              "source": {
+                "assetHash": "sha256:1d06104c48a9133e4b9acaaebde2308e22dd985712f6241ad4d59a3fc1b883f9",
+                "format": "vscode",
+                "license": "User supplied",
+                "revision": "local",
+                "url": "vector://midnight"
+              },
+              "syntax": {
+                "attribute": "#22d3ee",
+                "boolean": "#facc15",
+                "comment": "#6a7280",
+                "constant": "#facc15",
+                "constructor": "#c084fc",
+                "embedded": "#a1a1aa",
+                "escape": "#22d3ee",
+                "function": "#82aaff",
+                "functionBuiltin": "#60a5fa",
+                "invalid": "#f87171",
+                "keyword": "#c792ea",
+                "label": "#60a5fa",
+                "macro": "#8b7cf6",
+                "number": "#c3e88d",
+                "operator": "#8b7cf6",
+                "parameter": "#e8e8ea",
+                "property": "#f472b6",
+                "punctuation": "#a1a1aa",
+                "string": "#c3e88d",
+                "stringSpecial": "#22d3ee",
+                "tag": "#f472b6",
+                "type": "#c084fc",
+                "typeBuiltin": "#c084fc",
+                "variable": "#f78c6c",
+                "variableSpecial": "#8b7cf6"
+              },
+              "terminal": {
+                "ansi": [
+                  "#242424",
+                  "#ff5555",
+                  "#4ade80",
+                  "#facc15",
+                  "#60a5fa",
+                  "#c084fc",
+                  "#22d3ee",
+                  "#d4d4d8",
+                  "#52525b",
+                  "#fca5a5",
+                  "#86efac",
+                  "#fde047",
+                  "#93c5fd",
+                  "#d8b4fe",
+                  "#67e8f9",
+                  "#fafafa"
+                ],
+                "background": "#090909",
+                "foreground": "#e8e8ea",
+                "selection": "#ffffff38"
+              }
+            }
+          ]
+        },
+        "path": "$ROOT/Midnight.json",
+        "reports": {
+          "custom-midnight": {
+            "accentCandidates": [
+              {
+                "value": "#1e2a44",
+                "vscodeKey": "focusBorder"
+              },
+              {
+                "value": "#82aaff",
+                "vscodeKey": "textLink.foreground"
+              },
+              {
+                "value": "#3b82f6",
+                "vscodeKey": "button.background"
+              }
+            ],
+            "adjustments": [
+              {
+                "harnessRole": "raised",
+                "original": "#ffffff10",
+                "reason": "flattened a translucent foundational surface against the theme background",
+                "resolved": "#1f2126"
+              },
+              {
+                "harnessRole": "input",
+                "original": "#343438b8",
+                "reason": "flattened a translucent foundational surface against the theme background",
+                "resolved": "#2a2b2f"
+              },
+              {
+                "harnessRole": "text",
+                "original": "#3a3f4b",
+                "reason": "preserved the source hue while raising worst-case contrast from 1.34:1 to 4.53:1",
+                "resolved": "#8f9298"
+              },
+              {
+                "harnessRole": "textMuted",
+                "original": "#777777",
+                "reason": "preserved the source hue while raising worst-case contrast from 3.16:1 to 4.53:1",
+                "resolved": "#8f9298"
+              },
+              {
+                "harnessRole": "danger",
+                "original": "#aa3333",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#ad3939"
+              },
+              {
+                "harnessRole": "borderStrong",
+                "original": "#1e2a44",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#596175"
+              },
+              {
+                "harnessRole": "accent.*",
+                "original": "#626a7c",
+                "reason": "used textLink.foreground to keep interactions at 3:1",
+                "resolved": "#82aaff"
+              }
+            ],
+            "dropped": [
+              "TextMate fontStyle `italic` for comment",
+              "semantic fontStyle `bold` for variable.readonly"
+            ],
+            "fallbacks": [
+              "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it",
+              "dialog retained the Harness dark fallback",
+              "overlay retained the Harness dark fallback",
+              "active retained the Harness dark fallback",
+              "border retained the Harness dark fallback",
+              "textFaint retained the Harness dark fallback",
+              "warning retained the Harness dark fallback",
+              "success retained the Harness dark fallback",
+              "input retained the Harness dark fallback",
+              "cursor retained the Harness dark fallback",
+              "diffAdd retained the Harness dark fallback",
+              "diffDelete retained the Harness dark fallback",
+              "diffHunk retained the Harness dark fallback",
+              "terminal.background retained the Harness dark fallback",
+              "terminal.foreground retained the Harness dark fallback",
+              "terminal.selection retained the Harness dark fallback",
+              "terminal.ansi[0] retained the Harness dark fallback",
+              "terminal.ansi[2] retained the Harness dark fallback",
+              "terminal.ansi[3] retained the Harness dark fallback",
+              "terminal.ansi[4] retained the Harness dark fallback",
+              "terminal.ansi[5] retained the Harness dark fallback",
+              "terminal.ansi[6] retained the Harness dark fallback",
+              "terminal.ansi[7] retained the Harness dark fallback",
+              "terminal.ansi[8] retained the Harness dark fallback",
+              "terminal.ansi[9] retained the Harness dark fallback",
+              "terminal.ansi[10] retained the Harness dark fallback",
+              "terminal.ansi[11] retained the Harness dark fallback",
+              "terminal.ansi[12] retained the Harness dark fallback",
+              "terminal.ansi[13] retained the Harness dark fallback",
+              "terminal.ansi[14] retained the Harness dark fallback",
+              "terminal.ansi[15] retained the Harness dark fallback"
+            ],
+            "mappings": [
+              {
+                "harnessRole": "background",
+                "value": "#101218",
+                "vscodeKey": "editor.background"
+              },
+              {
+                "harnessRole": "shell",
+                "value": "#0c0e13",
+                "vscodeKey": "sideBar.background"
+              },
+              {
+                "harnessRole": "raised",
+                "value": "#ffffff10",
+                "vscodeKey": "list.hoverBackground"
+              },
+              {
+                "harnessRole": "card",
+                "value": "#0c0e13",
+                "vscodeKey": "sideBar.background"
+              },
+              {
+                "harnessRole": "hover",
+                "value": "#ffffff10",
+                "vscodeKey": "list.hoverBackground"
+              },
+              {
+                "harnessRole": "borderStrong",
+                "value": "#1e2a44",
+                "vscodeKey": "focusBorder"
+              },
+              {
+                "harnessRole": "text",
+                "value": "#3a3f4b",
+                "vscodeKey": "foreground"
+              },
+              {
+                "harnessRole": "textMuted",
+                "value": "#777777",
+                "vscodeKey": "descriptionForeground"
+              },
+              {
+                "harnessRole": "solid",
+                "value": "#3b82f6",
+                "vscodeKey": "button.background"
+              },
+              {
+                "harnessRole": "onSolid",
+                "value": "#0b1020",
+                "vscodeKey": "button.foreground"
+              },
+              {
+                "harnessRole": "danger",
+                "value": "#aa3333",
+                "vscodeKey": "editorError.foreground"
+              },
+              {
+                "harnessRole": "accent.*",
+                "value": "#1e2a44",
+                "vscodeKey": "focusBorder"
+              },
+              {
+                "harnessRole": "terminal.ansi[1]",
+                "value": "#ff5555",
+                "vscodeKey": "terminal.ansiRed"
+              },
+              {
+                "harnessRole": "syntax.comment",
+                "value": "#6a7280",
+                "vscodeKey": "comment"
+              },
+              {
+                "harnessRole": "syntax.keyword",
+                "value": "#c792ea",
+                "vscodeKey": "keyword"
+              },
+              {
+                "harnessRole": "syntax.keyword",
+                "value": "#c792ea",
+                "vscodeKey": "storage.type"
+              },
+              {
+                "harnessRole": "syntax.string",
+                "value": "#c3e88d",
+                "vscodeKey": "string"
+              },
+              {
+                "harnessRole": "syntax.number",
+                "value": "#c3e88d",
+                "vscodeKey": "constant.numeric"
+              },
+              {
+                "harnessRole": "syntax.function",
+                "value": "#82aaff",
+                "vscodeKey": "semantic:function"
+              },
+              {
+                "harnessRole": "syntax.variable",
+                "value": "#f78c6c",
+                "vscodeKey": "semantic:variable.readonly"
+              }
+            ],
+            "sourceFiles": [
+              "$ROOT/Midnight.json"
+            ],
+            "sourceHash": "sha256:bd8b9d24a1c7712ef18563f463abe57309ae3c798240a08168f8ad1bcda44eb6",
+            "validation": [],
+            "warnings": [
+              "ignored TextMate color bogus"
+            ]
+          }
+        },
+        "sourceKind": "file"
+      },
+      "familyId": "custom-midnight",
+      "familyName": "Midnight",
+      "files": {
+        "Midnight.json": "{\n  // A made-up theme.\n  \"name\": \"Midnight Ink\",\n  \"type\": \"dark\",\n  \"colors\": {\n    \"editor.background\": \"#101218\",\n    \"sideBar.background\": \"#0c0e13\",\n    \"foreground\": \"#3a3f4b\",\n    \"editor.foreground\": \"not-a-color\",\n    \"descriptionForeground\": \"#777\",\n    \"button.background\": \"#3b82f6\",\n    \"button.foreground\": \"#0b1020\",\n    \"focusBorder\": \"#1e2a44\",\n    \"textLink.foreground\": \"#82aaff\",\n    \"list.hoverBackground\": \"#ffffff10\",\n    \"editorError.foreground\": \"#a33\",\n    \"terminal.ansiRed\": \"#ff5555\", /* trailing comma next */\n  },\n  \"tokenColors\": [\n    { \"scope\": \"comment\", \"settings\": { \"foreground\": \"#6a7280\", \"fontStyle\": \"italic\" } },\n    { \"scope\": [\"keyword\", \"storage.type\"], \"settings\": { \"foreground\": \"#c792ea\" } },\n    { \"scope\": \"string, constant.numeric\", \"settings\": { \"foreground\": \"#c3e88d\" } },\n    { \"scope\": \"variable\", \"settings\": { \"foreground\": \"bogus\" } },\n  ],\n  \"semanticTokenColors\": {\n    \"function\": \"#82aaff\",\n    \"variable.readonly\": { \"foreground\": \"#f78c6c\", \"fontStyle\": \"bold\" },\n  },\n}\n"
+      },
+      "name": "a dark JSONC theme: comments and trailing commas, unreadable text lifted, a weak accent replaced, a translucent surface flattened, token and semantic colours mapped",
+      "sourceUrl": "vector://midnight"
+    },
+    {
+      "entry": "themes/Paper.json",
+      "expected": {
+        "failures": [],
+        "family": {
+          "id": "custom-paper",
+          "name": "Paper",
+          "variants": [
+            {
+              "accent": {
+                "activity": "#0969da",
+                "caret": "#0969da",
+                "glyph": [
+                  "#3584e0",
+                  "#0969da",
+                  "#074ea1"
+                ],
+                "on": "#ffffff",
+                "primary": "#0969da",
+                "selection": "#0969da80",
+                "strong": "#0969da",
+                "wash": "#0969da1f"
+              },
+              "appearance": "light",
+              "colors": {
+                "active": "#5b43e81a",
+                "background": "#fdfdfd",
+                "border": "#0000001f",
+                "borderStrong": "#0000006c",
+                "card": "#f3f3f3",
+                "cursor": "#3030358c",
+                "danger": "#dc2626",
+                "dangerMuted": "#ac292a",
+                "dialog": "#fefefe",
+                "diffAdd": "#15803d",
+                "diffDelete": "#dc2626",
+                "diffHunk": "#5b43e812",
+                "hover": "#0000000f",
+                "input": "#ffffff",
+                "onSolid": "#ffffff",
+                "overlay": "#ffffff",
+                "raised": "#ededf0",
+                "shell": "#f3f3f3",
+                "solid": "#232328",
+                "success": "#15803d",
+                "successMuted": "#1c6c3b",
+                "text": "#1a1a1a",
+                "textFaint": "#797981",
+                "textMuted": "#62626a",
+                "warning": "#a16207",
+                "warningMuted": "#855613"
+              },
+              "familyId": "custom-paper",
+              "id": "custom-paper",
+              "name": "Paper",
+              "recommendedSurfaceTreatment": "opaque",
+              "source": {
+                "assetHash": "sha256:aa40039bce0b6f8ba983fa0698f1b87aad89cfe13ebc376f4e324f11b8fe47df",
+                "format": "vscode",
+                "license": "User supplied",
+                "revision": "local",
+                "url": "vector://paper"
+              },
+              "syntax": {
+                "attribute": "#0e7490",
+                "boolean": "#a16207",
+                "comment": "#6b7280",
+                "constant": "#a16207",
+                "constructor": "#7e22ce",
+                "embedded": "#52525b",
+                "escape": "#0e7490",
+                "function": "#005cc5",
+                "functionBuiltin": "#2563eb",
+                "invalid": "#b91c1c",
+                "keyword": "#5b43e8",
+                "label": "#2563eb",
+                "macro": "#5b43e8",
+                "number": "#a16207",
+                "operator": "#5b43e8",
+                "parameter": "#303035",
+                "property": "#be185d",
+                "punctuation": "#52525b",
+                "string": "#15803d",
+                "stringSpecial": "#0e7490",
+                "tag": "#be185d",
+                "type": "#7e22ce",
+                "typeBuiltin": "#6f42c1",
+                "variable": "#303035",
+                "variableSpecial": "#5b43e8"
+              },
+              "terminal": {
+                "ansi": [
+                  "#1f1f1f",
+                  "#dc2626",
+                  "#16a34a",
+                  "#b45309",
+                  "#2563eb",
+                  "#9333ea",
+                  "#0e7490",
+                  "#3f3f46",
+                  "#71717a",
+                  "#b91c1c",
+                  "#15803d",
+                  "#92400e",
+                  "#1d4ed8",
+                  "#7e22ce",
+                  "#155e75",
+                  "#18181b"
+                ],
+                "background": "#fafafa",
+                "foreground": "#303035",
+                "selection": "#00000047"
+              }
+            }
+          ]
+        },
+        "path": "$ROOT/themes/Paper.json",
+        "reports": {
+          "custom-paper": {
+            "accentCandidates": [
+              {
+                "value": "#0969da",
+                "vscodeKey": "textLink.foreground"
+              }
+            ],
+            "adjustments": [
+              {
+                "harnessRole": "borderStrong",
+                "original": "#00000038",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#0000006c"
+              }
+            ],
+            "dropped": [],
+            "fallbacks": [
+              "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it",
+              "raised retained the Harness light fallback",
+              "dialog retained the Harness light fallback",
+              "overlay retained the Harness light fallback",
+              "hover retained the Harness light fallback",
+              "active retained the Harness light fallback",
+              "border retained the Harness light fallback",
+              "borderStrong retained the Harness light fallback",
+              "textMuted retained the Harness light fallback",
+              "textFaint retained the Harness light fallback",
+              "solid retained the Harness light fallback",
+              "onSolid retained the Harness light fallback",
+              "danger retained the Harness light fallback",
+              "warning retained the Harness light fallback",
+              "success retained the Harness light fallback",
+              "input retained the Harness light fallback",
+              "cursor retained the Harness light fallback",
+              "diffAdd retained the Harness light fallback",
+              "diffDelete retained the Harness light fallback",
+              "diffHunk retained the Harness light fallback",
+              "terminal.background retained the Harness light fallback",
+              "terminal.foreground retained the Harness light fallback",
+              "terminal.selection retained the Harness light fallback",
+              "terminal.ansi[0] retained the Harness light fallback",
+              "terminal.ansi[1] retained the Harness light fallback",
+              "terminal.ansi[2] retained the Harness light fallback",
+              "terminal.ansi[3] retained the Harness light fallback",
+              "terminal.ansi[4] retained the Harness light fallback",
+              "terminal.ansi[5] retained the Harness light fallback",
+              "terminal.ansi[6] retained the Harness light fallback",
+              "terminal.ansi[7] retained the Harness light fallback",
+              "terminal.ansi[8] retained the Harness light fallback",
+              "terminal.ansi[9] retained the Harness light fallback",
+              "terminal.ansi[10] retained the Harness light fallback",
+              "terminal.ansi[11] retained the Harness light fallback",
+              "terminal.ansi[12] retained the Harness light fallback",
+              "terminal.ansi[13] retained the Harness light fallback",
+              "terminal.ansi[14] retained the Harness light fallback",
+              "terminal.ansi[15] retained the Harness light fallback"
+            ],
+            "mappings": [
+              {
+                "harnessRole": "background",
+                "value": "#fdfdfd",
+                "vscodeKey": "editor.background"
+              },
+              {
+                "harnessRole": "shell",
+                "value": "#f3f3f3",
+                "vscodeKey": "sideBar.background"
+              },
+              {
+                "harnessRole": "card",
+                "value": "#f3f3f3",
+                "vscodeKey": "sideBar.background"
+              },
+              {
+                "harnessRole": "text",
+                "value": "#1a1a1a",
+                "vscodeKey": "foreground"
+              },
+              {
+                "harnessRole": "accent.*",
+                "value": "#0969da",
+                "vscodeKey": "textLink.foreground"
+              },
+              {
+                "harnessRole": "syntax.function",
+                "value": "#005cc5",
+                "vscodeKey": "entity.name.function"
+              },
+              {
+                "harnessRole": "syntax.typeBuiltin",
+                "value": "#6f42c1",
+                "vscodeKey": "support.type"
+              }
+            ],
+            "sourceFiles": [
+              "$ROOT/themes/base.json",
+              "$ROOT/themes/tokens.json",
+              "$ROOT/themes/Paper.json"
+            ],
+            "sourceHash": "sha256:5b84533046dc23fd8363ba338e06a1abb749d2de6a9107322d0eaa5a1bc87d76",
+            "validation": [],
+            "warnings": []
+          }
+        },
+        "sourceKind": "file"
+      },
+      "familyId": "custom-paper",
+      "familyName": "Paper",
+      "files": {
+        "themes/Paper.json": "{\n  \"include\": \"./base.json\",\n  \"colors\": {\n    \"sideBar.background\": \"#f3f3f3\",\n    \"textLink.foreground\": \"#0969da\",\n    \"editor.foreground\": \"#24292e\"\n  }\n}",
+        "themes/base.json": "{\n  \"colors\": {\n    \"editor.background\": \"#fdfdfd\",\n    \"foreground\": \"#1a1a1a\"\n  },\n  \"tokenColors\": \"./tokens.json\"\n}",
+        "themes/tokens.json": "[\n  {\n    \"scope\": \"entity.name.function\",\n    \"settings\": {\n      \"foreground\": \"#005cc5\"\n    }\n  },\n  {\n    \"scope\": \"support.type\",\n    \"settings\": {\n      \"foreground\": \"#6f42c1\"\n    }\n  }\n]"
+      },
+      "name": "a light theme through include, its tokens in a file of their own, its appearance from its background",
+      "sourceUrl": "vector://paper"
+    },
+    {
+      "entry": "",
+      "expected": {
+        "failures": [
+          {
+            "id": "custom-harbor-missing",
+            "message": "could not resolve $ROOT/./themes/missing.json",
+            "name": "Missing",
+            "path": "$ROOT/./themes/missing.json"
+          },
+          {
+            "id": "custom-harbor-no-path",
+            "message": "theme declaration has no path",
+            "name": "No Path",
+            "path": "$ROOT/package.json"
+          }
+        ],
+        "family": {
+          "id": "custom-harbor",
+          "name": "Harbor Themes",
+          "variants": [
+            {
+              "accent": {
+                "activity": "#e09f3e",
+                "caret": "#e09f3e",
+                "glyph": [
+                  "#e9ba74",
+                  "#e09f3e",
+                  "#b88233"
+                ],
+                "on": "#000000",
+                "primary": "#e09f3e",
+                "selection": "#e09f3e59",
+                "strong": "#e09f3e",
+                "wash": "#e09f3e38"
+              },
+              "appearance": "dark",
+              "colors": {
+                "active": "#8b7cf62e",
+                "background": "#0d1b2a",
+                "border": "#ffffff1a",
+                "borderStrong": "#ffffff56",
+                "card": "#0e0e0e",
+                "cursor": "#e8e8ea66",
+                "danger": "#f87171",
+                "dangerMuted": "#f49293",
+                "dialog": "#151516",
+                "diffAdd": "#2a9d8f",
+                "diffDelete": "#f87171",
+                "diffHunk": "#8b7cf614",
+                "hover": "#ffffff1c",
+                "input": "#292d34",
+                "onSolid": "#000000",
+                "overlay": "#1b1b1c",
+                "raised": "#343438",
+                "shell": "#0b1622",
+                "solid": "#ebebef",
+                "success": "#2a9d8f",
+                "successMuted": "#61d8ad",
+                "text": "#e0e1dd",
+                "textFaint": "#85858a",
+                "textMuted": "#a9a9ae",
+                "warning": "#facc15",
+                "warningMuted": "#f6d34a"
+              },
+              "familyId": "custom-harbor",
+              "id": "custom-harbor-harbor-night",
+              "name": "Harbor Night",
+              "recommendedSurfaceTreatment": "opaque",
+              "source": {
+                "assetHash": "sha256:76d114314cbd456a75719dfa376a77a37a1b578c4c96c6b2fe279d64aad1ea23",
+                "format": "vscode",
+                "license": "User supplied",
+                "revision": "local",
+                "url": "vector://harbor"
+              },
+              "syntax": {
+                "attribute": "#22d3ee",
+                "boolean": "#facc15",
+                "comment": "#92929a",
+                "constant": "#facc15",
+                "constructor": "#c084fc",
+                "embedded": "#a1a1aa",
+                "escape": "#22d3ee",
+                "function": "#60a5fa",
+                "functionBuiltin": "#60a5fa",
+                "invalid": "#f87171",
+                "keyword": "#8b7cf6",
+                "label": "#60a5fa",
+                "macro": "#8b7cf6",
+                "number": "#facc15",
+                "operator": "#8b7cf6",
+                "parameter": "#e8e8ea",
+                "property": "#f472b6",
+                "punctuation": "#a1a1aa",
+                "string": "#34d399",
+                "stringSpecial": "#22d3ee",
+                "tag": "#f472b6",
+                "type": "#c084fc",
+                "typeBuiltin": "#c084fc",
+                "variable": "#e8e8ea",
+                "variableSpecial": "#8b7cf6"
+              },
+              "terminal": {
+                "ansi": [
+                  "#242424",
+                  "#f87171",
+                  "#4ade80",
+                  "#facc15",
+                  "#60a5fa",
+                  "#c084fc",
+                  "#22d3ee",
+                  "#d4d4d8",
+                  "#52525b",
+                  "#fca5a5",
+                  "#86efac",
+                  "#fde047",
+                  "#93c5fd",
+                  "#d8b4fe",
+                  "#67e8f9",
+                  "#fafafa"
+                ],
+                "background": "#090909",
+                "foreground": "#e8e8ea",
+                "selection": "#ffffff38"
+              }
+            },
+            {
+              "accent": {
+                "activity": "#d62828",
+                "caret": "#d62828",
+                "glyph": [
+                  "#dc4d4b",
+                  "#d62828",
+                  "#9e1e1e"
+                ],
+                "on": "#ffffff",
+                "primary": "#d62828",
+                "selection": "#d6282880",
+                "strong": "#d62828",
+                "wash": "#d628281f"
+              },
+              "appearance": "light",
+              "colors": {
+                "active": "#5b43e81a",
+                "background": "#f7f3e9",
+                "border": "#0000001f",
+                "borderStrong": "#0000006e",
+                "card": "#efe9db",
+                "cursor": "#3030358c",
+                "danger": "#dc2626",
+                "dangerMuted": "#ac292a",
+                "dialog": "#fefefe",
+                "diffAdd": "#15803d",
+                "diffDelete": "#dc2626",
+                "diffHunk": "#5b43e812",
+                "hover": "#0000000f",
+                "input": "#ffffff",
+                "onSolid": "#ffffff",
+                "overlay": "#ffffff",
+                "raised": "#ededf0",
+                "shell": "#efe9db",
+                "solid": "#232328",
+                "success": "#289588",
+                "successMuted": "#1c6c3b",
+                "text": "#2b2d42",
+                "textFaint": "#797981",
+                "textMuted": "#62626a",
+                "warning": "#a16207",
+                "warningMuted": "#855613"
+              },
+              "familyId": "custom-harbor",
+              "id": "custom-harbor-harbor-day",
+              "name": "Harbor Day",
+              "recommendedSurfaceTreatment": "opaque",
+              "source": {
+                "assetHash": "sha256:ee60c38e3f692a896120ab8ec9789a49adca3ef0c106d8a4f4dfc6f972a4de9f",
+                "format": "vscode",
+                "license": "User supplied",
+                "revision": "local",
+                "url": "vector://harbor"
+              },
+              "syntax": {
+                "attribute": "#0e7490",
+                "boolean": "#a16207",
+                "comment": "#6b7280",
+                "constant": "#a16207",
+                "constructor": "#7e22ce",
+                "embedded": "#52525b",
+                "escape": "#0e7490",
+                "function": "#2563eb",
+                "functionBuiltin": "#2563eb",
+                "invalid": "#b91c1c",
+                "keyword": "#5b43e8",
+                "label": "#2563eb",
+                "macro": "#5b43e8",
+                "number": "#a16207",
+                "operator": "#5b43e8",
+                "parameter": "#303035",
+                "property": "#be185d",
+                "punctuation": "#52525b",
+                "string": "#15803d",
+                "stringSpecial": "#0e7490",
+                "tag": "#be185d",
+                "type": "#7e22ce",
+                "typeBuiltin": "#7e22ce",
+                "variable": "#303035",
+                "variableSpecial": "#5b43e8"
+              },
+              "terminal": {
+                "ansi": [
+                  "#1f1f1f",
+                  "#dc2626",
+                  "#16a34a",
+                  "#b45309",
+                  "#2563eb",
+                  "#9333ea",
+                  "#0e7490",
+                  "#3f3f46",
+                  "#71717a",
+                  "#b91c1c",
+                  "#15803d",
+                  "#92400e",
+                  "#1d4ed8",
+                  "#7e22ce",
+                  "#155e75",
+                  "#18181b"
+                ],
+                "background": "#fafafa",
+                "foreground": "#303035",
+                "selection": "#00000047"
+              }
+            },
+            {
+              "accent": {
+                "activity": "#e09f3e",
+                "caret": "#e09f3e",
+                "glyph": [
+                  "#e9ba74",
+                  "#e09f3e",
+                  "#b88233"
+                ],
+                "on": "#000000",
+                "primary": "#e09f3e",
+                "selection": "#e09f3e59",
+                "strong": "#e09f3e",
+                "wash": "#e09f3e38"
+              },
+              "appearance": "dark",
+              "colors": {
+                "active": "#8b7cf62e",
+                "background": "#0d1b2a",
+                "border": "#ffffff1a",
+                "borderStrong": "#ffffff56",
+                "card": "#0e0e0e",
+                "cursor": "#e8e8ea66",
+                "danger": "#f87171",
+                "dangerMuted": "#f49293",
+                "dialog": "#151516",
+                "diffAdd": "#2a9d8f",
+                "diffDelete": "#f87171",
+                "diffHunk": "#8b7cf614",
+                "hover": "#ffffff1c",
+                "input": "#292d34",
+                "onSolid": "#000000",
+                "overlay": "#1b1b1c",
+                "raised": "#343438",
+                "shell": "#0b1622",
+                "solid": "#ebebef",
+                "success": "#2a9d8f",
+                "successMuted": "#61d8ad",
+                "text": "#e0e1dd",
+                "textFaint": "#85858a",
+                "textMuted": "#a9a9ae",
+                "warning": "#facc15",
+                "warningMuted": "#f6d34a"
+              },
+              "familyId": "custom-harbor",
+              "id": "custom-harbor-harbor-night-3",
+              "name": "Harbor Night",
+              "recommendedSurfaceTreatment": "opaque",
+              "source": {
+                "assetHash": "sha256:330f4449e9e68f5f13863f7b4ab239cc7ae78538c389a00c1d11a5c98adf0ced",
+                "format": "vscode",
+                "license": "User supplied",
+                "revision": "local",
+                "url": "vector://harbor"
+              },
+              "syntax": {
+                "attribute": "#22d3ee",
+                "boolean": "#facc15",
+                "comment": "#92929a",
+                "constant": "#facc15",
+                "constructor": "#c084fc",
+                "embedded": "#a1a1aa",
+                "escape": "#22d3ee",
+                "function": "#60a5fa",
+                "functionBuiltin": "#60a5fa",
+                "invalid": "#f87171",
+                "keyword": "#8b7cf6",
+                "label": "#60a5fa",
+                "macro": "#8b7cf6",
+                "number": "#facc15",
+                "operator": "#8b7cf6",
+                "parameter": "#e8e8ea",
+                "property": "#f472b6",
+                "punctuation": "#a1a1aa",
+                "string": "#34d399",
+                "stringSpecial": "#22d3ee",
+                "tag": "#f472b6",
+                "type": "#c084fc",
+                "typeBuiltin": "#c084fc",
+                "variable": "#e8e8ea",
+                "variableSpecial": "#8b7cf6"
+              },
+              "terminal": {
+                "ansi": [
+                  "#242424",
+                  "#f87171",
+                  "#4ade80",
+                  "#facc15",
+                  "#60a5fa",
+                  "#c084fc",
+                  "#22d3ee",
+                  "#d4d4d8",
+                  "#52525b",
+                  "#fca5a5",
+                  "#86efac",
+                  "#fde047",
+                  "#93c5fd",
+                  "#d8b4fe",
+                  "#67e8f9",
+                  "#fafafa"
+                ],
+                "background": "#090909",
+                "foreground": "#e8e8ea",
+                "selection": "#ffffff38"
+              }
+            }
+          ]
+        },
+        "path": "$ROOT",
+        "reports": {
+          "custom-harbor-harbor-day": {
+            "accentCandidates": [
+              {
+                "value": "#d62828",
+                "vscodeKey": "activityBarBadge.background"
+              }
+            ],
+            "adjustments": [
+              {
+                "harnessRole": "success",
+                "original": "#2a9d8f",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#289588"
+              },
+              {
+                "harnessRole": "borderStrong",
+                "original": "#00000038",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#0000006e"
+              }
+            ],
+            "dropped": [],
+            "fallbacks": [
+              "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it",
+              "raised retained the Harness light fallback",
+              "dialog retained the Harness light fallback",
+              "overlay retained the Harness light fallback",
+              "hover retained the Harness light fallback",
+              "active retained the Harness light fallback",
+              "border retained the Harness light fallback",
+              "borderStrong retained the Harness light fallback",
+              "textMuted retained the Harness light fallback",
+              "textFaint retained the Harness light fallback",
+              "solid retained the Harness light fallback",
+              "onSolid retained the Harness light fallback",
+              "danger retained the Harness light fallback",
+              "warning retained the Harness light fallback",
+              "input retained the Harness light fallback",
+              "cursor retained the Harness light fallback",
+              "diffAdd retained the Harness light fallback",
+              "diffDelete retained the Harness light fallback",
+              "diffHunk retained the Harness light fallback",
+              "terminal.background retained the Harness light fallback",
+              "terminal.foreground retained the Harness light fallback",
+              "terminal.selection retained the Harness light fallback",
+              "terminal.ansi[0] retained the Harness light fallback",
+              "terminal.ansi[1] retained the Harness light fallback",
+              "terminal.ansi[2] retained the Harness light fallback",
+              "terminal.ansi[3] retained the Harness light fallback",
+              "terminal.ansi[4] retained the Harness light fallback",
+              "terminal.ansi[5] retained the Harness light fallback",
+              "terminal.ansi[6] retained the Harness light fallback",
+              "terminal.ansi[7] retained the Harness light fallback",
+              "terminal.ansi[8] retained the Harness light fallback",
+              "terminal.ansi[9] retained the Harness light fallback",
+              "terminal.ansi[10] retained the Harness light fallback",
+              "terminal.ansi[11] retained the Harness light fallback",
+              "terminal.ansi[12] retained the Harness light fallback",
+              "terminal.ansi[13] retained the Harness light fallback",
+              "terminal.ansi[14] retained the Harness light fallback",
+              "terminal.ansi[15] retained the Harness light fallback"
+            ],
+            "mappings": [
+              {
+                "harnessRole": "background",
+                "value": "#f7f3e9",
+                "vscodeKey": "editor.background"
+              },
+              {
+                "harnessRole": "shell",
+                "value": "#efe9db",
+                "vscodeKey": "panel.background"
+              },
+              {
+                "harnessRole": "card",
+                "value": "#efe9db",
+                "vscodeKey": "panel.background"
+              },
+              {
+                "harnessRole": "text",
+                "value": "#2b2d42",
+                "vscodeKey": "foreground"
+              },
+              {
+                "harnessRole": "success",
+                "value": "#2a9d8f",
+                "vscodeKey": "testing.iconPassed"
+              },
+              {
+                "harnessRole": "accent.*",
+                "value": "#d62828",
+                "vscodeKey": "activityBarBadge.background"
+              }
+            ],
+            "sourceFiles": [
+              "$ROOT/themes/day.json"
+            ],
+            "sourceHash": "sha256:47abcb92e8b731c491d3ae149d098ab3eda8d645431fe0229eb0f6a416aa6880",
+            "validation": [],
+            "warnings": []
+          },
+          "custom-harbor-harbor-night": {
+            "accentCandidates": [
+              {
+                "value": "#e09f3e",
+                "vscodeKey": "progressBar.background"
+              }
+            ],
+            "adjustments": [
+              {
+                "harnessRole": "input",
+                "original": "#343438b8",
+                "reason": "flattened a translucent foundational surface against the theme background",
+                "resolved": "#292d34"
+              },
+              {
+                "harnessRole": "borderStrong",
+                "original": "#ffffff2e",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#ffffff56"
+              }
+            ],
+            "dropped": [],
+            "fallbacks": [
+              "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it",
+              "raised retained the Harness dark fallback",
+              "card retained the Harness dark fallback",
+              "dialog retained the Harness dark fallback",
+              "overlay retained the Harness dark fallback",
+              "hover retained the Harness dark fallback",
+              "active retained the Harness dark fallback",
+              "border retained the Harness dark fallback",
+              "borderStrong retained the Harness dark fallback",
+              "textMuted retained the Harness dark fallback",
+              "textFaint retained the Harness dark fallback",
+              "solid retained the Harness dark fallback",
+              "onSolid retained the Harness dark fallback",
+              "danger retained the Harness dark fallback",
+              "warning retained the Harness dark fallback",
+              "input retained the Harness dark fallback",
+              "cursor retained the Harness dark fallback",
+              "diffDelete retained the Harness dark fallback",
+              "diffHunk retained the Harness dark fallback",
+              "terminal.background retained the Harness dark fallback",
+              "terminal.foreground retained the Harness dark fallback",
+              "terminal.selection retained the Harness dark fallback",
+              "terminal.ansi[0] retained the Harness dark fallback",
+              "terminal.ansi[1] retained the Harness dark fallback",
+              "terminal.ansi[2] retained the Harness dark fallback",
+              "terminal.ansi[3] retained the Harness dark fallback",
+              "terminal.ansi[4] retained the Harness dark fallback",
+              "terminal.ansi[5] retained the Harness dark fallback",
+              "terminal.ansi[6] retained the Harness dark fallback",
+              "terminal.ansi[7] retained the Harness dark fallback",
+              "terminal.ansi[8] retained the Harness dark fallback",
+              "terminal.ansi[9] retained the Harness dark fallback",
+              "terminal.ansi[10] retained the Harness dark fallback",
+              "terminal.ansi[11] retained the Harness dark fallback",
+              "terminal.ansi[12] retained the Harness dark fallback",
+              "terminal.ansi[13] retained the Harness dark fallback",
+              "terminal.ansi[14] retained the Harness dark fallback",
+              "terminal.ansi[15] retained the Harness dark fallback"
+            ],
+            "mappings": [
+              {
+                "harnessRole": "background",
+                "value": "#0d1b2a",
+                "vscodeKey": "editor.background"
+              },
+              {
+                "harnessRole": "shell",
+                "value": "#0b1622",
+                "vscodeKey": "activityBar.background"
+              },
+              {
+                "harnessRole": "text",
+                "value": "#e0e1dd",
+                "vscodeKey": "foreground"
+              },
+              {
+                "harnessRole": "success",
+                "value": "#2a9d8f",
+                "vscodeKey": "gitDecoration.addedResourceForeground"
+              },
+              {
+                "harnessRole": "diffAdd",
+                "value": "#2a9d8f",
+                "vscodeKey": "gitDecoration.addedResourceForeground"
+              },
+              {
+                "harnessRole": "accent.*",
+                "value": "#e09f3e",
+                "vscodeKey": "progressBar.background"
+              }
+            ],
+            "sourceFiles": [
+              "$ROOT/themes/night.json"
+            ],
+            "sourceHash": "sha256:d158f76f85691b6a0d99f6fbe0bf1b6e88fc57f20b87ea9647553b2dc4f1b600",
+            "validation": [],
+            "warnings": []
+          },
+          "custom-harbor-harbor-night-3": {
+            "accentCandidates": [
+              {
+                "value": "#e09f3e",
+                "vscodeKey": "progressBar.background"
+              }
+            ],
+            "adjustments": [
+              {
+                "harnessRole": "input",
+                "original": "#343438b8",
+                "reason": "flattened a translucent foundational surface against the theme background",
+                "resolved": "#292d34"
+              },
+              {
+                "harnessRole": "borderStrong",
+                "original": "#ffffff2e",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#ffffff56"
+              }
+            ],
+            "dropped": [],
+            "fallbacks": [
+              "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it",
+              "raised retained the Harness dark fallback",
+              "card retained the Harness dark fallback",
+              "dialog retained the Harness dark fallback",
+              "overlay retained the Harness dark fallback",
+              "hover retained the Harness dark fallback",
+              "active retained the Harness dark fallback",
+              "border retained the Harness dark fallback",
+              "borderStrong retained the Harness dark fallback",
+              "textMuted retained the Harness dark fallback",
+              "textFaint retained the Harness dark fallback",
+              "solid retained the Harness dark fallback",
+              "onSolid retained the Harness dark fallback",
+              "danger retained the Harness dark fallback",
+              "warning retained the Harness dark fallback",
+              "input retained the Harness dark fallback",
+              "cursor retained the Harness dark fallback",
+              "diffDelete retained the Harness dark fallback",
+              "diffHunk retained the Harness dark fallback",
+              "terminal.background retained the Harness dark fallback",
+              "terminal.foreground retained the Harness dark fallback",
+              "terminal.selection retained the Harness dark fallback",
+              "terminal.ansi[0] retained the Harness dark fallback",
+              "terminal.ansi[1] retained the Harness dark fallback",
+              "terminal.ansi[2] retained the Harness dark fallback",
+              "terminal.ansi[3] retained the Harness dark fallback",
+              "terminal.ansi[4] retained the Harness dark fallback",
+              "terminal.ansi[5] retained the Harness dark fallback",
+              "terminal.ansi[6] retained the Harness dark fallback",
+              "terminal.ansi[7] retained the Harness dark fallback",
+              "terminal.ansi[8] retained the Harness dark fallback",
+              "terminal.ansi[9] retained the Harness dark fallback",
+              "terminal.ansi[10] retained the Harness dark fallback",
+              "terminal.ansi[11] retained the Harness dark fallback",
+              "terminal.ansi[12] retained the Harness dark fallback",
+              "terminal.ansi[13] retained the Harness dark fallback",
+              "terminal.ansi[14] retained the Harness dark fallback",
+              "terminal.ansi[15] retained the Harness dark fallback"
+            ],
+            "mappings": [
+              {
+                "harnessRole": "background",
+                "value": "#0d1b2a",
+                "vscodeKey": "editor.background"
+              },
+              {
+                "harnessRole": "shell",
+                "value": "#0b1622",
+                "vscodeKey": "activityBar.background"
+              },
+              {
+                "harnessRole": "text",
+                "value": "#e0e1dd",
+                "vscodeKey": "foreground"
+              },
+              {
+                "harnessRole": "success",
+                "value": "#2a9d8f",
+                "vscodeKey": "gitDecoration.addedResourceForeground"
+              },
+              {
+                "harnessRole": "diffAdd",
+                "value": "#2a9d8f",
+                "vscodeKey": "gitDecoration.addedResourceForeground"
+              },
+              {
+                "harnessRole": "accent.*",
+                "value": "#e09f3e",
+                "vscodeKey": "progressBar.background"
+              }
+            ],
+            "sourceFiles": [
+              "$ROOT/themes/night.json"
+            ],
+            "sourceHash": "sha256:d158f76f85691b6a0d99f6fbe0bf1b6e88fc57f20b87ea9647553b2dc4f1b600",
+            "validation": [],
+            "warnings": []
+          }
+        },
+        "sourceKind": "package"
+      },
+      "familyId": "custom-harbor",
+      "familyName": "harbor",
+      "files": {
+        "package.json": "{\n  \"name\": \"harbor-themes\",\n  \"displayName\": \"Harbor Themes\",\n  \"contributes\": {\n    \"themes\": [\n      {\n        \"label\": \"Harbor Night\",\n        \"uiTheme\": \"vs-dark\",\n        \"path\": \"./themes/night.json\"\n      },\n      {\n        \"label\": \"Harbor Day\",\n        \"uiTheme\": \"vs\",\n        \"path\": \"./themes/day.json\"\n      },\n      {\n        \"label\": \"Harbor Night\",\n        \"uiTheme\": \"vs-dark\",\n        \"path\": \"./themes/night.json\"\n      },\n      {\n        \"label\": \"Missing\",\n        \"uiTheme\": \"vs\",\n        \"path\": \"./themes/missing.json\"\n      },\n      {\n        \"label\": \"No Path\",\n        \"uiTheme\": \"vs\"\n      }\n    ]\n  }\n}",
+        "themes/day.json": "{\n  \"colors\": {\n    \"editor.background\": \"#f7f3e9\",\n    \"foreground\": \"#2b2d42\",\n    \"panel.background\": \"#efe9db\",\n    \"activityBarBadge.background\": \"#d62828\",\n    \"testing.iconPassed\": \"#2a9d8f\"\n  }\n}",
+        "themes/night.json": "{\n  \"colors\": {\n    \"editor.background\": \"#0d1b2a\",\n    \"foreground\": \"#e0e1dd\",\n    \"activityBar.background\": \"#0b1622\",\n    \"progressBar.background\": \"#e09f3e\",\n    \"gitDecoration.addedResourceForeground\": \"#2a9d8f\"\n  }\n}"
+      },
+      "name": "an extension package: its variants by uiTheme, a repeated label kept apart, a missing file and a pathless declaration reported",
+      "sourceUrl": "vector://harbor"
+    },
+    {
+      "entry": "Sunset.json",
+      "expected": {
+        "failures": [],
+        "family": {
+          "id": "custom-sunset",
+          "name": "Sunset",
+          "variants": [
+            {
+              "accent": {
+                "activity": "#e6db74",
+                "caret": "#e6db74",
+                "glyph": [
+                  "#ede59b",
+                  "#e6db74",
+                  "#bdb45f"
+                ],
+                "on": "#000000",
+                "primary": "#e6db74",
+                "selection": "#e6db7459",
+                "strong": "#e6db74",
+                "wash": "#e6db7438"
+              },
+              "appearance": "dark",
+              "colors": {
+                "active": "#8b7cf62e",
+                "background": "#272822",
+                "border": "#ffffff1a",
+                "borderStrong": "#e6db74",
+                "card": "#0e0e0e",
+                "cursor": "#e8e8ea66",
+                "danger": "#f87171",
+                "dangerMuted": "#f49293",
+                "dialog": "#151516",
+                "diffAdd": "#34d399",
+                "diffDelete": "#f87171",
+                "diffHunk": "#8b7cf614",
+                "hover": "#ffffff1c",
+                "input": "#303132",
+                "onSolid": "#000000",
+                "overlay": "#1b1b1c",
+                "raised": "#343438",
+                "shell": "#0d0d0d",
+                "solid": "#ebebef",
+                "success": "#34d399",
+                "successMuted": "#61d8ad",
+                "text": "#f8f8f2",
+                "textFaint": "#85858a",
+                "textMuted": "#a9a9ae",
+                "warning": "#facc15",
+                "warningMuted": "#f6d34a"
+              },
+              "familyId": "custom-sunset",
+              "id": "custom-sunset",
+              "name": "Sunset",
+              "recommendedSurfaceTreatment": "opaque",
+              "source": {
+                "assetHash": "sha256:e592f560f336168445b7a5fa82f51227e4ad6535c4f7580c60d14ff6afbb7818",
+                "format": "vscode",
+                "license": "User supplied",
+                "revision": "local",
+                "url": "vector://sunset"
+              },
+              "syntax": {
+                "attribute": "#22d3ee",
+                "boolean": "#facc15",
+                "comment": "#75715e",
+                "constant": "#facc15",
+                "constructor": "#c084fc",
+                "embedded": "#a1a1aa",
+                "escape": "#22d3ee",
+                "function": "#60a5fa",
+                "functionBuiltin": "#60a5fa",
+                "invalid": "#f87171",
+                "keyword": "#f92672",
+                "label": "#60a5fa",
+                "macro": "#8b7cf6",
+                "number": "#facc15",
+                "operator": "#8b7cf6",
+                "parameter": "#e8e8ea",
+                "property": "#f472b6",
+                "punctuation": "#a1a1aa",
+                "string": "#34d399",
+                "stringSpecial": "#22d3ee",
+                "tag": "#f472b6",
+                "type": "#c084fc",
+                "typeBuiltin": "#c084fc",
+                "variable": "#e8e8ea",
+                "variableSpecial": "#8b7cf6"
+              },
+              "terminal": {
+                "ansi": [
+                  "#242424",
+                  "#f87171",
+                  "#4ade80",
+                  "#facc15",
+                  "#60a5fa",
+                  "#c084fc",
+                  "#22d3ee",
+                  "#d4d4d8",
+                  "#52525b",
+                  "#fca5a5",
+                  "#86efac",
+                  "#fde047",
+                  "#93c5fd",
+                  "#d8b4fe",
+                  "#67e8f9",
+                  "#fafafa"
+                ],
+                "background": "#090909",
+                "foreground": "#e8e8ea",
+                "selection": "#ffffff38"
+              }
+            }
+          ]
+        },
+        "path": "$ROOT/Sunset.json",
+        "reports": {
+          "custom-sunset": {
+            "accentCandidates": [
+              {
+                "value": "#e6db74",
+                "vscodeKey": "focusBorder"
+              }
+            ],
+            "adjustments": [
+              {
+                "harnessRole": "input",
+                "original": "#343438b8",
+                "reason": "flattened a translucent foundational surface against the theme background",
+                "resolved": "#303132"
+              }
+            ],
+            "dropped": [],
+            "fallbacks": [
+              "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it",
+              "shell retained the Harness dark fallback",
+              "raised retained the Harness dark fallback",
+              "card retained the Harness dark fallback",
+              "dialog retained the Harness dark fallback",
+              "overlay retained the Harness dark fallback",
+              "hover retained the Harness dark fallback",
+              "active retained the Harness dark fallback",
+              "border retained the Harness dark fallback",
+              "textMuted retained the Harness dark fallback",
+              "textFaint retained the Harness dark fallback",
+              "solid retained the Harness dark fallback",
+              "onSolid retained the Harness dark fallback",
+              "danger retained the Harness dark fallback",
+              "warning retained the Harness dark fallback",
+              "success retained the Harness dark fallback",
+              "input retained the Harness dark fallback",
+              "cursor retained the Harness dark fallback",
+              "diffAdd retained the Harness dark fallback",
+              "diffDelete retained the Harness dark fallback",
+              "diffHunk retained the Harness dark fallback",
+              "terminal.background retained the Harness dark fallback",
+              "terminal.foreground retained the Harness dark fallback",
+              "terminal.selection retained the Harness dark fallback",
+              "terminal.ansi[0] retained the Harness dark fallback",
+              "terminal.ansi[1] retained the Harness dark fallback",
+              "terminal.ansi[2] retained the Harness dark fallback",
+              "terminal.ansi[3] retained the Harness dark fallback",
+              "terminal.ansi[4] retained the Harness dark fallback",
+              "terminal.ansi[5] retained the Harness dark fallback",
+              "terminal.ansi[6] retained the Harness dark fallback",
+              "terminal.ansi[7] retained the Harness dark fallback",
+              "terminal.ansi[8] retained the Harness dark fallback",
+              "terminal.ansi[9] retained the Harness dark fallback",
+              "terminal.ansi[10] retained the Harness dark fallback",
+              "terminal.ansi[11] retained the Harness dark fallback",
+              "terminal.ansi[12] retained the Harness dark fallback",
+              "terminal.ansi[13] retained the Harness dark fallback",
+              "terminal.ansi[14] retained the Harness dark fallback",
+              "terminal.ansi[15] retained the Harness dark fallback"
+            ],
+            "mappings": [
+              {
+                "harnessRole": "background",
+                "value": "#272822",
+                "vscodeKey": "editor.background"
+              },
+              {
+                "harnessRole": "borderStrong",
+                "value": "#e6db74",
+                "vscodeKey": "focusBorder"
+              },
+              {
+                "harnessRole": "text",
+                "value": "#f8f8f2",
+                "vscodeKey": "foreground"
+              },
+              {
+                "harnessRole": "accent.*",
+                "value": "#e6db74",
+                "vscodeKey": "focusBorder"
+              },
+              {
+                "harnessRole": "syntax.comment",
+                "value": "#75715e",
+                "vscodeKey": "comment"
+              },
+              {
+                "harnessRole": "syntax.keyword",
+                "value": "#f92672",
+                "vscodeKey": "keyword"
+              },
+              {
+                "harnessRole": "syntax.keyword",
+                "value": "#f92672",
+                "vscodeKey": "storage"
+              }
+            ],
+            "sourceFiles": [
+              "$ROOT/Sunset.json",
+              "$ROOT/Sunset.tmTheme"
+            ],
+            "sourceHash": "sha256:c44cbd20bfc8748f0765b68d44a7fcd8c0123f74140f8d6287f0a10d6468895a",
+            "validation": [],
+            "warnings": []
+          }
+        },
+        "sourceKind": "file"
+      },
+      "familyId": "custom-sunset",
+      "familyName": "Sunset",
+      "files": {
+        "Sunset.json": "{\n  \"name\": \"Sunset\",\n  \"type\": \"dark\",\n  \"colors\": {\n    \"editor.background\": \"#272822\",\n    \"foreground\": \"#f8f8f2\",\n    \"focusBorder\": \"#e6db74\"\n  },\n  \"tokenColors\": \"./Sunset.tmTheme\"\n}",
+        "Sunset.tmTheme": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>name</key>\n  <string>Sunset</string>\n  <key>settings</key>\n  <array>\n    <dict>\n      <key>settings</key>\n      <dict>\n        <key>background</key>\n        <string>#272822</string>\n        <key>foreground</key>\n        <string>#F8F8F2</string>\n      </dict>\n    </dict>\n    <dict>\n      <key>name</key>\n      <string>Comment</string>\n      <key>scope</key>\n      <string>comment</string>\n      <key>settings</key>\n      <dict>\n        <key>foreground</key>\n        <string>#75715E</string>\n      </dict>\n    </dict>\n    <dict>\n      <key>scope</key>\n      <string>keyword, storage</string>\n      <key>settings</key>\n      <dict>\n        <key>fontStyle</key>\n        <string></string>\n        <key>foreground</key>\n        <string>#F92672</string>\n      </dict>\n    </dict>\n  </array>\n</dict>\n</plist>\n"
+      },
+      "name": "tokens from a TextMate plist",
+      "sourceUrl": "vector://sunset"
+    },
+    {
+      "entry": "plain.json",
+      "expected": {
+        "failures": [],
+        "family": {
+          "id": "custom-plain",
+          "name": "Plain",
+          "variants": [
+            {
+              "accent": {
+                "activity": "#8b7cf6",
+                "caret": "#8b7cf6",
+                "glyph": [
+                  "#aba1f9",
+                  "#8b7cf6",
+                  "#7266ca"
+                ],
+                "on": "#000000",
+                "primary": "#8b7cf6",
+                "selection": "#8b7cf659",
+                "strong": "#8b7cf6",
+                "wash": "#8b7cf638"
+              },
+              "appearance": "dark",
+              "colors": {
+                "active": "#8b7cf62e",
+                "background": "#222222",
+                "border": "#ffffff1a",
+                "borderStrong": "#ffffff56",
+                "card": "#0e0e0e",
+                "cursor": "#e8e8ea66",
+                "danger": "#f87171",
+                "dangerMuted": "#f49293",
+                "dialog": "#151516",
+                "diffAdd": "#34d399",
+                "diffDelete": "#f87171",
+                "diffHunk": "#8b7cf614",
+                "hover": "#ffffff22",
+                "input": "#2f2f32",
+                "onSolid": "#000000",
+                "overlay": "#1b1b1c",
+                "raised": "#3f3f3f",
+                "shell": "#0d0d0d",
+                "solid": "#ebebef",
+                "success": "#34d399",
+                "successMuted": "#61d8ad",
+                "text": "#eeeeee",
+                "textFaint": "#eeeeee",
+                "textMuted": "#aaaaaf",
+                "warning": "#facc15",
+                "warningMuted": "#f6d34a"
+              },
+              "familyId": "custom-plain",
+              "id": "custom-plain",
+              "name": "Plain",
+              "recommendedSurfaceTreatment": "opaque",
+              "source": {
+                "assetHash": "sha256:1e9526e3093548c3edf81d76316ffee7db6454fb3d5e0d52fd0fa64cc52ad297",
+                "format": "vscode",
+                "license": "User supplied",
+                "revision": "local",
+                "url": "vector://plain"
+              },
+              "syntax": {
+                "attribute": "#22d3ee",
+                "boolean": "#facc15",
+                "comment": "#92929a",
+                "constant": "#facc15",
+                "constructor": "#c084fc",
+                "embedded": "#a1a1aa",
+                "escape": "#22d3ee",
+                "function": "#60a5fa",
+                "functionBuiltin": "#60a5fa",
+                "invalid": "#f87171",
+                "keyword": "#8b7cf6",
+                "label": "#60a5fa",
+                "macro": "#8b7cf6",
+                "number": "#facc15",
+                "operator": "#8b7cf6",
+                "parameter": "#e8e8ea",
+                "property": "#f472b6",
+                "punctuation": "#a1a1aa",
+                "string": "#34d399",
+                "stringSpecial": "#22d3ee",
+                "tag": "#f472b6",
+                "type": "#c084fc",
+                "typeBuiltin": "#c084fc",
+                "variable": "#e8e8ea",
+                "variableSpecial": "#8b7cf6"
+              },
+              "terminal": {
+                "ansi": [
+                  "#242424",
+                  "#f87171",
+                  "#4ade80",
+                  "#facc15",
+                  "#60a5fa",
+                  "#c084fc",
+                  "#22d3ee",
+                  "#d4d4d8",
+                  "#52525b",
+                  "#fca5a5",
+                  "#86efac",
+                  "#fde047",
+                  "#93c5fd",
+                  "#d8b4fe",
+                  "#67e8f9",
+                  "#fafafa"
+                ],
+                "background": "#090909",
+                "foreground": "#e8e8ea",
+                "selection": "#ffffff38"
+              }
+            }
+          ]
+        },
+        "path": "$ROOT/plain.json",
+        "reports": {
+          "custom-plain": {
+            "accentCandidates": [],
+            "adjustments": [
+              {
+                "harnessRole": "raised",
+                "original": "#ffffff22",
+                "reason": "flattened a translucent foundational surface against the theme background",
+                "resolved": "#3f3f3f"
+              },
+              {
+                "harnessRole": "input",
+                "original": "#343438b8",
+                "reason": "flattened a translucent foundational surface against the theme background",
+                "resolved": "#2f2f32"
+              },
+              {
+                "harnessRole": "textMuted",
+                "original": "#a9a9ae",
+                "reason": "preserved the source hue while raising worst-case contrast from 4.50:1 to 4.55:1",
+                "resolved": "#aaaaaf"
+              },
+              {
+                "harnessRole": "textFaint",
+                "original": "#85858a",
+                "reason": "used foreground because the mapped color reached only 2.87:1",
+                "resolved": "#eeeeee"
+              },
+              {
+                "harnessRole": "borderStrong",
+                "original": "#ffffff2e",
+                "reason": "raised to 3:1 across the main and shell surfaces",
+                "resolved": "#ffffff56"
+              }
+            ],
+            "dropped": [],
+            "fallbacks": [
+              "surface treatment inferred as opaque because VS Code palettes target solid workbench backgrounds; the user's Harness surface preference can override it",
+              "shell retained the Harness dark fallback",
+              "card retained the Harness dark fallback",
+              "dialog retained the Harness dark fallback",
+              "overlay retained the Harness dark fallback",
+              "active retained the Harness dark fallback",
+              "border retained the Harness dark fallback",
+              "borderStrong retained the Harness dark fallback",
+              "textMuted retained the Harness dark fallback",
+              "textFaint retained the Harness dark fallback",
+              "solid retained the Harness dark fallback",
+              "onSolid retained the Harness dark fallback",
+              "danger retained the Harness dark fallback",
+              "warning retained the Harness dark fallback",
+              "success retained the Harness dark fallback",
+              "input retained the Harness dark fallback",
+              "cursor retained the Harness dark fallback",
+              "diffAdd retained the Harness dark fallback",
+              "diffDelete retained the Harness dark fallback",
+              "diffHunk retained the Harness dark fallback",
+              "accent.* retained the Harness fallback; curate a native accent",
+              "terminal.background retained the Harness dark fallback",
+              "terminal.foreground retained the Harness dark fallback",
+              "terminal.selection retained the Harness dark fallback",
+              "terminal.ansi[0] retained the Harness dark fallback",
+              "terminal.ansi[1] retained the Harness dark fallback",
+              "terminal.ansi[2] retained the Harness dark fallback",
+              "terminal.ansi[3] retained the Harness dark fallback",
+              "terminal.ansi[4] retained the Harness dark fallback",
+              "terminal.ansi[5] retained the Harness dark fallback",
+              "terminal.ansi[6] retained the Harness dark fallback",
+              "terminal.ansi[7] retained the Harness dark fallback",
+              "terminal.ansi[8] retained the Harness dark fallback",
+              "terminal.ansi[9] retained the Harness dark fallback",
+              "terminal.ansi[10] retained the Harness dark fallback",
+              "terminal.ansi[11] retained the Harness dark fallback",
+              "terminal.ansi[12] retained the Harness dark fallback",
+              "terminal.ansi[13] retained the Harness dark fallback",
+              "terminal.ansi[14] retained the Harness dark fallback",
+              "terminal.ansi[15] retained the Harness dark fallback"
+            ],
+            "mappings": [
+              {
+                "harnessRole": "background",
+                "value": "#222222",
+                "vscodeKey": "editor.background"
+              },
+              {
+                "harnessRole": "raised",
+                "value": "#ffffff22",
+                "vscodeKey": "list.hoverBackground"
+              },
+              {
+                "harnessRole": "hover",
+                "value": "#ffffff22",
+                "vscodeKey": "list.hoverBackground"
+              },
+              {
+                "harnessRole": "text",
+                "value": "#eeeeee",
+                "vscodeKey": "foreground"
+              }
+            ],
+            "sourceFiles": [
+              "$ROOT/plain.json"
+            ],
+            "sourceHash": "sha256:04b2564b0015a756066e8c67672aced9b1f8c4c42c7cce381cf784706a84654b",
+            "validation": [],
+            "warnings": []
+          }
+        },
+        "sourceKind": "file"
+      },
+      "familyId": "custom-plain",
+      "familyName": "Plain",
+      "files": {
+        "plain.json": "{\n  \"colors\": {\n    \"editor.background\": \"#222\",\n    \"foreground\": \"#eee\",\n    \"list.hoverBackground\": \"#fff2\"\n  }\n}"
+      },
+      "name": "short hex forms, and no accent to find",
+      "sourceUrl": "vector://plain"
+    }
+  ]
+}

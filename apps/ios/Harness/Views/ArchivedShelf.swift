@@ -17,8 +17,6 @@ struct ArchivedSection: View {
     var spaceId: String?
     /// Home's search text; archived sessions are searchable too.
     var query: String = ""
-    /// A session to leave out: the one already open above the stacked split's lower pane.
-    var excluding: String? = nil
     @Binding var path: [Route]
 
     // spaces.rs INITIAL/PAGE. Both session-transient, like the desktop's.
@@ -27,10 +25,10 @@ struct ArchivedSection: View {
     private static let initialCount = 10
     private static let pageSize = 25
 
-    private static let rowInsets = EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
+    private static let rowInsets = EdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14)  // + 10 = the 24pt gutter
 
     var body: some View {
-        let archived = model.archivedMatches(in: spaceId, query: query).filter { $0.id != excluding }
+        let archived = model.archivedMatches(in: spaceId, query: query)
         if !archived.isEmpty {
             Section {
                 header(count: archived.count)
@@ -121,6 +119,29 @@ struct ArchivedSection: View {
             }
             .tint(Theme.surfaceRaised)
         }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            hideButton(chat)
+        }
+        .contextMenu {
+            Button("Unarchive", systemImage: "arrow.up.bin") {
+                withAnimation(Motion.resort) { model.unarchive(chatId: chat.id) }
+            }
+            if !model.hiddenArchivedIds.contains(chat.id) {
+                hideButton(chat)
+            }
+        }
+    }
+
+    /// Hide from this shelf (desktop Chat history's Hide): the session stays
+    /// archived on every device, and search still finds it.
+    private func hideButton(_ chat: Chat) -> some View {
+        Button {
+            withAnimation(Motion.resort) { model.hideArchived(chatId: chat.id) }
+        } label: {
+            Label("Hide", systemImage: "eye.slash")
+        }
+        .tint(Theme.textMuted)
+        .accessibilityIdentifier("archived-hide")
     }
 
     private func showMore(remaining: Int) -> some View {

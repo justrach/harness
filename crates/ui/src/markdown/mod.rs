@@ -21,6 +21,8 @@ mod link_interaction;
 mod link_presentation;
 pub mod links;
 mod math;
+mod math_flow;
+mod math_layout;
 pub mod mend;
 pub mod parser;
 pub mod render;
@@ -30,3 +32,6 @@ pub mod veil;
 pub use parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full};
 
 pub mod mermaid;
+
+#[cfg(feature = "appshots-fixture")]
+pub(crate) use link_interaction::review_link;

@@ -14,12 +14,25 @@
 //! registry, geometry and mouse listeners live in `render.rs`.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+/// Identity of one gesture, independent of row keys and painted listeners.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SelectionClaim(u64);
+
+static LAST_CLAIM: AtomicU64 = AtomicU64::new(0);
+
+impl SelectionClaim {
+    fn new() -> Self {
+        Self(LAST_CLAIM.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+}
 
 /// One element's slice of the selection, in document order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
-    /// Element key (`{row_key}:{element ix}`).
+    /// Element key (`{row_key}:{element ix}`, or [`inline_fragment_key`]).
     pub key: String,
     /// Selected byte range of the element's flat text.
     pub range: Range<usize>,
@@ -30,13 +43,16 @@ pub struct Span {
 
 #[derive(Clone, Default)]
 struct MdSelection {
+    claim: SelectionClaim,
     /// Element that owns the drag (where the mouse went down).
     anchor_key: String,
+    /// Stable surface identity, retained when virtualization unmounts the anchor.
+    anchor_owner: Option<u64>,
     /// Byte offset of the anchor within its element.
     anchor_ix: usize,
-    /// The immediate word/paragraph selected by a multi-click. Moving inside
-    /// it (including a stationary pointer refresh) must not erase that span.
-    initial_span: Option<Range<usize>>,
+    /// The immediate word/paragraph selected by a multi-click. A paragraph
+    /// may span several inline fragments; moving inside must preserve it all.
+    initial_spans: Option<Vec<Span>>,
     dragging: bool,
     /// Document direction established while the anchor is still painted.
     /// Once virtualization moves it out of the registry, this tells us which
@@ -51,6 +67,42 @@ fn state() -> &'static Mutex<Option<MdSelection>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+/// The current gesture, including a settled or virtualized selection.
+pub(crate) fn current_claim() -> Option<SelectionClaim> {
+    state()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|selection| selection.claim)
+}
+
+/// Last gesture, even if it has already ended or selected no text. Deferred
+/// handoffs must still see a complete press/release dispatched in one update.
+pub(crate) fn latest_claim() -> Option<SelectionClaim> {
+    let claim = LAST_CLAIM.load(Ordering::Relaxed);
+    (claim != 0).then_some(SelectionClaim(claim))
+}
+
+/// Only a gesture started after the caller's mouse-down snapshot may take
+/// ownership. An older active or settled selection is not a new claim here.
+pub(crate) fn claim_after(previous: Option<SelectionClaim>) -> Option<SelectionClaim> {
+    latest_claim().filter(|claim| Some(*claim) != previous)
+}
+
+/// Revoke exactly the selection associated with an editor's handoff, even if
+/// its text listeners have unmounted. Never clear a newer surface's claim.
+pub(crate) fn clear_claim(claim: SelectionClaim) -> bool {
+    let mut guard = state().lock().unwrap();
+    if guard
+        .as_ref()
+        .is_some_and(|selection| selection.claim == claim)
+    {
+        *guard = None;
+        return true;
+    }
+    false
+}
+
 /// Selection state is process-global; tests that exercise its lifecycle must
 /// not race each other.
 #[cfg(test)]
@@ -58,6 +110,27 @@ pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Reserved suffix separating an inline fragment's paragraph key and index.
+const INLINE_FRAGMENT_SUFFIX: &str = "\u{1f}inline-fragment:";
+
+/// Make a unique selection key for one fragment of a logical paragraph.
+///
+/// Use the same document-unique `group` for every prose and equation fragment
+/// in that paragraph, and a distinct `index` for each fragment. Consecutive
+/// selected fragments in the same group copy without an inserted newline;
+/// paragraph boundaries and ordinary element keys retain their newlines.
+/// `group` is opaque and may itself contain the reserved suffix.
+pub fn inline_fragment_key(group: &str, index: usize) -> String {
+    format!("{group}{INLINE_FRAGMENT_SUFFIX}{index}")
+}
+
+fn inline_fragment_group(key: &str) -> Option<&str> {
+    let (group, index) = key.rsplit_once(INLINE_FRAGMENT_SUFFIX)?;
+    // Only recognize complete keys made by the API, not lookalike suffixes.
+    let parsed = index.parse::<usize>().ok()?;
+    (index == parsed.to_string()).then_some(group)
 }
 
 /// Resolve the spans for a selection between `a` and `b`, each an
@@ -91,9 +164,11 @@ pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, us
 /// Begin a drag anchored at `(key, ix)`; claims the global selection.
 pub fn begin(key: &str, ix: usize) {
     *state().lock().unwrap() = Some(MdSelection {
+        claim: SelectionClaim::new(),
         anchor_key: key.to_string(),
+        anchor_owner: None,
         anchor_ix: ix,
-        initial_span: None,
+        initial_spans: None,
         dragging: true,
         forward: None,
         spans: Vec::new(),
@@ -102,18 +177,98 @@ pub fn begin(key: &str, ix: usize) {
 
 /// Begin with an immediate span (double/triple click inside one element).
 pub fn begin_with_span(key: &str, text: &str, range: Range<usize>) {
-    *state().lock().unwrap() = Some(MdSelection {
-        anchor_key: key.to_string(),
-        anchor_ix: range.start,
-        initial_span: Some(range.clone()),
-        dragging: true,
-        forward: None,
-        spans: vec![Span {
+    begin_with_spans(
+        key,
+        vec![Span {
             key: key.to_string(),
             range,
             text: text.to_string(),
         }],
+    );
+}
+
+fn begin_with_spans(key: &str, spans: Vec<Span>) {
+    // At a styled word boundary the selected word may end in the preceding
+    // fragment; the clicked fragment still owns the mouse listeners.
+    let anchor_ix = spans
+        .iter()
+        .find(|span| span.key == key)
+        .map_or(0, |span| span.range.start);
+    *state().lock().unwrap() = Some(MdSelection {
+        claim: SelectionClaim::new(),
+        anchor_key: key.to_string(),
+        anchor_owner: None,
+        anchor_ix,
+        initial_spans: Some(spans.clone()),
+        dragging: true,
+        forward: None,
+        spans,
     });
+}
+
+/// Triple-click selects the logical paragraph, not just the painted fragment.
+/// `elements` must already be restricted to the same selection owner/scope.
+/// Ordinary elements (including code lines) retain their single-element rule.
+pub fn begin_paragraph(key: &str, elements: &[(&str, &str)]) -> bool {
+    let Some((start, end)) = paragraph_bounds(key, elements) else {
+        return false;
+    };
+    begin_with_spans(
+        key,
+        resolve_spans(elements, (start, 0), (end, elements[end].1.len())),
+    );
+    true
+}
+
+/// Double-click a prose word across adjacent styled fragments. Equation
+/// delimiters in the copy source act as word boundaries; equations themselves
+/// use atomic selection instead of this function.
+pub fn begin_word(key: &str, ix: usize, elements: &[(&str, &str)]) -> bool {
+    let Some((start, end)) = paragraph_bounds(key, elements) else {
+        return false;
+    };
+    let mut joined = String::new();
+    let mut offset = 0;
+    for (candidate, text) in &elements[start..=end] {
+        if *candidate == key {
+            offset = joined.len() + ix.min(text.len());
+        }
+        joined.push_str(text);
+    }
+    let range = word_range(&joined, offset);
+    let mut offset = 0;
+    let mut spans = Vec::new();
+    for (candidate, text) in &elements[start..=end] {
+        let from = range.start.saturating_sub(offset).min(text.len());
+        let to = range.end.saturating_sub(offset).min(text.len());
+        if from < to || *candidate == key && range.is_empty() {
+            spans.push(Span {
+                key: (*candidate).to_owned(),
+                range: from..to,
+                text: (*text).to_owned(),
+            });
+        }
+        offset += text.len();
+    }
+    begin_with_spans(key, spans);
+    true
+}
+
+fn paragraph_bounds(key: &str, elements: &[(&str, &str)]) -> Option<(usize, usize)> {
+    let index = elements
+        .iter()
+        .position(|(candidate, _)| *candidate == key)?;
+    let group = inline_fragment_group(key);
+    let (mut start, mut end) = (index, index);
+    if group.is_some() {
+        while start > 0 && inline_fragment_group(elements[start - 1].0) == group {
+            start -= 1;
+        }
+        while end + 1 < elements.len() && inline_fragment_group(elements[end + 1].0) == group {
+            end += 1;
+        }
+    }
+    Some((start, end))
 }
 
 /// The live drag's anchor, if `key` owns it: `(anchor byte offset)`.
@@ -129,6 +284,26 @@ pub(crate) fn anchor_key() -> Option<String> {
         .unwrap()
         .as_ref()
         .map(|s| s.anchor_key.clone())
+}
+
+/// Remember the surface that claimed this gesture independently of painted rows.
+pub(crate) fn set_anchor_owner(key: &str, owner: u64) {
+    if let Some(selection) = state()
+        .lock()
+        .unwrap()
+        .as_mut()
+        .filter(|selection| selection.dragging && selection.anchor_key == key)
+    {
+        selection.anchor_owner = Some(owner);
+    }
+}
+
+pub(crate) fn anchor_owner() -> Option<u64> {
+    state()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|selection| selection.anchor_owner)
 }
 
 /// Whether a markdown selection drag is currently in flight.
@@ -152,23 +327,18 @@ pub fn update_drag(elements: &[(&str, &str)], head: (usize, usize)) -> bool {
     let Some(selection) = guard.as_mut().filter(|selection| selection.dragging) else {
         return false;
     };
-    let spans = if let Some(anchor_ei) = elements
+    let initial = selection
+        .initial_spans
+        .as_ref()
+        .and_then(|spans| resolve_initial_drag(spans, elements, head));
+    let spans = if let Some((spans, forward)) = initial {
+        selection.forward = Some(forward);
+        spans
+    } else if let Some(anchor_ei) = elements
         .iter()
         .position(|(key, _)| *key == selection.anchor_key)
     {
-        let (anchor, head) = if let Some(range) = &selection.initial_span {
-            let start = (anchor_ei, range.start);
-            let end = (anchor_ei, range.end);
-            if head < start {
-                (end, head)
-            } else if head > end {
-                (start, head)
-            } else {
-                (start, end)
-            }
-        } else {
-            ((anchor_ei, selection.anchor_ix), head)
-        };
+        let anchor = (anchor_ei, selection.anchor_ix);
         selection.forward = Some(anchor <= head);
         resolve_spans(elements, anchor, head)
     } else {
@@ -185,6 +355,32 @@ pub fn update_drag(elements: &[(&str, &str)], head: (usize, usize)) -> bool {
     }
     selection.spans = spans;
     true
+}
+
+/// Extend from the opposite edge of the original multi-click selection, or
+/// keep the whole initial selection while the pointer is inside it. Resolve
+/// against frozen spans so partially virtualized paragraphs retain their text.
+fn resolve_initial_drag(
+    initial: &[Span],
+    elements: &[(&str, &str)],
+    head: (usize, usize),
+) -> Option<(Vec<Span>, bool)> {
+    let (head_key, _) = elements.get(head.0)?;
+    let forward = if let Some(span) = initial.iter().find(|span| span.key == *head_key) {
+        if span.range.contains(&head.1) || head.1 == span.range.end {
+            return Some((initial.to_vec(), true));
+        }
+        head.1 > span.range.end
+    } else {
+        let pivot = elements
+            .iter()
+            .position(|(key, _)| initial.iter().any(|span| span.key == *key))?;
+        head.0 > pivot
+    };
+    Some((
+        extend_virtualized_drag(initial, elements, head, forward)?,
+        forward,
+    ))
 }
 
 fn extend_virtualized_drag(
@@ -285,6 +481,20 @@ pub fn clear_if_owner(key: &str) -> bool {
     false
 }
 
+/// Invalidate a surface's snapshotted source, including an in-flight drag.
+/// Unlike an outside click, a buffer replacement must not retain old text.
+pub(crate) fn cancel_surface(prefix: &str) -> bool {
+    let mut guard = state().lock().unwrap();
+    if guard
+        .as_ref()
+        .is_some_and(|selection| selection.anchor_key.starts_with(prefix))
+    {
+        *guard = None;
+        return true;
+    }
+    false
+}
+
 /// The wash range for `key` this frame (empty ⇒ nothing to paint).
 pub fn wash_range(key: &str) -> Option<Range<usize>> {
     let guard = state().lock().unwrap();
@@ -298,52 +508,84 @@ pub fn wash_range(key: &str) -> Option<Range<usize>> {
 /// The full selected text (Cmd+C), spans joined in document order.
 pub fn selected_text() -> Option<String> {
     let guard = state().lock().unwrap();
-    let sel = guard.as_ref()?;
-    if sel.spans.iter().all(|s| s.range.is_empty()) {
+    selection_text(guard.as_ref()?)
+}
+
+/// Copy may read only the claim associated with its own window, not another
+/// window's newer selection. Check the identity and snapshot under one lock.
+pub(crate) fn selected_text_for_claim(claim: SelectionClaim) -> Option<String> {
+    let guard = state().lock().unwrap();
+    selection_text(
+        guard
+            .as_ref()
+            .filter(|selection| selection.claim == claim)?,
+    )
+}
+
+fn selection_text(selection: &MdSelection) -> Option<String> {
+    if selection.spans.iter().all(|span| span.range.is_empty()) {
         return None;
     }
-    Some(join_spans(&sel.spans))
+    Some(join_spans(&selection.spans))
 }
 
 fn join_spans(spans: &[Span]) -> String {
-    spans
-        .iter()
-        .map(|s| &s.text[s.range.clone()])
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut joined = String::new();
+    let mut previous_group = None;
+    for (index, span) in spans.iter().enumerate() {
+        let group = inline_fragment_group(&span.key);
+        if index > 0 && (group.is_none() || group != previous_group) {
+            joined.push('\n');
+        }
+        joined.push_str(&span.text[span.range.clone()]);
+        previous_group = group;
+    }
+    joined
 }
 
 /// Word range around `ix` for double-click selection: an alphanumeric/`_`
-/// run, or the single non-space char under the cursor, or empty at spaces.
+/// run, or one non-space grapheme, or empty at spaces. Never split combining
+/// marks or multi-codepoint emoji from the character they belong to.
 pub fn word_range(text: &str, ix: usize) -> Range<usize> {
-    let mut ix = ix.min(text.len());
-    // Snap into a char boundary (mouse indices should already be on one;
-    // defensive against mid-char byte offsets).
-    while ix > 0 && !text.is_char_boundary(ix) {
-        ix -= 1;
-    }
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let before = text[..ix].chars().next_back();
-    let at = text[ix..].chars().next();
-    // Off a word boundary entirely: select the single char (or nothing).
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let ix = ix.min(text.len());
+    // Mouse indices and defensive mid-byte offsets both snap to the start of
+    // the containing grapheme, not merely to a UTF-8 character boundary.
+    let ix = if ix < text.len() {
+        text.grapheme_indices(true)
+            .take_while(|(start, _)| *start <= ix)
+            .last()
+            .map_or(0, |(start, _)| start)
+    } else {
+        ix
+    };
+    let is_word = |grapheme: &str| {
+        grapheme
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    };
+    let before = text[..ix].graphemes(true).next_back();
+    let at = text[ix..].graphemes(true).next();
     if !at.is_some_and(is_word) && !before.is_some_and(is_word) {
         return match at {
-            Some(c) if !c.is_whitespace() => ix..ix + c.len_utf8(),
+            Some(grapheme) if !grapheme.chars().all(char::is_whitespace) => ix..ix + grapheme.len(),
             _ => ix..ix,
         };
     }
     let start = text[..ix]
-        .char_indices()
+        .grapheme_indices(true)
         .rev()
-        .take_while(|(_, c)| is_word(*c))
+        .take_while(|(_, grapheme)| is_word(grapheme))
         .last()
         .map(|(i, _)| i)
         .unwrap_or(ix);
     let end = text[ix..]
-        .char_indices()
-        .take_while(|(_, c)| is_word(*c))
+        .grapheme_indices(true)
+        .take_while(|(_, grapheme)| is_word(grapheme))
         .last()
-        .map(|(i, c)| ix + i + c.len_utf8())
+        .map(|(i, grapheme)| ix + i + grapheme.len())
         .unwrap_or(ix);
     start..end
 }
@@ -358,6 +600,69 @@ mod tests {
             ("p2", "second"),
             ("p3", "third one"),
         ]
+    }
+
+    #[test]
+    fn selection_claims_distinguish_repeated_gestures_and_reject_stale_revocations() {
+        let _state = test_state_lock();
+        begin_with_span("same-row", "first", 0..5);
+        let first = current_claim().unwrap();
+        assert_eq!(latest_claim(), Some(first));
+        assert_eq!(claim_after(None), Some(first));
+        assert_eq!(claim_after(Some(first)), None);
+        end_active_drag();
+        assert_eq!(current_claim(), Some(first));
+        assert_eq!(claim_after(None), Some(first));
+        assert_eq!(claim_after(Some(first)), None);
+        assert_eq!(selected_text_for_claim(first).as_deref(), Some("first"));
+
+        // Reusing a row key, including after virtualization, is a new claim.
+        begin_with_span("same-row", "second", 0..6);
+        let second = current_claim().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(claim_after(Some(first)), Some(second));
+        assert_eq!(selected_text_for_claim(first), None);
+        assert_eq!(selected_text_for_claim(second).as_deref(), Some("second"));
+        assert!(!clear_claim(first));
+        assert_eq!(selected_text().as_deref(), Some("second"));
+        assert!(clear_claim(second));
+        assert_eq!(current_claim(), None);
+        assert!(!is_dragging());
+        assert!(!clear_claim(second));
+
+        begin("empty-click", 0);
+        let empty = current_claim().unwrap();
+        end_active_drag();
+        assert_eq!(current_claim(), None);
+        assert_eq!(claim_after(Some(second)), Some(empty));
+        assert_eq!(claim_after(Some(empty)), None);
+        assert_eq!(selected_text_for_claim(empty), None);
+        assert!(!clear_claim(empty));
+    }
+
+    #[test]
+    fn selection_owner_is_bound_to_the_active_anchor_and_resets_for_new_gestures() {
+        let _state = test_state_lock();
+        begin("p1", 0);
+        assert_eq!(anchor_owner(), None);
+        set_anchor_owner("p1", 7);
+        set_anchor_owner("other", 9);
+        assert_eq!(anchor_owner(), Some(7));
+        update_drag(&elems(), (1, 6));
+        end_active_drag();
+        set_anchor_owner("p1", 9);
+        assert_eq!(anchor_owner(), Some(7));
+        begin_with_span("p2", "second", 0..6);
+        assert_eq!(anchor_owner(), None);
+        set_anchor_owner("p2", 0); // Non-transcript surfaces also have an owner.
+        assert_eq!(anchor_owner(), Some(0));
+        assert!(!clear_if_owner("p2")); // A live gesture is not a settled selection.
+        end_active_drag();
+        assert!(clear_if_owner("p2"));
+        assert_eq!(anchor_owner(), None);
+        begin("p3", 0);
+        assert_eq!(anchor_owner(), None);
+        end_active_drag();
     }
 
     #[test]
@@ -387,6 +692,124 @@ mod tests {
         let spans = resolve_spans(&elements, (0, 0), (2, 5));
         assert_eq!(spans.len(), 3);
         assert_eq!(join_spans(&spans), "first\n\nthird");
+    }
+
+    #[test]
+    fn inline_prose_math_and_prose_copy_as_one_paragraph() {
+        let keys = [
+            inline_fragment_key("row:p1", 0),
+            inline_fragment_key("row:p1", 1),
+            inline_fragment_key("row:p1", 2),
+        ];
+        let elements = [
+            (keys[0].as_str(), "The ratio is "),
+            (keys[1].as_str(), r"$\frac{a}{b}$"),
+            (keys[2].as_str(), " today."),
+        ];
+        let spans = resolve_spans(&elements, (0, 0), (2, elements[2].1.len()));
+        assert_eq!(join_spans(&spans), r"The ratio is $\frac{a}{b}$ today.");
+    }
+
+    #[test]
+    fn inline_fragments_keep_newlines_between_paragraphs_and_normal_elements() {
+        let keys = [
+            inline_fragment_key("row:p1", 0),
+            inline_fragment_key("row:p1", 1),
+            inline_fragment_key("row:p2", 0),
+            inline_fragment_key("row:p2", 1),
+        ];
+        let elements = [
+            (keys[0].as_str(), "First "),
+            (keys[1].as_str(), "$x$."),
+            (keys[2].as_str(), "Next "),
+            (keys[3].as_str(), "$y$."),
+            ("row:p3", "Ordinary paragraph."),
+        ];
+        let spans = resolve_spans(&elements, (0, 0), (4, elements[4].1.len()));
+        assert_eq!(
+            join_spans(&spans),
+            "First $x$.\nNext $y$.\nOrdinary paragraph."
+        );
+    }
+
+    #[test]
+    fn inline_fragments_preserve_unicode_partial_ranges_in_both_directions() {
+        let keys = [
+            inline_fragment_key("row:unicode", 0),
+            inline_fragment_key("row:unicode", 1),
+            inline_fragment_key("row:unicode", 2),
+        ];
+        let elements = [
+            (keys[0].as_str(), "前置 café "),
+            (keys[1].as_str(), "$α²$"),
+            (keys[2].as_str(), " naïve 終了"),
+        ];
+        let start = (0, "前置 ".len());
+        let end = (2, " naïve".len());
+        let spans = resolve_spans(&elements, start, end);
+        assert_eq!(join_spans(&spans), "café $α²$ naïve");
+        assert_eq!(resolve_spans(&elements, end, start), spans);
+    }
+
+    #[test]
+    fn inline_fragment_keys_are_unambiguous_and_reject_malformed_suffixes() {
+        let group = format!("row{INLINE_FRAGMENT_SUFFIX}3");
+        assert_eq!(
+            inline_fragment_group(&inline_fragment_key(&group, usize::MAX)),
+            Some(group.as_str())
+        );
+        assert_ne!(inline_fragment_key("row", 1), inline_fragment_key("row", 2));
+        for suffix in ["", "-1", "+1", "01", "1:extra", "184467440737095516160"] {
+            let key = format!("row{INLINE_FRAGMENT_SUFFIX}{suffix}");
+            assert_eq!(inline_fragment_group(&key), None);
+            let elements = [(key.as_str(), "first"), (key.as_str(), "second")];
+            let spans = resolve_spans(&elements, (0, 0), (1, 6));
+            assert_eq!(join_spans(&spans), "first\nsecond");
+        }
+    }
+
+    #[test]
+    fn ordinary_code_lines_keep_newlines_and_unicode_partial_ranges() {
+        let elements = [
+            ("code:0", "let café = 1;"),
+            ("code:1", ""),
+            ("code:2", "print(café);"),
+        ];
+        let spans = resolve_spans(&elements, (0, 4), (2, "print(café)".len()));
+        assert_eq!(join_spans(&spans), "café = 1;\n\nprint(café)");
+    }
+
+    #[test]
+    fn invalidating_surface_cancels_only_its_active_or_settled_selection() {
+        let _state = test_state_lock();
+        for dragging in [true, false] {
+            for key in [
+                "md-preview-1|row:0".to_owned(),
+                inline_fragment_key("md-preview-1|row:1", 0),
+            ] {
+                begin(&key, 0);
+                update_spans(vec![Span {
+                    key: key.clone(),
+                    range: 0..5,
+                    text: "$x_i$".into(),
+                }]);
+                if !dragging {
+                    end_active_drag();
+                } else {
+                    assert!(
+                        !clear_if_owner(&key),
+                        "ordinary outside-click clearing must still preserve an active drag"
+                    );
+                }
+                assert!(!cancel_surface("md-preview-10|"));
+                assert_eq!(is_dragging(), dragging);
+                assert_eq!(selected_text().as_deref(), Some("$x_i$"));
+                assert!(cancel_surface("md-preview-1|"));
+                assert!(!is_dragging());
+                assert!(selected_text().is_none());
+                assert!(!cancel_surface("md-preview-1|"));
+            }
+        }
     }
 
     #[test]
@@ -482,6 +905,119 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_multi_click_extends_reverses_and_preserves_virtualized_fragments() {
+        let _state = test_state_lock();
+        let keys = [
+            inline_fragment_key("row:p", 0),
+            inline_fragment_key("row:p", 1),
+            inline_fragment_key("row:p", 2),
+        ];
+        let elements = [
+            ("previous", "Previous"),
+            (keys[0].as_str(), "Before "),
+            (keys[1].as_str(), "$x$"),
+            (keys[2].as_str(), " after."),
+            ("next", "Next"),
+        ];
+        assert!(begin_paragraph(&keys[1], &elements));
+        assert_eq!(selected_text().as_deref(), Some("Before $x$ after."));
+        for head in [(1, 0), (2, 1), (3, 7)] {
+            assert!(!update_drag(&elements, head));
+        }
+        assert!(update_drag(&elements, (4, 4)));
+        assert_eq!(selected_text().as_deref(), Some("Before $x$ after.\nNext"));
+        assert!(update_drag(&elements, (0, 0)));
+        assert_eq!(
+            selected_text().as_deref(),
+            Some("Previous\nBefore $x$ after.")
+        );
+        assert!(update_drag(&elements, (2, 1)));
+        assert_eq!(selected_text().as_deref(), Some("Before $x$ after."));
+        // Only the end of the original paragraph remains painted. Entering it
+        // keeps the full initial selection, including the off-screen prefix.
+        let shifted = [elements[3], elements[4], ("last", "Last")];
+        assert!(!update_drag(&shifted, (0, 2)));
+        assert!(update_drag(&shifted, (2, 4)));
+        assert_eq!(
+            selected_text().as_deref(),
+            Some("Before $x$ after.\nNext\nLast")
+        );
+        assert_eq!(
+            end_drag(&keys[1]).as_deref(),
+            Some("Before $x$ after.\nNext\nLast")
+        );
+        assert!(clear_if_owner(&keys[1]));
+    }
+
+    #[test]
+    fn paragraph_multi_click_keeps_ordinary_elements_and_group_boundaries_separate() {
+        let _state = test_state_lock();
+        let first = inline_fragment_key("first", 0);
+        let second = inline_fragment_key("second", 0);
+        let elements = [
+            (first.as_str(), "$x$"),
+            (second.as_str(), "$y$"),
+            ("code", "line"),
+        ];
+        for (key, expected) in elements {
+            assert!(begin_paragraph(key, &elements));
+            assert_eq!(end_drag(key).as_deref(), Some(expected));
+            assert!(clear_if_owner(key));
+        }
+        assert!(!begin_paragraph("missing", &elements));
+        assert_eq!(selected_text(), None);
+    }
+
+    #[test]
+    fn word_multi_click_crosses_styles_but_not_equations_or_paragraphs() {
+        let _state = test_state_lock();
+        let keys: Vec<_> = (0..6)
+            .map(|index| inline_fragment_key("p", index))
+            .collect();
+        let other = inline_fragment_key("next", 0);
+        let elements = [
+            (keys[0].as_str(), "na"),
+            (keys[1].as_str(), "ïve "),
+            (keys[2].as_str(), "$x$"),
+            (keys[3].as_str(), "co"),
+            (keys[4].as_str(), "ordi"),
+            (keys[5].as_str(), "nate"),
+            (other.as_str(), "next"),
+        ];
+        for (index, expected) in [
+            (0, "naïve"),
+            (1, "naïve"),
+            (3, "coordinate"),
+            (4, "coordinate"),
+            (5, "coordinate"),
+            (6, "next"),
+        ] {
+            let key = elements[index].0;
+            assert!(begin_word(key, 1, &elements));
+            assert_eq!(selected_text().as_deref(), Some(expected));
+            assert!(!update_drag(&elements, (index, 1)));
+            assert_eq!(end_drag(key).as_deref(), Some(expected));
+            assert!(clear_if_owner(key));
+        }
+    }
+
+    #[test]
+    fn word_multi_click_boundary_keeps_clicked_fragment_ownership() {
+        let _state = test_state_lock();
+        let keys = [inline_fragment_key("p", 0), inline_fragment_key("p", 1)];
+        let elements = [(keys[0].as_str(), "word"), (keys[1].as_str(), " ")];
+        assert!(begin_word(&keys[1], 0, &elements));
+        assert_eq!(drag_anchor(&keys[1]), Some(0));
+        assert_eq!(selected_text().as_deref(), Some("word"));
+        assert!(!update_drag(&elements, (1, 0)));
+        assert_eq!(end_drag(&keys[1]).as_deref(), Some("word"));
+        assert!(clear_if_owner(&keys[1]));
+        assert!(begin_word(&keys[1], 1, &elements));
+        assert_eq!(end_drag(&keys[1]), None);
+        assert!(!begin_word("missing", 0, &elements));
+    }
+
+    #[test]
     fn ordinary_drag_can_still_contract_to_an_empty_selection() {
         let _state = test_state_lock();
         begin("p1", 6);
@@ -489,6 +1025,68 @@ mod tests {
         assert_eq!(selected_text().as_deref(), Some("paragraph"));
         assert!(update_drag(&elems(), (0, 6)));
         assert_eq!(end_drag("p1"), None);
+    }
+
+    #[test]
+    fn word_ranges_preserve_grapheme_boundaries_for_mixed_text_and_arbitrary_offsets() {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let pieces = ["", "a", "_", " ", "é", "e\u{301}", "👩‍💻", "👍🏽", "."];
+        for left in pieces {
+            for middle in pieces {
+                for right in pieces {
+                    let text = format!("{left}{middle}{right}");
+                    let boundaries = text
+                        .grapheme_indices(true)
+                        .map(|(ix, _)| ix)
+                        .chain(std::iter::once(text.len()))
+                        .collect::<Vec<_>>();
+                    for ix in (0..=text.len() + 3).chain(std::iter::once(usize::MAX)) {
+                        let range = word_range(&text, ix);
+                        assert!(
+                            range.start <= range.end && range.end <= text.len(),
+                            "{text:?}: {ix} -> {range:?}"
+                        );
+                        assert!(
+                            text.get(range.clone()).is_some(),
+                            "range must be UTF-8 safe"
+                        );
+                        assert!(
+                            boundaries.contains(&range.start) && boundaries.contains(&range.end),
+                            "selection split a grapheme in {text:?}: {ix} -> {range:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn word_ranges_keep_decomposed_letters_and_marks_together() {
+        for word in ["cafe\u{301}", "nai\u{308}ve", "foo_e\u{301}_bar"] {
+            let text = format!("[{word}]");
+            for ix in 1..1 + word.len() {
+                assert_eq!(
+                    &text[word_range(&text, ix)],
+                    word,
+                    "word={word:?}, byte={ix}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn word_ranges_select_complete_emoji_graphemes() {
+        for emoji in ["👩‍💻", "👍🏽", "🇸🇬", "✈️"] {
+            let text = format!(" {emoji} ");
+            for ix in 1..1 + emoji.len() {
+                assert_eq!(
+                    &text[word_range(&text, ix)],
+                    emoji,
+                    "emoji={emoji:?}, byte={ix}"
+                );
+            }
+        }
     }
 
     #[test]

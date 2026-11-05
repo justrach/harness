@@ -97,7 +97,20 @@ fn closing_a_canvas_tab_cannot_reuse_its_old_drop_target_at_the_same_index(
                     shell
                         .state
                         .update(cx, |state, cx| state.select_chat(None, cx));
-                    shell.chat_tabs = vec![ChatTab::default(), ChatTab::default()];
+                    let first = uuid::Uuid::new_v4();
+                    let replacement = uuid::Uuid::new_v4();
+                    shell.chat_tab = 0;
+                    shell.chat_tab_id = first;
+                    shell.chat_tabs = vec![
+                        ChatTab {
+                            id: first.to_string(),
+                            ..Default::default()
+                        },
+                        ChatTab {
+                            id: replacement.to_string(),
+                            ..Default::default()
+                        },
+                    ];
                     shell.sync_chat_panes(cx);
                 });
             });
@@ -109,7 +122,8 @@ fn closing_a_canvas_tab_cannot_reuse_its_old_drop_target_at_the_same_index(
             assert_no_new_attachment(&shell, cx);
             shell.read_with(cx, |shell, _| {
                 assert_eq!(shell.chat_tab, 0);
-                assert!(shell.chat_tabs.is_empty());
+                assert_eq!(shell.chat_tabs.len(), 1, "the other session remains open");
+                assert_eq!(shell.chat_tabs[0].id, shell.chat_tab_id.to_string());
             });
         },
     );

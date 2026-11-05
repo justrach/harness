@@ -19,9 +19,10 @@ use crate::theme::Theme;
 pub(crate) fn archive_on_close_copy(close: &str, close_only: &str) -> String {
     format!(
         "Closing a session tab or pane with {close} or its \u{2715} button archives it if idle, \
-         unless it is still open in another tab or pane in this app. {close_only} always closes \
-         without archiving. Running sessions and sessions waiting for input remain in the \
-         sidebar. Closing the app or a window does not archive sessions."
+         unless it is still open in another tab or pane in this app. The first {close} asks \
+         you to choose this default. {close_only} always closes without archiving. Running \
+         sessions and sessions waiting for input remain in the sidebar. Closing the app \
+         or a window does not archive sessions."
     )
 }
 
@@ -284,7 +285,7 @@ impl Render for ArchivedPage {
                     .rounded(px(8.0))
                     .px(px(12.0))
                     .py(px(8.0))
-                    .hover(|s| s.bg(crate::theme::ink(0.03)))
+                    .hover(|s| s.bg(theme.element_hover))
                     .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                         if *hovered {
                             this.hovered = Some(ix);
@@ -520,59 +521,6 @@ impl Render for ArchivedPage {
                                     )
                                     .children(delete_all),
                             )
-                            .child(
-                                widgets::section_card(&theme).child(
-                                    widgets::card_row(&theme, true)
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(widgets::row_title(
-                                                    &theme,
-                                                    "Archive sessions when closing tabs or panes",
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .mt(px(4.0))
-                                                        .text_size(crate::typography::ui_rems(12.0))
-                                                        .text_color(theme.text_muted)
-                                                        .child(archive_on_close_copy(&close, &close_only)),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("archive-on-close-toggle")
-                                                .flex_none()
-                                                .size(px(40.0))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .role(gpui::Role::Switch)
-                                                .aria_label("Archive sessions when closing tabs or panes")
-                                                .aria_toggled(if archive_sessions_on_close {
-                                                    gpui::Toggled::True
-                                                } else {
-                                                    gpui::Toggled::False
-                                                })
-                                                .tab_index(0)
-                                                .focus_visible(move |style| style.border_2().border_color(accent))
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.toggle_archive_on_close(cx);
-                                                }))
-                                                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                                                    if !event.is_held && matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                                        cx.stop_propagation();
-                                                        this.toggle_archive_on_close(cx);
-                                                    }
-                                                }))
-                                                .child(widgets::toggle_switch(
-                                                    &theme,
-                                                    archive_sessions_on_close,
-                                                )),
-                                        ),
-                                ),
-                            )
                             .when_some(self.error.clone(), |el, message| {
                                 el.child(
                                     widgets::error_strip(&theme, message)
@@ -650,6 +598,10 @@ mod tests {
     fn archive_on_close_copy_names_what_the_toggle_covers() {
         let copy = archive_on_close_copy("⌘W", "⌥⌘W");
         assert!(copy.starts_with("Closing a session tab or pane with ⌘W or its \u{2715} button"));
+        assert!(
+            copy.contains("The first ⌘W asks you to choose this default"),
+            "{copy}"
+        );
         assert!(
             copy.contains("⌥⌘W always closes without archiving."),
             "{copy}"

@@ -16,16 +16,7 @@ final class PhoneSplitTests: XCTestCase {
         XCTAssertNil(PhoneSplit.arrangement(mode: .sideBySide, in: portrait), "too narrow for two panes")
         XCTAssertNil(PhoneSplit.arrangement(mode: .sideBySide, in: CGSize(width: 599, height: 400)))
         let wide = PhoneSplit.arrangement(mode: .sideBySide, in: landscape)
-        XCTAssertEqual(wide?.axis, .sideBySide)
         XCTAssertEqual(wide?.listExtent ?? 0, 874 * 0.38, accuracy: 0.001)
-    }
-
-    func testStackedNeedsHeightAndIsLeftAloneInLandscape() {
-        XCTAssertNil(PhoneSplit.arrangement(mode: .stacked, in: landscape), "too short for two panes")
-        XCTAssertNil(PhoneSplit.arrangement(mode: .stacked, in: CGSize(width: 393, height: 599)))
-        let tall = PhoneSplit.arrangement(mode: .stacked, in: portrait)
-        XCTAssertEqual(tall?.axis, .stacked)
-        XCTAssertEqual(tall?.listExtent ?? 0, 852 * 0.45, accuracy: 0.001)
     }
 
     func testThePaneNeverGetsTooSmallOrTooLarge() {
@@ -33,40 +24,50 @@ final class PhoneSplitTests: XCTestCase {
                        PhoneSplit.sideListRange.upperBound)
         XCTAssertEqual(PhoneSplit.arrangement(mode: .sideBySide, in: CGSize(width: 600, height: 400))?.listExtent,
                        PhoneSplit.sideListRange.lowerBound)
-        XCTAssertEqual(PhoneSplit.arrangement(mode: .stacked, in: CGSize(width: 400, height: 1600))?.listExtent,
-                       PhoneSplit.stackedListRange.upperBound)
-        // At the smallest window the stacked shape is allowed in, the pane is already comfortably above its floor.
-        XCTAssertEqual(PhoneSplit.arrangement(mode: .stacked, in: CGSize(width: 400, height: 600))?.listExtent ?? 0,
-                       270, accuracy: 0.001)
-        XCTAssertGreaterThanOrEqual(270, PhoneSplit.stackedListRange.lowerBound)
     }
 
-    func testAnUnknownStoredValueFallsBackToOff() {
-        XCTAssertEqual(PhoneSplit(rawValue: "sideBySide"), .sideBySide)
-        XCTAssertEqual(PhoneSplit(rawValue: "stacked"), .stacked)
-        XCTAssertNil(PhoneSplit(rawValue: "diagonal"))
-        XCTAssertEqual(PhoneSplit(rawValue: "diagonal") ?? .off, .off)
-        XCTAssertEqual(PhoneSplit.allCases.map(\.label), ["Off", "Auto", "Side by side", "Stacked"])
+    func testTheChoicesAreOffAutoAndSideBySide() {
+        XCTAssertEqual(PhoneSplit.allCases.map(\.label), ["Off", "Auto", "Side by side"])
     }
 
-    func testAutoSplitsSideBySideOnlyWhereThereIsRoomAndNeverStacks() {
+    /// Stacked was removed. Someone who had picked it asked for a split, so it becomes Auto, not Off.
+    func testAStoredStackedBecomesAutoAndAnUnknownValueOff() {
+        XCTAssertEqual(PhoneSplit.stored("stacked"), .auto)
+        XCTAssertEqual(PhoneSplit.stored("diagonal"), .off)
+        XCTAssertEqual(PhoneSplit.stored(""), .off)
+        for mode in PhoneSplit.allCases {
+            XCTAssertEqual(PhoneSplit.stored(mode.rawValue), mode, "\(mode) round-trips")
+        }
+    }
+
+    func testMigrationRewritesAStoredStackedAndDropsTheHandleKeys() {
+        let name = "phone-split-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set("stacked", forKey: PhoneSplit.storageKey)
+        defaults.set("on", forKey: "rollout.stackedSplitDrag")
+        defaults.set(true, forKey: "onboarding.stackedSplitDrag.seen")
+        defaults.set(3, forKey: "usage.stackedSplitDrag.on.folded")
+        defaults.set(7, forKey: "usage.other.on.folded")
+        PhoneSplit.migrateStored(defaults)
+        XCTAssertEqual(defaults.string(forKey: PhoneSplit.storageKey), "auto")
+        XCTAssertNil(defaults.object(forKey: "rollout.stackedSplitDrag"))
+        XCTAssertNil(defaults.object(forKey: "onboarding.stackedSplitDrag.seen"))
+        XCTAssertNil(defaults.object(forKey: "usage.stackedSplitDrag.on.folded"))
+        XCTAssertEqual(defaults.integer(forKey: "usage.other.on.folded"), 7, "other keys are left alone")
+
+        defaults.set("sideBySide", forKey: PhoneSplit.storageKey)
+        PhoneSplit.migrateStored(defaults)
+        XCTAssertEqual(defaults.string(forKey: PhoneSplit.storageKey), "sideBySide", "a current choice is kept")
+    }
+
+    func testAutoSplitsSideBySideOnlyWhereThereIsRoom() {
         XCTAssertNil(PhoneSplit.arrangement(mode: .auto, in: portrait), "no room: Auto leaves the single stack")
         XCTAssertNil(PhoneSplit.arrangement(mode: .auto, in: CGSize(width: 599, height: 900)))
         XCTAssertEqual(PhoneSplit.arrangement(mode: .auto, in: landscape),
                        PhoneSplit.arrangement(mode: .sideBySide, in: landscape))
-        XCTAssertEqual(PhoneSplit.arrangement(mode: .auto, in: landscape)?.axis, .sideBySide)
-        // A tall, wide window (an unfolded fold) is still side by side, never stacked.
-        XCTAssertEqual(PhoneSplit.arrangement(mode: .auto, in: CGSize(width: 700, height: 900))?.axis, .sideBySide)
-    }
-
-    func testTheStackedListYieldsToTheKeyboard() {
-        // No keyboard: the session already has more than its minimum, so the list keeps its extent.
-        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: 800), 393)
-        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: .infinity), 393)
-        // A ~336pt keyboard leaves ~478pt: the list shrinks so the session keeps 320pt for its composer.
-        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: 478), 158)
-        // Never negative, however little room is left.
-        XCTAssertEqual(PhoneSplit.stackedListHeight(extent: 393, available: 200), 0)
+        // A tall, wide window (an unfolded fold) is side by side too.
+        XCTAssertNotNil(PhoneSplit.arrangement(mode: .auto, in: CGSize(width: 700, height: 900)))
     }
 
     func testTheKeyboardDoesNotReshapeTheSplit() {
@@ -79,56 +80,5 @@ final class PhoneSplitTests: XCTestCase {
         // Rotating or unfolding changes the width: a new window, measured afresh.
         let landscape = CGSize(width: 874, height: 402)
         XCTAssertEqual(PhoneSplit.layoutSize(previous: portrait, measured: landscape), landscape)
-    }
-
-    func testDraggingTheStackedHandleMovesTheListWithinItsExtent() {
-        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 350, drag: -100, extent: 350), 250)
-        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 350, drag: -900, extent: 350), 0)
-        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 350, drag: 200, extent: 350), 350,
-                       "the list never grows past its open height")
-        XCTAssertEqual(PhoneSplit.draggedListHeight(resting: 0, drag: 120, extent: 350), 120,
-                       "a folded list comes back down with the finger")
-    }
-
-    func testEachRestHasItsListHeight() {
-        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .session, open: 350, full: 740), 0)
-        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .split, open: 350, full: 740), 350)
-        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .list, open: 350, full: 740), 740)
-        XCTAssertEqual(PhoneSplit.stackedListHeight(for: .list, open: 350, full: 200), 350,
-                       "the list's whole screen is never smaller than its split height")
-    }
-
-    func testAReleasedDragSettlesAtTheNearestRest() {
-        // From the split (350 of 740).
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: -250, open: 350, full: 740), .session)
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: -100, open: 350, full: 740), .split,
-                       "a short drag up snaps back")
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: 120, open: 350, full: 740), .split,
-                       "a short drag down snaps back")
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 350, predicted: 300, open: 350, full: 740), .list,
-                       "dragging down past halfway gives the list the screen")
-        // From the session's screen: down to the split, or a long flick all the way to the list.
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 0, predicted: 220, open: 350, full: 740), .split)
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 0, predicted: 60, open: 350, full: 740), .session)
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 0, predicted: 900, open: 350, full: 740), .list)
-        // From the list's screen: back up to the split.
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 740, predicted: -300, open: 350, full: 740), .split)
-        XCTAssertEqual(PhoneSplit.paneAfterDrag(resting: 740, predicted: -80, open: 350, full: 740), .list)
-    }
-
-    func testTypingGivesTheSessionTheScreenUntilTheKeyboardGoes() {
-        for rest in [PhoneSplit.StackedPane.session, .split, .list] {
-            XCTAssertEqual(PhoneSplit.shownPane(resting: rest, composerFocused: true), .session)
-            XCTAssertEqual(PhoneSplit.shownPane(resting: rest, composerFocused: false), rest)
-        }
-    }
-
-    /// With nothing open the detail is only a placeholder: folded it left the list out of reach, and at the
-    /// split's rest it left the lower half of the screen blank.
-    func testWithNothingOpenTheListHasTheScreen() {
-        for rest in [PhoneSplit.StackedPane.session, .split, .list] {
-            XCTAssertEqual(PhoneSplit.shownPane(resting: rest, composerFocused: false, hasDetail: false), .list)
-            XCTAssertEqual(PhoneSplit.shownPane(resting: rest, composerFocused: true, hasDetail: false), .list)
-        }
     }
 }

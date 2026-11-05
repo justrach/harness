@@ -54,6 +54,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         band_top: None,
         band_bottom: None,
         inset_top: 0.0,
+        inset_right: 0.0,
         outset_bottom: 0.0,
         top,
         bottom,
@@ -72,6 +73,7 @@ pub struct EdgeFaded {
     band_top: Option<f32>,
     band_bottom: Option<f32>,
     inset_top: f32,
+    inset_right: f32,
     outset_bottom: f32,
     top: bool,
     bottom: bool,
@@ -157,6 +159,13 @@ impl EdgeFaded {
         self
     }
 
+    /// Hide content beneath overlaid trailing controls without changing the
+    /// child's layout or scroll viewport, including at the end of scrolling.
+    pub fn inset_right(mut self, px: f32) -> Self {
+        self.inset_right = px.max(0.0);
+        self
+    }
+
     pub fn outset_bottom(mut self, px: f32) -> Self {
         self.outset_bottom = px;
         self
@@ -233,9 +242,11 @@ impl Element for EdgeFaded {
                 right &= scrolled < max_scroll - 1.0;
             }
         }
+        right |= self.inset_right > 0.0;
         let fade = (top || bottom || left || right).then(|| {
             let mut bounds = bounds;
-            bounds.size.width += px(outset_right);
+            bounds.size.width =
+                (bounds.size.width + px(outset_right - self.inset_right)).max(px(0.0));
             let inset = px(self.inset_top).min(bounds.size.height);
             bounds.origin.y += inset;
             bounds.size.height -= inset;

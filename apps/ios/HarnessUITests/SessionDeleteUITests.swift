@@ -8,8 +8,7 @@ final class SessionDeleteUITests: XCTestCase {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["-demo", "-sethomefilter", "", "-phoneSplit", "off",
-                               "-rollout.stackedSplitDrag", "off"] + extra
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-phoneSplit", "off"] + extra
         app.launch()
         return app
     }

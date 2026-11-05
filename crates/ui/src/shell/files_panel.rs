@@ -51,6 +51,28 @@ fn files_panel_layout(
 }
 
 impl Shell {
+    /// File requests use a real chat or canvas target. The workspace identity
+    /// remains the owner of tab placement and cached views, never an RPC id.
+    pub(super) fn files_engine_owner(&self, ui_owner: &str, cx: &App) -> String {
+        if let Some(owner) = &self.workspace_panels.resource_engine_owner {
+            return owner.clone();
+        }
+        if self.workspace_panels.resource_owner.as_deref() == Some(ui_owner) {
+            if let Some(files) = self.files.get(ui_owner) {
+                return files.read(cx).session_owner().to_owned();
+            }
+            if let Some((files, _, _)) = self
+                .workspace_panels
+                .explorers
+                .values()
+                .find(|(_, _, owner)| owner == ui_owner)
+            {
+                return files.read(cx).session_owner().to_owned();
+            }
+        }
+        self.state.read(cx).panel_session_key()
+    }
+
     pub(super) fn files_panel_open(&self, cx: &App) -> bool {
         matches!(self.route, Route::Chat)
             && !self.active_chat.is_empty()
@@ -120,7 +142,7 @@ impl Shell {
         cx: &App,
     ) -> bool {
         matches!(self.route, Route::Chat)
-            && self.panel_key(cx) == owner
+            && (self.panel_key(cx) == owner || self.workspace_contains_owner(owner, cx))
             && source.read(cx).is_current_target(cx)
     }
 
@@ -134,11 +156,22 @@ impl Shell {
             .iter()
             .map(|chat| chat.id.as_str())
             .collect::<std::collections::HashSet<_>>();
-        for key in self.files.keys().filter(|key| !live.contains(key.as_str())) {
+        let workspace_owners: std::collections::HashSet<_> = self
+            .chat_tabs
+            .iter()
+            .chain(self.closed_chat_tabs.iter().map(|closed| &closed.tab))
+            .filter(|tab| !tab.id.is_empty())
+            .map(|tab| format!("workspace:{}", tab.id))
+            .collect();
+        let retained = |key: &str| {
+            key.starts_with("space-canvas:") || live.contains(key) || workspace_owners.contains(key)
+                || self.workspace_panels.layouts.values().any(|layout| layout.panels.iter().any(|panel| panel.tabs.iter().any(|tab| matches!(tab, workspace_panels::PanelTab::Files(owner) if owner == key))))
+        };
+        for key in self.files.keys().filter(|key| !retained(key)) {
             self.panels.update(key, |panels| panels.files_open = false);
         }
-        self.files.retain(|key, _| live.contains(key.as_str()));
-        self.files_subs.retain(|key, _| live.contains(key.as_str()));
+        self.files.retain(|key, _| retained(key));
+        self.files_subs.retain(|key, _| retained(key));
     }
 
     pub(super) fn sync_explorer_selection(&mut self, cx: &mut Context<Self>) {
@@ -154,15 +187,13 @@ impl Shell {
     }
 
     pub(super) fn add_files_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() {
-            return;
-        }
         let key = self.panel_key(cx);
         if !self.files.contains_key(&key) {
+            let engine_owner = self.files_engine_owner(&key, cx);
             let files = cx.new(|cx| {
                 FilesSurface::new_explorer(
                     self.state.clone(),
-                    self.active_chat.clone(),
+                    engine_owner,
                     self.settings.files_show_all,
                     cx,
                 )
@@ -172,10 +203,28 @@ impl Shell {
                 &files,
                 window,
                 move |this: &mut Self, source, event, window, cx| match event {
-                    FilesEvent::OpenFile(path)
+                    FilesEvent::OpenFile(path) | FilesEvent::OpenFileAtAnchor { path, .. }
                         if this.accepts_file_navigation(&owner, &source, cx) =>
                     {
-                        this.add_file_surface(path.clone(), window, cx);
+                        let previous_owner =
+                            this.workspace_panels.resource_owner.replace(owner.clone());
+                        let engine_owner = source.read(cx).session_owner().to_owned();
+                        let previous_engine = this
+                            .workspace_panels
+                            .resource_engine_owner
+                            .replace(engine_owner);
+                        if let FilesEvent::OpenFileAtAnchor { anchor, .. } = event {
+                            this.add_file_surface_at_anchor(
+                                path.clone(),
+                                anchor.clone(),
+                                window,
+                                cx,
+                            );
+                        } else {
+                            this.add_file_surface(path.clone(), window, cx);
+                        }
+                        this.workspace_panels.resource_owner = previous_owner;
+                        this.workspace_panels.resource_engine_owner = previous_engine;
                     }
                     FilesEvent::OpenWebLink(activation) => {
                         if let crate::markdown::render::LinkOutcome::External(url) =
@@ -184,6 +233,7 @@ impl Shell {
                             cx.open_url(&url);
                         }
                     }
+                    FilesEvent::AddProject => this.open_files_project(&source, cx),
                     FilesEvent::ShowAllFilesChanged(show_all) => {
                         this.set_files_show_all(*show_all, cx)
                     }
@@ -228,6 +278,9 @@ impl Shell {
     /// The explorer's own toggle. Opening docks the explorer into the right
     /// pane — opening the pane with just that portion when it was closed.
     pub(super) fn toggle_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.toggle_workspace_tool(workspace_panels::WorkspaceTool::Files, window, cx) {
+            return;
+        }
         if !self.files_panel_open(cx) {
             self.add_files_surface(window, cx);
             return;
@@ -343,6 +396,112 @@ mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
 
+    #[gpui::test]
+    fn files_choose_project_preserves_chat_and_session(cx: &mut TestAppContext) {
+        let (_dir, window) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        window.update(cx, |shell, window, cx| {
+            shell.boot_restored = true;
+            shell.ensure_workspace_sessions(cx);
+            let selected = shell.state.read(cx).selected_chat.clone();
+            let session = shell.chat_tabs[shell.chat_tab].id.clone();
+            shell.open_workspace_files(window, cx);
+            let files = shell.workspace_panels.explorers[&shell.workspace_panels.seq].0.clone();
+            let original = files.read(cx).session_owner().to_owned();
+            files.update(cx, |files, cx| files.choose_project("missing", cx));
+            assert_eq!(files.read(cx).session_owner(), original);
+            files.update(cx, |files, cx| files.choose_project("b", cx));
+            assert_eq!(files.read(cx).session_owner(), "space-canvas:b");
+            assert!(files.read(cx).is_current_target(cx));
+            let target = crate::files::client::FilesRequestContext::for_chat(shell.state.read(cx), files.read(cx).session_owner()).unwrap();
+            assert_eq!(target.target.space_id.as_deref(), Some("b"));
+            assert_eq!(target.target.chat_id, None);
+            assert_eq!(shell.state.read(cx).selected_chat, selected);
+            assert_eq!(shell.chat_tabs[shell.chat_tab].id, session);
+            shell.open_files_project(&files, cx);
+            assert!(shell.add_space.is_some());
+            shell.add_space = None; // Cancel leaves the current target intact.
+            assert_eq!(files.read(cx).session_owner(), "space-canvas:b");
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn workspace_session_file_views_keep_engine_targets_separate_from_cache_owners(
+        cx: &mut TestAppContext,
+    ) {
+        let (_dir, window) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.boot_restored = true;
+                shell.ensure_workspace_sessions(cx);
+                shell.state.update(cx, |state, _| {
+                    state.chats_synced = true;
+                    state
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.id == "current")
+                        .unwrap()
+                        .cwd = Some("/fixtures/a/worktree".into());
+                });
+                let first_session = shell.chat_tabs[shell.chat_tab].id.clone();
+                let first_owner = shell.panel_key(cx);
+                assert!(first_owner.starts_with("workspace:"));
+                shell.add_files_surface(window, cx);
+                let first_explorer = shell.files[&first_owner].clone();
+                assert_eq!(first_explorer.read(cx).session_owner(), "current");
+                assert!(first_explorer.read(cx).is_current_target(cx));
+                shell.add_file_surface("README.md".into(), window, cx);
+                let first_editor_id = shell.file_surface_keys
+                    [&(first_owner.clone(), "current".into(), "README.md".into())];
+                let first_editor = shell.file_surfaces[&first_editor_id].clone();
+                assert_eq!(first_editor.read(cx).session_owner(), "current");
+                let first_context = crate::files::client::FilesRequestContext::for_chat(
+                    shell.state.read(cx),
+                    first_editor.read(cx).session_owner(),
+                )
+                .unwrap();
+                assert_eq!(first_context.target.chat_id.as_deref(), Some("current"));
+                assert_eq!(first_context.cwd, "/fixtures/a/worktree");
+
+                shell.create_workspace_session(cx);
+                let second_owner = shell.panel_key(cx);
+                assert_ne!(first_owner, second_owner);
+                shell.add_files_surface(window, cx);
+                let second_explorer = shell.files[&second_owner].clone();
+                assert_eq!(second_explorer.read(cx).session_owner(), "space-canvas:a");
+                assert!(second_explorer.read(cx).is_current_target(cx));
+                shell.add_file_surface("README.md".into(), window, cx);
+                let second_editor_id = shell.file_surface_keys[&(
+                    second_owner.clone(),
+                    "space-canvas:a".into(),
+                    "README.md".into(),
+                )];
+                assert_ne!(first_editor_id, second_editor_id);
+                let second_editor = shell.file_surfaces[&second_editor_id].read(cx);
+                let second_context = crate::files::client::FilesRequestContext::for_chat(
+                    shell.state.read(cx),
+                    second_editor.session_owner(),
+                )
+                .unwrap();
+                assert_eq!(second_context.target.space_id.as_deref(), Some("a"));
+                assert_eq!(second_context.cwd, "/fixtures/a");
+                shell.open_workspace_files(window, cx);
+                let standalone = &shell.workspace_panels.explorers[&shell.workspace_panels.seq].0;
+                assert_eq!(standalone.read(cx).session_owner(), "space-canvas:a");
+                assert!(standalone.read(cx).is_current_target(cx));
+
+                shell.activate_workspace_session(&first_session, cx);
+                shell.prune_file_explorers(cx);
+                assert_eq!(shell.files[&first_owner], first_explorer);
+                assert_eq!(shell.files[&second_owner], second_explorer);
+                assert!(
+                    shell.file_surfaces[&first_editor_id]
+                        .read(cx)
+                        .is_current_target(cx)
+                );
+            })
+            .unwrap();
+    }
+
     #[test]
     fn files_layout_shrinks_the_tree_before_the_chat_or_editor() {
         let docked = files_panel_layout(1400.0, 256.0, 286.0, 286.0, true, false);
@@ -453,10 +612,8 @@ mod tests {
         window
             .update(cx, |shell, window, cx| {
                 shell.add_files_surface(window, cx);
-                assert!(
-                    shell.files.is_empty(),
-                    "the new-session canvas has no explorer"
-                );
+                assert_eq!(shell.files.len(), 1, "the draft canvas owns its explorer");
+                assert!(!shell.files_panel_open(cx));
                 shell.active_chat = "first".into();
                 shell.add_files_surface(window, cx);
                 let explorer = shell.files["first"].entity_id();
@@ -470,7 +627,43 @@ mod tests {
                 assert_eq!(shell.file_surfaces.len(), 1);
                 assert_eq!(shell.right_surface_rows(cx).len(), 1);
                 assert!(shell.right_pane_open(cx));
-                shell.toggle_files_panel(window, cx);
+                shell.add_file_surface_at_anchor(
+                    "notes/Cheatsheet.md".into(),
+                    "fractions".into(),
+                    window,
+                    cx,
+                );
+                let owner = shell.panel_key(cx);
+                let key = (
+                    owner.clone(),
+                    shell.files_engine_owner(&owner, cx),
+                    "notes/Cheatsheet.md".into(),
+                );
+                let id = shell.file_surface_keys[&key];
+                assert_eq!(
+                    shell.file_surfaces[&id]
+                        .read(cx)
+                        .test_pending_markdown_anchor(),
+                    Some(("notes/Cheatsheet.md".into(), "fractions".into()))
+                );
+                shell.add_file_surface_at_anchor(
+                    "notes/Cheatsheet.md".into(),
+                    "roots".into(),
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    shell.file_surface_keys[&key], id,
+                    "section links must reuse the document tab"
+                );
+                assert_eq!(
+                    shell.file_surfaces[&id]
+                        .read(cx)
+                        .test_pending_markdown_anchor(),
+                    Some(("notes/Cheatsheet.md".into(), "roots".into()))
+                );
+                shell.close_right_surface(RightSurface::File(id), window, cx);
+                shell.close_files_panel(cx);
                 assert!(!shell.files_panel_open(cx));
                 assert!(shell.right_pane_open(cx));
                 assert_eq!(shell.file_surfaces.len(), 1);
@@ -493,9 +686,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pane_toggle_drives_surfaces_only_and_last_tab_close_collapses_them(
-        cx: &mut TestAppContext,
-    ) {
+    fn pane_toggle_drives_surfaces_only_and_last_tab_close_collapses_them(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -521,6 +712,7 @@ mod tests {
         window
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "chat".into();
+                shell.viewport_width = 1400.0;
                 // Widths settle immediately so the assertions see end states.
                 shell.reduced_motion = true;
                 // A fresh pane toggle lands on the surface host alone.
@@ -531,8 +723,8 @@ mod tests {
                 assert!(!shell.right_pane_open(cx));
                 assert!(!shell.files_panel_open(cx));
 
-                // The explorer toggle opens the pane with only its portion.
-                shell.toggle_files_panel(window, cx);
+                // Opening the legacy explorer docks only its portion.
+                shell.add_files_surface(window, cx);
                 assert!(shell.files_panel_open(cx));
                 assert!(!shell.right_pane_open(cx));
                 assert!(shell.files_visible_width(cx) > 0.0);
@@ -559,9 +751,9 @@ mod tests {
                 assert!(shell.file_surfaces.is_empty());
                 assert!(!shell.right_pane_open(cx) && shell.files_panel_open(cx));
 
-                // Only the explorer toggle undocks it; with nothing else open
+                // Closing the legacy explorer undocks it; with nothing else open
                 // that closes the pane entirely.
-                shell.toggle_files_panel(window, cx);
+                shell.close_files_panel(cx);
                 assert!(!shell.right_pane_open(cx) && !shell.files_panel_open(cx));
                 assert_eq!(shell.files_reserved_width(cx), 0.0);
 

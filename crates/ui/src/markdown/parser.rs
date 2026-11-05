@@ -32,7 +32,16 @@ pub struct InlineStyle {
     /// A standalone content reference, never merged into adjacent references.
     pub content_reference: bool,
     pub image: Option<InlineImage>,
+    /// Retain the equation for typesetting; `InlineRun::text` is the plain-text
+    /// fallback for non-visual consumers, not the renderer's layout input.
+    pub math: Option<InlineMath>,
     pub task: Option<TaskMarker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineMath {
+    pub source: String,
+    pub display: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -460,9 +469,16 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
         }
         Event::SoftBreak => push(runs, " ".into(), style.clone()),
         Event::HardBreak => push(runs, "\n".into(), style.clone()),
-        // Formulas (`super::math`) read as Unicode; display math takes a
-        // line of its own, wherever in the paragraph the model put it.
-        Event::InlineMath(t) => push(runs, super::math::to_unicode(&t), style.clone()),
+        // Keep the original structure for the visual typesetter. Plain-text
+        // consumers retain the existing readable fallback.
+        Event::InlineMath(t) => {
+            let mut style = style.clone();
+            style.math = Some(InlineMath {
+                source: t.to_string(),
+                display: false,
+            });
+            push(runs, super::math::to_unicode(&t), style);
+        }
         Event::DisplayMath(t) => {
             if let Some(last) = runs.last_mut() {
                 let kept = last.text.trim_end_matches(' ').len();
@@ -476,7 +492,12 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
             };
             text.push_str(&super::math::to_unicode(&t));
             text.push('\n');
-            push(runs, text, style.clone());
+            let mut style = style.clone();
+            style.math = Some(InlineMath {
+                source: t.to_string(),
+                display: true,
+            });
+            push(runs, text, style);
         }
         Event::Html(t) | Event::InlineHtml(t) => {
             if let Some(reference) = super::content_reference::file_reference(&t) {
@@ -551,13 +572,21 @@ fn parse_inline_event(cur: &mut Cursor, runs: &mut Vec<InlineRun>, style: &Inlin
 
 /// Promote bare `http(s)://` URLs into link runs — GFM's autolink extension,
 /// which pulldown-cmark has no option for (agents paste naked PR/issue URLs
-/// constantly; user report: the link isn't clickable). Runs already inside a
-/// link or code span pass through untouched. Idempotent, so nested containers
-/// re-applying it on their merged output is harmless.
+/// constantly; user report: the link isn't clickable). Existing links pass
+/// through untouched. Code spans link only when the entire literal text is a
+/// safe web URL, preserving code styling and the exact destination. Idempotent,
+/// so nested containers re-applying it on their merged output is harmless.
 fn autolink_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
     let mut out = Vec::with_capacity(runs.len());
-    for run in runs {
-        if run.style.link.is_some() || run.style.code {
+    for mut run in runs {
+        if run.style.link.is_some() || run.style.math.is_some() {
+            out.push(run);
+        } else if run.style.code {
+            // Unlike prose, code has no sentence punctuation to trim. Do not
+            // turn URLs embedded in commands or snippets into partial links.
+            if crate::browser::model::transcript_address(&run.text).is_ok() {
+                run.style.link = Some(run.text.clone());
+            }
             out.push(run);
         } else {
             push_text_autolinked(&mut out, &run.text, &run.style);
@@ -675,6 +704,7 @@ fn merge_runs(runs: Vec<InlineRun>) -> Vec<InlineRun> {
             Some(last)
                 if last.style == run.style
                     && run.style.image.is_none()
+                    && run.style.math.is_none()
                     && !run.style.content_reference =>
             {
                 last.text.push_str(&run.text)
@@ -980,6 +1010,204 @@ mod tests {
         p
     }
 
+    #[test]
+    fn math_layout_preserves_equation_source() {
+        let tree = parse_full(r"\[\frac{1}{n}\sum_{i=1}^{n}x_i\]");
+        // The renderer cannot build fractions or operator limits after the
+        // parser has irreversibly flattened the equation into Unicode text.
+        assert!(format!("{tree:?}").contains(r"\\frac{1}{n}"));
+    }
+
+    #[test]
+    fn math_layout_nodes_keep_styles_and_literal_code() {
+        let source = r"**$\frac{a}{b}$** $x$ $x$ and `$x$`";
+        let tree = parse_full(source);
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        let math: Vec<_> = runs.iter().filter(|run| run.style.math.is_some()).collect();
+        assert_eq!(math.len(), 3, "adjacent equal formulas must not merge");
+        assert!(math[0].style.bold);
+        assert_eq!(math[0].style.math.as_ref().unwrap().source, r"\frac{a}{b}");
+        assert!(
+            math.iter()
+                .all(|run| !run.style.math.as_ref().unwrap().display)
+        );
+        assert!(
+            runs.iter()
+                .any(|run| run.style.code && run.style.math.is_none() && run.text == "$x$")
+        );
+        for chunk in [1, 3, 7] {
+            assert_eq!(stream(chunk, source).tree(), &tree);
+        }
+    }
+
+    fn math_runs(tree: &BlockTree) -> Vec<&InlineRun> {
+        fn collect<'a>(block: &'a Block, out: &mut Vec<&'a InlineRun>) {
+            match block {
+                Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+                    out.extend(runs.iter().filter(|run| run.style.math.is_some()));
+                }
+                Block::BlockQuote { children } => {
+                    for block in children {
+                        collect(block, out);
+                    }
+                }
+                Block::List { items, .. } => {
+                    for block in items.iter().flatten() {
+                        collect(block, out);
+                    }
+                }
+                Block::Table { header, rows, .. } => {
+                    for cell in header.iter().chain(rows.iter().flatten()) {
+                        out.extend(cell.iter().filter(|run| run.style.math.is_some()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for top in &tree.blocks {
+            collect(&top.block, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn math_layout_nested_markdown_retains_sources_modes_and_styles() {
+        let source = concat!(
+            "# **$x_1$**\n\n",
+            "- *\\(y_2\\)*\n",
+            "  - ~~$z^3$~~\n\n",
+            "> **\\[\\frac{a}{b}\\]**\n\n",
+            "| *$α_1$* | $$x^2$$ |\n|---|---|\n",
+            "| $x$ $x$ | \\(β+γ\\) |\n",
+        );
+        let tree = parse_full(source);
+        let runs = math_runs(&tree);
+        let equations: Vec<_> = runs
+            .iter()
+            .map(|run| {
+                let math = run.style.math.as_ref().unwrap();
+                (math.source.as_str(), math.display)
+            })
+            .collect();
+        assert_eq!(
+            equations,
+            [
+                ("x_1", false),
+                ("y_2", false),
+                ("z^3", false),
+                (r"\frac{a}{b}", true),
+                ("α_1", false),
+                ("x^2", true),
+                ("x", false),
+                ("x", false),
+                ("β+γ", false),
+            ]
+        );
+        assert!(runs[0].style.bold);
+        assert!(runs[1].style.italic);
+        assert!(runs[2].style.strikethrough);
+        assert!(runs[3].style.bold);
+        assert!(runs[4].style.italic);
+        assert!(runs.iter().all(|run| !run.style.code));
+        for run in runs {
+            let math = run.style.math.as_ref().unwrap();
+            assert_eq!(
+                run.text.trim_matches('\n'),
+                super::super::math::to_unicode(&math.source)
+            );
+        }
+    }
+
+    #[test]
+    fn math_layout_literal_regions_and_unclosed_delimiters_stay_nonmath() {
+        for source in [
+            r"`$x$` `\(x\)` `\[x\]` `$$x$$`",
+            "```latex\n$x$ \\(x\\) \\[x\\] $$x$$\n```\n",
+            "    $x$ \\(x\\) \\[x\\] $$x$$\n",
+            r"<span title='$x$ \(x\) \[x\] $$x$$'>literal</span>",
+            r"[literal](https://example.test/$x$)",
+            "$x",
+            r"\(x",
+            r"\[x",
+            "$$x",
+            r"\$x\$",
+            r"\\(x\\)",
+            r"\\[x\\]",
+            "$ x$",
+            "$x $",
+            "$$$x$$$",
+        ] {
+            assert!(math_runs(&parse_full(source)).is_empty(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn math_layout_malformed_tex_keeps_original_source_and_fallback() {
+        for (source, expected, display) in [
+            (r"$\frac{a}{$", r"\frac{a}{", false),
+            (r"\(\unknown{x}\)", r"\unknown{x}", false),
+            (r"\[x^{\]", r"x^{", true),
+            (r"$$\sqrt{$$", r"\sqrt{", true),
+        ] {
+            let tree = parse_full(source);
+            let runs = math_runs(&tree);
+            assert_eq!(runs.len(), 1, "{source:?}");
+            let math = runs[0].style.math.as_ref().unwrap();
+            assert_eq!(math.source, expected);
+            assert_eq!(math.display, display);
+            assert_eq!(
+                runs[0].text.trim_matches('\n'),
+                super::super::math::to_unicode(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn math_layout_every_character_boundary_matches_fresh_canonical_and_display() {
+        // Small structural corpus, not another generated dollar-delimiter corpus.
+        for source in [
+            "# **$x_1$** 🦀\n\n- *\\(α+β\\)*\n  - ~~$y^2$~~\n\n> \\[\\frac{a}{b}\\]\n",
+            "| $x$ $x$ | **$$y^2$$** |\n|---|---|\n| \\(λ_1\\) | \\[z_2\\] |\n\nafter\n",
+            "é e\u{301} $α_1$ \\(β+γ\\) $$x^2$$ \\[y_2\\]\n\n`$x$`\n\n```tex\n\\[x\\]\n```\n",
+            "intro\n\n$\\frac{a}{$ and \\(\\unknown{x}\\)\n\n\\[x^{\\]\n\n$$\\sqrt{$$\n\n$unclosed",
+            "**before $x$ after** and *\\(y\\)* ~~$z$~~\n\n- [ ] $x$\n- [x] $$y$$\n",
+        ] {
+            let mut streamed = IncrementalParser::new();
+            for (at, ch) in source.char_indices() {
+                let end = at + ch.len_utf8();
+                streamed.append(&source[at..end]);
+                let prefix = &source[..end];
+                assert_eq!(streamed.source(), prefix);
+                assert_eq!(
+                    streamed.tree(),
+                    &parse_full(prefix),
+                    "canonical at {end}: {prefix:?}"
+                );
+                let mut fresh = IncrementalParser::new();
+                fresh.reset(prefix);
+                assert_eq!(
+                    streamed.display_tree(),
+                    fresh.display_tree(),
+                    "display at {end}: {prefix:?}"
+                );
+                for tree in [streamed.tree().clone(), streamed.display_tree()] {
+                    for run in math_runs(&tree) {
+                        let math = run.style.math.as_ref().unwrap();
+                        assert!(!run.style.code);
+                        assert_eq!(
+                            run.text.trim_matches('\n'),
+                            super::super::math::to_unicode(&math.source),
+                            "fallback at {end}: {prefix:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     const CORPORA: &[&str] = &[
         "# Title\n\nHello **bold** and *italic* and `code` and ~~gone~~.\n",
         "Paragraph one\nlazy continuation\n\nParagraph two with a [link](https://x.dev).\n",
@@ -1209,13 +1437,67 @@ mod tests {
         assert_eq!(link.style.link.as_deref(), Some("https://x.dev"));
     }
 
-    /// Non-links stay text: glued schemes, bare schemes, code spans, and the
+    #[test]
+    fn inline_code_web_urls_are_links_without_losing_code_style() {
+        for url in [
+            "http://127.0.0.1:3000/preview",
+            "https://example.com/path?q=yes#section",
+            "HTTPS://EXAMPLE.COM/path",
+            "https://example.com/path?",
+            "https://example.com/Foo_(bar)",
+        ] {
+            let source = format!("Try **`{url}`** now\n");
+            let tree = parse_full(&source);
+            let Block::Paragraph { runs } = &tree.blocks[0].block else {
+                panic!("paragraph")
+            };
+            let code = runs.iter().find(|r| r.style.code).unwrap();
+            assert_eq!(code.text, url);
+            assert_eq!(code.style.link.as_deref(), Some(url), "{url}");
+            assert!(code.style.bold);
+            for chunk in [1, 3, 11] {
+                assert_eq!(stream(chunk, &source).tree(), &tree);
+            }
+        }
+    }
+
+    #[test]
+    fn inline_code_autolinks_only_complete_safe_web_urls() {
+        for text in [
+            "curl https://example.com",
+            "https://example.com and https://example.org",
+            "https://",
+            "https:///path",
+            "https://example.com/%GG",
+            "https://user:pass@example.com",
+            "https://example.com\\path",
+            "https://example.com/\u{0007}",
+            "javascript:alert(1)",
+            "file:///tmp/example.txt",
+            "example.com",
+        ] {
+            let source = format!("`{text}`\n");
+            assert_eq!(only_link(&source), None, "{text}");
+        }
+        // An explicit destination wins even when its label is a code URL.
+        assert_eq!(
+            only_link("[`https://shown.dev`](https://real.dev)\n"),
+            Some(("https://shown.dev".into(), "https://real.dev".into()))
+        );
+        let tree = parse_full("```text\nhttps://example.com\n```\n");
+        assert!(
+            matches!(&tree.blocks[0].block, Block::CodeBlock { code, .. }
+            if code == "https://example.com")
+        );
+    }
+
+    /// Non-links stay text: glued schemes, bare schemes, code commands, and the
     /// destination text of a real markdown link.
     #[test]
     fn autolink_leaves_non_urls_alone() {
         assert_eq!(only_link("foohttps://x.dev is glued\n"), None);
         assert_eq!(only_link("the https:// scheme alone\n"), None);
-        assert_eq!(only_link("`https://x.dev` in code\n"), None);
+        assert_eq!(only_link("`curl https://x.dev` in code\n"), None);
         // A markdown link whose TEXT is a URL keeps the written destination.
         assert_eq!(
             only_link("[https://shown.dev](https://real.dev)\n"),

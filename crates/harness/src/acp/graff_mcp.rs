@@ -31,6 +31,7 @@ pub async fn mcp_command(
     }
     let (program, _) = super::AcpHarness::graff().resolve_program(false).await?;
     let mut cmd = Command::new(&program);
+    crate::apply_run_environment(&mut cmd, None);
     crate::compose_child_path(&mut cmd, &program);
     cmd.arg("mcp").arg(verb);
     if verb == "reconnect" && names.is_empty() {

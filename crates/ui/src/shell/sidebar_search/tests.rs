@@ -103,7 +103,7 @@ impl Render for SearchSidebar {
                         div()
                             .flex_1()
                             .min_h_0()
-                            .child(shell.render_chat_sidebar(&theme, cx)),
+                            .child(shell.render_chat_sidebar(&theme, window, cx)),
                     )
                 })
                 .when(show_conversation, |el| el.child(shell.composer.clone()))
@@ -214,7 +214,6 @@ fn sidebar_search_native_controls_and_archived_open(cx: &mut gpui::TestAppContex
         cx.update(|_, cx| {
             shell.update(cx, |shell, cx| {
                 assert_eq!(shell.sidebar_search_ids(cx), ["active"]);
-                assert_eq!(shell.sidebar_visible_order(cx), ["active"]);
             })
         });
         let archived_toggle = cx.debug_bounds("sidebar-search-archived").unwrap();
@@ -240,8 +239,8 @@ fn sidebar_search_native_controls_and_archived_open(cx: &mut gpui::TestAppContex
             );
             assert_eq!(
                 shell.chat_tabs.len(),
-                2,
-                "search must preserve the previous session tab"
+                1,
+                "a result opens inside its project's session"
             );
         });
         cx.update(|window, cx| {
@@ -279,3 +278,4 @@ fn sidebar_search_native_controls_and_archived_open(cx: &mut gpui::TestAppContex
 mod edge_cases;
 mod keyboard_edges;
 mod reported_regressions;
+mod shortcut;

@@ -82,6 +82,28 @@ fn helper_path() -> Result<std::path::PathBuf, String> {
         .map_err(|e| e.to_string())?;
     Ok(path)
 }
+/// Starts the offscreen WebKitGTK helper. Unit tests never start one: its
+/// reader thread ("browser-frames") delivers packets, and reports a helper
+/// that stopped, by waking the page's GPUI task from that OS thread. The app's
+/// dispatcher accepts a wake from any thread, but GPUI's test scheduler fails
+/// the test when one arrives, so a test that opened a page passed or failed on
+/// whether its helper exited (CI has no display) before the test ended. macOS
+/// tests have no native page either, since WKWebView needs the main thread.
+fn spawn_helper() -> Result<Child, String> {
+    if cfg!(test) {
+        return Err("The WebKit helper doesn't run in unit tests".into());
+    }
+    Command::new(helper_path()?)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Could not start WebKitGTK: {e}. Install the WebKitGTK 4.1 runtime for your distribution."
+            )
+        })
+}
 impl BrowserData {
     fn worker(&self) -> Result<Arc<Worker>, String> {
         let mut current = self.0.lock().unwrap();
@@ -97,8 +119,7 @@ impl BrowserData {
                 return Ok(worker);
             }
         }
-        let mut child = Command::new(helper_path()?).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()
-            .map_err(|e| format!("Could not start WebKitGTK: {e}. Install the WebKitGTK 4.1 runtime for your distribution."))?;
+        let mut child = spawn_helper()?;
         let stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
         let routes: Arc<Mutex<HashMap<u32, Weak<Route>>>> = Arc::default();
@@ -242,6 +263,16 @@ impl NativePage {
     pub fn load_html(&self, html: &str) -> Result<(), String> {
         self.worker
             .send(self.id, json!({"cmd":"load-html","html":html}))
+    }
+    /// The helper page is independent of the host window. Only transient
+    /// pointer/menu state belongs to the previous window.
+    pub fn move_to_window(&mut self) {
+        self.pressed.set(None);
+        self.preedit.clear();
+        if self.menu.take().is_some() {
+            self.command(json!({"cmd":"dismiss-menu"}));
+        }
+        self.geometry = None;
     }
     pub fn load(&self, url: &str) -> Result<(), String> {
         self.worker.send(self.id, json!({"cmd":"load","url":url}))

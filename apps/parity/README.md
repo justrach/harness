@@ -10,13 +10,15 @@ each app runs its own test against the same files, so neither can drift without 
 | `vectors/home-grouping.json` | project and device sections, the Pinned section | `ParityTests.swift` | `ParityTest.kt` |
 | `ux-contract.json` | user-visible strings and the queue panel's layout numbers | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/agent-readiness.json` | when an agent counts as brought in (Graff, Claude Code, OpenAI Codex on an online computer), and the download link | `ParityTests.swift` | `ParityTest.kt` |
-| `vectors/run-errors.json` | which run errors read as signed out or limit reached, and their labels (the desktop checks it too, in `harness-proto`'s `run_errors`) | `ParityTests.swift` | not yet |
+| `vectors/run-errors.json` | which run errors read as signed out, limit reached or a rejected API key, and their labels and buttons (the desktop checks it too, in `harness-proto`'s `run_errors`, and so does the nano app, in `run_errors.zig`) | `ParityTests.swift` | not yet |
 | `vectors/registry-projection.json` | which registry rows become devices, projects, sessions and pins, with their defaults and order | `ParityTests.swift` (through `WorkspaceStore`) | `ParityTest.kt` (through the native core, `crates/mobile`) |
 | `vectors/transcript-decode.json` | how a session doc's messages, parts and queue rows decode, and which ones are dropped | `ParityTests.swift` (through `SessionStore`) | `ParityTest.kt` (through the native core) |
 | `vectors/cloud-sandbox.json` | how a cloud sandbox list reads: row titles, details and buttons, hourly rates, size choices, the running summary, and which size a create names (the desktop checks it too, in `harness-ui`'s `codegraff_sandboxes`; its gateway half, from sign-in and call plans to error sentences, runs in the engine, which the phone reaches through one of its computers) | `ParityTests.swift` | not yet |
 | `vectors/chat-mode.json` | chat mode's auto tiers (order, names, the older-gateway stand-in), when a chat can start, the model a new chat starts on, and the cost and unavailable notes (the desktop checks the same rules in `harness-ui`'s `chat_mode`) | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/composer-stop.json` | how long the composer ignores Stop after a question panel gives way to it (the desktop checks it too, in `harness-ui`'s `composer`) | `ParityTests.swift` | `ParityTest.kt` |
 | `vectors/composer-commands.json` | canonical command links, literal Markdown exclusions, UTF-16 token ranges and argument-preserving visible text (Rust checks the same vectors in `harness-proto`'s `invocation`) | `ComposerCommandTests.swift` | not yet |
+| `vectors/annotations.json` | the text an annotated image adds to the prompt: numbered boxes in image pixels, notes, text marks, and the annotated file name (the desktop sets the format and checks it in `harness-ui`'s `annotate`; the phones do not annotate yet) | not yet | not yet |
+| `vectors/localhost-pages.json` | which addresses open on the phone as a page its computer renders, and the address that computer's browser opens (the engine checks it too, in `harness-engine`'s `localhost_view::url_rule`) | `ParityTests.swift` | not yet |
 | `perf-contract.json` | the operations the performance monitor times, their budgets, and the Performance page copy | `ParityTests.swift` | `ParityTest.kt` |
 | `apps/ios/Harness/Theme/themes.json` | the theme catalog (Android bundles a copy) | `ThemeStoreTests.swift` | `ThemeCatalogTest.kt` |
 
@@ -47,3 +49,7 @@ Android's drafts survive navigation but not the process being killed, while iOS 
 The Attachments editor on a queued message (add, preview, replace and remove its images; #187, #493) is iOS-only
 for now. Its copy goes into `ux-contract.json` when the Compose app gets the editor, since the string check would
 otherwise fail the Android build.
+
+The Write page (the composer's draft on a full-height sheet, with markdown styled as it is typed) is iOS-only for
+now too. Its copy ("Write in full screen", "Done", "Send", "N words") goes into `ux-contract.json` with the Compose
+port, for the same reason.

@@ -92,6 +92,15 @@ final class SlashCommandUITests: XCTestCase {
         XCTAssertTrue(app.alerts["Rename session"].waitForExistence(timeout: 5))
         app.alerts["Rename session"].buttons["Cancel"].tap()
         XCTAssertEqual(input.value as? String, "")
+        input.tap()
+        input.typeText("/harness:resume")
+        let resume = app.buttons["composer-command-harness:resume"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        resume.tap()
+        XCTAssertTrue(app.navigationBars["Sessions"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.searchFields["Search sessions"].exists)
+        app.buttons["Done"].tap()
+        XCTAssertEqual(input.value as? String, "")
     }
 
     func testGoalCanBeExplicitlySelectedInTheComposer() {

@@ -9,8 +9,9 @@ final class LinkTapUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
         app = XCUIApplication()
-        app.launchArguments = ["-demo", "-sethomefilter", "", "-route", "chat:chat-tabs", "-links"]
+        app.launchArguments = ["-demo", "-sethomefilter", "", "-route", "chat:chat-tabs", "-links", "-phoneSplit", "off"]
         app.launch()
         XCTAssertTrue(app.otherElements["transcript"].waitForExistence(timeout: 15))
     }
@@ -26,6 +27,33 @@ final class LinkTapUITests: XCTestCase {
         XCTAssertTrue(link.waitForExistence(timeout: 10), "markdown link is not a link:\n\(app.debugDescription)")
         link.tap()
         assertSheet(for: "http://127.0.0.1:3777/md")
+    }
+
+    func testHostLinkSheetFitsItsContent() {
+        let link = app.links["the preview"]
+        XCTAssertTrue(link.waitForExistence(timeout: 10))
+        link.tap()
+        assertSheet(for: "http://127.0.0.1:3777/md")
+        let copy = app.buttons["host-link-copy"]
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        // The computer's other servers load after the sheet opens and end it; demo mode lists two.
+        let last = app.buttons["host-server-8080"]
+        XCTAssertTrue(last.waitForExistence(timeout: 5))
+        // Wait for the sheet's presentation and measured-size update to settle.
+        let compact = NSPredicate { _, _ in
+            let bottomInset = self.app.frame.maxY - last.frame.maxY
+            return (20..<100).contains(bottomInset)
+        }
+        expectation(for: compact, evaluatedWith: last)
+        waitForExpectations(timeout: 5)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Host link sheet"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        copy.tap()
+        XCTAssertTrue(app.buttons["host-link-copy"].label.contains("Copied"))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(link.waitForExistence(timeout: 5))
     }
 
     func testBareURLInSettledReplyOpens() {

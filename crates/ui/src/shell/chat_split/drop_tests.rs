@@ -14,12 +14,12 @@ impl Render for DropPanes {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             let width = f32::from(window.viewport_size().width);
-            let main_width = width * shell.focused_chat_pane_share();
-            let main = shell.render_main(window, main_width, main_width, cx);
+            let main_width = shell.focused_chat_pane_width(width);
+            let main = shell.render_main(window, main_width, main_width, None, cx);
             div()
                 .size_full()
                 .flex()
-                .child(shell.render_chat_split(main, width, cx))
+                .child(shell.render_chat_split(main, cx))
         })
     }
 }
@@ -30,6 +30,14 @@ fn draw(cx: &mut gpui::VisualTestContext) {
         window.refresh();
         window.draw(cx).clear();
     });
+}
+
+fn zoom_legacy_panes(shell: &mut Shell, cx: &mut Context<Shell>) {
+    // This host paints legacy split panes; the public shortcut targets the
+    // workspace panels instead. Invalidate through the split's normal sync.
+    shell.chat_split.as_mut().unwrap().zoomed = true;
+    shell.sync_chat_panes(cx);
+    cx.notify();
 }
 
 fn file_event(cx: &mut gpui::VisualTestContext, event: FileDropEvent) {
@@ -484,7 +492,7 @@ fn zooming_during_a_drag_does_not_send_files_to_a_hidden_pane(cx: &mut gpui::Tes
         false,
         |shell, image, peer, _, cx| {
             enter(cx, peer, image);
-            cx.update(|_, cx| shell.update(cx, |shell, cx| shell.toggle_chat_pane_zoom(cx)));
+            cx.update(|_, cx| shell.update(cx, zoom_legacy_panes));
             draw(cx);
             file_event(cx, FileDropEvent::Submit { position: peer });
             shell.read_with(cx, |shell, cx| {

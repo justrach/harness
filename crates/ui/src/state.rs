@@ -501,8 +501,18 @@ impl EngineHandle {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_client(client: RpcClient) -> Self {
+    /// An engine over `client`'s channels: tests, and headless scenes whose
+    /// replies are made up (examples/ui-scenes.rs `replies`).
+    #[cfg(any(test, feature = "ui-scenes"))]
+    pub fn from_test_client(client: RpcClient) -> Self {
+        Self::from_test_client_with_capabilities(client, Vec::new())
+    }
+
+    #[cfg(any(test, feature = "ui-scenes"))]
+    pub(crate) fn from_test_client_with_capabilities(
+        client: RpcClient,
+        capabilities: Vec<String>,
+    ) -> Self {
         Self {
             inner: Arc::new(RemoteEngine {
                 client: Arc::new(client),
@@ -513,7 +523,7 @@ impl EngineHandle {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
-                capabilities: Vec::new(),
+                capabilities,
             },
             deferred_state: None,
         }
@@ -651,6 +661,7 @@ pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
 /// paint (the spinner already animates each frame), so no notify plumbing is
 /// needed. A slow upload renders as "Uploading… N%" instead of a
 /// hang-indistinguishable "Sending…" (2026-08-18 user report).
+#[derive(Clone)]
 pub struct UploadProgress {
     done: std::sync::Arc<std::sync::atomic::AtomicU64>,
     total: u64,
@@ -748,6 +759,8 @@ pub struct AppState {
     /// straight from its host. Live-only: never in the transcript's doc.
     pub tool_progress: Vec<harness_proto::ToolProgressItem>,
     pub context_usage: Option<harness_proto::ContextUsage>,
+    /// Each visited chat's context over this app session, by chat id.
+    pub context_trajectories: HashMap<String, crate::context_trajectory::Trajectory>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -786,6 +799,11 @@ pub struct AppState {
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
     engine: Option<EngineHandle>,
+    /// A secondary window follows runtime replacement without sharing selection.
+    window_runtime_observation: Option<gpui::Subscription>,
+    /// Always the original runtime owner, so closing an intermediate pop-out
+    /// neither loses replacement events nor retains a chain of closed views.
+    window_runtime_source: Option<Entity<AppState>>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
@@ -802,6 +820,9 @@ pub struct AppState {
     /// the engine LRU — closing a tab MUST go through
     /// [`Self::unwatch_subagent_doc`].
     sub_watch_tasks: HashMap<String, Task<()>>,
+    /// Only chat panes watch live progress; child docs never inherit a parent's wait.
+    peer_progress_tasks: HashMap<String, Task<()>>,
+    peer_tool_progress: HashMap<String, Vec<harness_proto::ToolProgressItem>>,
     // A peer and a child may read the same document. Single-flight watches
     // share work, not lifetime; each kind of consumer releases independently.
     sub_doc_consumers: HashSet<String>,
@@ -863,6 +884,7 @@ impl AppState {
             remote_pending: Vec::new(),
             tool_progress: Vec::new(),
             context_usage: None,
+            context_trajectories: HashMap::new(),
             transcript_replayed: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
@@ -878,6 +900,8 @@ impl AppState {
             update: None,
             data_dir: None,
             engine: None,
+            window_runtime_observation: None,
+            window_runtime_source: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
@@ -887,6 +911,8 @@ impl AppState {
             change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
+            peer_progress_tasks: HashMap::new(),
+            peer_tool_progress: HashMap::new(),
             sub_doc_consumers: HashSet::new(),
             peer_doc_consumers: HashSet::new(),
             cloud_sandboxes: Default::default(),
@@ -898,6 +924,213 @@ impl AppState {
             deep_link_notice: None,
             vanished_selection: None,
             pending_open_folder: None,
+        }
+    }
+
+    /// Make a separate window's view onto this runtime. The engine and catalog
+    /// are shared; selection, transcript watches and pending input stay local.
+    /// In particular this never probes, bootstraps or owns another engine.
+    pub(crate) fn for_window(source: &Entity<Self>, cx: &mut Context<Self>) -> Self {
+        let mut state = Self::new();
+        let runtime_source = source
+            .read(cx)
+            .window_runtime_source
+            .clone()
+            .unwrap_or_else(|| source.clone());
+        state.window_runtime_observation =
+            Some(cx.observe(&runtime_source, |state, source, cx| {
+                state.follow_window_runtime(&source, cx);
+            }));
+        state.window_runtime_source = Some(runtime_source);
+        let handle = {
+            let source = source.read(cx);
+            state.copy_window_catalog(source);
+            state.selected_space = source.selected_space.clone();
+            state.no_project = source.no_project;
+            state.selected_device = source.selected_device.clone();
+            source.engine.clone()
+        };
+        // The caller installs the detached tab, rather than boot restoration
+        // selecting a different conversation as the first watch frame arrives.
+        state.auto_selected = true;
+        if let Some(handle) = handle {
+            state.attach_engine(handle, cx);
+            let source = source.read(cx);
+            state.connection = source.connection.clone();
+            state.connectivity_observed = source.connectivity_observed;
+        }
+        state
+    }
+
+    /// App-wide lifecycle work belongs to the original runtime's owner.
+    pub(crate) fn is_window_fork(&self) -> bool {
+        self.window_runtime_observation.is_some()
+    }
+
+    pub(crate) fn runtime_owner(state: &Entity<Self>, cx: &App) -> Entity<Self> {
+        state
+            .read(cx)
+            .window_runtime_source
+            .clone()
+            .unwrap_or_else(|| state.clone())
+    }
+
+    /// Seed the destination before its first paint while opening its own feed.
+    /// Prepared rows remain shared Arcs, keeping the existing transcript view
+    /// reusable until the destination's independent watch catches up.
+    pub(crate) fn adopt_window_chat(
+        &mut self,
+        source: &Entity<Self>,
+        chat_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (snapshot, baseline, queue, pending, tools, echoes, send, comments, upload) = {
+            let source = source.read(cx);
+            let selected = source.selected_chat.as_deref() == Some(chat_id.as_str());
+            let cached = source
+                .transcript_cache
+                .iter()
+                .find(|cached| cached.chat_id == chat_id);
+            (
+                CachedTranscript {
+                    prepared: source
+                        .prepared_transcripts
+                        .get(&chat_id)
+                        .cloned()
+                        .or_else(|| cached.and_then(|cached| cached.prepared.clone())),
+                    chat_id: chat_id.clone(),
+                    entries: source.overview_transcript(&chat_id).to_vec(),
+                    context_usage: if selected {
+                        source.context_usage
+                    } else {
+                        cached.and_then(|cached| cached.context_usage)
+                    },
+                    bytes: 0,
+                },
+                source.transcript_baselines.get(&chat_id).cloned(),
+                if selected {
+                    source.queue.clone()
+                } else {
+                    Vec::new()
+                },
+                if selected {
+                    source.remote_pending.clone()
+                } else {
+                    Vec::new()
+                },
+                if selected {
+                    source.tool_progress.clone()
+                } else {
+                    Vec::new()
+                },
+                source.echoes.get(&chat_id).cloned(),
+                source.pending_sends.get(&chat_id).cloned(),
+                source.review_comments.get(&chat_id).cloned(),
+                selected.then(|| source.upload_progress.clone()).flatten(),
+            )
+        };
+        self.select_chat(Some(chat_id.clone()), cx);
+        self.transcript = snapshot.entries;
+        self.context_usage = snapshot.context_usage;
+        self.transcript_replayed = source.read(cx).selected_chat.as_deref()
+            != Some(chat_id.as_str())
+            || source.read(cx).transcript_replayed;
+        self.queue = queue;
+        self.remote_pending = pending;
+        self.tool_progress = tools;
+        self.upload_progress = upload;
+        if let Some(prepared) = snapshot.prepared {
+            self.prepared_transcripts.insert(chat_id.clone(), prepared);
+        }
+        if let Some(baseline) = baseline {
+            self.transcript_baselines.insert(chat_id.clone(), baseline);
+        }
+        if let Some(echoes) = echoes {
+            self.echoes.insert(chat_id.clone(), echoes);
+        }
+        if let Some(send) = send {
+            self.pending_sends.insert(chat_id.clone(), send);
+        }
+        if let Some(comments) = comments {
+            self.review_comments.insert(chat_id, comments);
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// Preserve a pinned live/frozen document and retain its original watch role.
+    pub(crate) fn adopt_window_doc(
+        &mut self,
+        source: &Entity<Self>,
+        doc_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (entries, prepared, baseline, live) = {
+            let source = source.read(cx);
+            (
+                source.overview_transcript(&doc_id).to_vec(),
+                source.prepared_transcripts.get(&doc_id).cloned(),
+                source.transcript_baselines.get(&doc_id).cloned(),
+                source.sub_watch_tasks.contains_key(&doc_id),
+            )
+        };
+        self.sub_transcripts.insert(doc_id.clone(), entries);
+        if let Some(prepared) = prepared {
+            self.prepared_transcripts.insert(doc_id.clone(), prepared);
+        }
+        if let Some(baseline) = baseline {
+            self.transcript_baselines.insert(doc_id.clone(), baseline);
+        }
+        if live {
+            self.watch_subagent_doc(doc_id, cx);
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn copy_window_catalog(&mut self, source: &Self) {
+        self.connection = source.connection.clone();
+        self.workspace_scope = source.workspace_scope;
+        self.auth = source.auth.clone();
+        self.devices = source.devices.clone();
+        self.device_presentation = source.device_presentation.clone();
+        self.session_presence_presentation = source.session_presence_presentation.clone();
+        self.connectivity = source.connectivity.clone();
+        self.connectivity_observed = source.connectivity_observed;
+        self.spaces = source.spaces.clone();
+        self.chats = source.chats.clone();
+        self.sessions = source.sessions.clone();
+        self.sidebar_preferences = source.sidebar_preferences.clone();
+        self.session_presentation = source.session_presentation.clone();
+        self.chats_synced = source.chats_synced;
+        self.spaces_synced = source.spaces_synced;
+        self.local_device_id = source.local_device_id.clone();
+        self.update = source.update.clone();
+        self.data_dir = source.data_dir.clone();
+        self.transfers = source.transfers.clone();
+    }
+
+    fn follow_window_runtime(&mut self, source: &Entity<Self>, cx: &mut Context<Self>) {
+        let (handle, changed, connection) = {
+            let source = source.read(cx);
+            let changed = match (&self.engine, &source.engine) {
+                (Some(current), Some(next)) => !current.same_connection(next),
+                (None, None) => false,
+                _ => true,
+            };
+            (source.engine.clone(), changed, source.connection.clone())
+        };
+        if changed {
+            self.prepare_runtime_replacement(cx);
+            self.auto_selected = true;
+            self.copy_window_catalog(source.read(cx));
+            if let Some(handle) = handle {
+                self.attach_engine(handle, cx);
+            }
+        }
+        if changed || self.connection != connection {
+            self.connection = connection;
+            cx.notify();
         }
     }
 
@@ -925,16 +1158,20 @@ impl AppState {
     /// `space-canvas:{spaceId}` and the engine resolves the folder. Only
     /// a deliberate project-less canvas sends `~`.
     pub fn terminal_open_cwd(&self) -> Option<String> {
-        self.terminal_open_cwd_for(&self.panel_session_key())
+        let session_key = self.panel_session_key();
+        if self.no_project && session_key.starts_with(CANVAS_PANEL_PREFIX) {
+            return Some("~".to_string());
+        }
+        self.terminal_open_cwd_for(&session_key)
     }
 
-    /// [`Self::terminal_open_cwd`] for a specific panel key (the tab being
-    /// opened, which matches the selected session).
+    /// [`Self::terminal_open_cwd`] for a specific panel key. An independent
+    /// panel keeps its project even if the current canvas opts out of one.
     pub fn terminal_open_cwd_for(&self, session_key: &str) -> Option<String> {
         let Some(space_id) = session_key.strip_prefix(CANVAS_PANEL_PREFIX) else {
             return None;
         };
-        if space_id.is_empty() || self.no_project {
+        if space_id.is_empty() {
             return Some("~".to_string());
         }
         self.spaces
@@ -968,6 +1205,13 @@ impl AppState {
                 .clone()
         };
         (self.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
+    }
+
+    /// Review notes are unsent input, including notes on unfocused chats.
+    pub(crate) fn has_review_comments(&self) -> bool {
+        self.review_comments
+            .values()
+            .any(|comments| !comments.is_empty())
     }
 
     pub fn review_comments(&self, key: &str) -> &[ReviewComment] {
@@ -1446,9 +1690,20 @@ impl AppState {
         }
         if self.context_usage != update.context_usage {
             self.context_usage = update.context_usage;
+            self.record_context_trajectory();
             cx.notify();
         }
         Ok(())
+    }
+
+    /// Add the selected chat's current meter to its trajectory.
+    pub fn record_context_trajectory(&mut self) {
+        if let Some(chat) = &self.selected_chat {
+            self.context_trajectories
+                .entry(chat.clone())
+                .or_default()
+                .observe(self.context_usage, &self.transcript);
+        }
     }
 
     /// The opt-in opening tail is provisional. Never replace a complete view
@@ -1489,6 +1744,81 @@ impl AppState {
         self.sub_transcripts
             .get(doc_id)
             .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Explicit, live host signal only. A stale record cannot leak into a later
+    /// turn or survive a settled/cancelled session. An unavailable watch is empty.
+    pub(crate) fn build_wait_since_for_chat(
+        &self,
+        chat_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<i64> {
+        if self.indicator_for(chat_id, now) != Indicator::Working {
+            return None;
+        }
+        let items = if self.selected_chat.as_deref() == Some(chat_id) {
+            &self.tool_progress
+        } else {
+            self.peer_tool_progress.get(chat_id)?
+        };
+        let since = harness_proto::build_wait_since(items)?;
+        if self
+            .session_for(chat_id)
+            .and_then(|s| s.started_at)
+            .is_some_and(|start| since < start.timestamp())
+        {
+            return None;
+        }
+        Some(since)
+    }
+
+    pub(crate) fn receive_tool_progress(
+        &mut self,
+        chat_id: &str,
+        items: Vec<harness_proto::ToolProgressItem>,
+    ) -> bool {
+        let mut changed = false;
+        if self.selected_chat.as_deref() == Some(chat_id) && self.tool_progress != items {
+            self.tool_progress = items.clone();
+            changed = true;
+        }
+        if self.peer_doc_consumers.contains(chat_id)
+            && self.peer_tool_progress.get(chat_id) != Some(&items)
+        {
+            self.peer_tool_progress.insert(chat_id.to_owned(), items);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Synthetic production capture hook; never reads user data or opens a watch.
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_tool_progress(
+        &mut self,
+        chat_id: &str,
+        items: Vec<harness_proto::ToolProgressItem>,
+        cx: &mut Context<Self>,
+    ) {
+        self.receive_tool_progress(chat_id, items);
+        cx.notify();
+    }
+
+    /// Read already-loaded rows for a monitoring card without changing the
+    /// selected conversation or opening another transcript watch.
+    pub(crate) fn overview_transcript(&self, chat_id: &str) -> &[SessionMessageEntry] {
+        if self.selected_chat.as_deref() == Some(chat_id) {
+            return &self.transcript;
+        }
+        if let Some(entries) = self.sub_transcripts.get(chat_id)
+            && !entries.is_empty()
+        {
+            return entries;
+        }
+        self.transcript_cache
+            .iter()
+            .find(|cached| cached.chat_id == chat_id)
+            .map(|cached| cached.entries.as_slice())
             .unwrap_or(&[])
     }
 
@@ -1540,7 +1870,16 @@ impl AppState {
     /// same doc watch subagent tabs use (`WatchDocMessages` takes any doc id).
     pub fn watch_peer_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.peer_doc_consumers.insert(chat_id.clone());
-        self.watch_doc(chat_id, cx);
+        self.watch_doc(chat_id.clone(), cx);
+        if !self.peer_progress_tasks.contains_key(&chat_id)
+            && let Some(handle) = self.engine.clone()
+            && handle
+                .engine_info()
+                .supports(harness_proto::capabilities::TOOL_PROGRESS_V1)
+        {
+            let task = spawn_tool_progress_watch(cx, handle, chat_id.clone());
+            self.peer_progress_tasks.insert(chat_id, task);
+        }
     }
 
     /// Drop an unfocused pane's feed. A chat that just became the selected
@@ -1548,6 +1887,8 @@ impl AppState {
     /// feed, so those stay; only the peer rows and watch go.
     pub fn unwatch_peer_chat(&mut self, chat_id: &str) {
         self.peer_doc_consumers.remove(chat_id);
+        self.peer_progress_tasks.remove(chat_id);
+        self.peer_tool_progress.remove(chat_id);
         self.release_doc_if_unused(chat_id);
     }
 
@@ -1606,6 +1947,51 @@ impl AppState {
                 self.transcript_revision = self.transcript_revision.wrapping_add(1);
             }
         }
+    }
+
+    /// Replace a provisional optimistic id with the queue's durable message id.
+    /// The transcript can confirm the durable id before the queue ack arrives.
+    pub(crate) fn rekey_echo(&mut self, chat_id: &str, provisional_id: &str, message_id: &str) {
+        let authoritative = self
+            .selected_chat
+            .as_deref()
+            .filter(|selected| *selected == chat_id)
+            .is_some_and(|_| self.transcript.iter().any(|entry| entry.id == message_id))
+            || self
+                .sub_transcripts
+                .get(chat_id)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.id == message_id));
+
+        let Some(echoes) = self.echoes.get_mut(chat_id) else {
+            return;
+        };
+        let had_provisional = echoes.iter().any(|entry| entry.id == provisional_id);
+        if !had_provisional {
+            return;
+        }
+
+        let final_echo_exists =
+            provisional_id != message_id && echoes.iter().any(|entry| entry.id == message_id);
+        if authoritative || final_echo_exists {
+            echoes.retain(|entry| entry.id != provisional_id);
+        } else if let Some(entry) = echoes.iter_mut().find(|entry| entry.id == provisional_id) {
+            entry.id = message_id.to_owned();
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    /// Whether an id is already visible as an optimistic or authoritative
+    /// message for this chat.
+    pub(crate) fn message_is_in_transcript(&self, chat_id: &str, message_id: &str) -> bool {
+        self.echoes
+            .get(chat_id)
+            .is_some_and(|echoes| echoes.iter().any(|entry| entry.id == message_id))
+            || (self.selected_chat.as_deref() == Some(chat_id)
+                && self.transcript.iter().any(|entry| entry.id == message_id))
+            || self
+                .sub_transcripts
+                .get(chat_id)
+                .is_some_and(|entries| entries.iter().any(|entry| entry.id == message_id))
     }
 
     /// Composer send fired: overlay the chat as Working until the host writes
@@ -2009,7 +2395,8 @@ impl AppState {
     /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
     /// narrowed to the current project filter. The jump shortcuts and their
     /// hints both count positions here, so neither can drift from the rows on
-    /// screen.
+    /// screen. `None` includes every project; an empty filter is the shell's
+    /// explicit projectless selection.
     pub fn sidebar_chats(
         &self,
         now: DateTime<Utc>,
@@ -2018,6 +2405,7 @@ impl AppState {
         self.overview_chats(now)
             .into_iter()
             .filter(|(_, chat)| match space_filter {
+                Some("") => chat.space_id.is_none(),
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,
             })
@@ -2064,9 +2452,12 @@ impl AppState {
         effective_indicator(self.session_for(chat_id), now)
     }
 
-    pub fn selected_chat_row(&self) -> Option<&Chat> {
-        let id = self.selected_chat.as_deref()?;
+    pub fn chat_row(&self, id: &str) -> Option<&Chat> {
         self.chats.iter().find(|c| c.id == id)
+    }
+
+    pub fn selected_chat_row(&self) -> Option<&Chat> {
+        self.chat_row(self.selected_chat.as_deref()?)
     }
 
     /// The chat the Archive session shortcut acts on: the selected one, unless
@@ -2100,8 +2491,8 @@ impl AppState {
         self.engine.as_ref()
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_test_engine(&mut self, handle: EngineHandle) {
+    #[cfg(any(test, feature = "ui-scenes"))]
+    pub fn set_test_engine(&mut self, handle: EngineHandle) {
         self.engine = Some(handle);
     }
 
@@ -2129,6 +2520,10 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        self.queue_task = None;
+        self.tool_progress_task = None;
+        self.sub_watch_tasks.clear();
+        self.sub_transcripts.clear();
         self.change_request_tasks.clear();
         self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
@@ -2151,6 +2546,9 @@ impl AppState {
         self.chats_synced = false;
         self.spaces_synced = false;
         self.transcript.clear();
+        self.queue.clear();
+        self.remote_pending.clear();
+        self.tool_progress.clear();
         self.transcript_baselines.clear();
         self.transcript_cache.clear();
         self.prepared_transcripts.clear();
@@ -2159,6 +2557,8 @@ impl AppState {
         self.transcript_replayed = false;
         self.echoes.clear();
         self.pending_sends.clear();
+        self.review_comments.clear();
+        self.review_comment_flushes.clear();
         self.upload_progress = None;
         self.transfers.clear();
         self.local_device_id = None;
@@ -2172,6 +2572,14 @@ impl AppState {
     /// Kick off (or retry) the engine bootstrap: probe → connect-or-embed on
     /// tokio, then attach subscriptions. Safe to call again after `Failed`.
     pub fn bootstrap(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
+        let owner = Self::runtime_owner(&state, cx);
+        if owner.entity_id() != state.entity_id() {
+            // Retry and profile switches can originate in any window. Keep
+            // the retained process state on the replacement handle so every
+            // other window, Dock reopen and app quit observe the same engine.
+            owner.update(cx, |owner, cx| owner.prepare_runtime_replacement(cx));
+            return Self::bootstrap(owner, config, cx);
+        }
         let data_dir = config.data_dir.clone();
         state.update(cx, |s, cx| {
             s.connection = ConnectionStatus::Connecting;
@@ -2214,8 +2622,17 @@ impl AppState {
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
+        self.tool_progress.clear();
+        self.tool_progress_task = None;
+        self.peer_progress_tasks.clear();
+        self.peer_tool_progress.clear();
+        for chat_id in self.peer_doc_consumers.clone() {
+            self.watch_peer_chat(chat_id, cx);
+        }
         let mut watch_tasks = Vec::with_capacity(10);
-        if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
+        if !self.is_window_fork()
+            && let Some(task) = spawn_deferred_engine_watch(cx, handle.clone())
+        {
             watch_tasks.push(task);
         }
         watch_tasks.extend([
@@ -3262,10 +3679,7 @@ fn spawn_tool_progress_watch(
                     continue;
                 };
                 let alive = this.update(cx, |state, cx| {
-                    if state.selected_chat.as_deref() == Some(chat_id.as_str())
-                        && state.tool_progress != frame.items
-                    {
-                        state.tool_progress = frame.items;
+                    if state.receive_tool_progress(&chat_id, frame.items) {
                         cx.notify();
                     }
                 });
@@ -3274,7 +3688,11 @@ fn spawn_tool_progress_watch(
                 }
             }
             if this
-                .update(cx, |state, _| state.tool_progress.clear())
+                .update(cx, |state, cx| {
+                    if state.receive_tool_progress(&chat_id, Vec::new()) {
+                        cx.notify();
+                    }
+                })
                 .is_err()
             {
                 return;
@@ -3384,6 +3802,190 @@ mod tests {
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `harness_proto::view`.
     use harness_proto::{SessionStatus, UserProfile};
+
+    #[gpui::test]
+    fn window_state_keeps_selection_and_transcript_independent(cx: &mut gpui::TestAppContext) {
+        let source = cx.new(|_| {
+            let mut state = AppState::new();
+            state.connection = ConnectionStatus::Ready;
+            state.chats = vec![chat("source-chat", 0, None), chat("other-chat", 1, None)];
+            state.spaces = vec![space("project", "dev", "/tmp/project", 0)];
+            state.selected_chat = Some("source-chat".into());
+            state.selected_space = Some("project".into());
+            state.selected_device = Some("dev".into());
+            state.transcript = vec![user_entry("source-message")];
+            state.chats_synced = true;
+            state.spaces_synced = true;
+            state
+        });
+        let detached = cx.new(|cx| AppState::for_window(&source, cx));
+        detached.update(cx, |state, cx| {
+            assert!(state.is_window_fork());
+            assert_eq!(state.chats.len(), 2);
+            assert_eq!(state.spaces.len(), 1);
+            assert!(state.chats_synced && state.spaces_synced && state.auto_selected);
+            assert_eq!(state.selected_chat, None);
+            assert!(state.transcript.is_empty());
+            assert!(state.queue.is_empty());
+            assert!(state.transcript_task.is_none() && state.queue_task.is_none());
+            state.select_chat(Some("other-chat".into()), cx);
+            state.selected_space = None;
+            state.no_project = true;
+            state.selected_device = Some("other-device".into());
+            state.transcript.push(user_entry("detached-message"));
+        });
+        source.read_with(cx, |state, _| {
+            assert!(!state.is_window_fork());
+            assert_eq!(state.selected_chat.as_deref(), Some("source-chat"));
+            assert_eq!(state.selected_space.as_deref(), Some("project"));
+            assert_eq!(state.selected_device.as_deref(), Some("dev"));
+            assert!(!state.no_project);
+            assert_eq!(state.transcript[0].id, "source-message");
+        });
+    }
+
+    #[gpui::test]
+    fn window_state_adoption_seeds_chat_and_frozen_doc_before_first_frame(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let source = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("moving-chat".into());
+            state.transcript = vec![user_entry("current-message")];
+            state.transcript_replayed = true;
+            state
+                .echoes
+                .insert("moving-chat".into(), vec![user_entry("pending-message")]);
+            state.set_subagent_snapshot("frozen-doc".into(), vec![user_entry("frozen-message")]);
+            state
+        });
+        let detached = cx.new(|cx| AppState::for_window(&source, cx));
+        detached.update(cx, |state, cx| {
+            state.adopt_window_chat(&source, "moving-chat".into(), cx);
+            state.adopt_window_doc(&source, "frozen-doc".into(), cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("moving-chat"));
+            assert_eq!(state.transcript[0].id, "current-message");
+            assert!(state.transcript_replayed);
+            assert_eq!(state.echoes["moving-chat"][0].id, "pending-message");
+            assert_eq!(state.sub_transcript("frozen-doc")[0].id, "frozen-message");
+            assert!(!state.sub_watch_tasks.contains_key("frozen-doc"));
+            state.select_chat(None, cx);
+        });
+        source.read_with(cx, |state, _| {
+            assert_eq!(state.selected_chat.as_deref(), Some("moving-chat"));
+            assert_eq!(state.transcript[0].id, "current-message");
+            assert_eq!(state.sub_transcript("frozen-doc")[0].id, "frozen-message");
+        });
+    }
+
+    #[gpui::test]
+    fn window_state_forks_keep_the_original_runtime_owner_after_intermediate_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let original = cx.new(|_| AppState::new());
+        let first = cx.new(|cx| AppState::for_window(&original, cx));
+        let second = cx.new(|cx| AppState::for_window(&first, cx));
+        let owner = cx.update(|cx| AppState::runtime_owner(&second, cx));
+        assert_eq!(owner.entity_id(), original.entity_id());
+        let first_weak = first.downgrade();
+        drop(first);
+        cx.run_until_parked();
+        assert!(first_weak.upgrade().is_none());
+        original.update(cx, |state, cx| {
+            state.connection = ConnectionStatus::Failed("replacement failed".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        second.read_with(cx, |state, _| {
+            assert_eq!(
+                state.connection,
+                ConnectionStatus::Failed("replacement failed".into())
+            );
+        });
+    }
+
+    struct WindowStateRpc;
+
+    #[async_trait]
+    impl RpcService for WindowStateRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            _params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            Err(RpcError::UnknownMethod(method.into()))
+        }
+    }
+
+    fn window_test_engine(device: &str) -> EngineHandle {
+        EngineHandle {
+            inner: Arc::new(RemoteEngine {
+                client: Arc::new(memory_client(Arc::new(WindowStateRpc))),
+                url: "ws://window-test".into(),
+                lifecycle_task: tokio::sync::Mutex::new(None),
+            }),
+            engine_info: EngineInfo {
+                device_id: device.into(),
+                workspace_scope: WorkspaceScope::Local,
+                cursor_sdk_version: None,
+                capabilities: Vec::new(),
+            },
+            deferred_state: None,
+        }
+    }
+
+    #[gpui::test]
+    fn window_state_reuses_engine_and_follows_runtime_replacement(cx: &mut gpui::TestAppContext) {
+        // This verifies handle/watch ownership without serving RPC replies.
+        // Keep transport tasks on this thread: a multithreaded Tokio runtime
+        // would wake GPUI's deterministic scheduler from an external worker.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+        let first = window_test_engine("first-runtime");
+        let source = cx.new(|_| {
+            let mut state = AppState::new();
+            state.connection = ConnectionStatus::Ready;
+            state.engine = Some(first.clone());
+            state
+        });
+        let detached = cx.new(|cx| AppState::for_window(&source, cx));
+        detached.read_with(cx, |state, _| {
+            assert!(state.engine().unwrap().same_connection(&first));
+            assert!(!state.watch_tasks.is_empty());
+            assert_eq!(state.local_device_id.as_deref(), Some("first-runtime"));
+        });
+        detached.update(cx, |state, cx| {
+            state.select_chat(Some("detached-chat".into()), cx);
+            state.transcript.push(user_entry("old-account-message"));
+        });
+        let replacement = window_test_engine("replacement-runtime");
+        source.update(cx, |state, cx| {
+            state.engine = Some(replacement.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        detached.read_with(cx, |state, _| {
+            assert!(state.engine().unwrap().same_connection(&replacement));
+            assert!(!state.engine().unwrap().same_connection(&first));
+            assert_eq!(
+                state.local_device_id.as_deref(),
+                Some("replacement-runtime")
+            );
+            assert!(state.selected_chat.is_none());
+            assert!(state.transcript.is_empty());
+            assert!(state.auto_selected);
+        });
+        source.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
+        cx.run_until_parked();
+        detached.read_with(cx, |state, _| {
+            assert!(state.engine().is_none());
+            assert_eq!(state.connection, ConnectionStatus::Connecting);
+            assert!(state.watch_tasks.is_empty());
+        });
+    }
 
     #[test]
     fn another_devices_pending_prompt_shows_until_its_message_lands() {
@@ -4022,6 +4624,29 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         }
+    }
+
+    #[test]
+    fn overview_transcript_prefers_selected_then_live_then_cached_rows() {
+        let mut state = AppState::new();
+        state.transcript_cache.push_back(CachedTranscript {
+            prepared: None,
+            chat_id: "chat".into(),
+            entries: vec![user_entry("cached")],
+            context_usage: None,
+            bytes: 0,
+        });
+        state.sub_transcripts.insert("chat".into(), Vec::new());
+        assert_eq!(state.overview_transcript("chat")[0].id, "cached");
+        state
+            .sub_transcripts
+            .insert("chat".into(), vec![user_entry("live")]);
+        assert_eq!(state.overview_transcript("chat")[0].id, "live");
+        state.selected_chat = Some("chat".into());
+        assert!(state.overview_transcript("chat").is_empty());
+        state.transcript = vec![user_entry("selected")];
+        assert_eq!(state.overview_transcript("chat")[0].id, "selected");
+        assert!(state.overview_transcript("unknown").is_empty());
     }
 
     #[gpui::test]
@@ -4818,6 +5443,18 @@ mod tests {
         assert_eq!(state.panel_session_key(), "space-canvas:");
         assert_eq!(state.terminal_open_cwd().as_deref(), Some("~"));
         assert_eq!(
+            state.terminal_open_cwd_for("space-canvas:s1").as_deref(),
+            Some("/Users/me/proj"),
+            "a pinned project terminal ignores another canvas's opt-out"
+        );
+        state.selected_space = Some("s1".into());
+        assert_eq!(
+            state.terminal_open_cwd().as_deref(),
+            Some("~"),
+            "the selected canvas's explicit opt-out still wins over a stale project"
+        );
+        state.selected_space = None;
+        assert_eq!(
             state.terminal_target_device("space-canvas:").as_deref(),
             Some("remote")
         );
@@ -5012,6 +5649,30 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_project_filters_distinguish_all_projectless_and_named_projects() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut in_project = chat("project", 0, Some(2));
+        in_project.space_id = Some("project-a".into());
+        let mut archived = chat("archived", 0, Some(3));
+        archived.archived = true;
+        state.apply_spaces(vec![space("project-a", "d1", "/tmp/project-a", 0)]);
+        state.apply_chats(vec![in_project, chat("projectless", 0, Some(1)), archived]);
+        let ids = |filter| {
+            state
+                .sidebar_chats(now, filter)
+                .into_iter()
+                .map(|(_, chat)| chat.id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(None), ["project", "projectless"]);
+        assert_eq!(ids(Some("project-a")), ["project"]);
+        assert!(ids(Some("missing-project")).is_empty());
+        assert_eq!(ids(Some("")), ["projectless"]);
+    }
+
+    #[test]
     fn jump_slots_count_the_rows_the_sidebar_draws() {
         let now = Utc::now();
         let mut state = AppState::new();
@@ -5108,6 +5769,61 @@ mod tests {
             },
         );
         assert!(state.pending_echoes().is_empty());
+    }
+
+    #[test]
+    fn rekeyed_steer_echo_survives_ack_order_and_is_chat_scoped() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("c1".into());
+        let mut echo = user_entry("provisional");
+        echo.created_at = 42;
+        let expected = SessionMessageEntry {
+            id: "queued-id".into(),
+            ..echo.clone()
+        };
+        state.push_echo("c1", echo);
+
+        state.rekey_echo("c1", "provisional", "queued-id");
+        assert_eq!(state.pending_echoes(), &[expected.clone()]);
+        assert!(state.message_is_in_transcript("c1", "queued-id"));
+        assert!(!state.message_is_in_transcript("other", "queued-id"));
+
+        // Once the transcript confirms the durable id, it prunes the echo.
+        state.apply_transcript(vec![expected.clone()]);
+        assert!(state.pending_echoes().is_empty());
+        assert!(state.message_is_in_transcript("c1", "queued-id"));
+
+        // A transcript can land before the queue acknowledgement while the
+        // optimistic echo still has its provisional id. Rekey removes it.
+        let mut doc_first_echo = user_entry("doc-first-provisional");
+        doc_first_echo.created_at = 43;
+        let doc_first_expected = SessionMessageEntry {
+            id: "doc-first-queued".into(),
+            ..doc_first_echo.clone()
+        };
+        state.push_echo("c1", doc_first_echo.clone());
+        state.apply_transcript(vec![doc_first_expected.clone()]);
+        assert_eq!(state.pending_echoes(), &[doc_first_echo]);
+        state.rekey_echo("c1", "doc-first-provisional", "doc-first-queued");
+        assert!(state.pending_echoes().is_empty());
+        assert!(state.message_is_in_transcript("c1", "doc-first-queued"));
+
+        // If a final-id echo already exists, rekeying must not leave both.
+        state.push_echo("c1", user_entry("duplicate-provisional"));
+        let duplicate_final = user_entry("duplicate-final");
+        state.push_echo("c1", duplicate_final.clone());
+        state.rekey_echo("c1", "duplicate-provisional", "duplicate-final");
+        assert_eq!(state.pending_echoes(), &[duplicate_final]);
+
+        // Failed queued sends remove only their own pending echo.
+        state.push_echo("c1", user_entry("failed-id"));
+        state.remove_echo("c1", "failed-id");
+        assert!(!state.message_is_in_transcript("c1", "failed-id"));
+
+        // Same ids in another chat do not make this chat appear to contain it.
+        state.push_echo("other", user_entry("other-id"));
+        assert!(!state.message_is_in_transcript("c1", "other-id"));
+        assert!(state.message_is_in_transcript("other", "other-id"));
     }
 
     #[test]
@@ -5531,6 +6247,27 @@ mod tests {
 
 #[cfg(feature = "appshots-fixture")]
 impl AppState {
+    /// Replace only the synthetic review chat's feed for deterministic captures.
+    pub(crate) fn fixture_review_transcript(
+        &mut self,
+        entries: Vec<SessionMessageEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript_task = None;
+        if let Some(id) = self.selected_chat.clone() {
+            self.sub_watch_tasks.remove(&id);
+            self.prepared_transcripts.remove(&id);
+            self.transcript_baselines.insert(
+                id,
+                Arc::new(harness_doc::TranscriptBaseline::capture(&entries)),
+            );
+        }
+        self.transcript = entries;
+        self.transcript_replayed = true;
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        cx.notify();
+    }
+
     /// Keep fixture documents deterministic while using the real attachment RPC.
     pub fn fixture_attachment_engine(&mut self, engine: EngineHandle) {
         self.engine = Some(engine);

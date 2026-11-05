@@ -1,6 +1,8 @@
 //! AppKit boundary for the browser. Wry owns the native child and its UI
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
+mod user_agent;
+
 use super::model::{PageState, Presentation, allowed_navigation};
 use super::saved_view::{
     VIEW_CSP, VIEW_SCHEME, ViewReadError, allowed_view_navigation, read_view, view_csp, view_from_url,
@@ -13,16 +15,17 @@ use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSView, NSWindowOrderingMode,
+    NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSImage,
+    NSView, NSWindowOrderingMode,
 };
 use objc2_foundation::{
-    NSArray, NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSObject,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString, NSURL,
+    NSArray, NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSNumber,
+    NSObject, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString, NSURL,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKMediaCaptureType, WKNavigation, WKNavigationAction, WKNavigationActionPolicy,
     WKNavigationDelegate, WKNavigationResponse, WKNavigationResponsePolicy, WKOpenPanelParameters,
-    WKPermissionDecision, WKSecurityOrigin, WKUIDelegate, WKWebView,
+    WKPermissionDecision, WKSecurityOrigin, WKSnapshotConfiguration, WKUIDelegate, WKWebView,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -57,7 +60,14 @@ impl BrowserData {
         let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
         unsafe {
             configuration.setWebsiteDataStore(data.store.as_ref().unwrap());
+            #[cfg(feature = "browser-fixture")]
+            if std::env::var_os("HARNESS_BROWSER_INSPECTOR_FIXTURE_ONLY").is_some() {
+                configuration.setWebsiteDataStore(
+                    &objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
+                );
+            }
         }
+        user_agent::configure(&configuration);
         configuration
     }
     pub(super) fn register_preview(&self, address: &str) {
@@ -304,6 +314,67 @@ struct ClipState {
     dragging: Cell<bool>,
     region: Cell<objc2_foundation::NSRect>,
     resize_inset: Cell<f64>,
+    page: Cell<PageClip>,
+}
+
+/// The page sits below a toolbar, so only its lower corners belong to the
+/// rounded card. Keep these corners anchored to the full page when GPUI clips
+/// part of it for a popup, sidebar, or split-view transition.
+#[derive(Clone, Copy, PartialEq)]
+struct PageClip {
+    region: objc2_foundation::NSRect,
+    radius: f64,
+    bottom_at_max_y: bool,
+}
+
+impl PageClip {
+    fn new(region: objc2_foundation::NSRect, radius: f64, flipped: bool) -> Self {
+        Self {
+            region,
+            radius: radius
+                .max(0.)
+                .min(region.size.width.max(0.) / 2.)
+                .min(region.size.height.max(0.) / 2.),
+            bottom_at_max_y: flipped,
+        }
+    }
+
+    fn mask_frame(self, visible: objc2_foundation::NSRect) -> objc2_foundation::NSRect {
+        objc2_foundation::NSRect::new(
+            objc2_foundation::NSPoint::new(
+                self.region.origin.x - visible.origin.x,
+                self.region.origin.y - visible.origin.y,
+            ),
+            self.region.size,
+        )
+    }
+
+    fn contains(self, point: objc2_foundation::NSPoint) -> bool {
+        let left = point.x - self.region.origin.x;
+        let right = self.region.size.width - left;
+        if left < 0.
+            || right <= 0.
+            || point.y < self.region.origin.y
+            || point.y >= self.region.origin.y + self.region.size.height
+        {
+            return false;
+        }
+        let lower = if self.bottom_at_max_y {
+            self.region.origin.y + self.region.size.height - point.y
+        } else {
+            point.y - self.region.origin.y
+        };
+        let edge = left.min(right);
+        if edge >= self.radius || lower >= self.radius {
+            return true;
+        }
+        (self.radius - edge).powi(2) + (self.radius - lower).powi(2) <= self.radius.powi(2)
+    }
+
+    fn masked_corners(self) -> usize {
+        // CACornerMask: MinXMinY | MaxXMinY, or MinXMaxY | MaxXMaxY.
+        if self.bottom_at_max_y { 0b1100 } else { 0b0011 }
+    }
 }
 
 // Clips native content to GPUI's current paint mask. During app drags the
@@ -321,6 +392,7 @@ define_class!(
             if self.ivars().dragging.get()
                 || point.x < region.origin.x + self.ivars().resize_inset.get() || point.x >= region.origin.x + region.size.width
                 || point.y < region.origin.y || point.y >= region.origin.y + region.size.height
+                || !self.ivars().page.get().contains(point)
             { std::ptr::null_mut() }
             else { unsafe { msg_send![super(self), hitTest: point] } }
         }
@@ -335,7 +407,9 @@ pub(super) struct Host {
     view: Retained<WKWebView>,
     observer: Retained<Observer>,
     clip: Retained<BrowserClipView>,
+    viewport: Retained<NSView>,
     clip_mask: Retained<AnyObject>,
+    page_mask: Retained<AnyObject>,
     parent: Retained<NSView>,
     visible_bounds: Option<Bounds<Pixels>>,
     background_color: Option<Retained<NSColor>>,
@@ -343,6 +417,10 @@ pub(super) struct Host {
     shortcuts: Rc<RefCell<Vec<String>>>,
     bounds: Option<Bounds<Pixels>>,
     presentation: Presentation,
+    page_had_focus: bool,
+    restore_page_focus: bool,
+    drag_focus_recorded: bool,
+    pointer_focus_candidate: bool,
     tx: Sender,
     #[cfg(feature = "browser-fixture")]
     visibility_changes: Cell<u64>,
@@ -516,15 +594,21 @@ impl NativePage {
                 dragging: Cell::new(false),
                 region: Cell::new(objc2_foundation::NSRect::ZERO),
                 resize_inset: Cell::new(0.0),
+                page: Cell::new(PageClip::new(objc2_foundation::NSRect::ZERO, 0., false)),
             });
             msg_send![super(object), initWithFrame: objc2_foundation::NSRect::ZERO]
         };
         clip.setWantsLayer(true);
         clip.setAutoresizesSubviews(false);
         let clip_mask: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
+        let page_mask: Retained<AnyObject> = unsafe { msg_send![class!(CALayer), new] };
         unsafe {
             let color = NSColor::blackColor().CGColor();
-            let _: () = msg_send![&*clip_mask, setBackgroundColor: &*color];
+            let _: () = msg_send![&*page_mask, setBackgroundColor: &*color];
+            // A transparent container clips the rounded shape to GPUI's
+            // rectangle. Core Animation does not support masks of masks.
+            let _: () = msg_send![&*clip_mask, setMasksToBounds: true];
+            let _: () = msg_send![&*clip_mask, addSublayer: &*page_mask];
             let layer: *mut AnyObject = msg_send![&*clip, layer];
             let _: () = msg_send![layer, setMasksToBounds: true];
             let _: () = msg_send![layer, setMask: &*clip_mask];
@@ -542,7 +626,18 @@ impl NativePage {
                 break;
             }
         }
-        clip.addSubview(&view);
+        // WebKit docks its inspector beside the inspected view and lays out
+        // both using their shared parent's bounds. The stationary clip spans
+        // the entire window, so give WebKit a parent matching the browser body.
+        let viewport = NSView::initWithFrame(mtm.alloc(), objc2_foundation::NSRect::ZERO);
+        viewport.setAutoresizesSubviews(true);
+        clip.addSubview(&viewport);
+        view.setFrame(viewport.bounds());
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        viewport.addSubview(&view);
 
         let observer = Observer::new(tx.clone(), view_page, document, mtm);
         unsafe {
@@ -624,7 +719,9 @@ impl NativePage {
             view,
             observer,
             clip,
+            viewport,
             clip_mask,
+            page_mask,
             parent,
             visible_bounds: None,
             background_color: None,
@@ -632,6 +729,10 @@ impl NativePage {
             shortcuts,
             bounds: None,
             presentation: Presentation::Hidden,
+            page_had_focus: false,
+            restore_page_focus: false,
+            drag_focus_recorded: false,
+            pointer_focus_candidate: false,
             #[cfg(feature = "browser-fixture")]
             visibility_changes: Cell::new(0),
             tx,
@@ -640,12 +741,130 @@ impl NativePage {
     pub fn handle(&self) -> Rc<RefCell<Host>> {
         self.0.clone()
     }
+    /// Reparent the retained native hierarchy; never rebuild or reload WebKit.
+    pub fn move_to_window(&self, window: &Window) -> Result<(), String> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let handle = HasWindowHandle::window_handle(window).map_err(|error| error.to_string())?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return Err("Browser destination is not an AppKit window".into());
+        };
+        let parent = unsafe { Retained::retain(handle.ns_view.as_ptr().cast::<NSView>()) }
+            .ok_or("Browser destination view is missing")?;
+        window
+            .enable_scene_overlay()
+            .map_err(|error| error.to_string())?;
+        let mut host = self.0.borrow_mut();
+        if std::ptr::eq(&*host.parent, &*parent) {
+            return Ok(());
+        }
+        host.restore_page_focus =
+            host.page_had_focus || host.pointer_focus_candidate || has_focus(&host.view);
+        host.page_had_focus = host.restore_page_focus;
+        host.drag_focus_recorded = false;
+        host.pointer_focus_candidate = false;
+        host.release_focus();
+        // Hide until destination layout supplies valid clipping and bounds.
+        // This prevents a frame painted at the source window's coordinates.
+        host.clip.setHidden(true);
+        parent.addSubview(&host.clip);
+        for sibling in parent.subviews() {
+            if sibling.class().name() == c"GPUIOverlayView" {
+                parent.addSubview_positioned_relativeTo(
+                    &host.clip,
+                    NSWindowOrderingMode::Below,
+                    Some(&sibling),
+                );
+                break;
+            }
+        }
+        host.parent = parent;
+        host.bounds = None;
+        host.visible_bounds = None;
+        host.clip.ivars().region.set(objc2_foundation::NSRect::ZERO);
+        host.update_visibility();
+        Ok(())
+    }
+
+    /// WebKit snapshots include native page content absent from GPUI captures.
+    pub fn snapshot(&self) -> tokio::sync::oneshot::Receiver<Option<Vec<u8>>> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let Some(mtm) = MainThreadMarker::new() else {
+            let _ = sender.send(None);
+            return receiver;
+        };
+        let host = self.0.borrow();
+        if host.view.bounds().size.width <= 0. || host.view.bounds().size.height <= 0. {
+            let _ = sender.send(None);
+            return receiver;
+        }
+        let configuration = unsafe { WKSnapshotConfiguration::new(mtm) };
+        unsafe {
+            configuration.setSnapshotWidth(Some(&NSNumber::new_f64(440.)));
+            configuration.setAfterScreenUpdates(false);
+        }
+        let sender = RefCell::new(Some(sender));
+        let completion = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            let bytes = if error.is_null() {
+                unsafe { image.as_ref() }
+                    .and_then(|image| image.TIFFRepresentation())
+                    .map(|data| data.to_vec())
+            } else {
+                None
+            };
+            if let Some(sender) = sender.borrow_mut().take() {
+                let _ = sender.send(bytes);
+            }
+        });
+        unsafe {
+            host.view
+                .takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &completion);
+        }
+        receiver
+    }
+
     pub fn focus_chrome(&self) {
-        let _ = self.0.borrow().web.focus_parent();
+        let mut host = self.0.borrow_mut();
+        // Activating a newly reparented tab focuses its chrome as part of the
+        // ordinary tab path. Preserve the pending return to the live page.
+        if !host.restore_page_focus && !host.drag_focus_recorded {
+            host.page_had_focus = false;
+            host.drag_focus_recorded = false;
+            host.pointer_focus_candidate = false;
+        }
+        host.focus_parent();
     }
     /// Hand the keyboard back to the app if WebKit holds it.
     pub fn release_focus(&self) {
-        self.0.borrow().release_focus();
+        let mut host = self.0.borrow_mut();
+        host.page_had_focus = false;
+        host.restore_page_focus = false;
+        host.drag_focus_recorded = false;
+        host.pointer_focus_candidate = false;
+        host.release_focus();
+    }
+    pub fn will_restore_page_focus(&self) -> bool {
+        self.0.borrow().restore_page_focus
+    }
+    pub fn prepare_window_drag(&self) {
+        let mut host = self.0.borrow_mut();
+        host.page_had_focus = host.pointer_focus_candidate || has_focus(&host.view);
+        host.pointer_focus_candidate = false;
+        host.drag_focus_recorded = true;
+    }
+    pub fn restore_page_focus_after_drag(&self) -> bool {
+        let mut host = self.0.borrow_mut();
+        host.restore_page_focus = host.page_had_focus;
+        host.drag_focus_recorded = false;
+        host.pointer_focus_candidate = false;
+        host.restore_page_focus
+    }
+    pub fn discard_page_focus_after_drag(&self) {
+        let mut host = self.0.borrow_mut();
+        host.page_had_focus = false;
+        host.restore_page_focus = false;
+        host.drag_focus_recorded = false;
+        host.pointer_focus_candidate = false;
     }
     pub fn set_shortcuts(&self, shortcuts: Vec<String>) {
         *self.0.borrow().shortcuts.borrow_mut() = shortcuts;
@@ -745,11 +964,30 @@ fn has_focus(view: &NSView) -> bool {
 }
 
 impl Host {
+    /// The tab press reaches this capture listener before GPUI can recognize
+    /// a drag. Keep its responder candidate only for this pointer gesture.
+    pub fn release_focus_for_pointer(&mut self) {
+        self.pointer_focus_candidate = has_focus(&self.view);
+        self.release_focus();
+    }
+
+    pub fn end_pointer_focus_candidate(&mut self) {
+        self.pointer_focus_candidate = false;
+    }
+
+    // Wry retains the original parent view, even after native reparenting.
+    // Hand focus to our current host instead of Wry's original NSView.
+    fn focus_parent(&self) {
+        if let Some(window) = self.view.window() {
+            window.makeFirstResponder(Some(&self.parent));
+        }
+    }
+
     /// GPUI's view never takes first responder on a click, so once WebKit
     /// has the keyboard it keeps it until someone hands it back.
     pub fn release_focus(&self) {
         if has_focus(&self.view) {
-            let _ = self.web.focus_parent();
+            self.focus_parent();
         }
     }
 
@@ -759,6 +997,7 @@ impl Host {
         mask: Bounds<Pixels>,
         dragging: bool,
         resize_inset: Pixels,
+        bottom_radius: Pixels,
     ) {
         // WebKit may fill newly exposed tiles a frame after a viewport change.
         // Match its page background beneath those tiles instead of exposing
@@ -786,17 +1025,41 @@ impl Host {
             .ivars()
             .resize_inset
             .set(f64::from(f32::from(resize_inset)));
-        if self.bounds != Some(bounds) || self.visible_bounds != Some(visible) {
+        let parent_bounds = self.parent.bounds();
+        let flipped = self.parent.isFlipped();
+        let web_height = f64::from(f32::from(bounds.size.height)).max(0.);
+        let web_y = f64::from(f32::from(bounds.origin.y));
+        let web_y = if flipped {
+            web_y
+        } else {
+            parent_bounds.size.height - web_y - web_height
+        };
+        let page = PageClip::new(
+            objc2_foundation::NSRect::new(
+                objc2_foundation::NSPoint::new(f64::from(f32::from(bounds.origin.x)), web_y),
+                objc2_foundation::NSSize::new(
+                    f64::from(f32::from(bounds.size.width)).max(0.),
+                    web_height,
+                ),
+            ),
+            f64::from(f32::from(bottom_radius)),
+            flipped,
+        );
+        if self.bounds != Some(bounds)
+            || self.visible_bounds != Some(visible)
+            || self.clip.ivars().page.get() != page
+            || self.clip.frame() != parent_bounds
+        {
             self.bounds = Some(bounds);
             self.visible_bounds = Some(visible);
             let x = f64::from(f32::from(visible.origin.x));
             let y = f64::from(f32::from(visible.origin.y));
             let width = f64::from(f32::from(visible.size.width)).max(0.);
             let height = f64::from(f32::from(visible.size.height)).max(0.);
-            let y = if self.parent.isFlipped() {
+            let y = if flipped {
                 y
             } else {
-                self.parent.bounds().size.height - y - height
+                parent_bounds.size.height - y - height
             };
             let actions_disabled: bool = unsafe {
                 let previous = msg_send![class!(CATransaction), disableActions];
@@ -805,32 +1068,23 @@ impl Host {
             };
             // Keep the host stationary. Moving it while WebKit updates its
             // remote layer tree can combine the old origin with the new size.
-            self.clip.setFrame(self.parent.bounds());
+            self.clip.setFrame(parent_bounds);
             let region = objc2_foundation::NSRect::new(
                 objc2_foundation::NSPoint::new(x, y),
                 objc2_foundation::NSSize::new(width, height),
             );
             self.clip.ivars().region.set(region);
+            self.clip.ivars().page.set(page);
             unsafe {
                 let _: () = msg_send![&*self.clip_mask, setFrame: region];
+                let _: () = msg_send![&*self.page_mask, setFrame: page.mask_frame(region)];
+                let _: () = msg_send![&*self.page_mask, setCornerRadius: page.radius];
+                let _: () = msg_send![&*self.page_mask, setMaskedCorners: page.masked_corners()];
             }
-            // Wry's set_bounds rounds logical origins and sizes to whole points. GPUI
-            // uses fractional points, so that leaves uncovered background
-            // strips between the WKWebView and its clip after a resize.
-            let web_height = f64::from(f32::from(bounds.size.height)).max(0.);
-            let web_y = f64::from(f32::from(bounds.origin.y));
-            let web_y = if self.parent.isFlipped() {
-                web_y
-            } else {
-                self.parent.bounds().size.height - web_y - web_height
-            };
-            self.view.setFrame(objc2_foundation::NSRect::new(
-                objc2_foundation::NSPoint::new(f64::from(f32::from(bounds.origin.x)), web_y),
-                objc2_foundation::NSSize::new(
-                    f64::from(f32::from(bounds.size.width)).max(0.),
-                    web_height,
-                ),
-            ));
+            // Preserve fractional GPUI geometry. Resize the shared viewport,
+            // not WKWebView: WebKit owns the page/inspector split while docked.
+            // The outer clip stays stationary to keep native/Metal updates aligned.
+            self.viewport.setFrame(page.region);
             unsafe {
                 // Leave the implicit transaction open for the matching Metal
                 // presentation. Committing here would expose native geometry early.
@@ -856,14 +1110,14 @@ impl Host {
         }
         self.update_visibility();
     }
-    fn update_visibility(&self) {
+    fn update_visibility(&mut self) {
         let visible = self.presentation != Presentation::Hidden
             && self.observer.ivars().error.borrow().is_none()
             && self
                 .visible_bounds
                 .is_some_and(|b| f32::from(b.size.width) > 0. && f32::from(b.size.height) > 0.);
         if (!visible || self.presentation == Presentation::Passthrough) && has_focus(&self.view) {
-            let _ = self.web.focus_parent();
+            self.focus_parent();
         }
         if self.view.isHidden() == visible {
             #[cfg(feature = "browser-fixture")]
@@ -872,8 +1126,36 @@ impl Host {
             let _ = self.web.set_visible(visible);
         }
         self.clip.setHidden(!visible);
+        if visible && self.presentation == Presentation::Live && self.restore_page_focus {
+            if let Some(window) = self.view.window()
+                && window.makeFirstResponder(Some(&self.view))
+            {
+                self.restore_page_focus = false;
+                self.page_had_focus = false;
+                self.drag_focus_recorded = false;
+            }
+        }
     }
     fn present(&mut self, presentation: Presentation) {
+        if presentation == Presentation::Passthrough
+            && self.presentation == Presentation::Live
+            && !self.drag_focus_recorded
+        {
+            self.page_had_focus = self.pointer_focus_candidate || has_focus(&self.view);
+        } else if presentation == Presentation::Live
+            && !self.restore_page_focus
+            && !self.drag_focus_recorded
+        {
+            // A normal menu/address transition never restores native focus.
+            // Only reparenting or explicit drag cancellation arms restoration.
+            self.page_had_focus = false;
+            self.drag_focus_recorded = false;
+        } else if presentation == Presentation::Hidden
+            && !self.drag_focus_recorded
+            && !self.restore_page_focus
+        {
+            self.page_had_focus = false;
+        }
         self.presentation = presentation;
         self.clip
             .ivars()
@@ -886,7 +1168,7 @@ impl Host {
 impl Drop for Host {
     fn drop(&mut self) {
         if has_focus(&self.view) {
-            let _ = self.web.focus_parent();
+            self.focus_parent();
         }
         unsafe {
             if let Some(monitor) = self.monitor.take() {
@@ -904,8 +1186,123 @@ impl Drop for Host {
     }
 }
 
+#[cfg(test)]
+mod clipping_tests {
+    use super::PageClip;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    fn page(flipped: bool) -> PageClip {
+        PageClip::new(
+            NSRect::new(NSPoint::new(20., 30.), NSSize::new(100., 80.)),
+            10.,
+            flipped,
+        )
+    }
+
+    #[test]
+    fn browser_page_only_lower_corners_pass_pointer_events_through() {
+        let page = page(false);
+        assert!(!page.contains(NSPoint::new(20.5, 30.5)));
+        assert!(!page.contains(NSPoint::new(119.5, 30.5)));
+        assert!(page.contains(NSPoint::new(20.5, 109.5)));
+        assert!(page.contains(NSPoint::new(119.5, 109.5)));
+        assert!(page.contains(NSPoint::new(70., 30.5)));
+        assert!(page.contains(NSPoint::new(25., 35.)));
+    }
+
+    #[test]
+    fn browser_page_flipped_parent_preserves_screen_bottom_corners() {
+        let page = page(true);
+        assert!(!page.contains(NSPoint::new(20.5, 109.5)));
+        assert!(!page.contains(NSPoint::new(119.5, 109.5)));
+        assert!(page.contains(NSPoint::new(20.5, 30.5)));
+        assert!(page.contains(NSPoint::new(119.5, 30.5)));
+        assert_eq!(page.masked_corners(), 0b1100);
+    }
+
+    #[test]
+    fn browser_page_occlusion_does_not_move_card_corners() {
+        let page = page(false);
+        let visible = NSRect::new(NSPoint::new(25., 35.), NSSize::new(70., 65.));
+        assert_eq!(
+            page.mask_frame(visible),
+            NSRect::new(NSPoint::new(-5., -5.), NSSize::new(100., 80.))
+        );
+        assert!(page.contains(visible.origin));
+    }
+
+    #[test]
+    fn browser_page_zero_radius_preserves_rectangular_previews() {
+        let page = PageClip::new(page(false).region, 0., false);
+        assert!(page.contains(NSPoint::new(20., 30.)));
+        assert!(page.contains(NSPoint::new(119.5, 109.5)));
+        assert!(!page.contains(NSPoint::new(19.5, 30.)));
+    }
+}
+
 #[cfg(feature = "browser-fixture")]
 impl NativePage {
+    /// Fixture-only access to WebKit's real inspector, not a simulated split.
+    pub fn fixture_inspector(&self, action: &str) -> bool {
+        let host = self.0.borrow();
+        unsafe {
+            let inspector: Retained<AnyObject> = msg_send![&*host.view, _inspector];
+            match action {
+                "show" => {
+                    let _: () = msg_send![&*inspector, show];
+                    return true;
+                }
+                "close" => {
+                    let _: () = msg_send![&*inspector, close];
+                    return true;
+                }
+                "detach" => {
+                    let _: () = msg_send![&*inspector, detach];
+                    return true;
+                }
+                _ => {}
+            }
+            let frontend: Option<Retained<WKWebView>> = msg_send![&*inspector, inspectorWebView];
+            let Some(frontend) = frontend else {
+                return false;
+            };
+            if frontend.isLoading() {
+                return false;
+            }
+            let script = match action {
+                "bottom" | "left" | "right" => format!(
+                    "InspectorFrontendHost.requestSetDockSide({});", serde_json::to_string(action).unwrap()
+                ),
+                "resize" => "InspectorFrontendHost.setAttachedWindowHeight(280); InspectorFrontendHost.setAttachedWindowWidth(420);".to_owned(),
+                _ => return false,
+            };
+            frontend.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+            true
+        }
+    }
+    pub fn fixture_inspector_geometry(&self) -> serde_json::Value {
+        let host = self.0.borrow();
+        let rect =
+            |r: objc2_foundation::NSRect| [r.origin.x, r.origin.y, r.size.width, r.size.height];
+        let page = host
+            .clip
+            .convertRect_fromView(host.view.bounds(), Some(&host.view));
+        let expected = host.clip.ivars().page.get().region;
+        unsafe {
+            let inspector: Retained<AnyObject> = msg_send![&*host.view, _inspector];
+            let frontend: Option<Retained<WKWebView>> = msg_send![&*inspector, inspectorWebView];
+            serde_json::json!({
+                "expected": rect(expected),
+                "page": rect(page),
+                "inspector": frontend.as_ref().map(|view| rect(host.clip.convertRect_fromView(view.bounds(), Some(view)))),
+                "attached": frontend.as_ref().is_some_and(|view| view.isDescendantOf(&host.clip)),
+                "visible": frontend.as_ref().is_some_and(|view| !view.isHidden()),
+            })
+        }
+    }
+    pub fn fixture_identity(&self) -> usize {
+        std::ptr::from_ref(&*self.0.borrow().view) as usize
+    }
     pub fn fixture_move_cursor(&self, x: f64, y: f64) {
         #[link(name = "CoreGraphics", kind = "framework")]
         unsafe extern "C" {
@@ -1007,6 +1404,18 @@ impl NativePage {
     pub fn fixture_focused(&self) -> bool {
         has_focus(&self.0.borrow().view)
     }
+    pub fn fixture_focus_state(&self) -> serde_json::Value {
+        let host = self.0.borrow();
+        serde_json::json!({
+            "nativeFocused": has_focus(&host.view),
+            "pageHadFocus": host.page_had_focus,
+            "dragRecorded": host.drag_focus_recorded,
+            "pointerCandidate": host.pointer_focus_candidate,
+            "restorePending": host.restore_page_focus,
+            "live": host.presentation == Presentation::Live,
+            "visible": !host.view.isHidden()
+        })
+    }
     pub fn fixture_overlay_at(&self, x: f64, y: f64) -> bool {
         let host = self.0.borrow();
         let parent = host.parent.clone();
@@ -1046,6 +1455,12 @@ impl NativePage {
                 .borrow()
                 .view
                 .evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
+        }
+    }
+    pub fn fixture_set_user_agent(&self, user_agent: Option<&str>) {
+        let user_agent = user_agent.map(NSString::from_str);
+        unsafe {
+            self.0.borrow().view.setCustomUserAgent(user_agent.as_deref());
         }
     }
 }

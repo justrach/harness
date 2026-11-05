@@ -4,6 +4,8 @@
 use super::*;
 use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
 use crate::pickers::{CanvasDraft, CanvasInput, CanvasTarget};
+use crate::shell::chat_tabs::test_support::{mutations, reply};
+use crate::shell::workspace_panels::PanelTab;
 use gpui::{AppContext, TestAppContext};
 
 const URL: &str = "https://example.com/split-links";
@@ -81,6 +83,138 @@ fn with_link_panes(
     cx.run_until_parked();
 }
 
+/// The owner, peer-a and peer-b in their own panels of one real workspace
+/// session, so browsers opened here get their real `workspace:<session>` owner.
+fn with_panel_links(
+    cx: &mut TestAppContext,
+    run: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>),
+) {
+    with_link_panes(cx, Some("owner"), |shell, window, cx| {
+        shell.chat_split = None;
+        shell.sync_chat_panes(cx);
+        shell.boot_restored = true;
+        shell.ensure_workspace_sessions(cx);
+        shell.sync_panel_workspace(cx);
+        for chat in ["peer-a", "peer-b"] {
+            shell.workspace_split(SplitAxis::Horizontal, cx);
+            let layout = shell.panel_layout_mut(cx);
+            let focused = layout.focused;
+            let panel = layout.panels.iter_mut().find(|panel| panel.id == focused);
+            let panel = panel.unwrap();
+            panel.tabs = vec![PanelTab::Chat(chat.into())];
+            panel.active = 0;
+        }
+        focus_panel_chat(shell, "owner", window, cx);
+        run(shell, window, cx);
+    });
+}
+
+/// A left press on a panel's transcript, which focuses it before the link fires.
+fn focus_panel_chat(shell: &mut Shell, chat: &str, window: &mut Window, cx: &mut Context<Shell>) {
+    let tab = PanelTab::Chat(chat.into());
+    let (panel, _) = shell.panel_layout(cx).unwrap().location(&tab).unwrap();
+    shell.focus_workspace_tab(panel, tab, window, cx);
+    shell.on_state_changed(&shell.state.clone(), cx);
+}
+
+fn workspace_owner(shell: &Shell) -> String {
+    format!("workspace:{}", shell.chat_tabs[shell.chat_tab].id)
+}
+
+/// Open a browser tab from `source` and place it, as the next frame would.
+fn open_panel_browser(
+    shell: &mut Shell,
+    source: &str,
+    window: &mut Window,
+    cx: &mut Context<Shell>,
+) -> u64 {
+    assert_eq!(
+        shell.activate_session_link(&activation(Some(source), LinkAction::Internal), window, cx),
+        LinkOutcome::Internal
+    );
+    shell.sync_panel_workspace(cx);
+    shell.browser_seq
+}
+
+/// Bring a browser back to the front of its panel without moving focus.
+fn show_panel_browser(shell: &mut Shell, browser: u64, cx: &mut Context<Shell>) {
+    let layout = shell.panel_layout_mut(cx);
+    for panel in &mut layout.panels {
+        if let Some(ix) = panel.tabs.iter().position(|tab| {
+            matches!(tab, PanelTab::Surface { surface: RightSurface::Browser(id), .. } if *id == browser)
+        }) {
+            panel.active = ix;
+        }
+    }
+}
+
+/// Put another tab in front of a browser, hiding it without closing it.
+fn cover_panel_browser(shell: &mut Shell, browser: u64, cx: &mut Context<Shell>) {
+    for panel in &mut shell.panel_layout_mut(cx).panels {
+        if panel.tabs.iter().any(|tab| {
+            matches!(tab, PanelTab::Surface { surface: RightSurface::Browser(id), .. } if *id == browser)
+        }) {
+            panel.tabs.push(PanelTab::New(u64::MAX));
+            panel.active = panel.tabs.len() - 1;
+        }
+    }
+}
+
+/// A mock engine that answers, so deletion finishes as a connected client sees it.
+struct DeleteEngine {
+    runtime: tokio::runtime::Runtime,
+}
+
+impl DeleteEngine {
+    fn new() -> Self {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        Self { runtime }
+    }
+
+    fn attach(
+        &self,
+        shell: &mut Shell,
+        cx: &mut Context<Shell>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::sync::mpsc::Sender<String>,
+    ) {
+        let _guard = self.runtime.enter();
+        let (out, requests) = tokio::sync::mpsc::channel(128);
+        let (replies, inbound) = tokio::sync::mpsc::channel(128);
+        let engine =
+            crate::state::EngineHandle::from_test_client(harness_rpc::RpcClient::new(out, inbound));
+        shell
+            .state
+            .update(cx, |state, _| state.set_test_engine(engine));
+        (requests, replies)
+    }
+
+    /// Reply to the deleteChat a shell has already sent, then let it finish.
+    fn confirm(
+        &self,
+        (requests, replies): &mut (
+            tokio::sync::mpsc::Receiver<String>,
+            tokio::sync::mpsc::Sender<String>,
+        ),
+        chat: &str,
+        cx: &mut TestAppContext,
+    ) {
+        cx.run_until_parked();
+        let closing = mutations(requests);
+        assert_eq!(closing.len(), 1, "{closing:?}");
+        assert_eq!(
+            closing[0]["params"],
+            serde_json::json!({"op": "deleteChat", "chatId": chat})
+        );
+        reply(&self.runtime, replies, &closing[0]);
+        cx.run_until_parked();
+    }
+}
+
 /// Check more than tab counts: rejection/external routing must not select a
 /// peer, park a draft, reveal a panel, change its active tab, or open a file.
 #[derive(Debug, PartialEq)]
@@ -98,6 +232,7 @@ struct LinkState {
     panels: std::collections::HashMap<String, ChatPanels>,
     peers: Vec<String>,
     notice: Option<SharedString>,
+    panel_tabs: Vec<(usize, Vec<PanelTab>)>,
 }
 
 fn link_state(shell: &Shell, cx: &App) -> LinkState {
@@ -121,6 +256,13 @@ fn link_state(shell: &Shell, cx: &App) -> LinkState {
         panels: shell.panels.map.clone(),
         peers,
         notice: shell.sidebar_notice.clone(),
+        panel_tabs: shell.panel_layout(cx).map_or_else(Vec::new, |layout| {
+            layout
+                .panels
+                .iter()
+                .map(|panel| (panel.active, panel.tabs.clone()))
+                .collect()
+        }),
     }
 }
 
@@ -263,9 +405,11 @@ fn callback_authority_recovers_across_repeated_route_snapshot_and_selection_tran
 ) {
     use crate::browser::BrowserEvent;
 
-    for callback in ["transcript", "browser", "saved-view"] {
+    // "browser" is a chat-keyed host, gated on its row; "session-browser" is
+    // the real `workspace:<session>` host, whose authority is its visibility.
+    for callback in ["transcript", "browser", "session-browser", "saved-view"] {
         let mut setup = None;
-        with_link_panes(cx, Some("owner"), |shell, window, cx| {
+        let seed = |shell: &mut Shell, window: &mut Window, cx: &mut Context<Shell>| {
             shell
                 .state
                 .update(cx, |state, _| state.local_device_id = Some("local".into()));
@@ -274,14 +418,21 @@ fn callback_authority_recovers_across_repeated_route_snapshot_and_selection_tran
                 window,
                 cx,
             );
+            shell.sync_panel_workspace(cx);
             setup = Some((
                 cx.entity(),
                 window.window_handle(),
                 Shell::view_opener(cx),
                 shell.browsers[&1].clone(),
+                shell.panel_key(cx),
             ));
-        });
-        let (shell, window, opener, browser) = setup.unwrap();
+        };
+        if callback == "session-browser" {
+            with_panel_links(cx, seed);
+        } else {
+            with_link_panes(cx, Some("owner"), seed);
+        }
+        let (shell, window, opener, browser, owner) = setup.unwrap();
         let original_row = shell.read_with(cx, |shell, cx| {
             shell.state.read(cx).selected_chat_row().unwrap().clone()
         });
@@ -318,12 +469,21 @@ fn callback_authority_recovers_across_repeated_route_snapshot_and_selection_tran
                     }
                 });
                 shell.set_right_active(RightSurface::Browser(1), cx);
+                shell.sync_panel_workspace(cx);
+                show_panel_browser(shell, 1, cx);
             });
             let before = shell.read_with(cx, link_state);
             let known_live = row_state == "live";
+            let row_allows =
+                known_live || (row_state == "missing" && !synced && callback != "saved-view");
+            // A visible browser answers to its route and its own owner, not to
+            // which chat is selected. Everything else also follows the selection.
             let allowed = chat_route
-                && selected == Some("owner")
-                && (known_live || (row_state == "missing" && !synced && callback != "saved-view"));
+                && match callback {
+                    "session-browser" => true,
+                    "browser" => row_allows,
+                    _ => selected == Some("owner") && row_allows,
+                };
             window
                 .update(cx, |_, window, cx| match callback {
                     "transcript" => shell.update(cx, |shell, cx| {
@@ -340,7 +500,9 @@ fn callback_authority_recovers_across_repeated_route_snapshot_and_selection_tran
                             }
                         );
                     }),
-                    "browser" => browser.update(cx, |_, cx| cx.emit(BrowserEvent::NewTab(None))),
+                    "browser" | "session-browser" => {
+                        browser.update(cx, |_, cx| cx.emit(BrowserEvent::NewTab(None)))
+                    }
                     "saved-view" => {
                         let view = harness_proto::ToolView::new(
                             harness_proto::ToolViewKind::Html,
@@ -357,7 +519,11 @@ fn callback_authority_recovers_across_repeated_route_snapshot_and_selection_tran
                 if allowed && callback != "transcript" && (callback != "saved-view" || cfg!(target_os = "macos")) {
                     assert_eq!(shell.browser_seq, before.browser_seq + 1, "{callback}, {row_state}");
                     assert_eq!(shell.browsers.len(), before.browsers.len() + 1);
-                    assert_eq!(shell.resolved_right_active(cx), RightSurface::Browser(shell.browser_seq));
+                    // The new tab joins the host's owner, whichever chat is selected.
+                    let opened = RightSurface::Browser(shell.browser_seq);
+                    assert!(shell.right_tabs[&owner].contains(&opened), "{callback}, {selected:?}");
+                    assert_eq!(shell.panels.get(&owner).right_active, opened);
+                    assert!(!shell.right_tabs.contains_key("peer-a"), "{callback}, {selected:?}");
                 } else {
                     let mut expected = before;
                     if allowed && callback == "saved-view" {
@@ -365,6 +531,31 @@ fn callback_authority_recovers_across_repeated_route_snapshot_and_selection_tran
                     }
                     assert_eq!(link_state(shell, cx), expected, "{callback}, route={chat_route}, row={row_state}, synced={synced}, selected={selected:?}");
                 }
+            });
+            // Place the new tab before the next transition, as a frame would.
+            shell.update(cx, |shell, cx| shell.sync_panel_workspace(cx));
+        }
+        // A hidden browser opens nothing, whichever chat rows and selection hold.
+        shell.update(cx, |shell, cx| {
+            shell.route = Route::Chat;
+            shell.state.update(cx, |state, _| {
+                state.chats_synced = true;
+                state.selected_chat = Some("owner".into());
+                state.chats.retain(|chat| chat.id != "owner");
+                state.chats.push(original_row.clone());
+            });
+            shell.sync_panel_workspace(cx);
+            cover_panel_browser(shell, 1, cx);
+        });
+        if matches!(callback, "browser" | "session-browser") {
+            let before = shell.read_with(cx, link_state);
+            shell.read_with(cx, |shell, cx| {
+                assert!(!shell.visible_workspace_browsers(cx).contains(&1));
+            });
+            browser.update(cx, |_, cx| cx.emit(BrowserEvent::NewTab(None)));
+            cx.run_until_parked();
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(link_state(shell, cx), before, "{callback}")
             });
         }
     }
@@ -734,6 +925,7 @@ fn reordered_browser_fallback_transfers_navigation_authority_to_the_visible_tab(
 fn deleting_a_chat_releases_its_browser_tabs_and_queued_callbacks(cx: &mut TestAppContext) {
     use crate::browser::BrowserEvent;
 
+    let engine = DeleteEngine::new();
     for foreground in [false, true] {
         let mut setup = None;
         with_link_panes(cx, Some("owner"), |shell, window, cx| {
@@ -756,10 +948,14 @@ fn deleting_a_chat_releases_its_browser_tabs_and_queued_callbacks(cx: &mut TestA
                 assert!(shell.select_chat_pane(0, cx));
                 shell.on_state_changed(&shell.state.clone(), cx);
             }
+            let channels = engine.attach(shell, cx);
             shell.delete_chat("peer-a".into(), window, cx);
-            setup = Some((cx.entity(), deleted, surviving));
+            setup = Some((cx.entity(), deleted, surviving, channels));
         });
-        let (shell, deleted, surviving) = setup.unwrap();
+        let (shell, deleted, surviving, mut channels) = setup.unwrap();
+        // Asking is not deleting: nothing is released until the engine confirms.
+        shell.read_with(cx, |shell, _| assert_eq!(shell.browsers.len(), 3));
+        engine.confirm(&mut channels, "peer-a", cx);
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.browsers.len(), 1);
             assert_eq!(shell.browser_subs.len(), 1);
@@ -1109,6 +1305,7 @@ fn browser_cleanup_waits_for_authoritative_chat_deletion_not_archive_or_partial_
 ) {
     use crate::browser::BrowserEvent;
 
+    let engine = DeleteEngine::new();
     for foreground in [false, true] {
         let mut setup = None;
         with_link_panes(cx, Some("owner"), |shell, window, cx| {
@@ -1126,9 +1323,9 @@ fn browser_cleanup_waits_for_authoritative_chat_deletion_not_archive_or_partial_
                     ));
                 }
             }
-            setup = Some((cx.entity(), deleted));
+            setup = Some((cx.entity(), window.window_handle(), deleted));
         });
-        let (shell, deleted) = setup.unwrap();
+        let (shell, window, deleted) = setup.unwrap();
         let original = shell.read_with(cx, link_state);
         // A partial/cold-start chat list is not evidence of deletion.
         let row = shell.update(cx, |shell, cx| {
@@ -1165,7 +1362,7 @@ fn browser_cleanup_waits_for_authoritative_chat_deletion_not_archive_or_partial_
             assert_eq!(shell.right_tabs, original.tabs);
             assert_eq!(shell.panels.map, original.panels);
         });
-        // Restore the row before deleting it in a later authoritative snapshot,
+        // Restore the row before removing it in a later authoritative snapshot,
         // as can happen when another client deletes a foreground or parked chat.
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
@@ -1193,11 +1390,33 @@ fn browser_cleanup_waits_for_authoritative_chat_deletion_not_archive_or_partial_
             });
         });
         cx.run_until_parked();
+        // A missing row is not a deletion: panels keep the browsers it left.
+        shell.read_with(cx, |shell, _| {
+            for (id, _) in &deleted {
+                assert!(shell.browsers.contains_key(id));
+                assert!(shell.browser_subs.contains_key(id));
+            }
+        });
+        // The confirmed delete call is what releases them.
+        let mut channels = shell.update(cx, |shell, cx| engine.attach(shell, cx));
+        window
+            .update(cx, |_, window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.delete_chat("peer-a".into(), window, cx)
+                });
+            })
+            .unwrap();
+        shell.read_with(cx, |shell, _| {
+            for (id, _) in &deleted {
+                assert!(shell.browsers.contains_key(id), "released before the reply");
+            }
+        });
+        engine.confirm(&mut channels, "peer-a", cx);
         shell.read_with(cx, |shell, _| {
             for (id, _) in &deleted {
                 assert!(
                     !shell.browsers.contains_key(id),
-                    "snapshot deletion leaked browser {id}"
+                    "confirmed deletion leaked browser {id}"
                 );
                 assert!(!shell.browser_subs.contains_key(id));
                 assert!(!shell.right_tabs["peer-a"].contains(&RightSurface::Browser(*id)));
@@ -1223,6 +1442,7 @@ fn browser_cleanup_waits_for_authoritative_chat_deletion_not_archive_or_partial_
 fn deleting_background_browsers_preserves_mixed_surfaces_and_keyboard_focus(
     cx: &mut TestAppContext,
 ) {
+    let engine = DeleteEngine::new();
     for active_browser in [false, true] {
         let mut setup = None;
         with_link_panes(cx, Some("owner"), |shell, window, cx| {
@@ -1245,9 +1465,10 @@ fn deleting_background_browsers_preserves_mixed_surfaces_and_keyboard_focus(
                 window,
                 cx,
             );
-            setup = Some((cx.entity(), window.window_handle(), diff, file));
+            let channels = engine.attach(shell, cx);
+            setup = Some((cx.entity(), window.window_handle(), diff, file, channels));
         });
-        let (shell, window, diff, file) = setup.unwrap();
+        let (shell, window, diff, file, mut channels) = setup.unwrap();
         let focus = window
             .update(cx, |_, window, cx| {
                 let composer = shell.read(cx).composer.clone();
@@ -1274,9 +1495,15 @@ fn deleting_background_browsers_preserves_mixed_surfaces_and_keyboard_focus(
             .unwrap();
         expected.browsers.retain(|id| *id != deleted);
         expected.tabs.insert("peer-a".into(), vec![diff, file]);
-        // The isolated fixture intentionally has no engine; deleteChat reports
-        // that connection status independently of local surface cleanup.
-        expected.notice = Some("Engine not connected".into());
+        // The deleted chat leaves its pane and panel; everything else stays.
+        for pane in &mut expected.split.as_mut().unwrap().panes {
+            if pane.as_deref() == Some("peer-a") {
+                *pane = None;
+            }
+        }
+        for (_, tabs) in &mut expected.panel_tabs {
+            tabs.retain(|tab| *tab != PanelTab::Chat("peer-a".into()));
+        }
         if active_browser {
             expected.panels.get_mut("peer-a").unwrap().right_active = RightSurface::Picker;
         }
@@ -1287,6 +1514,12 @@ fn deleting_background_browsers_preserves_mixed_surfaces_and_keyboard_focus(
                 });
             })
             .unwrap();
+        engine.confirm(&mut channels, "peer-a", cx);
+        // This window's root is the focus fixture, so the search for Shell
+        // windows passes it by. Finish the deletion on the shell directly.
+        shell.update(cx, |shell, cx| {
+            shell.finish_history_chat_deletion("peer-a", cx)
+        });
         cx.run_until_parked();
         shell.read_with(cx, |shell, cx| {
             assert_eq!(link_state(shell, cx), expected);
@@ -1306,11 +1539,15 @@ fn deleting_background_browsers_preserves_mixed_surfaces_and_keyboard_focus(
 fn queued_browser_events_cannot_recreate_tabs_during_chat_deletion(cx: &mut TestAppContext) {
     use crate::browser::BrowserEvent;
 
-    for event in [
+    let engine = DeleteEngine::new();
+    for (event, hidden_host) in [
         BrowserEvent::NewTab(None),
         BrowserEvent::OpenSource("/workspace/link-tests/race.rs".into()),
         BrowserEvent::Close,
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|event| [(event.clone(), true), (event, false)])
+    {
         for queue_before_delete in [false, true] {
             let mut setup = None;
             with_link_panes(cx, Some("owner"), |shell, window, cx| {
@@ -1319,13 +1556,18 @@ fn queued_browser_events_cannot_recreate_tabs_during_chat_deletion(cx: &mut Test
                     window,
                     cx,
                 );
+                shell.sync_panel_workspace(cx);
+                if hidden_host {
+                    cover_panel_browser(shell, shell.browser_seq, cx);
+                }
                 setup = Some((
                     cx.entity(),
                     window.window_handle(),
                     shell.browsers[&shell.browser_seq].clone(),
+                    engine.attach(shell, cx),
                 ));
             });
-            let (shell, window, browser) = setup.unwrap();
+            let (shell, window, browser, mut channels) = setup.unwrap();
             window
                 .update(cx, |_, window, cx| {
                     // Both operations share one GPUI update: subscriptions must not
@@ -1341,17 +1583,30 @@ fn queued_browser_events_cannot_recreate_tabs_during_chat_deletion(cx: &mut Test
                     }
                 })
                 .unwrap();
-            cx.run_until_parked();
+            engine.confirm(&mut channels, "peer-a", cx);
             shell.read_with(cx, |shell, _| {
+                let case = format!("{event:?}, before={queue_before_delete}, hidden={hidden_host}");
+                assert!(shell.browsers.is_empty(), "{case}");
+                assert!(shell.browser_subs.is_empty(), "{case}");
                 assert!(
-                    shell.browsers.is_empty(),
-                    "{event:?}, before={queue_before_delete}"
+                    !shell.right_tabs["peer-a"]
+                        .iter()
+                        .any(|tab| matches!(tab, RightSurface::Browser(_))),
+                    "{case}"
                 );
-                assert!(shell.browser_subs.is_empty());
-                assert!(shell.right_tabs["peer-a"].is_empty());
-                assert!(shell.file_surfaces.is_empty());
-                assert_eq!(shell.browser_seq, 1);
+                // Until the engine confirms, a visible browser's chat is still
+                // live and may answer. A hidden one never recreates anything.
+                if hidden_host {
+                    assert!(shell.right_tabs["peer-a"].is_empty(), "{case}");
+                    assert!(shell.file_surfaces.is_empty(), "{case}");
+                    assert_eq!(shell.browser_seq, 1, "{case}");
+                }
             });
+            // Delivered once the deletion has finished, the event finds no host.
+            let finished = shell.read_with(cx, link_state);
+            browser.update(cx, |_, cx| cx.emit(event.clone()));
+            cx.run_until_parked();
+            shell.read_with(cx, |shell, cx| assert_eq!(link_state(shell, cx), finished));
         }
     }
 }
@@ -1369,42 +1624,93 @@ fn hide_browser_navigation_host(shell: &mut Shell, hidden_by: &str, cx: &mut Con
     }
 }
 
+/// Each way a browser's panel tab can leave the screen.
+fn hide_panel_browser(shell: &mut Shell, browser: u64, hidden_by: &str, cx: &mut Context<Shell>) {
+    assert_eq!(shell.active_chat, "peer-a");
+    match hidden_by {
+        "tab-behind" => cover_panel_browser(shell, browser, cx),
+        "zoomed-away" => {
+            // Zoom fills the window with the focused panel, so focus another.
+            let layout = shell.panel_layout_mut(cx);
+            layout.focused = layout
+                .panels
+                .iter()
+                .find(|panel| {
+                    !panel.tabs.iter().any(|tab| {
+                        matches!(tab, PanelTab::Surface { surface: RightSurface::Browser(id), .. } if *id == browser)
+                    })
+                })
+                .unwrap()
+                .id;
+            shell.workspace_zoom(cx);
+        }
+        "settings" => shell.route = Route::Settings(SettingsSection::Appearance),
+        "other-session" => {
+            shell.create_workspace_session(cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+        }
+        _ => unreachable!(),
+    }
+    if hidden_by != "settings" {
+        assert!(
+            !shell.visible_workspace_browsers(cx).contains(&browser),
+            "{hidden_by}"
+        );
+    }
+}
+
+fn reveal_panel_browser(
+    shell: &mut Shell,
+    browser: u64,
+    hidden_by: &str,
+    window: &mut Window,
+    cx: &mut Context<Shell>,
+) {
+    match hidden_by {
+        "tab-behind" => {
+            for panel in &mut shell.panel_layout_mut(cx).panels {
+                panel.tabs.retain(|tab| *tab != PanelTab::New(u64::MAX));
+            }
+            show_panel_browser(shell, browser, cx);
+        }
+        "zoomed-away" => shell.workspace_zoom(cx),
+        "settings" => shell.route = Route::Chat,
+        "other-session" => {
+            shell.switch_chat_tab(0, window, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+        }
+        _ => unreachable!(),
+    }
+    shell.sync_panel_workspace(cx);
+    assert!(shell.visible_workspace_browsers(cx).contains(&browser));
+}
+
 #[gpui::test]
 fn browser_navigation_events_require_a_visible_consistently_selected_host(cx: &mut TestAppContext) {
     use crate::browser::BrowserEvent;
 
-    for hidden_by in [
-        "closed-host",
-        "settings",
-        "selection-handoff",
-        "canvas-handoff",
-    ] {
+    for hidden_by in ["tab-behind", "zoomed-away", "settings", "other-session"] {
         for event in [
             BrowserEvent::NewTab(Some("https://example.com/queued-popup".into())),
             BrowserEvent::OpenSource("/workspace/link-tests/queued-source.rs".into()),
         ] {
             let mut setup = None;
-            with_link_panes(cx, Some("owner"), |shell, window, cx| {
-                assert_eq!(
-                    shell.activate_session_link(
-                        &activation(Some("peer-a"), LinkAction::Internal),
-                        window,
-                        cx
-                    ),
-                    LinkOutcome::Internal
-                );
-                let browser = shell.browsers[&shell.browser_seq].clone();
-                setup = Some((cx.entity(), browser));
+            with_panel_links(cx, |shell, window, cx| {
+                focus_panel_chat(shell, "peer-a", window, cx);
+                let id = open_panel_browser(shell, "peer-a", window, cx);
+                setup = Some((
+                    cx.entity(),
+                    window.window_handle(),
+                    id,
+                    shell.browsers[&id].clone(),
+                    workspace_owner(shell),
+                ));
             });
-            let (shell, browser) = setup.unwrap();
-            // Let initial promotion notifications settle before simulating a
-            // later in-flight handoff, so this really tests inconsistent state.
-            shell.update(cx, |shell, cx| {
-                hide_browser_navigation_host(shell, hidden_by, cx)
-            });
+            let (shell, window, id, browser, owner) = setup.unwrap();
+            shell.update(cx, |shell, cx| hide_panel_browser(shell, id, hidden_by, cx));
             let before = shell.read_with(cx, link_state);
             // A native/action event can have been queued while the page was
-            // live, before the host disappeared or selection began changing.
+            // live, before the host disappeared.
             browser.update(cx, |_, cx| cx.emit(event.clone()));
             cx.run_until_parked();
             shell.read_with(cx, |shell, cx| {
@@ -1412,37 +1718,36 @@ fn browser_navigation_events_require_a_visible_consistently_selected_host(cx: &m
             });
 
             // The same live browser regains navigation authority when its
-            // owner and host are visible again; do not permanently mute it.
-            shell.update(cx, |shell, cx| {
-                shell.route = Route::Chat;
-                shell
-                    .state
-                    .update(cx, |state, _| state.selected_chat = Some("peer-a".into()));
-                shell.on_state_changed(&shell.state.clone(), cx);
-                shell.set_surfaces_open(true, cx);
-            });
+            // host is visible again; do not permanently mute it.
+            window
+                .update(cx, |_, window, cx| {
+                    shell.update(cx, |shell, cx| {
+                        reveal_panel_browser(shell, id, hidden_by, window, cx)
+                    })
+                })
+                .unwrap();
             cx.run_until_parked();
             browser.update(cx, |_, cx| cx.emit(event.clone()));
             cx.run_until_parked();
             shell.read_with(cx, |shell, cx| {
-                assert_eq!(shell.active_chat, "peer-a");
-                assert!(shell.right_pane_open(cx));
+                assert_eq!(shell.active_chat, "peer-a", "{hidden_by}");
+                assert_eq!(
+                    shell.right_tabs.keys().collect::<Vec<_>>(),
+                    [&owner],
+                    "{hidden_by}"
+                );
+                let opened = shell.panels.get(&owner).right_active;
+                assert!(shell.right_tabs[&owner].contains(&opened), "{hidden_by}");
                 match event {
                     BrowserEvent::NewTab(_) => {
                         assert_eq!(shell.browsers.len(), 2);
                         assert!(shell.file_surfaces.is_empty());
-                        assert_eq!(
-                            shell.resolved_right_active(cx),
-                            RightSurface::Browser(shell.browser_seq)
-                        );
+                        assert_eq!(opened, RightSurface::Browser(shell.browser_seq));
                     }
                     BrowserEvent::OpenSource(_) => {
                         assert_eq!(shell.browsers.len(), 1);
                         assert_eq!(shell.file_surfaces.len(), 1);
-                        assert!(matches!(
-                            shell.resolved_right_active(cx),
-                            RightSurface::File(_)
-                        ));
+                        assert!(matches!(opened, RightSurface::File(_)));
                         assert_eq!(
                             shell.file_surface_paths.values().next().map(String::as_str),
                             Some("queued-source.rs")
@@ -1452,6 +1757,48 @@ fn browser_navigation_events_require_a_visible_consistently_selected_host(cx: &m
                 }
             });
         }
+    }
+
+    // A selection still changing hands does not hide a visible browser, and it
+    // does not hand the browser's new tab to whichever chat is arriving.
+    for arriving in [Some("peer-b"), None] {
+        let mut setup = None;
+        with_panel_links(cx, |shell, window, cx| {
+            focus_panel_chat(shell, "peer-a", window, cx);
+            let id = open_panel_browser(shell, "peer-a", window, cx);
+            setup = Some((
+                cx.entity(),
+                shell.browsers[&id].clone(),
+                workspace_owner(shell),
+            ));
+        });
+        let (shell, browser, owner) = setup.unwrap();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                // Deliberately stop between AppState selection and Shell sync.
+                state.selected_chat = arriving.map(str::to_owned);
+            });
+        });
+        browser.update(cx, |_, cx| {
+            cx.emit(BrowserEvent::NewTab(Some(
+                "https://example.com/queued-popup".into(),
+            )))
+        });
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.state.read(cx).selected_chat.as_deref(),
+                arriving,
+                "the tab must not move the selection"
+            );
+            assert_eq!(shell.browsers.len(), 2, "{arriving:?}");
+            assert_eq!(
+                shell.right_tabs.keys().collect::<Vec<_>>(),
+                [&owner],
+                "{arriving:?}"
+            );
+            assert_eq!(shell.right_tabs[&owner].len(), 2, "{arriving:?}");
+        });
     }
 }
 
@@ -1623,6 +1970,18 @@ fn browser_close_batches_preserve_a_parked_canvas_in_every_delivery_order(cx: &m
             if tabs.is_empty() {
                 panel.changes_open = false;
             }
+            // Its panel tab goes too, and the tab on screen stays selected.
+            for (active, tabs) in &mut expected.panel_tabs {
+                let closed = tabs.iter().position(|tab| {
+                    matches!(tab, PanelTab::Surface { surface: open, .. } if *open == surface)
+                });
+                if let Some(at) = closed {
+                    tabs.remove(at);
+                    if at < *active {
+                        *active -= 1;
+                    }
+                }
+            }
             browser.update(cx, |_, cx| cx.emit(BrowserEvent::Close));
             cx.run_until_parked();
             shell.read_with(cx, |shell, cx| {
@@ -1779,56 +2138,77 @@ fn browser_navigation_events_cannot_leak_into_another_peer_after_promotion(
     use crate::browser::BrowserEvent;
 
     let mut setup = None;
-    with_link_panes(cx, Some("owner"), |shell, window, cx| {
-        let link = activation(Some("peer-a"), LinkAction::Internal);
-        assert_eq!(
-            shell.activate_session_link(&link, window, cx),
-            LinkOutcome::Internal
-        );
-        let old = shell.browsers[&shell.browser_seq].clone();
-        assert_eq!(
-            shell.activate_session_link(&link, window, cx),
-            LinkOutcome::Internal
-        );
-        let active = shell.browsers[&shell.browser_seq].clone();
-        setup = Some((cx.entity(), old, active));
+    with_panel_links(cx, |shell, window, cx| {
+        focus_panel_chat(shell, "peer-a", window, cx);
+        let old = open_panel_browser(shell, "peer-a", window, cx);
+        let active = open_panel_browser(shell, "peer-a", window, cx);
+        setup = Some((
+            cx.entity(),
+            window.window_handle(),
+            shell.browsers[&old].clone(),
+            active,
+            shell.browsers[&active].clone(),
+            workspace_owner(shell),
+        ));
     });
-    let (shell, old, active) = setup.unwrap();
+    let (shell, window, old, active_id, active, owner) = setup.unwrap();
+    let focus = |chat: &'static str, cx: &mut TestAppContext| {
+        window
+            .update(cx, |_, window, cx| {
+                shell.update(cx, |shell, cx| focus_panel_chat(shell, chat, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+    };
+    // The tab behind the visible one stays silent, whichever peer is focused.
     for background_owner in [false, true] {
         if background_owner {
-            shell.update(cx, |shell, cx| {
-                assert!(shell.select_chat_pane(1, cx));
-                shell.on_state_changed(&shell.state.clone(), cx);
-            });
-            cx.run_until_parked();
+            focus("peer-b", cx);
         }
         let before = shell.read_with(cx, link_state);
-        for browser in if background_owner {
-            vec![&old, &active]
-        } else {
-            vec![&old]
-        } {
-            for event in [
-                BrowserEvent::NewTab(Some(URL.into())),
-                BrowserEvent::OpenSource("/workspace/link-tests/source.rs".into()),
-            ] {
-                browser.update(cx, |_, cx| cx.emit(event));
-                cx.run_until_parked();
-                shell.read_with(cx, |shell, cx| assert_eq!(link_state(shell, cx), before));
-            }
+        for event in [
+            BrowserEvent::NewTab(Some(URL.into())),
+            BrowserEvent::OpenSource("/workspace/link-tests/source.rs".into()),
+        ] {
+            old.update(cx, |_, cx| cx.emit(event));
+            cx.run_until_parked();
+            shell.read_with(cx, |shell, cx| assert_eq!(link_state(shell, cx), before));
         }
     }
-    shell.update(cx, |shell, cx| {
-        assert!(shell.select_chat_pane(0, cx));
-        shell.on_state_changed(&shell.state.clone(), cx);
-    });
-    cx.run_until_parked();
+    // The visible one may still open a tab with peer-b focused. The tab joins
+    // its own owner and does not move focus or surfaces to peer-b.
     active.update(cx, |_, cx| cx.emit(BrowserEvent::NewTab(Some(URL.into()))));
+    cx.run_until_parked();
+    let newest = shell.update(cx, |shell, cx| {
+        shell.sync_panel_workspace(cx);
+        assert_eq!(shell.active_chat, "peer-b");
+        assert_eq!(
+            shell.state.read(cx).selected_chat.as_deref(),
+            Some("peer-b")
+        );
+        assert_eq!(shell.right_tabs.keys().collect::<Vec<_>>(), [&owner]);
+        assert_eq!(shell.right_tabs[&owner].len(), 3);
+        assert!(!shell.visible_workspace_browsers(cx).contains(&active_id));
+        assert!(
+            shell
+                .visible_workspace_browsers(cx)
+                .contains(&shell.browser_seq)
+        );
+        shell.browsers[&shell.browser_seq].clone()
+    });
+    // The tab it opened covers it, so it has gone quiet in turn.
+    let before = shell.read_with(cx, link_state);
+    active.update(cx, |_, cx| cx.emit(BrowserEvent::NewTab(Some(URL.into()))));
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| assert_eq!(link_state(shell, cx), before));
+    // Focus returning to the promoted peer changes nothing about ownership.
+    focus("peer-a", cx);
+    newest.update(cx, |_, cx| cx.emit(BrowserEvent::NewTab(Some(URL.into()))));
     cx.run_until_parked();
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.active_chat, "peer-a");
-        assert_eq!(shell.right_tabs["peer-a"].len(), 3);
-        assert!(!shell.right_tabs.contains_key("peer-b"));
+        assert_eq!(shell.right_tabs.keys().collect::<Vec<_>>(), [&owner]);
+        assert_eq!(shell.right_tabs[&owner].len(), 4);
         assert_eq!(
             shell.resolved_right_active(cx),
             RightSurface::Browser(shell.browser_seq)
@@ -1841,35 +2221,44 @@ fn browser_navigation_events_cannot_leak_into_another_peer_after_promotion(
 fn link_callbacks_follow_sources_across_focus_zoom_and_chat_tab_round_trips(
     cx: &mut TestAppContext,
 ) {
-    with_link_panes(cx, Some("owner"), |shell, window, cx| {
+    with_panel_links(cx, |shell, window, cx| {
         let link = activation(Some("peer-a"), LinkAction::Internal);
-        assert_eq!(
-            shell.activate_session_link(&link, window, cx),
-            LinkOutcome::Internal
-        );
-        let first = shell.browser_seq;
+        let owner = workspace_owner(shell);
+        focus_panel_chat(shell, "peer-a", window, cx);
+        let first = open_panel_browser(shell, "peer-a", window, cx);
 
-        // A menu callback retained while another pane is zoomed cannot navigate
-        // until its source is visible again.
-        assert!(shell.select_chat_pane(1, cx));
-        shell.on_state_changed(&shell.state.clone(), cx);
+        // A menu callback retained while another panel is zoomed cannot navigate
+        // until its source is back on screen and focused.
+        focus_panel_chat(shell, "peer-b", window, cx);
         shell.toggle_chat_pane_zoom(cx);
+        assert!(shell.panel_layout(cx).unwrap().expanded.is_some());
         assert_rejected_unchanged(shell, &link, window, cx);
         shell.toggle_chat_pane_zoom(cx);
+        assert!(shell.panel_layout(cx).unwrap().expanded.is_none());
+        focus_panel_chat(shell, "peer-a", window, cx);
         assert_eq!(
             shell.activate_session_link(&link, window, cx),
             LinkOutcome::Internal
         );
-        assert_eq!(shell.right_tabs["peer-a"].len(), 2);
+        assert_eq!(shell.right_tabs[&owner].len(), 2);
+        shell.sync_panel_workspace(cx);
 
         // Parked layouts and browsers do not authorize a hidden transcript.
-        // Restoring the tab should make a fresh activation work normally.
+        // Restoring the session should make a fresh activation work normally.
+        shell.create_workspace_session(cx);
         shell.new_chat_tab(Some("parked".into()), window, cx);
         shell.on_state_changed(&shell.state.clone(), cx);
         assert_eq!(shell.active_chat, "parked");
+        let parked_owner = workspace_owner(shell);
+        assert_ne!(parked_owner, owner);
         assert!(shell.browsers.contains_key(&first));
         assert_rejected_unchanged(shell, &link, window, cx);
-        shell.switch_chat_tab(0, window, cx);
+        let home = shell
+            .chat_tabs
+            .iter()
+            .position(|tab| format!("workspace:{}", tab.id) == owner)
+            .unwrap();
+        shell.switch_chat_tab(home, window, cx);
         shell.on_state_changed(&shell.state.clone(), cx);
         assert_eq!(shell.active_chat, "peer-a");
         assert!(shell.right_pane_open(cx));
@@ -1877,8 +2266,9 @@ fn link_callbacks_follow_sources_across_focus_zoom_and_chat_tab_round_trips(
             shell.activate_session_link(&link, window, cx),
             LinkOutcome::Internal
         );
-        assert_eq!(shell.right_tabs["peer-a"].len(), 3);
+        assert_eq!(shell.right_tabs[&owner].len(), 3);
         assert!(!shell.right_tabs.contains_key("parked"));
+        assert!(!shell.right_tabs.contains_key(&parked_owner));
     });
 }
 

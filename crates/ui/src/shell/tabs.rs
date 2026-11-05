@@ -86,16 +86,27 @@ impl Shell {
     /// these are the very keys the shortcuts table invites them to press) or
     /// underneath the add-space palette, stranding the overlay over a session
     /// they never picked.
-    pub(super) fn cycle_session(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn cycle_session(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx) {
             return;
         }
         // The same list `render_active_rows` draws and the jump shortcuts
         // count — one function, so neither can drift from the screen.
-        let order = self.sidebar_visible_order(cx);
-        let selected = self.state.read(cx).selected_chat.clone();
+        let rows = self.workspace_session_sidebar_rows(cx);
+        let order: Vec<_> = rows
+            .iter()
+            .filter(|row| self.session_row_in_sidebar(row))
+            .map(|row| row.id.clone())
+            .collect();
+        let selected = self.chat_tabs.get(self.chat_tab).map(|tab| tab.id.clone());
         if let Some(target) = cycle_target(&order, selected.as_deref(), forward) {
-            self.open_chat_in_tab(target, window, cx);
+            self.activate_workspace_session(&target, cx);
+            window.focus(&self.composer.focus_handle(cx), cx);
         }
     }
 
@@ -105,7 +116,10 @@ impl Shell {
     pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
         // First synced frame: reopen what was open at quit (its chat and
         // split layout), unless a deep link or manual pick already landed.
-        if !self.boot_restored && self.state.read(cx).chats_synced {
+        if !self.boot_restored
+            && self.state.read(cx).chats_synced
+            && self.state.read(cx).spaces_synced
+        {
             self.boot_restored = true;
             let has_draft = {
                 let composer = self.composer.read(cx);
@@ -117,45 +131,29 @@ impl Shell {
                 // Content entered before sync is new-session intent too.
                 self.state.update(cx, |state, _| state.auto_selected = true);
             }
+            if self.state.read(cx).selected_chat.is_none() && !self.state.read(cx).auto_selected && self.restore_project_tabs(cx) {
+                return;
+            }
             let restore = {
                 let state = self.state.read(cx);
-                // Saved views may reference archived conversations. Only
-                // automatic recency fallback should filter them out.
-                let live = |id: &str| state.chats.iter().any(|c| c.id == id);
+                // Missing metadata may belong to an offline device. Preserve
+                // saved identities; confirmed deletion removes them explicitly.
+                let live = |_id: &str| true;
                 (state.selected_chat.is_none() && !state.auto_selected).then(|| {
                     (
                         self.settings.last_chat_id.clone().filter(|id| live(id)),
                         self.settings
                             .chat_layout
                             .as_ref()
-                            .and_then(|saved| chat_split::ChatSplit::from_saved(saved, |id| {
-                                live(id) && self.settings.last_chat_id.as_deref() != Some(id)
-                            })),
-                        chat_tabs::restore_chat_tabs(
-                            &self.settings.chat_tabs,
-                            self.settings.chat_tab,
-                            live,
-                        ),
+                            .and_then(|saved| chat_split::ChatSplit::from_saved(saved, live)),
                     )
                 })
             };
-            if let Some((mut last, mut layout, tabs)) = restore {
-                // The active tab's own layout is the one restored below.
-                if let Some(restored) = tabs {
-                    if restored.tabs.len() >= 2 {
-                        self.chat_tabs = restored.tabs;
-                        self.chat_tab = restored.active;
-                    }
-                    // The saved active tab was empty and dropped: its live
-                    // chat and layout go with it, and the tab that took its
-                    // place loads as the live one.
-                    if let Some(tab) = restored.replace_live {
-                        last = tab.selected;
-                        layout = tab.split;
-                        self.set_space_filter(tab.project, cx);
-                    }
-                }
+            if let Some((last, layout)) = restore {
                 let restored_layout = layout.is_some();
+                let restored_panels = layout.as_ref().map(|split| {
+                    workspace_session_persistence::legacy_workspace_panels(split, last.as_deref())
+                });
                 self.chat_split = layout;
                 self.chat_split_selected = last.clone();
                 self.sync_chat_panes(cx);
@@ -167,6 +165,12 @@ impl Shell {
                         s.auto_selected = true;
                         s.select_chat(last, cx)
                     });
+                    if let Some(panels) = restored_panels {
+                        self.ensure_workspace_sessions(cx);
+                        let session = self.chat_tabs[self.chat_tab].id.clone();
+                        self.restore_workspace_panels(&session, &panels, cx);
+                        self.persist_chat_tabs(cx);
+                    }
                     return;
                 }
             } else {
@@ -177,7 +181,11 @@ impl Shell {
         }
         let first = {
             let state = self.state.read(cx);
-            if !state.chats_synced || state.selected_chat.is_some() || state.auto_selected {
+            if !self.boot_restored
+                || !state.chats_synced
+                || state.selected_chat.is_some()
+                || state.auto_selected
+            {
                 return;
             }
             state
@@ -194,15 +202,7 @@ impl Shell {
 
     /// Replace the current tab/pane's session, as `/resume` requests.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
-        if chat_split::existing_chat_selection(Some(chat_id.clone()), self.state.read(cx)).is_none() {
-            return;
-        }
-        self.command_palette = None;
-        self.route = Route::Chat;
-        self.focus_composer(cx);
-        self.state
-            .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
-        cx.notify();
+        self.open_chat_preserving_tabs(chat_id, cx);
     }
 
     /// ⌘W's last rung: with nothing else to close, leave the open chat for a
@@ -212,16 +212,8 @@ impl Shell {
         if !matches!(self.route, Route::Chat) || self.state.read(cx).selected_chat.is_none() {
             return false;
         }
-        self.remember_closed_chat_tab(
-            self.chat_tab,
-            chat_tabs::ChatTab {
-                id: self.chat_tab_id,
-                split: self.chat_split.clone(),
-                selected: self.state.read(cx).selected_chat.clone(),
-                project: self.settings.space_filter.clone(),
-                draft: Some(self.current_canvas_draft(cx)),
-            },
-        );
+        let tab = self.park_chat_tab(cx);
+        self.remember_closed_chat_tab(tab, self.chat_tab, cx);
         self.chat_tab_id = uuid::Uuid::new_v4();
         self.open_new_session(cx);
         self.remember_last_tab_canvas(cx);
@@ -236,161 +228,45 @@ impl Shell {
     /// open it just hides (detach, not close — the source chat's tabs and
     /// PTYs survive for the return trip).
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
-        self.command_palette = None;
-        self.route = Route::Chat;
-        self.focus_composer(cx);
-        // Pre-hide before the selection flips so the state change can't
-        // auto-create a canvas tab (the panel's observer runs on the same
-        // update). The source chat's flag stays set — returning restores it.
-        let was_open = self.terminal_open(cx)
-            || self
-                .terminal
-                .as_ref()
-                .is_some_and(|panel| panel.read(cx).is_open());
-        if was_open {
-            self.terminal_tween = None;
-            if let Some(panel) = self.terminal.clone() {
-                panel.update(cx, |panel, cx| panel.set_open(false, cx));
-            }
-        }
-        let target = {
-            let state = self.state.read(cx);
-            self.settings
-                .space_filter
-                .clone()
-                .filter(|id| state.space_row(id).is_some())
-        };
-        let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
-        self.state.update(cx, |s, cx| {
-            if target.is_some() {
-                s.select_space(target, cx);
-            } else if defaults.no_project {
-                // Opening an existing project session (including boot's last
-                // session) must not erase the saved new-session opt-out.
-                s.select_space(None, cx);
-                if let Some(device) = defaults.device {
-                    s.select_device(device, cx);
-                }
-            }
-            s.select_chat(None, cx);
-        });
-        // The canvas never restores a drawer: a previously opened canvas
-        // terminal must not pop open on a fresh new chat.
-        let key = self.panel_key(cx);
-        if self.panels.get(&key).terminal_open {
-            self.panels.update(&key, |panels| {
-                panels.terminal_open = false;
-            });
-        }
-        self.terminal_tween = None;
-        if let Some(panel) = self.terminal.clone()
-            && panel.read(cx).is_open()
-        {
-            panel.update(cx, |panel, cx| panel.set_open(false, cx));
-        }
-        cx.notify();
+        self.create_workspace_session(cx);
     }
 
-    /// The unified titlebar in chat mode:
-    /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
-    /// Replaces the tab strip; inherits its titlebar duties (drag region,
-    /// animated left inset, the toggle-changes button on git projects).
+    /// Project context and pane actions below the shared sidebar/tab header.
     pub(super) fn render_session_title_bar(
         &mut self,
         viewport_height: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // The canvas titles as NOTHING (user request — a "New session"
-        // header over the empty canvas was noise); the bar keeps its height,
-        // drag region, and buttons. A session appends its target as a muted
-        // "project @ device" tag right of the title (the composer footer no
-        // longer carries it).
-        let (title, target, harness, on_canvas): (
-            SharedString,
-            Option<SharedString>,
-            Option<harness_proto::HarnessId>,
-            bool,
-        ) = {
+        let target = {
             let state = self.state.read(cx);
-            match state.selected_chat_row() {
-                Some(chat) => {
-                    let folder = chat
-                        .space_id
-                        .as_deref()
-                        .and_then(|id| state.space_row(id))
-                        .map(|s| s.display_name().to_string())
-                        .unwrap_or_else(|| "~".to_string());
-                    let device = state
-                        .device_name(&chat.device_id)
-                        .unwrap_or("Unknown device");
-                    (
-                        SharedString::from(transcript::single_line(&crate::state::chat_label(
-                            chat,
-                            &state.provisional_title(),
-                            "New session",
-                        ))),
-                        Some(SharedString::from(format!("{folder} @ {device}"))),
-                        chat.config.as_ref().map(|c| c.harness),
-                        false,
-                    )
-                }
-                None => (SharedString::from(""), None, None, true),
-            }
+            state.selected_chat_row().map(|chat| {
+                SharedString::from(transcript::single_line(&crate::state::chat_label(
+                    chat,
+                    &state.provisional_title(),
+                    "New conversation",
+                )))
+            })
         };
-
-        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
-        // session is selected (`render_titlebar_cluster`) — this row budgets
-        // one button slot so the title never sits under it.
+        let on_canvas = target.is_none();
         let sidebar_now = self.sidebar_now();
-        // The update control, when shown, takes the next slot after it.
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx)
-            + self.titlebar_update_slot(cx);
+        let content_left = (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start(cx));
 
-        // Same glide as the old strip: content starts at the inset card's
-        // left edge while the sidebar is open, and slides toward the control
-        // cluster as it collapses.
-        let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
-
-        // Trailing titlebar section. With the changes pane open this is the
-        // PANE'S HEADER — a strip exactly as wide as the pane carrying its
-        // controls (scope dropdown, ref selector, fold-all from the Changes
-        // entity; expand + close shell-side). It lives up here because the
-        // titlebar overlay owns this band's hit-testing: controls mounted in
-        // the pane itself would sit under the drag region and never see a
-        // click. Closed, it is just the stable open/close toggle. Hidden on
-        // the new-session canvas (user request) — nothing to diff yet.
+        // Each pane keeps its own controls aligned with its content below.
         let right_pane_open = !on_canvas && self.right_pane_open(cx);
         let takeover = right_pane_open && self.right_pane_expanded;
-        // In takeover the title hides and the strip owns the whole band, so
-        // the row's left inset pulls back to the sidebar seam — the title
-        // inset would push the scope dropdown off the pane's own left gutter
-        // (user report: misaligned dead space). With the sidebar COLLAPSED
-        // the seam is the window edge, where the traffic lights + nav
-        // cluster overlay lives — the strip must still clear it, but only
-        // just: `title_bar_content_start` carries the identity-group margin the
-        // strip doesn't want (it brings its own 8px pad), and doubling up
-        // read as a hole after the `+` (user report).
         let row_left = if takeover {
-            // The surface tabs must LEFT-ALIGN with the pane's own rows (the
-            // diff options and stats strip carry an 8px box gutter off the
-            // seam — user report: rows started at different insets). The
-            // strip's width is capped to `avail`, which subtracts the row's
-            // 8px child gap — pulling row_left 8 LEFT of the seam cancels
-            // that, so the uncapped strip starts exactly at the seam and its
-            // own 8px pad lands the first chip on the pane gutter. The
-            // window-control cluster still wins while the sidebar is
-            // collapsed (the chips clear it instead of underlapping).
-            let cluster_end =
-                self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP + plus_inset - 14.0;
-            (sidebar_now - 8.0).max(cluster_end)
+            (sidebar_now - 8.0).max(self.title_bar_content_start(cx))
         } else {
             content_left
         };
         let row_gap = 8.0;
         let files_width = self.files_visible_width(cx);
-        let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
+        let right_pad = self.titlebar_right_pad(if theme.is_harp() {
+            TITLEBAR_CLUSTER_PAD
+        } else {
+            TITLEBAR_ACTION_EDGE_INSET
+        });
         // The title row's gaps are outside the fixed-width panel controls.
         let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
         let right_visible = self.right_visible_width(cx);
@@ -511,7 +387,13 @@ impl Shell {
                                 "toggle-changes",
                                 icons::SIDEBAR_MINIMALISTIC,
                                 &theme,
-                                cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_workspace_tool(
+                                        workspace_panels::WorkspaceTool::Changes,
+                                        window,
+                                        cx,
+                                    );
+                                }),
                             )),
                     )
                     .into_any_element(),
@@ -531,53 +413,15 @@ impl Shell {
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
-            // In panel takeover the header strip spans the whole band — the
-            // title would sit UNDER it (both flex_none, the row overflows and
-            // paint order stacks them), so it hides for the duration.
             .when(!takeover, |el| {
-                el.child(
+                el.children(target.map(|target| {
                     div()
                         .min_w_0()
-                        .overflow_hidden()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when_some(
-                            harness.map(crate::pickers::harness_brand_icon),
-                            |el, (path, tint)| {
-                                el.child(
-                                    icon(path)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(tint.unwrap_or(theme.text_muted)),
-                                )
-                            },
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on_canvas {
-                                    theme.text_muted.opacity(0.7)
-                                } else {
-                                    theme.text.opacity(0.85)
-                                })
-                                .child(title),
-                        )
-                        .when_some(target, |el, target| {
-                            el.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_muted.opacity(0.5))
-                                    .child(target),
-                            )
-                        }),
-                )
+                        .truncate()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(target)
+                }))
             })
             .child(div().flex_1())
             .children(actions)

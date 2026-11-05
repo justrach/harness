@@ -36,6 +36,8 @@ x11 = [
 screen-capture = [
     "scap",
 ]
+# Read back only this app's rendered scene for tab/window drag previews.
+scene-capture = []
 windows-manifest = ["dep:embed-resource"]
 input-latency-histogram = ["dep:hdrhistogram"]
 profiler = []
@@ -267,3 +269,7 @@ path = "examples/a11y.rs"
 [[example]]
 name = "view_example"
 path = "examples/view_example/view_example_main.rs"
+
+[[example]]
+name = "frame_pacing"
+path = "examples/frame_pacing.rs"

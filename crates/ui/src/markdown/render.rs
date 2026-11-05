@@ -8,6 +8,10 @@
 //! chunk opacity veil over the text runs (see [`super::veil`]) — opacity only,
 //! zero translate, applied after layout-relevant properties are fixed.
 
+#[cfg(test)]
+#[path = "render/selection_geometry_tests.rs"]
+mod selection_geometry_tests;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
@@ -28,9 +32,9 @@ use super::veil::{RowVeil, apply_veil, slice_spans};
 
 /// Gap between markdown blocks inside one message (harness mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
-/// Body text size / line height (harness: 14px / 22px).
-pub const MD_TEXT_SIZE: f32 = 14.0;
-pub const MD_LINE_HEIGHT: f32 = 22.0;
+/// Conversation body metrics, shared with the reference typography scale.
+pub const MD_TEXT_SIZE: f32 = crate::typography::CHAT_BODY_SIZE;
+pub const MD_LINE_HEIGHT: f32 = crate::typography::CHAT_BODY_LINE_HEIGHT;
 /// Default code block metrics; the rendered size comes from the theme.
 pub const CODE_TEXT_SIZE: f32 = 12.5;
 pub const CODE_LINE_HEIGHT: f32 = 18.0;
@@ -47,7 +51,7 @@ const CODE_SCROLLBAR_HIT_HEIGHT: f32 = 10.0;
 // resolved md theme. The design is frameless ("flat hairline"): 1px horizontal
 // rules under the header and between rows are the only chrome — no outer box,
 // no header fill, no corner radius (theme: headerBackground transparent,
-// radius 0). Cells use the body scale (14/22) with a uniform 12px padding;
+// radius 0). Cells use the shared body scale with a uniform 12px padding;
 // the header row is weight-700 per `table.headerWeight`.
 /// Uniform cell padding in px (harness `table.cellPadding`).
 pub const TABLE_CELL_PADDING: f32 = 12.0;
@@ -179,7 +183,7 @@ pub fn autolinked_text(
         super::link_interaction::LinkRanges {
             id,
             child: styled.into_any_element(),
-            layout,
+            layout: Some(layout),
             selection_key: None,
             links,
             ui,
@@ -258,7 +262,7 @@ pub(crate) fn selectable_autolinked_text(
     super::link_interaction::LinkRanges {
         id: SharedString::from(key.to_string()),
         child,
-        layout,
+        layout: Some(layout),
         selection_key: Some(key),
         links,
         ui,
@@ -452,18 +456,7 @@ struct CodeBlockTooltip(&'static str);
 
 impl Render for CodeBlockTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text)
-            .child(self.0)
+        crate::popover::tooltip_label(Theme::of(cx), self.0)
     }
 }
 
@@ -637,15 +630,16 @@ pub fn render_block(
             runs,
             MD_TEXT_SIZE,
             MD_LINE_HEIGHT,
-            false,
+            FontWeight::NORMAL,
             top_ix,
             ix,
             opts,
             theme,
+            window,
         ),
         Block::Heading { level, runs } => {
-            let (size, line) = heading_metrics(*level);
-            text_element(runs, size, line, true, top_ix, ix, opts, theme)
+            let (size, line, weight) = heading_metrics(*level);
+            text_element(runs, size, line, weight, top_ix, ix, opts, theme, window)
         }
         Block::CodeBlock { language, code } => render_code_block(
             language.as_deref(),
@@ -835,15 +829,15 @@ pub fn render_block(
     }
 }
 
-/// Tight monochrome heading scale (harness: h2 ≈ 16px semibold; headings step
-/// down quickly toward body size).
-fn heading_metrics(level: u8) -> (f32, f32) {
-    match level {
-        1 => (19.0, 27.0),
-        2 => (16.0, 24.0),
-        3 => (15.0, 22.0),
-        _ => (14.0, 22.0),
-    }
+/// Dia's chat heading hierarchy inherits the body's 1.5 line-height ratio.
+fn heading_metrics(level: u8) -> (f32, f32, FontWeight) {
+    let (size, weight) = match level {
+        1 => (22.0, FontWeight::MEDIUM),
+        2 => (17.0, FontWeight::SEMIBOLD),
+        3 => (16.0, FontWeight::SEMIBOLD),
+        _ => (15.0, FontWeight::MEDIUM),
+    };
+    (size, size * 1.5, weight)
 }
 
 /// Shared per-column table geometry (port of mugen `tableColumns`).
@@ -958,6 +952,18 @@ fn render_table(
                     *natural = width;
                 }
             }
+            // An equation is an indivisible inline box, not its shorter
+            // Unicode fallback; tables must reserve its actual natural width.
+            for math in runs.iter().filter_map(|run| run.style.math.as_ref()) {
+                if let Ok(equation) = super::math_layout::render(
+                    &math.source,
+                    math.display,
+                    MD_TEXT_SIZE * f32::from(window.rem_size()) / 16.0,
+                    theme.text,
+                ) {
+                    *natural = natural.max(equation.width);
+                }
+            }
             out.push(Some(flat));
         }
         flats.push(out);
@@ -993,20 +999,47 @@ fn render_table(
                 TableAlign::Center => cell.text_center(),
                 TableAlign::Right => cell.text_right(),
             };
-            if opts.media.is_some()
+            if all[r].get(c).is_some_and(|runs| {
+                runs.iter().any(|run| run.style.math.is_some())
+                    && !runs
+                        .iter()
+                        .any(|run| opts.media.is_some() && run.style.image.is_some())
+            }) {
+                cell = cell.child(super::math_flow::render_aligned_weighted(
+                    &all[r][c],
+                    MD_TEXT_SIZE,
+                    MD_LINE_HEIGHT,
+                    if has_header && r == 0 {
+                        TABLE_HEADER_WEIGHT
+                    } else {
+                        FontWeight::NORMAL
+                    },
+                    table_cell_ix(ix, r, c),
+                    opts,
+                    theme,
+                    window,
+                    align.get(c).copied().unwrap_or_default(),
+                ));
+            } else if opts.media.is_some()
                 && all[r]
                     .get(c)
                     .is_some_and(|runs| runs.iter().any(|run| run.style.image.is_some()))
             {
-                cell = cell.child(text_element(
+                cell = cell.child(text_element_aligned(
                     &all[r][c],
                     MD_TEXT_SIZE,
                     MD_LINE_HEIGHT,
-                    has_header && r == 0,
+                    if has_header && r == 0 {
+                        TABLE_HEADER_WEIGHT
+                    } else {
+                        FontWeight::NORMAL
+                    },
                     top_ix,
                     table_cell_ix(ix, r, c),
                     opts,
                     theme,
+                    window,
+                    align.get(c).copied().unwrap_or_default(),
                 ));
             } else if let Some(flat) = cell_flat {
                 cell = cell.child(flat_text_element(
@@ -1073,7 +1106,11 @@ pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> Fl
 
 /// [`flatten_runs`] with an explicit base weight (table headers are 700 per
 /// harness's `table.headerWeight`; strong runs never drop below semibold).
-fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
+pub(super) fn flatten_runs_weighted(
+    runs: &[InlineRun],
+    theme: &Theme,
+    base_weight: FontWeight,
+) -> FlatText {
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -1218,6 +1255,16 @@ pub(super) fn flat_text_presented_element(
     opts: &RenderOptions,
     theme: &Theme,
 ) -> AnyElement {
+    flat_text_presented_element_with_key(flat, ix, opts, theme, None)
+}
+
+pub(super) fn flat_text_presented_element_with_key(
+    flat: &FlatText,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+    selection_key: Option<std::sync::Arc<str>>,
+) -> AnyElement {
     // Streaming veil: opacity-only recolor of the runs covering newly appended
     // chunks. Same text, same fonts, same lengths — layout is untouched.
     // Settled elements return no spans and reuse the cached runs unsplit.
@@ -1253,7 +1300,7 @@ pub(super) fn flat_text_presented_element(
     // from the text's own layout handle. Pure paint — never in layout. The
     // same paint pass re-registers the frame-scoped window mouse listeners
     // that drive text selection (round 18; see markdown/selection.rs).
-    let sel_key: std::sync::Arc<str> = format!("{}:{ix}", opts.row_key).into();
+    let sel_key = selection_key.unwrap_or_else(|| format!("{}:{ix}", opts.row_key).into());
     let link_selection_key = sel_key.clone();
     let code_ranges = flat.code_ranges.clone();
     let flat_text = flat
@@ -1304,11 +1351,20 @@ pub(super) fn flat_text_presented_element(
                     key: sel_key.clone(),
                     text: flat_text.clone(),
                     layout: layout.clone(),
+                    atomic_bounds: None,
+                    clip_bounds: Some(window.content_mask().bounds),
                     offsets: offsets.clone(),
                     owner: PAINT_OWNER.get(),
                 })
             });
-            register_selection_listeners(window, &sel_key, &flat_text, &layout, offsets.clone());
+            register_selection_listeners(
+                window,
+                &sel_key,
+                &flat_text,
+                &layout,
+                offsets.clone(),
+                None,
+            );
         },
     )
     .absolute()
@@ -1332,7 +1388,7 @@ pub(super) fn flat_text_presented_element(
         )
         .into(),
         child,
-        layout: link_layout,
+        layout: Some(link_layout),
         selection_key: Some(link_selection_key),
         links: flat
             .links
@@ -1401,11 +1457,13 @@ fn paint_text_selection_with_wash(
             key: key.clone(),
             text: text.clone(),
             layout: layout.clone(),
+            atomic_bounds: None,
+            clip_bounds: Some(window.content_mask().bounds),
             offsets: None,
             owner: PAINT_OWNER.get(),
         })
     });
-    register_selection_listeners(window, key, text, layout, None);
+    register_selection_listeners(window, key, text, layout, None, None);
 }
 
 pub(crate) fn selectable_text_element(
@@ -1442,10 +1500,102 @@ struct RegEntry {
     key: std::sync::Arc<str>,
     text: SharedString,
     layout: gpui::TextLayout,
+    /// Equations select atomically and copy their original LaTeX.
+    atomic_bounds: Option<Bounds<gpui::Pixels>>,
+    /// Paint-time clip: collapsed prompts and scrolled text retain their full
+    /// layout, but only their visible hit area may handle pointer events.
+    clip_bounds: Option<Bounds<gpui::Pixels>>,
     offsets: Option<super::link_presentation::OffsetMap>,
     /// The transcript that painted it ([`selection_owner_reset`]); 0 for
     /// text painted outside one.
     owner: u64,
+}
+
+impl RegEntry {
+    fn bounds(&self) -> Bounds<gpui::Pixels> {
+        let bounds = self.atomic_bounds.unwrap_or_else(|| self.layout.bounds());
+        self.clip_bounds
+            .map_or(bounds, |clip| bounds.intersect(&clip))
+    }
+
+    fn index_at(&self, position: gpui::Point<gpui::Pixels>) -> usize {
+        if let Some(bounds) = self.atomic_bounds {
+            return if position.x < bounds.center().x {
+                0
+            } else {
+                self.text.len()
+            };
+        }
+        let position = visible_selection_position(position, self.bounds());
+        let (Ok(ix) | Err(ix)) = self.layout.index_for_position(position);
+        self.offsets.as_ref().map_or(ix, |map| map.original(ix))
+    }
+}
+
+/// Register equation geometry alongside text fragments, preserving drag/copy
+/// order without exposing a hidden Unicode approximation as selectable text.
+pub(super) fn equation_selection(
+    key: std::sync::Arc<str>,
+    source: SharedString,
+    wash: Hsla,
+) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, cx| {
+            super::math_layout::flush_evictions(window, cx);
+            // Images can be wider than their horizontally scrolling viewport.
+            // Hit-testing/selection must never reach into a neighbouring pane.
+            let bounds = bounds.intersect(&window.content_mask().bounds);
+            if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+                return;
+            }
+            if super::selection::wash_range(&key).is_some() {
+                window.paint_quad(quad(
+                    bounds,
+                    px(0.),
+                    wash,
+                    px(0.),
+                    gpui::transparent_black(),
+                    BorderStyle::default(),
+                ));
+            }
+            let layout = gpui::TextLayout::default();
+            REGISTRY.with(|registry| {
+                registry.borrow_mut().push(RegEntry {
+                    key: key.clone(),
+                    text: source.clone(),
+                    layout: layout.clone(),
+                    atomic_bounds: Some(bounds),
+                    clip_bounds: None,
+                    offsets: None,
+                    owner: PAINT_OWNER.get(),
+                })
+            });
+            register_selection_listeners(window, &key, &source, &layout, None, Some(bounds));
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
+/// Keep the head on a visible line even when a drag leaves the element. Stay
+/// just inside both edges: TextLayout can resolve an exact line boundary to
+/// the preceding (possibly clipped) line. Within the band, preserve x for
+/// visual-line gutters; beyond it, select through the visible start or end.
+fn visible_selection_position(
+    mut position: gpui::Point<gpui::Pixels>,
+    bounds: gpui::Bounds<gpui::Pixels>,
+) -> gpui::Point<gpui::Pixels> {
+    if position.y < bounds.top() {
+        position.x = bounds.left();
+    } else if position.y >= bounds.bottom() {
+        position.x = bounds.right();
+    }
+    position.y = position
+        .y
+        .max(px(f32::from(bounds.top()).next_up()))
+        .min(px(f32::from(bounds.bottom()).next_down()));
+    position
 }
 
 thread_local! {
@@ -1454,13 +1604,29 @@ thread_local! {
     static PAINT_OWNER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// Locate a synthetic fixture's text without depending on theme or wrap geometry.
+#[cfg(feature = "appshots-fixture")]
+pub fn fixture_selection_position(
+    text: &str,
+    byte_index: usize,
+) -> Option<gpui::Point<gpui::Pixels>> {
+    REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .iter()
+            .find(|entry| entry.text.as_ref() == text)
+            .and_then(|entry| entry.layout.position_for_index(byte_index))
+            .map(|position| position + point(px(0.1), px(8.0)))
+    })
+}
+
 /// Every text element registered this frame: `(key, text, bounds)`.
 #[cfg(test)]
 pub(crate) fn selection_test_entries() -> Vec<(String, String, gpui::Bounds<gpui::Pixels>)> {
     REGISTRY.with(|r| {
         r.borrow()
             .iter()
-            .map(|e| (e.key.to_string(), e.text.to_string(), e.layout.bounds()))
+            .map(|e| (e.key.to_string(), e.text.to_string(), e.bounds()))
             .collect()
     })
 }
@@ -1472,7 +1638,6 @@ pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
             .iter()
             .find(|entry| entry.key.as_ref() == key)
             .expect("text must be registered")
-            .layout
             .bounds()
     })
 }
@@ -1556,6 +1721,9 @@ pub(crate) fn release_selection_owner(owner: u64) {
 
 /// The transcript the drag's anchor was painted by.
 fn anchor_owner(reg: &[RegEntry]) -> u64 {
+    if let Some(owner) = super::selection::anchor_owner() {
+        return owner;
+    }
     let anchor = super::selection::anchor_key().unwrap_or_default();
     reg.iter()
         .find(|e| *e.key == *anchor)
@@ -1575,9 +1743,7 @@ pub(crate) fn clear_selection_surface(prefix: &str) {
         r.borrow_mut()
             .retain(|entry| !entry.key.starts_with(prefix))
     });
-    if let Some(anchor) = super::selection::anchor_key().filter(|key| key.starts_with(prefix)) {
-        super::selection::clear_if_owner(&anchor);
-    }
+    super::selection::cancel_surface(prefix);
 }
 
 pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
@@ -1592,19 +1758,23 @@ pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
 
 /// `(element index, byte offset)` for a window position: the registered
 /// element whose vertical band contains it, else the nearest by vertical
-/// distance (a drag past the gutter or between blocks clamps sensibly).
+/// distance, then horizontal distance. Table cells can share a vertical band;
+/// the cell under the pointer must win over the first cell in document order.
 fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
     REGISTRY.with(|r| {
         let reg = r.borrow();
         let anchor = super::selection::anchor_key().unwrap_or_default();
         let owner = anchor_owner(&reg);
-        let mut best: Option<(usize, f32)> = None;
+        let mut best: Option<(usize, (f32, f32))> = None;
         for (ei, entry) in reg.iter().enumerate() {
             // A drag stays in the pane it started in.
             if selection_scope(&entry.key) != selection_scope(&anchor) || entry.owner != owner {
                 continue;
             }
-            let b = entry.layout.bounds();
+            let b = entry.bounds();
+            if b.is_empty() {
+                continue;
+            }
             let dy = if position.y < b.top() {
                 f32::from(b.top() - position.y)
             } else if position.y > b.bottom() {
@@ -1612,21 +1782,23 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
             } else {
                 0.0
             };
-            if best.is_none_or(|(_, d)| dy < d) {
-                best = Some((ei, dy));
+            let dx = if position.x < b.left() {
+                f32::from(b.left() - position.x)
+            } else if position.x > b.right() {
+                f32::from(position.x - b.right())
+            } else {
+                0.0
+            };
+            if best.is_none_or(|(_, distance)| (dy, dx) < distance) {
+                best = Some((ei, (dy, dx)));
             }
-            if dy == 0.0 {
+            if b.contains(&position) {
+                best = Some((ei, (0.0, 0.0)));
                 break;
             }
         }
         let (ei, _) = best?;
-        let ix = match reg[ei].layout.index_for_position(position) {
-            Ok(ix) | Err(ix) => ix,
-        };
-        Some((
-            ei,
-            reg[ei].offsets.as_ref().map_or(ix, |map| map.original(ix)),
-        ))
+        Some((ei, reg[ei].index_at(position)))
     })
 }
 
@@ -1640,8 +1812,9 @@ pub(crate) fn begin_drag_in_whitespace(owner: u64, position: gpui::Point<gpui::P
         let nearest = reg
             .iter()
             .filter_map(|entry| {
-                let bounds = entry.layout.bounds();
-                if entry.owner != owner
+                let bounds = entry.bounds();
+                if bounds.is_empty()
+                    || entry.owner != owner
                     || !selection_scope(&entry.key).is_empty()
                     || position.y < bounds.top()
                     || position.y >= bounds.bottom()
@@ -1663,11 +1836,8 @@ pub(crate) fn begin_drag_in_whitespace(owner: u64, position: gpui::Point<gpui::P
         };
         // Preserve the layout's visual-line boundary, including soft wraps;
         // whitespace after a line is its END, not its final character.
-        let ix = match entry.layout.index_for_position(position) {
-            Ok(ix) | Err(ix) => ix,
-        };
-        let ix = entry.offsets.as_ref().map_or(ix, |map| map.original(ix));
-        super::selection::begin(&entry.key, ix);
+        super::selection::begin(&entry.key, entry.index_at(position));
+        super::selection::set_anchor_owner(&entry.key, entry.owner);
         true
     })
 }
@@ -1718,29 +1888,64 @@ fn register_selection_listeners(
     text: &SharedString,
     layout: &gpui::TextLayout,
     offsets: Option<super::link_presentation::OffsetMap>,
+    atomic_bounds: Option<Bounds<gpui::Pixels>>,
 ) {
     use gpui::{DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
+    let visible_mask = window.content_mask().bounds;
     {
         let (key, text, layout) = (key.clone(), text.clone(), layout.clone());
+        let bounds = atomic_bounds
+            .unwrap_or_else(|| layout.bounds())
+            .intersect(&visible_mask);
+        let owner = PAINT_OWNER.get();
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _cx| {
             if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                 return;
             }
-            if layout.bounds().contains(&e.position) {
-                let ix = match layout.index_for_position(e.position) {
-                    Ok(ix) | Err(ix) => ix,
-                };
-                let ix = offsets.as_ref().map_or(ix, |map| map.original(ix));
-                match e.click_count {
-                    2 => {
-                        let range = super::selection::word_range(&text, ix);
-                        super::selection::begin_with_span(&key, &text, range);
+            if bounds.contains(&e.position) {
+                let position = visible_selection_position(e.position, bounds);
+                let ix = if let Some(bounds) = atomic_bounds {
+                    if position.x < bounds.center().x {
+                        0
+                    } else {
+                        text.len()
                     }
-                    n if n >= 3 => {
+                } else {
+                    let (Ok(ix) | Err(ix)) = layout.index_for_position(position);
+                    offsets.as_ref().map_or(ix, |map| map.original(ix))
+                };
+                match e.click_count {
+                    2 if atomic_bounds.is_some() => {
                         super::selection::begin_with_span(&key, &text, 0..text.len());
+                    }
+                    n if n >= 2 => {
+                        REGISTRY.with(|registry| {
+                            let registry = registry.borrow();
+                            let Some(owner) = registry
+                                .iter()
+                                .find(|entry| entry.key == key)
+                                .map(|entry| entry.owner)
+                            else {
+                                return;
+                            };
+                            let elements: Vec<_> = registry
+                                .iter()
+                                .filter(|entry| {
+                                    entry.owner == owner
+                                        && selection_scope(&entry.key) == selection_scope(&key)
+                                })
+                                .map(|entry| (entry.key.as_ref(), entry.text.as_ref()))
+                                .collect();
+                            if n == 2 {
+                                super::selection::begin_word(&key, ix, &elements);
+                            } else {
+                                super::selection::begin_paragraph(&key, &elements);
+                            }
+                        });
                     }
                     _ => super::selection::begin(&key, ix),
                 }
+                super::selection::set_anchor_owner(&key, owner);
                 window.refresh();
             } else if super::selection::clear_if_owner(&key) {
                 window.refresh();
@@ -1764,8 +1969,8 @@ fn register_selection_listeners(
     }
     {
         let key = key.clone();
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, _cx| {
-            if phase != DispatchPhase::Bubble {
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, _cx| {
+            if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
                 return;
             }
             if let Some(_text) = super::selection::end_drag(&key) {
@@ -1869,11 +2074,39 @@ fn text_element(
     runs: &[InlineRun],
     size: f32,
     line_height: f32,
-    bold_default: bool,
+    weight: FontWeight,
     top_ix: usize,
     ix: usize,
     opts: &RenderOptions,
     theme: &Theme,
+    window: &Window,
+) -> AnyElement {
+    text_element_aligned(
+        runs,
+        size,
+        line_height,
+        weight,
+        top_ix,
+        ix,
+        opts,
+        theme,
+        window,
+        TableAlign::Left,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn text_element_aligned(
+    runs: &[InlineRun],
+    size: f32,
+    line_height: f32,
+    weight: FontWeight,
+    top_ix: usize,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+    window: &Window,
+    alignment: TableAlign,
 ) -> AnyElement {
     if let Some(media) = &opts.media {
         if runs.iter().any(|run| run.style.image.is_some()) {
@@ -1882,15 +2115,17 @@ fn text_element(
             for (index, run) in runs.iter().enumerate() {
                 if let Some(image) = &run.style.image {
                     if start < index {
-                        elements.push(text_element(
+                        elements.push(text_element_aligned(
                             &runs[start..index],
                             size,
                             line_height,
-                            bold_default,
+                            weight,
                             top_ix,
                             ix.wrapping_mul(4099).wrapping_add(start + 1000),
                             opts,
                             theme,
+                            window,
+                            alignment,
                         ));
                     }
                     elements.push((media.image)(
@@ -1902,15 +2137,17 @@ fn text_element(
                 }
             }
             if start < runs.len() {
-                elements.push(text_element(
+                elements.push(text_element_aligned(
                     &runs[start..],
                     size,
                     line_height,
-                    bold_default,
+                    weight,
                     top_ix,
                     ix.wrapping_mul(4099).wrapping_add(start + 1000),
                     opts,
                     theme,
+                    window,
+                    alignment,
                 ));
             }
             return div()
@@ -1920,6 +2157,19 @@ fn text_element(
                 .children(elements)
                 .into_any_element();
         }
+    }
+    if runs.iter().any(|run| run.style.math.is_some()) {
+        return super::math_flow::render_aligned_weighted(
+            runs,
+            size,
+            line_height,
+            weight,
+            ix,
+            opts,
+            theme,
+            window,
+            alignment,
+        );
     }
     if let Some(lines) = opts
         .workspace_root
@@ -1931,27 +2181,24 @@ fn text_element(
             .flex()
             .flex_col()
             .children(lines.into_iter().enumerate().map(|(line_ix, text)| {
-                text_element(
+                text_element_aligned(
                     &[InlineRun {
                         text,
                         style: style.clone(),
                     }],
                     size,
                     line_height,
-                    bold_default,
+                    weight,
                     top_ix,
                     ix.wrapping_mul(4099).wrapping_add(line_ix + 2000),
                     opts,
                     theme,
+                    window,
+                    alignment,
                 )
             }))
             .into_any_element();
     }
-    let weight = if bold_default {
-        FontWeight::SEMIBOLD
-    } else {
-        FontWeight::NORMAL
-    };
     let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
     let inner = flat_text_element(&flat, ix, opts, theme);
     let direct_file = opts
@@ -2012,7 +2259,7 @@ fn sole_workspace_file_link(runs: &[InlineRun], workspace_root: &str) -> Option<
             _ => {}
         }
     }
-    crate::workspace_links::resolve_workspace_file_link(target?, workspace_root)
+    crate::workspace_links::resolve_markdown_file_link(target?, workspace_root)
         .map(|link| link.path)
 }
 
@@ -2177,7 +2424,7 @@ fn code_icon_action(
         .bg(crate::motion::hover_blend(
             &fade_key,
             gpui::transparent_black(),
-            crate::theme::ink(0.08),
+            theme.element_hover,
         ))
         .on_hover(crate::motion::hover_listener(fade_key))
         .on_click(move |_, window, cx| {
@@ -2217,7 +2464,7 @@ fn code_copy_button(
             .bg(crate::motion::hover_blend(
                 &fade_key,
                 gpui::transparent_black(),
-                crate::theme::ink(0.08),
+                theme.element_hover,
             ))
             .on_hover(crate::motion::hover_listener(fade_key))
             .text_size(px(10.5))
@@ -2658,7 +2905,7 @@ mod tests {
     struct CodeSelectionHarness;
 
     impl Render for CodeSelectionHarness {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let opts = RenderOptions::settled("code-selection-test".into());
             let plain = |text: &str| {
@@ -2676,11 +2923,12 @@ mod tests {
                     &plain("before"),
                     MD_TEXT_SIZE,
                     MD_LINE_HEIGHT,
-                    false,
+                    FontWeight::NORMAL,
                     0,
                     0,
                     &opts,
                     &theme,
+                    window,
                 ))
                 .child(render_code_block_source(
                     None,
@@ -2695,11 +2943,12 @@ mod tests {
                     &plain("after"),
                     MD_TEXT_SIZE,
                     MD_LINE_HEIGHT,
-                    false,
+                    FontWeight::NORMAL,
                     2,
                     2,
                     &opts,
                     &theme,
+                    window,
                 ))
         }
     }
@@ -2842,6 +3091,39 @@ mod tests {
             },
         }];
         assert_eq!(sole_workspace_file_link(&external, "/work/comet"), None);
+    }
+
+    #[test]
+    fn math_selection_hits_inline_geometry_and_copies_latex() {
+        let _lock = super::super::selection::test_state_lock();
+        let first = super::super::selection::inline_fragment_key("math-row", 0);
+        let second = super::super::selection::inline_fragment_key("math-row", 1);
+        REGISTRY.with(|registry| {
+            registry.borrow_mut().clear();
+            for (key, text, x) in [(&first, "Before ", 0.), (&second, r"$\frac{1}{n}$", 80.)] {
+                registry.borrow_mut().push(RegEntry {
+                    key: key.clone().into(),
+                    text: text.into(),
+                    layout: gpui::TextLayout::default(),
+                    atomic_bounds: Some(Bounds::new(point(px(x), px(10.)), size(px(70.), px(30.)))),
+                    clip_bounds: None,
+                    offsets: None,
+                    owner: 0,
+                });
+            }
+        });
+        super::super::selection::begin(&first, 0);
+        let head = registry_point(point(px(145.), px(20.))).unwrap();
+        assert_eq!(head, (1, r"$\frac{1}{n}$".len()));
+        assert!(resolve_drag(head));
+        assert_eq!(
+            super::super::selection::selected_text().as_deref(),
+            Some(r"Before $\frac{1}{n}$")
+        );
+        assert_eq!(registry_point(point(px(85.), px(20.))), Some((1, 0)));
+        super::super::selection::end_drag(&first);
+        super::super::selection::clear_if_owner(&first);
+        REGISTRY.with(|registry| registry.borrow_mut().clear());
     }
 
     #[test]

@@ -63,6 +63,47 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
     })
 }
 
+/// Desktop's curated catalog. The shared catalog above remains byte-compatible
+/// with mobile; desktop deliberately recolors only its Codegraff built-ins.
+pub(crate) fn desktop_registry() -> &'static ThemeRegistry {
+    static REGISTRY: OnceLock<ThemeRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = builtin_registry().clone();
+        let codegraff = registry
+            .families
+            .iter_mut()
+            .find(|family| family.id == "codegraff")
+            .expect("the shared catalog contains Codegraff");
+        for original in &mut codegraff.variants {
+            let mut desktop = match original.appearance {
+                Appearance::Light => warm_harp_light(),
+                Appearance::Dark => warm_harp_dark(),
+            };
+            desktop.id = original.id.clone();
+            desktop.family_id = original.family_id.clone();
+            desktop.name = original.name.clone();
+            update_desktop_asset_hash(&mut desktop);
+            *original = desktop;
+        }
+        // Keep saved local selections resolvable without changing their IDs.
+        registry.families.push(family(
+            "warm-harp",
+            "Warm Harp",
+            vec![warm_harp_light(), warm_harp_dark()],
+        ));
+        registry
+            .families
+            .push(family("harp", "Harp", vec![harp_light(), harp_dark()]));
+        registry
+    })
+}
+
+fn update_desktop_asset_hash(variant: &mut ThemeVariant) {
+    variant.source.asset_hash.clear();
+    let encoded = serde_json::to_vec(&*variant).expect("desktop theme serializes");
+    variant.source.asset_hash = format!("sha256:{:x}", Sha256::digest(encoded));
+}
+
 fn family(id: &str, name: &str, variants: Vec<ThemeVariant>) -> ThemeFamily {
     ThemeFamily {
         id: id.into(),
@@ -235,6 +276,199 @@ const ANSI_LIGHT: [&str; 16] = [
     "#1f1f1f", "#dc2626", "#16a34a", "#b45309", "#2563eb", "#9333ea", "#0e7490", "#3f3f46",
     "#71717a", "#b91c1c", "#15803d", "#92400e", "#1d4ed8", "#7e22ce", "#155e75", "#18181b",
 ];
+
+// Adapted visual tokens from Harp's sidebar, with opaque transcript surfaces
+// matching its published light/dark screenshots. Rendering remains native to Harness.
+const HARP_REVISION: &str = "bad92b3fee6224941c9de92eaa3968a53e61ae6b";
+const HARP_SOURCE: &str = "https://github.com/dominikmartn/harp/blob/bad92b3fee6224941c9de92eaa3968a53e61ae6b/app/src/workspace/view/vertical_tabs.rs#L8983-L9107";
+
+fn harp_light() -> ThemeVariant {
+    harp_surfaces(variant(Seeds {
+        id: "harp-light",
+        family_id: "harp",
+        name: "Harp Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Frosted,
+        background: "#ffffff",
+        shell: "#e8e8eb",
+        raised: "#f4f4f5",
+        card: "#ffffff",
+        text: "#1d1d1f",
+        muted: "#626269",
+        faint: "#6e6e73",
+        accent: "#3a3a3c",
+        danger: "#c93432",
+        warning: "#9a5700",
+        success: "#248a3d",
+        terminal_background: "#ffffff",
+        ansi: ANSI_LIGHT,
+        syntax: [
+            "#6e6e73", "#9b2393", "#0b7500", "#1c00cf", "#5a1d9a", "#326d74", "#3a3a3c", "#1d1d1f",
+            "#626269", "#9b2393", "#804000", "#c93432",
+        ],
+        source: source(
+            "harp-light",
+            "native-adaptation",
+            HARP_SOURCE,
+            HARP_REVISION,
+            "AGPL-3.0-only",
+        ),
+    }))
+}
+
+fn harp_dark() -> ThemeVariant {
+    harp_surfaces(variant(Seeds {
+        id: "harp-dark",
+        family_id: "harp",
+        name: "Harp Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Frosted,
+        background: "#1e1e1e",
+        shell: "#232326",
+        raised: "#2c2c2e",
+        card: "#3a3a3d",
+        text: "#f5f5f7",
+        muted: "#98989f",
+        faint: "#8e8e93",
+        accent: "#e5e5ea",
+        danger: "#ff6961",
+        warning: "#f0b35c",
+        success: "#30d158",
+        terminal_background: "#1e1e1e",
+        ansi: ANSI_DARK,
+        syntax: [
+            "#98989f", "#fc5fa3", "#67b7a4", "#d0bf69", "#d0a8ff", "#6bdfff", "#e5e5ea", "#f5f5f7",
+            "#98989f", "#fc5fa3", "#d0bf69", "#ff6961",
+        ],
+        source: source(
+            "harp-dark",
+            "native-adaptation",
+            HARP_SOURCE,
+            HARP_REVISION,
+            "AGPL-3.0-only",
+        ),
+    }))
+}
+
+fn harp_surfaces(mut theme: ThemeVariant) -> ThemeVariant {
+    let dark = theme.appearance.is_dark();
+    let border_tone = if dark { Color::WHITE } else { Color::BLACK };
+    theme.colors.hover = border_tone.with_alpha(if dark { 15. / 255. } else { 13. / 255. });
+    theme.colors.active = theme.colors.card;
+    theme.colors.border = c(if dark { "#3a3a3c" } else { "#ececef" });
+    theme.colors.border_strong = border_tone.with_alpha(if dark { 26. / 255. } else { 20. / 255. });
+    theme.colors.dialog = c(if dark { "#2c2c2e" } else { "#ffffff" });
+    theme.colors.overlay = theme.colors.dialog;
+    theme.colors.input = theme.colors.dialog;
+    theme.colors.text_faint = theme
+        .colors
+        .text_faint
+        .ensure_contrast(theme.colors.shell, 4.5);
+    theme.accent.caret = c(if dark { "#0a84ff" } else { "#007aff" });
+    theme.accent.selection = theme
+        .accent
+        .caret
+        .with_alpha(if dark { 0.35 } else { 0.50 });
+    update_desktop_asset_hash(&mut theme);
+    theme
+}
+
+// This warm palette is authored here, rather than copied from Harp. Its shell
+// treatment follows the Harp layout reference recorded in HARP_SOURCE above.
+fn warm_harp_source(id: &str) -> ThemeSource {
+    source(
+        id,
+        "native-palette-adaptation; Harp layout reference",
+        "https://github.com/justrach/harness/blob/main/crates/theme/src/builtins.rs",
+        &format!("warm-harp-v1; Harp layout {HARP_REVISION}"),
+        "Harness LICENSE (modified AGPL-3.0)",
+    )
+}
+
+fn warm_harp_light() -> ThemeVariant {
+    warm_harp_surfaces(variant(Seeds {
+        id: "warm-harp-light",
+        family_id: "warm-harp",
+        name: "Warm Harp Light",
+        appearance: Appearance::Light,
+        treatment: SurfaceTreatment::Frosted,
+        background: "#faf8f3",
+        shell: "#eae5dc",
+        raised: "#f4efe6",
+        card: "#f4efe6",
+        text: "#29251f",
+        muted: "#6c6357",
+        faint: "#6c6357",
+        accent: "#b57931",
+        danger: "#b14228",
+        warning: "#966319",
+        success: "#4e753c",
+        terminal_background: "#faf8f3",
+        ansi: [
+            "#29251f", "#b14228", "#4e753c", "#966319", "#3b6fb0", "#7a4ea3", "#2f7c86", "#6c6357",
+            "#807363", "#b14228", "#4e753c", "#b57931", "#3b6fb0", "#7a4ea3", "#2f7c86", "#29251f",
+        ],
+        syntax: [
+            "#766c5f", "#a46924", "#4e753c", "#966319", "#29251f", "#a46924", "#29251f", "#29251f",
+            "#6c6357", "#b14228", "#966319", "#b14228",
+        ],
+        source: warm_harp_source("warm-harp-light"),
+    }))
+}
+
+fn warm_harp_dark() -> ThemeVariant {
+    warm_harp_surfaces(variant(Seeds {
+        id: "warm-harp-dark",
+        family_id: "warm-harp",
+        name: "Warm Harp Dark",
+        appearance: Appearance::Dark,
+        treatment: SurfaceTreatment::Frosted,
+        background: "#1c1a17",
+        shell: "#24211d",
+        raised: "#302b25",
+        card: "#302b25",
+        text: "#f2ece2",
+        muted: "#b9ae9d",
+        faint: "#b9ae9d",
+        accent: "#d3a464",
+        danger: "#dc8068",
+        warning: "#d9af6c",
+        success: "#94b77d",
+        terminal_background: "#1c1a17",
+        ansi: [
+            "#1c1a17", "#dc8068", "#94b77d", "#d9af6c", "#9aaec6", "#bd96d7", "#8bb7aa", "#f2ece2",
+            "#8a7e6c", "#e99984", "#a9c794", "#e4bd83", "#aec0d6", "#ccace1", "#a2c8bd", "#fffaf2",
+        ],
+        syntax: [
+            "#a99c89", "#d3a464", "#94b77d", "#d9af6c", "#f2ece2", "#d3a464", "#f2ece2", "#f2ece2",
+            "#b9ae9d", "#dc8068", "#d9af6c", "#dc8068",
+        ],
+        source: warm_harp_source("warm-harp-dark"),
+    }))
+}
+
+fn warm_harp_surfaces(mut theme: ThemeVariant) -> ThemeVariant {
+    let dark = theme.appearance.is_dark();
+    theme.colors.active = c(if dark { "#4d453b" } else { "#fffdf8" });
+    // Cream surfaces have little room to brighten. A warm ink wash makes
+    // hover visible there; dark surfaces lift, with selection still brighter.
+    theme.colors.hover = if dark {
+        Color::WHITE.with_alpha(0.09)
+    } else {
+        theme.colors.text.with_alpha(0.07)
+    };
+    theme.colors.text_muted = c(if dark { "#c1b6a5" } else { "#635a4e" });
+    theme.colors.text_faint = theme.colors.text_muted;
+    theme.colors.border = c(if dark { "#40392f" } else { "#ded7ca" });
+    theme.colors.border_strong = c(if dark { "#5a4d3d" } else { "#cfc4b4" });
+    theme.colors.dialog = c(if dark { "#302b25" } else { "#f4efe6" });
+    theme.colors.overlay = theme.colors.dialog;
+    theme.colors.input = theme.colors.dialog;
+    theme.colors.solid = c(if dark { "#eee5d8" } else { "#332b21" });
+    theme.colors.on_solid = theme.colors.solid.best_on_color();
+    update_desktop_asset_hash(&mut theme);
+    theme
+}
 
 fn harness_dark() -> ThemeVariant {
     variant(Seeds {

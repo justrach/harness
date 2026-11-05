@@ -42,7 +42,7 @@ impl Pickers {
                 .justify_center()
                 .cursor_pointer()
                 .when(!favorites_view, |el| {
-                    el.hover(|s| s.bg(crate::theme::ink(0.06)))
+                    el.hover(|s| s.bg(theme.element_hover))
                 })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.setting_menu = None;
@@ -85,7 +85,7 @@ impl Pickers {
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
+                        .when(!is_viewed, |el| el.hover(|s| s.bg(theme.element_hover)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.setting_menu = None;
                             this.model_rail = ModelRail::Harness;
@@ -114,6 +114,12 @@ impl Pickers {
             return;
         }
         let current = self.effective_harness(cx);
+        #[cfg(feature = "model-picker-preview")]
+        let current = if self.preview.enabled {
+            self.preview_viewed(cx)
+        } else {
+            current
+        };
         let index = descriptors.iter().position(|d| Some(d.id) == current);
         let next = match (index, backwards) {
             (Some(0), true) | (None, true) => descriptors.len() - 1,

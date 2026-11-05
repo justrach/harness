@@ -136,6 +136,7 @@ fn click(
 }
 pub async fn exercise(
     window: WindowHandle<shell::Shell>,
+    browser_id: u64,
     page: Entity<BrowserSurface>,
     output: &std::path::Path,
     cx: &mut AsyncApp,
@@ -143,6 +144,14 @@ pub async fn exercise(
     eval(&page,"document.body.style.paddingTop='0'; document.body.insertAdjacentHTML('afterbegin', `<div id='browser-blur-grid' style='height:140px;background:repeating-conic-gradient(#172f25 0% 25%,#f5f0df 0% 50%) 0 0/16px 16px'></div><input id='browser-input' style='height:32px;width:200px' placeholder='Browser input'><button id='browser-button' onclick='window.browserClicks=(window.browserClicks||0)+1'>Click</button>`); window.browserClicks=0; document.body.addEventListener('pointerdown',()=>window.pagePresses=(window.pagePresses||0)+1); let live=document.createElement('div');live.style='position:fixed;bottom:12px;right:12px;background:#29483b;color:white;padding:8px;border-radius:6px;font:12px monospace';document.body.append(live);window.browserFrames=0;function frame(){live.textContent='LIVE '+(++window.browserFrames);requestAnimationFrame(frame)}frame();true",cx).await?;
     pause(cx, 400).await;
     let bounds = page.read_with(cx, |b, _| b.fixture_linux_bounds());
+    let (tab, divider) = window
+        .update(cx, |shell, _, cx| {
+            shell.fixture_browser_panel_targets(browser_id, cx)
+        })?
+        .ok_or_else(|| anyhow::anyhow!("browser panel chrome was not measured"))?;
+    let reload = page
+        .read_with(cx, |b, _| b.fixture_reload_bounds())
+        .ok_or_else(|| anyhow::anyhow!("browser reload button was not measured"))?;
     let input=eval(&page,"(()=>{let r=document.getElementById('browser-input').getBoundingClientRect();return [r.x+20,r.y+15]})()",cx).await?;
     click(
         window,
@@ -346,9 +355,9 @@ pub async fn exercise(
     );
     for _ in 0..5 {
         for pos in [
-            point(bounds.origin.x + px(25.), px(20.)),
-            point(bounds.origin.x + px(75.), px(56.)),
-            point(bounds.origin.x + px(180.), px(20.)),
+            tab.center(),
+            reload.center(),
+            tab.center() + point(px(20.), px(0.)),
         ] {
             dispatch(
                 window,
@@ -368,7 +377,7 @@ pub async fn exercise(
     dispatch(
         window,
         PlatformInput::MouseMove(gpui::MouseMoveEvent {
-            position: point(bounds.origin.x + px(75.), px(56.)),
+            position: reload.center(),
             ..Default::default()
         }),
         cx,
@@ -406,7 +415,47 @@ pub async fn exercise(
     );
     eval(&page, "scrollTo(0,0);true", cx).await?;
     pause(cx, 200).await;
-    let start = point(bounds.origin.x - px(2.), bounds.origin.y + px(100.));
+    // Dispatch a crossing release before the next render can switch the
+    // browser to passthrough. The page never owned this divider press.
+    let start = divider.center();
+    let release = start + point(px(80.0), px(0.0));
+    AnyWindowHandle::from(window).update(cx, |_, window, cx| {
+        window.dispatch_event(
+            PlatformInput::MouseDown(gpui::MouseDownEvent {
+                position: start,
+                button: MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                position: release,
+                pressed_button: Some(MouseButton::Left),
+                ..Default::default()
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            PlatformInput::MouseUp(gpui::MouseUpEvent {
+                position: release,
+                button: MouseButton::Left,
+                click_count: 1,
+                ..Default::default()
+            }),
+            cx,
+        );
+    })?;
+    anyhow::ensure!(
+        !window.update(cx, |shell, _, _| shell.fixture_workspace_resizing())?,
+        "page consumed a divider release before presentation updated"
+    );
+    pause(cx, 100).await;
+    let (_, divider) = window
+        .update(cx, |shell, _, cx| shell.fixture_browser_panel_targets(browser_id, cx))?
+        .ok_or_else(|| anyhow::anyhow!("browser divider was not measured after immediate resize"))?;
+    let start = divider.center();
     dispatch(
         window,
         PlatformInput::MouseDown(gpui::MouseDownEvent {
@@ -432,8 +481,8 @@ pub async fn exercise(
         )?;
         pause(cx, 100).await;
         anyhow::ensure!(
-            cx.update(|cx| cx.has_active_drag()),
-            "resize failed to start"
+            window.update(cx, |shell, _, _| shell.fixture_workspace_resizing())?,
+            "workspace divider resize failed to start"
         );
         widths.push(f32::from(
             page.read_with(cx, |b, _| b.fixture_linux_bounds().size.width),
@@ -454,6 +503,10 @@ pub async fn exercise(
         cx,
     )?;
     pause(cx, 400).await;
+    anyhow::ensure!(
+        !window.update(cx, |shell, _, _| shell.fixture_workspace_resizing())?,
+        "workspace divider resize did not end"
+    );
     anyhow::ensure!(
         widths.iter().copied().fold(f32::MIN, f32::max)
             - widths.iter().copied().fold(f32::MAX, f32::min)
@@ -477,36 +530,28 @@ pub async fn exercise(
     }
     for _ in 0..3 {
         window.update(cx, |s, _, cx| s.fixture_toggle_sidebar(true, cx))?;
-        pause(cx, 60).await;
+        pause(cx, 400).await;
+        anyhow::ensure!(
+            !page.read_with(cx, |b, _| b.fixture_native_visible()),
+            "expanded neighboring panel retained the browser"
+        );
         window.update(cx, |s, _, cx| s.fixture_toggle_sidebar(true, cx))?;
         pause(cx, 400).await;
         anyhow::ensure!(
             page.read_with(cx, |b, _| b.fixture_native_visible()),
-            "interrupted sidebar lost browser"
+            "restoring workspace panels lost the browser"
         );
     }
-    window.update(cx, |s, _, cx| s.fixture_toggle_sidebar(true, cx))?;
-    pause(cx, 400).await;
-    anyhow::ensure!(
-        !page.read_with(cx, |b, _| b.fixture_native_visible()),
-        "closed sidebar kept browser active"
-    );
-    window.update(cx, |s, _, cx| s.fixture_toggle_sidebar(true, cx))?;
-    pause(cx, 400).await;
-    anyhow::ensure!(
-        page.read_with(cx, |b, _| b.fixture_native_visible()),
-        "reopened sidebar lost browser"
-    );
     cx.update(|cx| appearance::set_surface(harness_theme::SurfacePreference::Frosted, cx));
     capture(output, "browser-blur-baseline-dark")?;
-    window.update(cx, |s, _, cx| s.fixture_browser_menu(true, cx))?;
+    window.update(cx, |s, w, cx| s.fixture_browser_menu(true, w, cx))?;
     pause(cx, 700).await;
     let presses = eval(&page, "window.pagePresses||0", cx).await?;
     let outside =
         page.read_with(cx, |b, _| b.fixture_linux_bounds().origin) + point(px(350.), px(300.));
     click(window, outside, cx)?;
-    // Dismissal includes an exit animation and a deferred repaint. Wait for
-    // the real popup lifecycle instead of racing its 120ms removal timer.
+    // Wait for the actual workspace menu to dismiss before checking that
+    // the next click reaches the page.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while window.update(cx, |s, _, _| s.fixture_browser_menu_mounted())? {
         anyhow::ensure!(
@@ -527,8 +572,11 @@ pub async fn exercise(
             == Some(presses.as_u64().unwrap() + 1),
         "browser input did not return after menu dismissal"
     );
-    window.update(cx, |s, _, cx| s.fixture_browser_menu(true, cx))?;
+    window.update(cx, |s, w, cx| s.fixture_browser_menu(true, w, cx))?;
     pause(cx, 500).await;
+    let menu_bounds = window
+        .update(cx, |s, _, _| s.fixture_browser_menu_bounds())?
+        .ok_or_else(|| anyhow::anyhow!("browser tab menu was not measured"))?;
     capture(output, "browser-blur-dark")?;
     cx.update(|cx| appearance::set_mode(appearance::AppearanceMode::Light, cx));
     pause(cx, 500).await;
@@ -544,17 +592,19 @@ pub async fn exercise(
     cx.update(|cx| appearance::set_surface(harness_theme::SurfacePreference::Opaque, cx));
     pause(cx, 300).await;
     capture(output, "browser-menu-opaque")?;
-    let bounds = page.read_with(cx, |b, _| b.fixture_linux_bounds());
     let viewport =
         AnyWindowHandle::from(window).update(cx, |_, w, _| f32::from(w.viewport_size().width))?;
-    super::validate_blur(
+    super::validate_menu_surface(
         output,
-        // Browser and Terminal are the two permanent rows. Keep this in sync
-        // with the compact menu so the lower-right sample stays inside it.
-        (f32::from(bounds.origin.x) as f64 + 124., 42., 168., 78.),
+        (
+            f32::from(menu_bounds.origin.x) as f64,
+            f32::from(menu_bounds.origin.y) as f64,
+            f32::from(menu_bounds.size.width) as f64,
+            f32::from(menu_bounds.size.height) as f64,
+        ),
         viewport,
     )?;
-    window.update(cx, |s, _, cx| s.fixture_browser_menu(false, cx))?;
+    window.update(cx, |s, w, cx| s.fixture_browser_menu(false, w, cx))?;
     cx.update(|cx| {
         appearance::set_mode(appearance::AppearanceMode::Dark, cx);
         appearance::set_surface(harness_theme::SurfacePreference::Frosted, cx);
@@ -568,7 +618,7 @@ pub async fn exercise(
     std::fs::write(
         output.join("linux-results.json"),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"keyboard":true,"unicodeClipboard":true,"imeComposition":true,"buttonAndScroll":true,"menuClickIsolation":true,"hoverVisibility":true,"resizeWidths":widths,"cssViewport":width,"liveFrames":frames,"sidebarTransitions":true}),
+            &serde_json::json!({"keyboard":true,"unicodeClipboard":true,"imeComposition":true,"buttonAndScroll":true,"menuClickIsolation":true,"hoverVisibility":true,"resizeWidths":widths,"cssViewport":width,"liveFrames":frames,"sidebarTransitions":true,"panelVisibility":true}),
         )?,
     )?;
     Ok(())

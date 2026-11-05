@@ -7,6 +7,7 @@
 //! instruction blocks are not part of what the person saw.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use harness_doc::MessageRole;
@@ -18,7 +19,90 @@ use super::{Block, ExternalSession, Msg, Source};
 pub(super) fn discover(codex_home: &Path, cwd: Option<&str>) -> Vec<ExternalSession> {
     let mut files = Vec::new();
     rollout_files(&codex_home.join("sessions"), &mut files);
+    rollout_files(&codex_home.join("archived_sessions"), &mut files);
     files.iter().filter_map(|path| head(path, cwd)).collect()
+}
+
+/// A link identifies a local thread; it does not authorize fetching a web page
+/// or starting Codex. Keep references separate from filesystem paths.
+pub(super) fn reference_id(reference: &str) -> Result<String, String> {
+    let reference = reference.trim();
+    let id = match reference.strip_prefix("codex://threads/") {
+        Some(rest) => {
+            let path = rest.split(['?', '#']).next().unwrap_or("");
+            path.strip_suffix('/').unwrap_or(path)
+        }
+        None => reference,
+    };
+    let parsed = uuid::Uuid::parse_str(id).map_err(|_| {
+        "Paste a Codex conversation link (codex://threads/<conversation-id>) or its conversation ID."
+            .to_string()
+    })?;
+    let canonical = parsed.hyphenated().to_string();
+    if !canonical.eq_ignore_ascii_case(id) {
+        return Err("The Codex conversation ID must be a hyphenated UUID.".into());
+    }
+    Ok(canonical)
+}
+
+/// Resolve exactly one thread, including archived rollouts. A filename narrows
+/// the read, and session_meta verifies the ID before any transcript is imported.
+pub(super) fn resolve(codex_home: &Path, id: &str) -> Result<(ExternalSession, bool), String> {
+    for (directory, archived) in [("sessions", false), ("archived_sessions", true)] {
+        let mut files = Vec::new();
+        rollout_files(&codex_home.join(directory), &mut files);
+        files.sort();
+        for path in files {
+            let matches_id = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    let name = name.to_ascii_lowercase();
+                    name == format!("{id}.jsonl") || name.ends_with(&format!("-{id}.jsonl"))
+                });
+            if !matches_id {
+                continue;
+            }
+            let lines = super::head_lines(&path)
+                .map_err(|e| format!("The local Codex conversation could not be read: {e}"))?;
+            let mut metadata = None;
+            for line in lines {
+                if line["type"] == "session_meta" {
+                    if line["payload"]["source"]["subagent"].is_object() {
+                        break;
+                    }
+                    if line["payload"]["id"]
+                        .as_str()
+                        .is_some_and(|native| native.eq_ignore_ascii_case(id))
+                    {
+                        metadata = Some(line["payload"]["cwd"].as_str().map(str::to_owned));
+                    }
+                    break;
+                }
+            }
+            let Some(cwd) = metadata else {
+                continue;
+            };
+            let title = head(&path, None)
+                .map(|session| session.title)
+                .unwrap_or_else(|| "Codex conversation".into());
+            let (started_at, updated_at, size) = super::file_times(&path);
+            return Ok((
+                ExternalSession {
+                    source: Source::Codex,
+                    id: id.to_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    cwd,
+                    title,
+                    started_at,
+                    updated_at,
+                    size,
+                },
+                archived,
+            ));
+        }
+    }
+    Err("That Codex conversation was not found on this device. Open Harness on the computer that holds the conversation, or check the Codex conversation link.".into())
 }
 
 /// Walk `sessions/` (three levels of date folders) for rollout files.
@@ -28,9 +112,12 @@ fn rollout_files(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
             rollout_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+        } else if kind.is_file() && path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             out.push(path);
         }
     }
@@ -94,7 +181,31 @@ pub(super) fn load(path: &Path) -> std::io::Result<Vec<Msg>> {
     let mut msgs: Vec<Msg> = Vec::new();
     // call_id → (message index, block index)
     let mut calls: HashMap<String, (usize, usize)> = HashMap::new();
-    for line in super::json_lines(path)? {
+    let mut lines = BufReader::new(std::fs::File::open(path)?)
+        .lines()
+        .enumerate()
+        .peekable();
+    while let Some((index, line)) = lines.next() {
+        // A session may be actively appending its final JSON record. Other
+        // malformed records and all I/O/UTF-8 errors must abort the import,
+        // rather than permanently saving a silently truncated snapshot.
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line: Value = match serde_json::from_str(&line) {
+            Ok(line) => line,
+            Err(error) if error.is_eof() && lines.peek().is_none() => break,
+            Err(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Codex history contains an invalid JSON record at line {}",
+                        index + 1
+                    ),
+                ));
+            }
+        };
         if line["type"] != "response_item" {
             continue;
         }
@@ -245,6 +356,8 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    const THREAD_ID: &str = "12345678-1234-4123-8123-123456789abc";
+
     fn session(dir: &Path, name: &str, cwd: &str) -> PathBuf {
         let day = dir.join("sessions/2026/09/01");
         std::fs::create_dir_all(&day).unwrap();
@@ -316,5 +429,88 @@ mod tests {
         let mine = discover(dir.path(), Some("/w/app"));
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].cwd.as_deref(), Some("/w/app"));
+    }
+
+    #[test]
+    fn references_accept_codex_threads_and_reject_other_urls_and_paths() {
+        for reference in [
+            THREAD_ID.to_string(),
+            format!("codex://threads/{THREAD_ID}"),
+            format!(" codex://threads/{THREAD_ID}?view=review#latest "),
+            format!("codex://threads/{THREAD_ID}/"),
+            THREAD_ID.to_uppercase(),
+        ] {
+            assert_eq!(reference_id(&reference).unwrap(), THREAD_ID);
+        }
+        for reference in [
+            "".to_owned(),
+            "codex://threads/".into(),
+            format!("https://example.com/{THREAD_ID}"),
+            format!("https://chatgpt.com/share/{THREAD_ID}"),
+            format!("codex://threads/{THREAD_ID}/../../private"),
+            format!("codex://threads/{THREAD_ID}//"),
+            format!("codex://threads/{THREAD_ID}%2fprivate"),
+            format!("codex://someone@threads/{THREAD_ID}"),
+            THREAD_ID.replace('-', ""),
+            format!("{{{THREAD_ID}}}"),
+            format!("/tmp/{THREAD_ID}.jsonl"),
+        ] {
+            assert!(reference_id(&reference).is_err(), "{reference}");
+        }
+    }
+
+    #[test]
+    fn direct_resolution_finds_archived_paginated_rollouts_and_verifies_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = session(dir.path(), "rollout-fixture.jsonl", "/w/app");
+        let archived_dir = dir.path().join("archived_sessions");
+        std::fs::create_dir_all(&archived_dir).unwrap();
+        let body = std::fs::read_to_string(&original).unwrap().replace(
+            r#""id":"c1""#,
+            &format!(r#""id":"{THREAD_ID}","history_mode":"paginated""#),
+        );
+        let path = archived_dir.join(format!("rollout-2026-09-01-{THREAD_ID}.jsonl"));
+        std::fs::write(&path, body).unwrap();
+        std::fs::remove_file(original).unwrap();
+        let (found, archived) = resolve(dir.path(), THREAD_ID).unwrap();
+        assert!(archived);
+        assert_eq!(found.id, THREAD_ID);
+        assert_eq!(found.title, "add a retry");
+        assert_eq!(load(&path).unwrap().len(), 2);
+        assert_eq!(discover(dir.path(), None).len(), 1);
+
+        std::fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"different","cwd":"/w/app"}}"#,
+        )
+        .unwrap();
+        assert!(resolve(dir.path(), THREAD_ID).is_err());
+    }
+
+    #[test]
+    fn history_tolerates_only_an_incomplete_final_json_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session(dir.path(), "rollout-fixture.jsonl", "/w/app");
+        let valid = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{valid}{{\"type\":")).unwrap();
+        assert_eq!(load(&path).unwrap().len(), 2);
+        std::fs::write(
+            &path,
+            format!("{valid}{{\"type\":\n{{\"type\":\"event_msg\"}}\n"),
+        )
+        .unwrap();
+        assert!(
+            load(&path).is_err(),
+            "an incomplete interior record is corrupt"
+        );
+        std::fs::write(&path, format!("{valid}not-json\n")).unwrap();
+        assert!(load(&path).is_err(), "a malformed final record is corrupt");
+        let mut corrupt = valid.into_bytes();
+        corrupt.extend_from_slice(b"\xff\n{\"type\":\"event_msg\"}\n");
+        std::fs::write(&path, corrupt).unwrap();
+        assert_eq!(
+            load(&path).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 }

@@ -190,33 +190,18 @@ impl Scene {
         self.paths.sort_by_key(|path| path.order);
         self.underlines.sort_by_key(|underline| underline.order);
         // Sprites of one order are grouped by texture: a batch draws from one
-        // texture, and tile ids, numbered per texture, would interleave them.
-        // Unstable: primitives that overlap never share an order (the bounds
-        // tree orders each above what it overlaps), so sprites with equal
-        // keys never overlap and their relative order draws nothing
-        // differently. Every glyph on screen is sorted each frame, including
-        // those of views replayed from the last frame.
-        self.monochrome_sprites.sort_unstable_by_key(|sprite| {
-            (
-                sprite.order,
-                sprite.tile.texture_id.index,
-                sprite.tile.tile_id,
-            )
-        });
-        self.subpixel_sprites.sort_unstable_by_key(|sprite| {
-            (
-                sprite.order,
-                sprite.tile.texture_id.index,
-                sprite.tile.tile_id,
-            )
-        });
-        self.polychrome_sprites.sort_unstable_by_key(|sprite| {
-            (
-                sprite.order,
-                sprite.tile.texture_id.index,
-                sprite.tile.tile_id,
-            )
-        });
+        // texture. Modified by Harness: a stable sort on (order, texture) keeps
+        // paint order within a group, instead of also sorting by tile id. Every
+        // glyph on screen is sorted each frame, including those of views
+        // replayed from the last frame; they arrive mostly in order, and the
+        // stable sort merges the runs that already are, where sorting by tile
+        // id scrambled every line and sorted it again from scratch.
+        self.monochrome_sprites
+            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
+        self.subpixel_sprites
+            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
+        self.polychrome_sprites
+            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
         self.surfaces.sort_by_key(|surface| surface.order);
         self.backdrop_blurs.sort_by_key(|blur| blur.order);
     }

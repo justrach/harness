@@ -35,12 +35,12 @@
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use gpui::{App, Global, Hsla, SharedString, hsla};
-use serde::{Deserialize, Serialize};
 use harness_syntax::HighlightKind;
 use harness_theme::{
     AccentPreset, AccentSelection, Color as ModelColor, SurfacePreference, SurfaceTreatment,
     ThemeRegistry, ThemeVariant,
 };
+use serde::{Deserialize, Serialize};
 
 /// User-selectable accent family. A choice is one color identity, not a
 /// miniature multi-hue theme: every interactive accent role stays on the same
@@ -586,6 +586,21 @@ fn git_graph_tone(mut color: Hsla) -> Hsla {
     color
 }
 
+/// High-contrast colors shared by compact hover labels in every appearance.
+pub struct TooltipColors {
+    pub surface: Hsla,
+    pub border: Hsla,
+    pub text: Hsla,
+    pub shortcut: Hsla,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkbenchStyle {
+    Standard,
+    Harp,
+    WarmHarp,
+}
+
 /// The app theme. Two concrete instances — [`Theme::dark`] and [`Theme::light`].
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -595,6 +610,9 @@ pub struct Theme {
     pub variant_id: SharedString,
     /// Stable id of the family that owns [`Self::variant_id`].
     pub family_id: SharedString,
+    // Assigned only to exact curated desktop variants, never guessed from a
+    // custom theme's name or family id. Not part of the shared/mobile schema.
+    workbench_style: WorkbenchStyle,
     /// Whether the base theme or a user preset owns interactive identity.
     pub accent_selection: AccentSelection,
     /// The persisted policy that resolved [`Self::surface_treatment`].
@@ -734,10 +752,9 @@ pub struct Theme {
     pub terminal: TerminalColors,
 
     // ---- fonts ----
-    /// UI font family (bundling of Geist lands with asset work; until then the
-    /// text system falls back to the system sans when the family is missing).
+    /// User-selected UI family, defaulting to System UI on macOS and Geist elsewhere.
     pub font_sans: SharedString,
-    /// Fixed Geist chrome for code-adjacent surfaces and recovery controls.
+    /// Fixed platform-default chrome for code-adjacent surfaces and recovery controls.
     pub font_sans_fixed: SharedString,
     /// User-selected family for code, diffs, and file editors.
     pub font_mono: SharedString,
@@ -775,12 +792,71 @@ impl TerminalColors {
             Appearance::Dark => "harnesser-dark",
             Appearance::Light => "harnesser-light",
         };
-        let registry = ThemeRegistry::active();
-        Self::from_variant(registry.variant(id).expect("Harness terminal palette exists"))
+        let registry = ThemeRegistry::desktop_active();
+        Self::from_variant(
+            registry
+                .variant(id)
+                .expect("Harness terminal palette exists"),
+        )
     }
 }
 
 impl Theme {
+    /// Harp's workbench keeps a frosted sidebar around opaque content planes.
+    pub fn is_harp(&self) -> bool {
+        matches!(
+            self.workbench_style,
+            WorkbenchStyle::Harp | WorkbenchStyle::WarmHarp
+        )
+    }
+
+    fn is_warm_harp(&self) -> bool {
+        self.workbench_style == WorkbenchStyle::WarmHarp
+    }
+
+    /// Authored raised selection for Harp, preserving each legacy surface recipe.
+    pub fn active_bg(&self, legacy: Hsla) -> Hsla {
+        if self.is_harp() {
+            self.element_active
+        } else {
+            legacy
+        }
+    }
+
+    pub fn card_selected_bg(&self) -> Hsla {
+        self.active_bg(card_selected_bg())
+    }
+
+    pub fn sidebar_selected_bg(&self) -> Hsla {
+        self.active_bg(glass_selected_bg())
+    }
+
+    pub fn sidebar_selected_shadows(&self) -> Vec<gpui::BoxShadow> {
+        if !self.is_harp() {
+            return glass_selected_shadows();
+        }
+        vec![
+            gpui::BoxShadow {
+                color: self.border_strong,
+                offset: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+                blur_radius: gpui::px(0.0),
+                spread_radius: gpui::px(0.5),
+                inset: true,
+            },
+            gpui::BoxShadow {
+                color: gpui::black().opacity(if self.appearance.is_dark() {
+                    0.16
+                } else {
+                    0.06
+                }),
+                offset: gpui::point(gpui::px(0.0), gpui::px(1.0)),
+                blur_radius: gpui::px(2.0),
+                spread_radius: gpui::px(0.0),
+                inset: false,
+            },
+        ]
+    }
+
     // ---- numbers drive layout (px) ----
     /// Frost translucency over the blurred window background (macOS vibrancy
     /// or Windows Acrylic). Linux stays opaque because compositor blur is not
@@ -833,6 +909,11 @@ impl Theme {
     pub const PANEL_RADIUS: f32 = 10.0;
     /// Small control radius (buttons, chips).
     pub const CONTROL_RADIUS: f32 = 6.0;
+    /// The smallest pointer target for an icon-sized control. The visible
+    /// glyph or pill stays its own size; the hit area around it grows.
+    pub const HIT_TARGET: f32 = 32.0;
+    /// Shared rounding for selectable sidebar and dropdown rows.
+    pub const SELECTION_RADIUS: f32 = 8.0;
     /// Base spacing steps.
     pub const SPACE_XS: f32 = 4.0;
     pub const SPACE_SM: f32 = 8.0;
@@ -851,9 +932,10 @@ impl Theme {
         if self.surface_treatment == SurfaceTreatment::Opaque {
             return self.surface;
         }
-        let base = match self.appearance {
-            Appearance::Dark => Self::GLASS_ALPHA,
-            Appearance::Light => Self::GLASS_ALPHA_LIGHT,
+        let base = match (self.is_harp(), self.appearance) {
+            (true, _) if cfg!(any(target_os = "macos", target_os = "windows")) => 0.55,
+            (_, Appearance::Dark) => Self::GLASS_ALPHA,
+            (_, Appearance::Light) => Self::GLASS_ALPHA_LIGHT,
         };
         self.surface
             .opacity(self.contrast_checked_glass_alpha(base))
@@ -872,16 +954,43 @@ impl Theme {
     /// whose blurred content can otherwise invalidate an imported palette's
     /// original solid-background assumptions.
     fn contrast_checked_tint_alpha(&self, tint: Hsla, base: f32, backdrop: Hsla) -> f32 {
+        // Harp uses the secondary role for small sidebar section labels.
+        let muted_minimum = if self.is_harp() { 4.5 } else { 3.0 };
         for step in 0..=20 {
             let alpha = base + (1.0 - base) * step as f32 / 20.0;
             let composite = flatten(tint.opacity(alpha), backdrop);
-            if painted_contrast(self.text, composite) >= 4.5
-                && painted_contrast(self.text_muted, composite) >= 3.0
+            let hovered = flatten(self.element_hover, composite);
+            let hover_readable = !self.is_warm_harp()
+                || (painted_contrast(self.text, hovered) >= 4.5
+                    && painted_contrast(self.text_muted, hovered) >= 4.5);
+            if hover_readable
+                && painted_contrast(self.text, composite) >= 4.5
+                && painted_contrast(self.text_muted, composite) >= muted_minimum
+                && self.tint_preserves_active_elevation(tint.opacity(alpha))
             {
                 return alpha;
             }
         }
         1.0
+    }
+
+    fn tint_preserves_active_elevation(&self, tint: Hsla) -> bool {
+        if !self.is_warm_harp() {
+            return true;
+        }
+        // The adverse backdrop for text is not always the adverse backdrop
+        // for a lighter selected row. Check both desktop luminance extremes,
+        // including the hover wash, before allowing translucency to flatten
+        // or reverse the palette's authored surface hierarchy.
+        [grey(0), grey(0xff)].into_iter().all(|backdrop| {
+            let rest = flatten(tint, backdrop);
+            let hovered = flatten(self.element_hover, rest);
+            [rest, hovered].into_iter().all(|host| {
+                let selected = flatten(self.element_active, host);
+                relative_luminance(selected) > relative_luminance(host)
+                    && contrast_ratio(selected, host) >= 1.08
+            })
+        })
     }
 
     fn adverse_backdrop(&self) -> Hsla {
@@ -902,7 +1011,7 @@ impl Theme {
 
     /// Shared background for the editor host and the adjacent Files column.
     pub fn panel_bg(&self) -> Hsla {
-        if self.is_glass() {
+        if self.is_glass() && !self.is_harp() {
             self.bg.opacity(0.4)
         } else {
             self.bg
@@ -936,7 +1045,9 @@ impl Theme {
     /// Fixed opaque grays turn muddy over colorful or bright backgrounds.
     pub fn for_popup(&self) -> Self {
         let mut popup = self.clone();
-        if self.is_frost() {
+        // Warm Harp's secondary roles are tuned against rest, hover, and the
+        // brighter active fill. Dimming them again loses that contrast.
+        if self.is_frost() && !self.is_warm_harp() {
             popup.text_muted = self.text.opacity(0.64);
             popup.text_faint = self.text.opacity(0.48);
         }
@@ -996,7 +1107,7 @@ impl Theme {
     /// color while hiding the transcript and overlapping surfaces underneath.
     /// Frosted surfaces retain their translucent, contrast-checked tint.
     pub fn input_glass_bg(&self) -> Hsla {
-        if !self.is_frost() {
+        if !self.is_frost() || self.is_harp() {
             return flatten(self.input_bg, self.bg);
         }
         let base = if matches!(self.appearance, Appearance::Light) {
@@ -1007,6 +1118,70 @@ impl Theme {
         let window = flatten(self.glass(), self.adverse_backdrop());
         self.input_bg
             .opacity(self.contrast_checked_tint_alpha(self.input_bg, base, window))
+    }
+
+    /// A bright, opaque writing plane above the conversation. Light palettes
+    /// keep a trace of their input tint; dark palettes retain their raised fill.
+    pub fn composer_bg(&self) -> Hsla {
+        let input = flatten(self.input_bg, self.bg);
+        if self.appearance.is_dark() {
+            input
+        } else {
+            flatten(gpui::white().opacity(0.82), input)
+        }
+    }
+
+    /// Foreground for controls filled with the primary accent. `on_accent`
+    /// is authored for the stronger fill, so lighter primary tones may need
+    /// a different foreground to remain readable.
+    pub fn on_primary_accent(&self) -> Hsla {
+        if contrast_ratio(self.on_accent, self.accent) >= 4.5 {
+            self.on_accent
+        } else if contrast_ratio(gpui::black(), self.accent)
+            >= contrast_ratio(gpui::white(), self.accent)
+        {
+            gpui::black()
+        } else {
+            gpui::white()
+        }
+    }
+
+    /// Hover labels stay opaque charcoal over both light and dark controls,
+    /// matching the Codex reference independently of the window's glass tint.
+    pub fn tooltip_colors(&self) -> TooltipColors {
+        TooltipColors {
+            surface: gpui::rgb(0x282828).into(),
+            border: gpui::rgb(0x383838).into(),
+            text: gpui::rgb(0xf8f8f8).into(),
+            shortcut: gpui::rgb(0x5c5c5c).into(),
+        }
+    }
+
+    pub fn composer_shadows(&self) -> Vec<gpui::BoxShadow> {
+        let opacity = if self.appearance.is_dark() {
+            0.18
+        } else {
+            0.05
+        };
+        [(1.0, 2.0), (3.0, 10.0)]
+            .into_iter()
+            .map(|(offset, blur)| gpui::BoxShadow {
+                color: gpui::black().opacity(opacity),
+                offset: gpui::point(gpui::px(0.0), gpui::px(offset)),
+                blur_radius: gpui::px(blur),
+                spread_radius: gpui::px(0.0),
+                inset: false,
+            })
+            .collect()
+    }
+
+    /// The conversation column's lift over the shell chrome, extending the
+    /// composer's contrast to the main screen: light palettes wash the column
+    /// toward white, so the sidebar's tone reads as chrome around a bright
+    /// page. The wash is translucent, so glass still shows through. Dark
+    /// palettes keep the column flush on the shell.
+    pub fn content_plane(&self) -> Option<Hsla> {
+        (!self.appearance.is_dark() && !self.is_harp()).then(|| gpui::white().opacity(0.55))
     }
 
     /// Section-card fill (settings cards and similar in-panel cards). The
@@ -1067,6 +1242,7 @@ impl Theme {
             appearance: Appearance::Dark,
             variant_id: "harnesser-dark".into(),
             family_id: "harnesser".into(),
+            workbench_style: WorkbenchStyle::Standard,
             accent_selection: AccentSelection::Preset(accent_color.into()),
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
@@ -1118,8 +1294,12 @@ impl Theme {
             diff_del: oklch(0.704, 0.191, 22.216),  // red-400
             diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
             terminal: TerminalColors::harness(Appearance::Dark),
-            font_sans: "Geist".into(),
-            font_sans_fixed: "Geist".into(),
+            font_sans: crate::typography::UiFontFamily::default()
+                .family_name()
+                .into(),
+            font_sans_fixed: crate::typography::UiFontFamily::default()
+                .family_name()
+                .into(),
             font_mono: "Geist Mono".into(),
             font_terminal: "Geist Mono".into(),
             code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
@@ -1147,6 +1327,7 @@ impl Theme {
             appearance: Appearance::Light,
             variant_id: "harnesser-light".into(),
             family_id: "harnesser".into(),
+            workbench_style: WorkbenchStyle::Standard,
             accent_selection: AccentSelection::Preset(accent_color.into()),
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
@@ -1217,8 +1398,12 @@ impl Theme {
             diff_del: oklch(0.577, 0.245, 27.325),  // red-600
             diff_hunk_bg: hsla(0.6, 0.35, 0.35, 0.07),
             terminal: TerminalColors::harness(Appearance::Light),
-            font_sans: "Geist".into(),
-            font_sans_fixed: "Geist".into(),
+            font_sans: crate::typography::UiFontFamily::default()
+                .family_name()
+                .into(),
+            font_sans_fixed: crate::typography::UiFontFamily::default()
+                .family_name()
+                .into(),
             font_mono: "Geist Mono".into(),
             font_terminal: "Geist Mono".into(),
             code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
@@ -1274,7 +1459,7 @@ impl Theme {
         accent_selection: AccentSelection,
         surface_preference: SurfacePreference,
     ) -> Self {
-        let registry = ThemeRegistry::active();
+        let registry = ThemeRegistry::desktop_active();
         let fallback_id = match appearance {
             Appearance::Dark => "harnesser-dark",
             Appearance::Light => "harnesser-light",
@@ -1309,7 +1494,7 @@ impl Theme {
             colors.overlay,
             colors.input,
         ];
-        let is_curated_builtin = ThemeRegistry::builtin()
+        let is_curated_builtin = ThemeRegistry::desktop_builtin()
             .variant(&variant.id)
             .is_some_and(|builtin| builtin == variant);
         let safe_text = if is_curated_builtin {
@@ -1324,6 +1509,17 @@ impl Theme {
         };
         theme.variant_id = variant.id.clone().into();
         theme.family_id = variant.family_id.clone().into();
+        theme.workbench_style = if is_curated_builtin {
+            match variant.id.as_str() {
+                "harp-light" | "harp-dark" => WorkbenchStyle::Harp,
+                "warm-harp-light" | "warm-harp-dark" | "codegraff-light" | "codegraff-dark" => {
+                    WorkbenchStyle::WarmHarp
+                }
+                _ => WorkbenchStyle::Standard,
+            }
+        } else {
+            WorkbenchStyle::Standard
+        };
         theme.accent_selection = accent_selection;
         theme.surface_preference = surface_preference;
         theme.surface_treatment = surface_preference.resolve(variant.recommended_surface_treatment);
@@ -1358,12 +1554,15 @@ impl Theme {
         theme.success = model_color(colors.success);
         theme.success_muted = model_color(colors.success_muted);
         theme.busy = model_color(accent.activity);
+        if theme.workbench_style == WorkbenchStyle::Harp {
+            theme.busy = theme.text_muted;
+        }
         theme.glyph = GlyphPalette {
             light: model_color(accent.glyph[0]),
             mid: model_color(accent.glyph[1]),
             deep: model_color(accent.glyph[2]),
         };
-        theme.surface_raised_hover = model_color(colors.raised);
+        theme.surface_raised_hover = model_color(colors.hover.blend_over(colors.raised));
         theme.band = model_color(colors.hover);
         theme.input_bg = model_color(colors.input);
         theme.selection = model_color(accent.selection);
@@ -1941,6 +2140,166 @@ mod tests {
     }
 
     #[test]
+    fn desktop_codegraff_matches_warm_harp_with_independent_accent_and_surface_choices() {
+        for (appearance, codegraff_id, warm_id) in [
+            (Appearance::Light, "codegraff-light", "warm-harp-light"),
+            (Appearance::Dark, "codegraff-dark", "warm-harp-dark"),
+        ] {
+            for accent in [
+                AccentSelection::ThemeDefault,
+                AccentSelection::Preset(AccentPreset::Blue),
+            ] {
+                for surface in SurfacePreference::ALL {
+                    let codegraff = Theme::for_selection(appearance, codegraff_id, accent, surface);
+                    let warm = Theme::for_selection(appearance, warm_id, accent, surface);
+                    assert_eq!(codegraff.variant_id.as_ref(), codegraff_id);
+                    assert_eq!(codegraff.family_id.as_ref(), "codegraff");
+                    assert_eq!(codegraff.accent_selection, accent);
+                    assert_eq!(codegraff.surface_preference, surface);
+                    assert!(codegraff.is_harp());
+                    assert_eq!(codegraff.bg, warm.bg);
+                    assert_eq!(codegraff.text, warm.text);
+                    assert_eq!(codegraff.text_muted, warm.text_muted);
+                    assert_eq!(codegraff.accent, warm.accent);
+                    assert_eq!(codegraff.surface_treatment, warm.surface_treatment);
+                    assert_eq!(codegraff.panel_bg(), warm.panel_bg());
+                    assert_eq!(codegraff.glass(), warm.glass());
+                    assert_eq!(codegraff.glass_overlay(), warm.glass_overlay());
+                    assert_eq!(codegraff.sidebar_selected_bg(), warm.sidebar_selected_bg());
+                    assert_eq!(codegraff.input_glass_bg(), warm.input_glass_bg());
+                    assert!(codegraff.content_plane().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn custom_codegraff_named_variants_keep_their_own_palette_and_surface_style() {
+        for id in ["custom-codegraff-dark", "codegraff-dark"] {
+            let mut variant = ThemeRegistry::desktop_builtin()
+                .variant("codegraff-dark")
+                .unwrap()
+                .clone();
+            variant.id = id.into();
+            variant.colors.background = ModelColor::rgb(0x11, 0x22, 0x33);
+            let custom = Theme::from_variant(
+                &variant,
+                AccentSelection::Preset(AccentPreset::Blue),
+                SurfacePreference::Opaque,
+            );
+            assert_eq!(custom.bg, model_color(variant.colors.background));
+            assert_eq!(custom.variant_id.as_ref(), id);
+            assert!(
+                !custom.is_harp(),
+                "custom appearance must not be inferred from its name"
+            );
+            assert_eq!(custom.surface_treatment, SurfaceTreatment::Opaque);
+            assert_eq!(
+                custom.accent_selection,
+                AccentSelection::Preset(AccentPreset::Blue)
+            );
+        }
+    }
+
+    #[test]
+    fn harp_content_stays_opaque_inside_frosted_chrome() {
+        for (appearance, id) in [
+            (Appearance::Light, "harp-light"),
+            (Appearance::Dark, "harp-dark"),
+            (Appearance::Light, "warm-harp-light"),
+            (Appearance::Dark, "warm-harp-dark"),
+        ] {
+            let theme = Theme::for_selection(
+                appearance,
+                id,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::ThemeDefault,
+            );
+            assert!(theme.is_harp());
+            assert_eq!(theme.surface_treatment, SurfaceTreatment::Frosted);
+            assert_eq!(theme.panel_bg(), theme.bg);
+            assert_eq!(theme.input_glass_bg().a, 1.0);
+            assert!(painted_contrast(theme.text, theme.input_glass_bg()) >= 4.5);
+            assert!(painted_contrast(theme.text, theme.sidebar_selected_bg()) >= 4.5);
+            assert_eq!(theme.card_selected_bg(), theme.sidebar_selected_bg());
+            let shell = flatten(theme.glass(), theme.adverse_backdrop());
+            assert!(painted_contrast(theme.text_muted, shell) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn warm_harp_selection_stays_lighter_on_rendered_glass() {
+        for (appearance, id) in [
+            (Appearance::Light, "warm-harp-light"),
+            (Appearance::Dark, "warm-harp-dark"),
+        ] {
+            let theme = Theme::for_selection(
+                appearance,
+                id,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::ThemeDefault,
+            );
+            for (surface_name, tint) in
+                [("sidebar", theme.glass()), ("popup", theme.glass_overlay())]
+            {
+                for backdrop in [grey(0), grey(0xff)] {
+                    let rest = flatten(tint, backdrop);
+                    let hovered = flatten(theme.glass_hover(), rest);
+                    let selected = flatten(theme.element_active, rest);
+                    assert!(
+                        contrast_ratio(hovered, rest) >= 1.12,
+                        "{id}: hover must remain visible on {surface_name}"
+                    );
+                    for foreground in [theme.text, theme.text_muted] {
+                        assert!(
+                            painted_contrast(foreground, hovered) >= 4.5,
+                            "{id}: hovered {surface_name} text must remain readable"
+                        );
+                    }
+                    for host in [rest, hovered] {
+                        assert!(
+                            relative_luminance(selected) > relative_luminance(host),
+                            "{id}: selected must lift above {surface_name} on {backdrop:?}"
+                        );
+                        assert!(
+                            contrast_ratio(selected, host) >= 1.08,
+                            "{id}: selected must remain distinct on {surface_name}"
+                        );
+                    }
+                    for foreground in [theme.text, theme.text_muted, theme.for_popup().text_muted] {
+                        assert!(
+                            painted_contrast(foreground, selected) >= 4.5,
+                            "{id}: selected {surface_name} text must remain readable"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn imported_raised_controls_have_a_visible_hover() {
+        for (appearance, id) in [
+            (Appearance::Light, "warm-harp-light"),
+            (Appearance::Dark, "warm-harp-dark"),
+            (Appearance::Light, "codegraff-light"),
+            (Appearance::Dark, "codegraff-dark"),
+            (Appearance::Dark, "catppuccin-mocha"),
+        ] {
+            let theme = Theme::for_selection(
+                appearance,
+                id,
+                AccentSelection::ThemeDefault,
+                SurfacePreference::Opaque,
+            );
+            assert!(
+                contrast_ratio(theme.surface_raised_hover, theme.surface_raised) >= 1.10,
+                "{id}: raised controls need a visible hover"
+            );
+        }
+    }
+
+    #[test]
     fn contrast_ratio_hits_known_anchors() {
         let white = grey(0xff);
         let black = grey(0x00);
@@ -2032,7 +2391,7 @@ mod tests {
 
     #[test]
     fn forced_frost_preserves_shell_text_contrast_for_every_builtin() {
-        let registry = ThemeRegistry::builtin();
+        let registry = ThemeRegistry::desktop_builtin();
         for variant in registry.families.iter().flat_map(|family| &family.variants) {
             let appearance = model_appearance(variant.appearance);
             let theme = Theme::from_variant(
@@ -2079,7 +2438,7 @@ mod tests {
 
     #[test]
     fn runtime_hardening_protects_native_custom_theme_edits() {
-        let mut variant = ThemeRegistry::builtin()
+        let mut variant = ThemeRegistry::desktop_builtin()
             .variant("harnesser-dark")
             .unwrap()
             .clone();
@@ -2108,7 +2467,7 @@ mod tests {
     fn light_mode_selection_wash_stays_legible_on_content_surfaces() {
         let mut themes = vec![("default".to_string(), Theme::light())];
         themes.extend(
-            ThemeRegistry::builtin()
+            ThemeRegistry::desktop_builtin()
                 .variants_for(harness_theme::Appearance::Light)
                 .map(|variant| {
                     (
@@ -2146,7 +2505,7 @@ mod tests {
 
     #[test]
     fn runtime_hardening_leaves_curated_builtin_text_unchanged() {
-        for variant in ThemeRegistry::builtin()
+        for variant in ThemeRegistry::desktop_builtin()
             .families
             .iter()
             .flat_map(|family| &family.variants)
@@ -2757,7 +3116,10 @@ mod tests {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let theme = Theme::for_appearance(appearance).with_font_sans("Inter".into());
             assert_eq!(theme.font_sans.as_ref(), "Inter");
-            assert_eq!(theme.font_sans_fixed.as_ref(), "Geist");
+            assert_eq!(
+                theme.font_sans_fixed.as_ref(),
+                crate::typography::UiFontFamily::default().family_name()
+            );
             assert_eq!(theme.font_mono.as_ref(), "Geist Mono");
         }
     }

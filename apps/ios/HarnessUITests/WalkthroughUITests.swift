@@ -7,7 +7,7 @@ import XCTest
 ///
 /// Nothing is pinned beyond the offline demo: Split view starts as a new install has it, and is turned on the way a
 /// person would, from Settings. `WALKTHROUGH_ARGS` (the script's `--args`) adds launch arguments, such as
-/// `-rollout.stackedSplitDrag on`.
+/// `-phoneSplit sideBySide`.
 @MainActor
 final class WalkthroughUITests: XCTestCase {
     private var app: XCUIApplication!
@@ -80,19 +80,6 @@ final class WalkthroughUITests: XCTestCase {
         return true
     }
 
-    /// The stacked split's empty lower pane: half the screen with nothing in it.
-    private func noteEmptyDetail(_ when: String) {
-        if app.staticTexts["Pick a session, or start one with +"].isHittable {
-            note("\(when), the lower half of the screen is an empty \"Pick a session\" placeholder")
-        }
-    }
-
-    private func closeButtons() -> [XCUIElement] {
-        app.buttons.matching(identifier: "stacked-pane-close").allElementsBoundByIndex
-            .filter(\.isHittable)
-            .sorted { $0.frame.minY < $1.frame.minY }
-    }
-
     // MARK: the walk
 
     func testFirstRunWalkthrough() {
@@ -113,13 +100,13 @@ final class WalkthroughUITests: XCTestCase {
         }
         _ = app.buttons["home-status-all"].waitForExistence(timeout: 5)
         step("home-after-juggling")
+        // Upright there is no split that fits, so nothing should be offered here.
         if element("split-offer").exists {
             step("split-offer")
-        } else {
-            note("after opening four sessions in a row in portrait, Split view was never offered")
+            note("Split view was offered in portrait, where no split fits")
         }
 
-        // Find Split view in Settings and choose Stacked.
+        // Find Split view in Settings and choose Auto.
         let settings = app.buttons["home-settings"]
         guard settings.waitForExistence(timeout: 5) else {
             note("no Settings button on Home")
@@ -139,69 +126,24 @@ final class WalkthroughUITests: XCTestCase {
             return
         }
         picker.tap()
-        let stacked = app.buttons["Stacked"].firstMatch
-        if stacked.waitForExistence(timeout: 3) {
+        let auto = app.buttons["Auto"].firstMatch
+        if auto.waitForExistence(timeout: 3) {
             step("split-view-choices")
-            stacked.tap()
+            if app.buttons["Stacked"].exists { note("the Split view picker still offers Stacked") }
+            auto.tap()
         } else {
             note("the Split view picker did not show its choices")
         }
-        step("split-view-stacked")
+        step("split-view-auto")
         let done = app.buttons["Done"].firstMatch
         if done.exists { done.tap() } else { app.swipeDown(velocity: .fast) }
-        step("home-stacked")
-        noteEmptyDetail("with Stacked on and nothing open")
+        step("home-auto")
 
-        // The stacked split: the list above, the session below.
+        // Upright, Auto keeps the single stack: the session replaces the list.
         guard open("Tool group header colors"), header.waitForExistence(timeout: 10) else { return }
-        step("stacked-split")
-        if !listButton.isHittable { note("Stacked is on but the session still replaced the list") }
-        if !app.buttons["stacked-split-handle"].exists {
-            note("no drag handle between the panes (this install is in the off half of the stackedSplitDrag rollout)")
-        }
-        if element("stacked-drag-onboarding").exists {
-            step("stacked-drag-onboarding")
-            app.buttons["stacked-drag-onboarding-dismiss"].tap()
-        }
+        step("auto-portrait-session")
 
-        // Split like ⌘D: a second session under the first.
-        let split = app.buttons["stacked-split-open"]
-        if split.waitForExistence(timeout: 3), split.isHittable {
-            split.tap()
-            if element("stacked-session-picker").waitForExistence(timeout: 5) {
-                step("lower-pane-picker")
-                if open("Model picker catalog sync", lowest: true) {
-                    step("two-sessions")
-                    let closes = closeButtons()
-                    if closes.count < 2 { note("expected an × on each pane, found \(closes.count)") }
-                    if let lower = closes.last {
-                        lower.tap()
-                        step("closed-lower-pane")
-                    }
-                }
-            } else {
-                note("the split button did not open a session list below")
-            }
-        } else {
-            note("no split button on the open session")
-        }
-
-        // Again, closing the upper pane this time: the lower session moves up.
-        if split.waitForExistence(timeout: 3), split.isHittable {
-            split.tap()
-            if element("stacked-session-picker").waitForExistence(timeout: 5),
-               open("Wrangler deploy hygiene", lowest: true) {
-                step("two-sessions-again")
-                if let upper = closeButtons().first {
-                    upper.tap()
-                    step("closed-upper-pane")
-                }
-            } else if let close = closeButtons().last {
-                close.tap()
-            }
-        }
-
-        // Type and send: the session should get the screen above the keyboard, and the list come back after.
+        // Type and send.
         let input = app.textViews["composer-input"]
         if input.waitForExistence(timeout: 5) {
             input.tap()
@@ -220,7 +162,7 @@ final class WalkthroughUITests: XCTestCase {
             note("no composer on the open session")
         }
 
-        // Landscape: Stacked does not fit, so the phone falls back to its single stack.
+        // Landscape: Auto puts the list beside the session where the window is wide enough.
         XCUIDevice.shared.orientation = .landscapeLeft
         step("landscape")
         XCUIDevice.shared.orientation = .portrait
@@ -229,6 +171,5 @@ final class WalkthroughUITests: XCTestCase {
         back()
         _ = app.buttons["home-status-all"].waitForExistence(timeout: 5)
         step("home-at-the-end")
-        noteEmptyDetail("after Back from the last session")
     }
 }

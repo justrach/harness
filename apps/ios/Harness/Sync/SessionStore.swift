@@ -58,6 +58,8 @@ final class SessionStore {
     /// (crates/doc/src/queue.rs). Shared with every other device on the chat:
     /// what the Mac queued shows up here, and reordering here reorders there.
     private(set) var queue: [QueuedMessage] = []
+    /// The agent's context meter, from the doc's `meta.contextUsage` (ContextWindow). The demo sets it directly.
+    var contextUsage: ContextUsage?
     var queueActionsPending: Set<String> = []
     var queueActionError: String?
     /// Local submission only; remote user entries never pull a reader to a new turn.
@@ -271,7 +273,7 @@ final class SessionStore {
             cursor: { [weak self] in self?.cursor ?? 0 },
             containsFrontier: { [weak self] frontier in
                 guard let self else { return false }
-                return Self.containsFrontier(frontier, in: self.doc)
+                return await Self.frontierContained(frontier, in: self.doc)
             },
             applyCheckpoint: { [weak self] bytes, seq in
                 guard let self, await self.importRemote(bytes) else {
@@ -418,11 +420,21 @@ final class SessionStore {
 
     var admittedBatchIDs: Set<String> { admitted }
 
-    static func containsFrontier(_ frontier: Data, in doc: LoroDoc) -> Bool {
+    nonisolated static func containsFrontier(_ frontier: Data, in doc: LoroDoc) -> Bool {
         guard !frontier.isEmpty,
               let vv = try? VersionVector.decode(bytes: frontier),
               !vv.toHashmap().isEmpty else { return false }
         return doc.oplogVv().includesVv(other: vv)
+    }
+
+    /// `containsFrontier`, off the main actor. Reading the oplog's version waits
+    /// for the doc's lock, which an import off the main actor holds for as long as
+    /// it rebuilds a long text. Waiting on the main actor let the watchdog kill
+    /// the app (0x8BADF00D, TestFlight build 63) just as importing there did (#484).
+    nonisolated static func frontierContained(_ frontier: Data, in doc: LoroDoc) async -> Bool {
+        await Task.detached(priority: .userInitiated) {
+            containsFrontier(frontier, in: doc)
+        }.value
     }
 
     /// Mine the retired s2 snapshot for OUR OWN still-pending commands and
@@ -642,8 +654,8 @@ final class SessionStore {
         let cache = started ? entryCache : nil
         let generation = lifecycleGeneration
         Task { @MainActor [weak self] in
-            let decoded = await Task.detached(priority: .userInitiated) {
-                Self.decodeEntries(from: doc, cache: cache)
+            let (decoded, usage) = await Task.detached(priority: .userInitiated) {
+                (Self.decodeEntries(from: doc, cache: cache), Self.contextUsage(from: doc))
             }.value
             guard let self, !self.stopped,
                   self.lifecycleGeneration == generation else { return }
@@ -652,6 +664,7 @@ final class SessionStore {
             if let decoded {
                 self.apply(decoded.entries, queue: decoded.queue)
             }
+            if usage != self.contextUsage { self.contextUsage = usage }
             if self.projectPending {
                 if self.viewAttached {
                     self.projectPending = false
@@ -727,6 +740,12 @@ final class SessionStore {
         return (joinContinuations(raw), queue)
     }
 
+    /// The agent's context meter: one JSON string at `meta.contextUsage`, written whole so tokens and window
+    /// never tear on sync (schema.rs `write_context_usage`).
+    nonisolated static func contextUsage(from doc: LoroDoc) -> ContextUsage? {
+        doc.getMap(id: "meta").get(key: "contextUsage")?.asValue()?.stringValue.flatMap(ContextUsage.decode)
+    }
+
     /// Same decode as `entryFrom(_:)` but reading the message map's scalar
     /// fields directly and taking already-decoded parts — EntryCache uses it
     /// to skip the deep-value walk on messages whose parts are memoized.
@@ -762,6 +781,9 @@ final class SessionStore {
         switch kind {
         case "text":
             return .text(id: id, text: m["text"]?.stringValue ?? "")
+        case "reasoning":
+            // The body lives in `reasoning`, never `text` (schema.rs DocPartJson).
+            return .reasoning(id: id, text: m["reasoning"]?.stringValue ?? "")
         case "visual":
             // Mobile shows only the bounded title; source is never read or executed.
             guard let title = m["title"]?.stringValue,
@@ -793,6 +815,21 @@ final class SessionStore {
                 else if let list = v.listValue {
                     // ApplyPatch changes — keep a JSON echo.
                     fields[k] = list.map { "\($0.jsonObject)" }
+                }
+            }
+            // A spawn's lifecycle and live tail ride the part, not the call (schema.rs set_subagent_*).
+            if let status = m["subagentStatus"]?.stringValue { fields[RenderToolCall.subagentStatusKey] = status }
+            if let tail = m["subagentTail"]?.stringValue { fields[RenderToolCall.subagentTailKey] = tail }
+            // The output's full length, for the context card's estimate (ContextWindow).
+            if let bytes = m["outputBytes"]?.i64Value ?? m["output"]?.stringValue.map({ Int64($0.utf8.count) }) {
+                fields[RenderToolCall.outputBytesKey] = bytes
+            }
+            // A compaction chip's record rides its call's input (proto CompactionMeta).
+            if tag == "unknown", fields["name"] as? String == "Compact context",
+               let input = callMap["input"]?.mapValue, let kind = input["kind"]?.stringValue {
+                fields[RenderToolCall.compactionKindKey] = kind
+                for key in ["tokensBefore", "tokensAfter", "itemTokens"] {
+                    if let n = input[key]?.i64Value { fields["compaction.\(key)"] = n }
                 }
             }
             // isError presence IS the resolution marker (schema.rs:96).

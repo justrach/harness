@@ -23,6 +23,22 @@ pub struct FilesRequestContext {
 
 impl FilesRequestContext {
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
+        if let Some(space_id) = chat_id.strip_prefix("space-canvas:") {
+            let space = state.space_row(space_id)?;
+            let cwd = state.terminal_open_cwd_for(chat_id)?;
+            return Some(Self {
+                target: WorkspaceTarget {
+                    chat_id: None,
+                    space_id: Some(space_id.to_owned()),
+                    checkout_path: None,
+                },
+                target_device_id: (state.local_device_id.as_deref()
+                    != Some(space.device_id.as_str()))
+                .then(|| space.device_id.clone()),
+                cwd,
+                checkout_id: None,
+            });
+        }
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
         let cwd = chat.cwd.clone()?;
         let target_device_id = (state.local_device_id.as_deref() != Some(&chat.device_id))

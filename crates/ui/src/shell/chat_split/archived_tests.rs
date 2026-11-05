@@ -71,8 +71,9 @@ fn an_archived_session_keeps_its_pane_after_a_split(cx: &mut TestAppContext) {
         .update(cx, |shell, window, cx| {
             shell.open_chat_preserving_tabs("old".into(), cx);
             assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("old"));
-            // ⌘D: the archived session parks in the pane it leaves.
-            shell.split_chat(SplitAxis::Horizontal, window, cx);
+            // Exercise legacy split restoration directly; the shortcut now
+            // creates workspace panels. The archived session stays parked.
+            shell.split_chat_opening(SplitAxis::Horizontal, None, window, cx);
         })
         .unwrap();
     cx.run_until_parked();
@@ -104,9 +105,12 @@ fn an_archived_session_keeps_its_pane_after_a_split(cx: &mut TestAppContext) {
     }
     // Away to another tab and back: the tab's split still holds it.
     let tab = window
-        .update(cx, |shell, window, cx| {
+        .update(cx, |shell, _, cx| {
             let tab = shell.chat_tab;
-            shell.new_chat_tab(None, window, cx);
+            // New chat now opens inside the same workspace. A fresh session
+            // exercises the parked split's restoration across session switches.
+            shell.create_workspace_session(cx);
+            assert_ne!(shell.chat_tab, tab);
             tab
         })
         .unwrap();
@@ -145,7 +149,7 @@ fn archiving_a_session_shown_in_another_pane_still_closes_it(cx: &mut TestAppCon
     window
         .update(cx, |shell, window, cx| {
             shell.open_chat_preserving_tabs("live".into(), cx);
-            shell.split_chat(SplitAxis::Horizontal, window, cx);
+            shell.split_chat_opening(SplitAxis::Horizontal, None, window, cx);
         })
         .unwrap();
     cx.run_until_parked();

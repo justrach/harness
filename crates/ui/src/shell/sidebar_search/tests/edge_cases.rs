@@ -386,7 +386,6 @@ fn sidebar_search_roundtrips_themes_widths_and_disclosures(cx: &mut gpui::TestAp
             cx.update(|_, cx| {
                 cx.set_global(if light { Theme::light() } else { Theme::dark() });
                 shell.update(cx, |shell, cx| {
-                    shell.pinned_open = false;
                     shell.sessions_open = false;
                     shell.archived_open = false;
                     shell.sidebar_collapsed_groups.insert("local".into());
@@ -402,7 +401,7 @@ fn sidebar_search_roundtrips_themes_widths_and_disclosures(cx: &mut gpui::TestAp
             cx.run_until_parked();
             assert_eq!(input.read_with(cx, |input, _| input.text().to_string()), "");
             shell.read_with(cx, |shell, _| {
-                assert!(!shell.pinned_open && !shell.sessions_open && !shell.archived_open);
+                assert!(!shell.sessions_open && !shell.archived_open);
                 assert!(shell.sidebar_collapsed_groups.contains("local"));
             });
             press_keys(cx, "escape");

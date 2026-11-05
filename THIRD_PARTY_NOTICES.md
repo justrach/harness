@@ -48,6 +48,16 @@ Harness also vendors the GPUI editor foundations below. Each crate is Apache-2.0
 
 Harness's own source code is licensed under the terms in `LICENSE`. Bundled third-party components retain their respective licenses and notices.
 
+## Mathematical typesetting
+
+Native Markdown equations use [LaTeX-Rust 2.1.1](https://github.com/jscarr64/latex-rust/tree/v2.1.1),
+Copyright 2026 Jeffrey S Carr, under MIT OR Apache-2.0. Its embedded STIX Two
+Math 2.13 font is SIL OFL-1.1; its modified dvips color-name table is
+LPPL-1.3c-or-later. The upstream notice, MIT license, font license and modified
+color-table header are retained in
+[`third_party/licenses/LaTeX-Rust-NOTICES.txt`](third_party/licenses/LaTeX-Rust-NOTICES.txt).
+The notice identifies the original LaTeX graphics bundle and its source.
+
 ## Symbols
 
 Harness bundles the SVG icon set and filename/folder associations from
@@ -64,7 +74,24 @@ Icons is MIT licensed, Copyright (c) 2023 LobeHub; the complete license is
 retained at `crates/ui/assets/icons/LICENSE.lobehub`. The marks identify each
 model's maker and imply no affiliation or endorsement.
 
+The additional gateway/runtime marks (except MLX/oMLX) use the same upstream
+MIT license, from `@lobehub/icons-static-svg` 1.98.0. Original SVG geometry is
+preserved. These identify routes separately from the model maker.
+
+The MLX wordmark comes from `ml-explore/mlx` (`docs/logo/mlx_logo.svg`, MIT;
+license retained as `LICENSE.mlx`). The oMLX favicon comes from `jundot/omlx`
+(`apps/omlx-web/omlx_web/static/favicon.svg`, Apache-2.0; license retained as
+`LICENSE.omlx`). Geometry is unchanged.
+
 ## Bundled theme palette adaptations
+
+The desktop Harp adaptations reference the native sidebar surfaces from
+[dominikmartn/harp at bad92b3](https://github.com/dominikmartn/harp/blob/bad92b3fee6224941c9de92eaa3968a53e61ae6b/app/src/workspace/view/vertical_tabs.rs#L8983-L9107),
+declared as AGPL-3.0-only in their embedded provenance. Warm Harp's warm palette
+is authored in Harness, with the Harp layout reference retained in its source
+metadata. The desktop Codegraff variants use that warm palette while retaining
+their Codegraff identities. This adaptation does not replace the shared mobile
+catalog.
 
 Harness includes manually curated palette adaptations derived from the projects
 below. The source repository and exact audited revision are also embedded in
@@ -195,3 +222,11 @@ Copyright 2025 The Google Sans Code Project Authors. Both are licensed under the
 SIL Open Font License 1.1; the notices are retained in
 [`third_party/licenses/Geist-OFL.txt`](third_party/licenses/Geist-OFL.txt) and
 [`third_party/licenses/GoogleSansCode-OFL.txt`](third_party/licenses/GoogleSansCode-OFL.txt).
+
+## Session emoji metadata — emoji-datasource 16.0.0
+
+Session emoji names, aliases, categories and Unicode sequences are derived from
+[emoji-datasource](https://github.com/iamcal/emoji-data/tree/v16.0.0),
+Copyright (c) 2013 Cal Henderson, under the MIT License.
+The complete license is in `crates/ui/assets/session-emoji/LICENSE`; source URLs
+and hashes are in the adjacent `SOURCE.json`. No emoji artwork is bundled.

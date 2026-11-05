@@ -7,12 +7,14 @@
 import SwiftUI
 
 enum HomeGroupBy: String, CaseIterable, Identifiable {
-    case none, project, device
+    /// Needs you, then Today, then Earlier: the default home.
+    case status, none, project, device
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .status: return "Status"
         case .none: return "Time"
         case .project: return "Project"
         case .device: return "Device"
@@ -21,6 +23,7 @@ enum HomeGroupBy: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .status: return "bell"
         case .none: return "clock"
         case .project: return "folder"
         case .device: return "laptopcomputer"
@@ -36,6 +39,8 @@ struct HomeGroup: Identifiable, Equatable {
         /// nil: sessions without a project.
         case project(spaceId: String?)
         case device(deviceId: String)
+        /// "needs", "today" or "earlier".
+        case status(key: String)
     }
 
     var id: String
@@ -45,18 +50,50 @@ struct HomeGroup: Identifiable, Equatable {
 
 enum HomeGrouping {
     static func groups(_ chats: [Chat], by grouping: HomeGroupBy,
-                       pinned: Set<String> = []) -> [HomeGroup] {
+                       pinned: Set<String> = [],
+                       indicator: (Chat) -> ChatIndicator = { _ in .idle },
+                       now: Date = Date()) -> [HomeGroup] {
         guard grouping != .none else {
             return [HomeGroup(id: "all", kind: .all, chats: chats)]
         }
         let pins = chats.filter { pinned.contains($0.id) }
-        guard !pins.isEmpty else { return sections(chats, by: grouping) }
+        guard !pins.isEmpty else { return sections(chats, by: grouping, indicator: indicator, now: now) }
         return [HomeGroup(id: "pinned", kind: .pinned, chats: pins)]
-            + sections(chats.filter { !pinned.contains($0.id) }, by: grouping)
+            + sections(chats.filter { !pinned.contains($0.id) }, by: grouping,
+                       indicator: indicator, now: now)
     }
 
-    private static func sections(_ chats: [Chat], by grouping: HomeGroupBy) -> [HomeGroup] {
+    /// Which status section a session belongs in. Waiting on you or failed
+    /// goes to "Needs you"; otherwise by the day it last moved.
+    static func statusKey(_ chat: Chat, indicator: ChatIndicator, now: Date = Date(),
+                          calendar: Calendar = .current) -> String {
+        switch indicator {
+        case .awaitingInput, .errored: return "needs"
+        default:
+            let ms = chat.lastMessageAt ?? chat.createdAt
+            let at = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+            return calendar.isDate(at, inSameDayAs: now) ? "today" : "earlier"
+        }
+    }
+
+    static func statusTitle(_ key: String) -> String {
+        switch key {
+        case "needs": return "Needs you"
+        case "today": return "Today"
+        default: return "Earlier"
+        }
+    }
+
+    private static func sections(_ chats: [Chat], by grouping: HomeGroupBy,
+                                 indicator: (Chat) -> ChatIndicator,
+                                 now: Date) -> [HomeGroup] {
         switch grouping {
+        case .status:
+            let buckets = ordered(chats) { statusKey($0, indicator: indicator($0), now: now) }
+            let rank = ["needs": 0, "today": 1, "earlier": 2]
+            return buckets.sorted { (rank[$0.key] ?? 3) < (rank[$1.key] ?? 3) }.map {
+                HomeGroup(id: "status:\($0.key)", kind: .status(key: $0.key), chats: $0.chats)
+            }
         case .none:
             return [HomeGroup(id: "all", kind: .all, chats: chats)]
         case .project:
@@ -134,6 +171,7 @@ struct HomeGroupHeader: View {
                 ?? "Project"
         case .project(nil): return "No project"
         case .device(let deviceId): return model.deviceName(deviceId)
+        case .status(let key): return HomeGrouping.statusTitle(key)
         }
     }
 
@@ -155,6 +193,10 @@ struct HomeGroupHeader: View {
                         .frame(width: 6, height: 6)
                         .offset(x: 3, y: 2)
                 }
+        case .status("needs"):
+            Circle().fill(Theme.accent).frame(width: 8, height: 8)
+        case .status:
+            EmptyView()
         default:
             Circle().strokeBorder(Theme.textFaint, lineWidth: 1.5).frame(width: 8, height: 8)
         }

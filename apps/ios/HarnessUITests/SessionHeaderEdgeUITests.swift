@@ -17,8 +17,8 @@ final class SessionHeaderEdgeUITests: XCTestCase {
     private func launch(count: Int, current: Int = 0, idle: Bool = false, split: String = "off") {
         let id = current == 0 ? "chat-veil" : "header-status-\(current)"
         app.launchArguments = ["-demo", "-sethomefilter", "", "-route", "chat:\(id)",
-                               "-header-status-count", "\(count)", "-phoneSplit", split,
-                               "-rollout.stackedSplitDrag", "off"] + (idle ? ["-header-status-idle"] : [])
+                               "-header-status-count", "\(count)", "-phoneSplit", split]
+            + (idle ? ["-header-status-idle"] : [])
         app.launch()
         XCTAssertTrue(element("session-header").waitForExistence(timeout: 10))
     }
@@ -126,15 +126,5 @@ final class SessionHeaderEdgeUITests: XCTestCase {
                     evaluatedWith: element("session-page-position"))
         waitForExpectations(timeout: 5)
         XCTAssertFalse(app.alerts["Rename session"].exists)
-    }
-
-    func testStackedSplitKeepsTheLongTitleAndStatusMarksInBounds() {
-        launch(count: 12, split: "stacked")
-        assertFits()
-        element("session-header").tap()
-        XCTAssertTrue(app.alerts["Rename session"].waitForExistence(timeout: 5))
-        app.alerts["Rename session"].buttons["Cancel"].tap()
-        assertFits()
-        capture("header-stacked-split-overflow")
     }
 }

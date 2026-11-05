@@ -946,10 +946,16 @@ pub(crate) mod tests {
                 truncated: true,
             },
             screenshot: StagedAttachment {
+                #[cfg(target_os = "macos")]
+                editable: None,
+                #[cfg(target_os = "macos")]
+                unavailable_editable: None,
+                unavailable: None,
                 id: "image-1".into(),
                 name: "Safari Appshot.png".into(),
                 image: Some(Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new()))),
                 file: None,
+                annotations: None,
             },
             screenshot_dimensions: Some((1440, 900)),
             app_icon: None,

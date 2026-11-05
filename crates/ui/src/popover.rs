@@ -258,8 +258,7 @@ pub fn match_rank(query: &str, label: &str) -> Option<usize> {
             && query.split_whitespace().all(|token| {
                 let token = token.to_lowercase();
                 let compact = compact_alnum(&token);
-                label.contains(&token)
-                    || (!compact.is_empty() && compact_label.contains(&compact))
+                label.contains(&token) || (!compact.is_empty() && compact_label.contains(&compact))
             })
         {
             Some(4)
@@ -320,18 +319,31 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 // Elements
 // ---------------------------------------------------------------------------
 
-/// The floating-menu surface (harness `.glass-surface` + `menuSurface`):
-/// Shared floating surface used by palettes, popovers, dropdowns and menus.
-/// Mount helpers supply the same 16px backdrop blur as the composer.
-/// Corner radius must match the frost wrapper's mask.
+/// Rounded menu corners, shared with the floating layer's mask.
 pub const CARD_RADIUS: f32 = 12.0;
 
-pub const MENU_GAP: f32 = 2.0;
+pub const MENU_GAP: f32 = 1.0;
 /// The four-pixel inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
 pub const CARD_INSET: f32 = 4.0;
-/// Concentric corners: rows sit inside both the card's 1px border and padding.
-pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - 1.0 - CARD_INSET;
+/// Concentric corners: an element inset by `border + padding` inside a
+/// surface rounded at `outer` is rounded at `outer - border - padding`, so
+/// both curves share one center. Never below zero.
+pub const fn nested_radius(outer: f32, border: f32, padding: f32) -> f32 {
+    let inner = outer - border - padding;
+    if inner > 0.0 { inner } else { 0.0 }
+}
+/// The surface radius that keeps an inner element's `inner` corners
+/// concentric at `border + padding` in: the inverse of [`nested_radius`].
+pub const fn outer_radius(inner: f32, border: f32, padding: f32) -> f32 {
+    inner + border + padding
+}
+/// Cascading menus sit two pixels beyond the parent card's border.
+pub const NESTED_MENU_WIDTH: f32 = 232.0;
+const NESTED_MENU_OFFSET: f32 = CARD_INSET + 1.0 + 2.0;
+const MENU_WINDOW_GUTTER: f32 = 8.0;
+/// Match the sidebar's active-row shape inside the menu's four-pixel inset.
+pub const MENU_ITEM_RADIUS: f32 = Theme::SELECTION_RADIUS;
 pub const PALETTE_ITEM_RADIUS: f32 = 14.0 - CARD_INSET;
 
 pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
@@ -347,13 +359,48 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
         .border_1()
         .border_color(theme.border)
         .rounded(px(CARD_RADIUS))
-        .when(!theme.is_frost(), |el| el.shadow_lg())
-        .bg(surface_bg(theme))
+        .shadow(menu_shadows(theme, false))
+        // An opaque menu plane keeps text readable over a busy transcript and
+        // prevents filled drop shadows from showing through the card itself.
+        .bg(theme.surface_overlay.alpha(1.0))
         .p(px(CARD_INSET))
         .gap(px(MENU_GAP))
         .overflow_hidden()
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text)
+}
+
+/// A child menu continues its parent's surface with a tighter, quieter shadow.
+pub fn nested_menu_card(theme: &Theme) -> gpui::Div {
+    popover_card(theme)
+        .w(px(NESTED_MENU_WIDTH))
+        .shadow(menu_shadows(theme, true))
+}
+
+/// Contact and ambient shadows keep menus raised in both surface modes.
+fn menu_shadows(theme: &Theme, nested: bool) -> Vec<gpui::BoxShadow> {
+    let dark = theme.appearance.is_dark();
+    let layers = if nested {
+        [
+            (1.0, 4.0, if dark { 0.18 } else { 0.06 }),
+            (4.0, 12.0, if dark { 0.22 } else { 0.08 }),
+        ]
+    } else {
+        [
+            (2.0, 6.0, if dark { 0.22 } else { 0.08 }),
+            (8.0, 24.0, if dark { 0.32 } else { 0.12 }),
+        ]
+    };
+    layers
+        .into_iter()
+        .map(|(offset, blur, opacity)| gpui::BoxShadow {
+            color: gpui::black().opacity(opacity),
+            offset: gpui::point(px(0.0), px(offset)),
+            blur_radius: px(blur),
+            spread_radius: px(0.0),
+            inset: false,
+        })
+        .collect()
 }
 
 /// [`popover_card`] without the shared inset — for popovers that manage their
@@ -637,20 +684,24 @@ pub fn anchored_menu_right(
         .into_any_element()
 }
 
-/// A nested menu beside its trigger. Callers choose the side that has room;
-/// vertical placement still stays within the window's eight-pixel gutter.
+/// Use the same card width, horizontal gap and window gutter as [`nested_menu`].
+pub fn nested_menu_opens_left(trigger_right: Pixels, window_width: Pixels) -> bool {
+    trigger_right + px(NESTED_MENU_OFFSET + NESTED_MENU_WIDTH + MENU_WINDOW_GUTTER) > window_width
+}
+
+/// A nested menu beside its trigger, with the first child row aligned to it.
+/// Callers choose the side with room; vertical placement respects the window gutter.
 pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool) -> AnyElement {
-    // A nested menu shares the parent's interaction surface. Its outside
-    // clicks must reach sibling controls and its trigger; the top-level menu
-    // still consumes dismissal clicks before they reach the app underneath.
-    let content =
-        crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, content).into_any_element();
+    // The opaque child gets its own paint order without blurring the parent.
+    // Outside clicks still reach sibling controls and the opening trigger.
+    let content = crate::frost::layered(content).into_any_element();
+    let id: SharedString = id.into();
     div()
         .absolute()
-        .top_0()
+        .top(px(-(CARD_INSET + 1.0)))
         .size_0()
-        .when(left, |el| el.left(px(-(CARD_INSET + 6.0))))
-        .when(!left, |el| el.right(px(-(CARD_INSET + 6.0))))
+        .when(left, |el| el.left(px(-NESTED_MENU_OFFSET)))
+        .when(!left, |el| el.right(px(-NESTED_MENU_OFFSET)))
         .child(
             gpui::deferred(
                 gpui::anchored()
@@ -659,8 +710,8 @@ pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool)
                     } else {
                         Anchor::TopLeft
                     })
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion(id.into(), None, div().occlude().child(content))),
+                    .snap_to_window_with_margin(px(MENU_WINDOW_GUTTER))
+                    .child(motion::fade_quick(id, div().occlude().child(content))),
             )
             .priority(2),
         )
@@ -885,26 +936,16 @@ fn modal_with(
     .into_any_element()
 }
 
-/// One menu row (harness `menuItem`): `gap-2.5 rounded-lg px-2 py-1.5
+/// One menu row (harness `menuItem`): `gap-2.5 px-2 py-[5px]
 /// text-[13px]`, active = `bg-white/10 text-foreground`, hover wash
 /// `white/[0.08]` fading over `transition-colors` (floating-styles.ts) via the
 /// per-`fade_key` [`motion::hover_blend`]. The caller adds the id/click
 /// listener — `fade_key` must be unique app-wide and stable across frames
 /// (the id string is a good choice).
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
-    let row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(8.0))
-        .py(px(6.0))
-        .rounded(px(MENU_ITEM_RADIUS))
-        .text_size(crate::typography::ui_rems(13.0))
-        .cursor_pointer();
+    let row = menu_row_base();
     if active {
-        row.bg(crate::theme::card_selected_bg())
-            .text_color(theme.text)
+        row.bg(theme.card_selected_bg()).text_color(theme.text)
     } else {
         let fade_key = fade_key.into();
         let mut row = row
@@ -916,7 +957,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
             .bg(motion::hover_blend(
                 &fade_key,
                 crate::theme::wash(0.0),
-                crate::theme::card_selected_bg(),
+                theme.element_hover,
             ));
         // Imperative form — the caller's `.id(...)` makes the element stateful
         // (hover listeners need element state, `.on_hover` needs `Stateful`).
@@ -926,10 +967,31 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
     }
 }
 
-/// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
-/// carries the full `bg-white/10` wash, the keyboard cursor the lighter
-/// `bg-white/[0.08]` (harness's `data-[highlighted]` styling) — two selected-
-/// looking rows never appear at once.
+/// A row whose only highlight is the caller-owned mouse/keyboard cursor.
+/// No independent hover wash can linger on a second row after a key press.
+pub fn menu_cursor_row(theme: &Theme, highlighted: bool) -> gpui::Div {
+    menu_row_base()
+        .text_color(theme.text.opacity(0.9))
+        .when(highlighted, |row| {
+            row.bg(theme.element_hover).text_color(theme.text)
+        })
+}
+
+fn menu_row_base() -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(8.0))
+        .py(px(5.0))
+        .rounded(px(MENU_ITEM_RADIUS))
+        .text_size(crate::typography::ui_rems(13.0))
+        .cursor_pointer()
+}
+
+/// Keyboard navigation uses the same hover fill as the pointer. Selection
+/// retains its separate active fill, so the cursor never looks selected.
 pub fn menu_row_nav(
     theme: &Theme,
     selected: bool,
@@ -938,8 +1000,7 @@ pub fn menu_row_nav(
 ) -> gpui::Div {
     let row = menu_row(theme, selected, fade_key);
     if !selected && highlighted {
-        row.bg(crate::theme::card_selected_bg())
-            .text_color(theme.text)
+        row.bg(theme.element_hover).text_color(theme.text)
     } else {
         row
     }
@@ -1141,6 +1202,76 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_string()))
 }
 
+/// The shared compact hover-label surface. Rich preview cards use their own
+/// layout; action labels use this opaque, high-contrast bubble in every theme.
+pub fn tooltip_surface(theme: &Theme) -> Div {
+    let colors = theme.tooltip_colors();
+    div()
+        .max_w(px(380.0))
+        .px(px(12.0))
+        .py(px(5.0))
+        .rounded(px(13.0))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.surface)
+        .shadow(vec![gpui::BoxShadow {
+            color: gpui::black().opacity(0.18),
+            offset: gpui::point(px(0.0), px(2.0)),
+            blur_radius: px(6.0),
+            spread_radius: px(0.0),
+            inset: false,
+        }])
+        .font_family(theme.font_sans.clone())
+        .text_size(crate::typography::ui_rems(13.0))
+        .line_height(crate::typography::ui_rems(18.0))
+        .font_weight(gpui::FontWeight::NORMAL)
+        .text_color(colors.text)
+}
+
+pub fn tooltip_label(theme: &Theme, label: impl Into<SharedString>) -> Div {
+    tooltip_surface(theme).child(label.into())
+}
+
+/// A control's hover label, with an optional shortcut in a brighter capsule.
+/// Menu accelerators retain the quieter `kbd_hint` treatment.
+pub fn shortcut_tooltip(
+    label: impl Into<SharedString>,
+    shortcut: impl Into<SharedString>,
+    cx: &mut gpui::App,
+) -> gpui::AnyView {
+    let label = label.into();
+    let shortcut = shortcut.into();
+    cx.new(|_| ShortcutTooltip { label, shortcut }).into()
+}
+
+struct ShortcutTooltip {
+    label: SharedString,
+    shortcut: SharedString,
+}
+
+impl gpui::Render for ShortcutTooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let colors = theme.tooltip_colors();
+        tooltip_surface(theme)
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(div().min_w_0().child(self.label.clone()))
+            .when(!self.shortcut.is_empty(), |card| {
+                card.pr(px(6.0)).child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .px(px(6.0))
+                        .rounded(px(8.0))
+                        .bg(colors.shortcut)
+                        .child(self.shortcut.clone()),
+                )
+            })
+    }
+}
+
 /// The search/text input frame at the top of a picker popover (harness
 /// `searchInput`: `w-full rounded-lg bg-white/[0.04] px-2.5 py-1.5
 /// text-[13px]` + `mb-1`, borderless — full width inside the card's own
@@ -1238,7 +1369,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
         .bg(motion::hover_blend(
             &fade_key,
             crate::theme::wash(0.0),
-            ink(0.06),
+            theme.element_hover,
         ))
         .cursor_pointer()
         .child(SharedString::from(label.to_string()));
@@ -1713,12 +1844,18 @@ impl MenuScrollbarState {
         })
     }
 
-    /// The press ended anywhere: drop the drag; the rail stays armed only
-    /// while the list is still hovered. Returns whether anything changed.
+    /// The press ended anywhere: drop the drag. Only a captured scrollbar
+    /// press restarts the linger; unrelated mouse-up-out events do not.
+    /// Returns whether the hover treatment changed.
     pub fn end_press(&mut self) -> bool {
-        self.grab = None;
-        // Releasing a drag lingers like a stopped scroll.
-        self.last_scroll_at = Some(Instant::now());
+        self.end_press_at(Instant::now())
+    }
+
+    fn end_press_at(&mut self, now: Instant) -> bool {
+        if self.grab.take().is_some() {
+            // Releasing a drag lingers like a stopped scroll.
+            self.last_scroll_at = Some(now);
+        }
         if !self.list_hovered && self.bar_hovered {
             self.bar_hovered = false;
             true
@@ -2276,6 +2413,53 @@ mod tests {
         assert_eq!(
             bar.drag_target_in(&metrics, track_top, pointer(146.0)),
             Some(0.5)
+        );
+    }
+
+    #[test]
+    fn scrollbar_release_without_a_drag_does_not_start_a_countdown() {
+        let mut bar = MenuScrollbarState::default();
+        let now = Instant::now();
+        assert!(!bar.end_press_at(now));
+        assert_eq!(bar.last_scroll_at, None);
+        assert_eq!(bar.arm_hide_timer_at(now), None);
+    }
+
+    #[test]
+    fn scrollbar_release_outside_the_rail_preserves_the_scroll_deadline() {
+        let mut bar = MenuScrollbarState::default();
+        let t0 = Instant::now();
+        bar.note_scroll_offset_at(0.0, t0);
+        bar.note_scroll_offset_at(600.0, t0);
+        bar.arm_hide_timer_at(t0);
+        let pending = bar.hide_wake_at;
+        // Opening a dialog delivers mouse-up-out to the visible rail, but
+        // no scrollbar press was captured. It must not restart the linger.
+        let clicked = t0 + Duration::from_millis(800);
+        assert!(!bar.end_press_at(clicked));
+        assert_eq!(bar.last_scroll_at, Some(t0));
+        assert_eq!(bar.hide_wake_at, pending);
+        let hidden =
+            t0 + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + MENU_SCROLLBAR_FADE_MS + 1);
+        assert!(!bar.scroll_countdown(hidden));
+        assert_eq!(bar.arm_hide_timer_at(hidden), None);
+    }
+
+    #[test]
+    fn scrollbar_release_after_a_drag_restarts_the_linger() {
+        let mut bar = MenuScrollbarState::default();
+        let t0 = Instant::now();
+        bar.note_scroll_offset_at(0.0, t0);
+        bar.note_scroll_offset_at(600.0, t0);
+        let metrics = MenuScrollbarMetrics::from_viewport(300.0, 600.0, 600.0).unwrap();
+        bar.begin_press_in(&metrics, px(0.0), px(100.0));
+        let released = t0 + Duration::from_secs(2);
+        bar.end_press_at(released);
+        assert!(bar.grab.is_none());
+        assert_eq!(bar.last_scroll_at, Some(released));
+        assert_eq!(
+            bar.arm_hide_timer_at(released),
+            Some(Duration::from_millis(MENU_SCROLLBAR_LINGER_MS))
         );
     }
 

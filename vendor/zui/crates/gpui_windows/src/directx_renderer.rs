@@ -1,3 +1,6 @@
+// Modified by Harness: a test-only hook observes presents for `native_tests`, ported from
+// longbridge/gpui-fast 124f79b. See vendor/zui/NOTICE.
+
 use std::{
     slice,
     sync::{Arc, OnceLock},
@@ -250,6 +253,8 @@ impl DirectXRenderer {
                 .swap_chain
                 .Present(0, DXGI_PRESENT(0))
         };
+        #[cfg(test)]
+        crate::native_tests::present(self.hwnd, self.direct_composition.is_some(), result.0);
         result.ok().context("Presenting swap chain failed")
     }
 

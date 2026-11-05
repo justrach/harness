@@ -1,0 +1,195 @@
+{
+    "name": "settings-agents-remote",
+    "appearance": "dark",
+    "width": 1200,
+    "height": 780,
+    "spaces": [
+        {
+            "id": "s",
+            "deviceId": "scene-device",
+            "path": "/work/fieldnotes",
+            "gitDetected": true,
+            "createdAt": "2026-09-24T14:41:22.685Z"
+        }
+    ],
+    "chats": [
+        {
+            "id": "a",
+            "deviceId": "scene-device",
+            "title": "Tidy the release notes",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-24T00:00:00Z",
+            "createdAt": "2026-10-24T00:00:00Z"
+        },
+        {
+            "id": "b",
+            "deviceId": "scene-device",
+            "title": "Sketch the onboarding flow",
+            "archived": false,
+            "spaceId": "s",
+            "cwd": "/work/fieldnotes",
+            "config": {
+                "harness": "graff",
+                "model": null,
+                "reasoning": null,
+                "modelOptions": {},
+                "sandbox": "workspace-write"
+            },
+            "lastMessagePreview": null,
+            "lastMessageAt": "2026-10-23T00:00:00Z",
+            "createdAt": "2026-10-23T00:00:00Z"
+        }
+    ],
+    "steps": [
+        {
+            "do": "click",
+            "x": 18,
+            "y": 762
+        },
+        {
+            "do": "click",
+            "x": 100,
+            "y": 750
+        },
+        {
+            "do": "click",
+            "x": 60,
+            "y": 337
+        },
+        {
+            "do": "hover",
+            "x": 1150,
+            "y": 20
+        },
+        {
+            "do": "click",
+            "x": 1040,
+            "y": 86
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        },
+        {
+            "do": "click",
+            "x": 1044,
+            "y": 124
+        },
+        {
+            "do": "wait",
+            "ms": 400
+        }
+    ],
+    "replies": {
+        "ListHarnesses": [
+            {
+                "id": "graff",
+                "name": "graff",
+                "supportsSteering": true,
+                "steeringMode": "step-boundary",
+                "reasoningLevels": [
+                    "low",
+                    "medium",
+                    "high"
+                ],
+                "installed": true,
+                "canInstall": false,
+                "enabled": true
+            },
+            {
+                "id": "claude-code",
+                "name": "Claude Code",
+                "supportsSteering": false,
+                "steeringMode": "turn-boundary",
+                "reasoningLevels": [
+                    "low",
+                    "medium",
+                    "high"
+                ],
+                "installed": true,
+                "canInstall": false,
+                "enabled": true
+            },
+            {
+                "id": "codex",
+                "name": "Codex",
+                "supportsSteering": false,
+                "steeringMode": "turn-boundary",
+                "reasoningLevels": [
+                    "low",
+                    "medium",
+                    "high"
+                ],
+                "installed": true,
+                "canInstall": false,
+                "enabled": false
+            },
+            {
+                "id": "pi",
+                "name": "Pi",
+                "supportsSteering": false,
+                "steeringMode": "turn-boundary",
+                "reasoningLevels": [
+                    "low",
+                    "medium",
+                    "high"
+                ],
+                "installed": false,
+                "canInstall": true
+            },
+            {
+                "id": "opencode",
+                "name": "opencode",
+                "supportsSteering": false,
+                "steeringMode": "turn-boundary",
+                "reasoningLevels": [
+                    "low",
+                    "medium",
+                    "high"
+                ],
+                "installed": false,
+                "canInstall": false
+            }
+        ],
+        "GetGraffDraftSubagents": true,
+        "GetGraffCompactAt": 80,
+        "GetTitleSettings": {
+            "harness": "graff",
+            "model": null
+        },
+        "ListModels": [
+            {
+                "id": "fast-1",
+                "label": "Fast One"
+            },
+            {
+                "id": "deep-2",
+                "label": "Deep Two"
+            }
+        ]
+    },
+    "devices": [
+        {
+            "id": "d2",
+            "name": "Build box",
+            "platform": "linux",
+            "lastSeenAt": null
+        },
+        {
+            "id": "d3",
+            "name": "Laptop",
+            "platform": "macos",
+            "lastSeenAt": null
+        }
+    ]
+}

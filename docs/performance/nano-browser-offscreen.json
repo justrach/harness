@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-27",
+  "kind": "UI-only offscreen GPUI/nano chat replay after agent links and Browser surfaces",
+  "scope": "Native chat rendering only; Browser tabs are closed. WebKit child-process memory is not part of this comparison.",
+  "conditions": {
+    "windowPoints": [
+      1320,
+      880
+    ],
+    "scale": 2,
+    "runsEach": 2,
+    "order": [
+      "gpui",
+      "nano",
+      "nano",
+      "gpui"
+    ],
+    "nanoBuild": "ReleaseFast with the same local nanoui fork used by the app",
+    "gpuiBuild": "app-dev renderers built in this checkout",
+    "sampler": "scripts/macos-resource-stat.c, 500 ms; memory peaks include phase warmup"
+  },
+  "validation": {
+    "zigTestsPassed": 363,
+    "parityFrames": 312,
+    "averageChangedPercent": 0.0178,
+    "worstChangedPercent": 0.13,
+    "parityBudgetFailures": 0
+  },
+  "means": {
+    "gpui": {
+      "replay": {
+        "durationSeconds": 15.78,
+        "cpuPercent": 14.71,
+        "peakFootprintMiB": 178.9,
+        "endFootprintMiB": 178.9,
+        "peakRssMiB": 87.0,
+        "endRssMiB": 87.0,
+        "idleWakeupsPerSecond": 0.05
+      },
+      "settled": {
+        "durationSeconds": 12.23,
+        "cpuPercent": 0.27,
+        "peakFootprintMiB": 229.1,
+        "endFootprintMiB": 102.55,
+        "peakRssMiB": 125.45,
+        "endRssMiB": 125.45,
+        "idleWakeupsPerSecond": 0.0
+      },
+      "lifetimePeakFootprintMiB": 229.6
+    },
+    "nano": {
+      "replay": {
+        "durationSeconds": 15.56,
+        "cpuPercent": 7.55,
+        "peakFootprintMiB": 159.0,
+        "endFootprintMiB": 159.0,
+        "peakRssMiB": 34.2,
+        "endRssMiB": 34.2,
+        "idleWakeupsPerSecond": 0.0
+      },
+      "settled": {
+        "durationSeconds": 12.5,
+        "cpuPercent": 0.17,
+        "peakFootprintMiB": 178.2,
+        "endFootprintMiB": 58.95,
+        "peakRssMiB": 53.65,
+        "endRssMiB": 53.65,
+        "idleWakeupsPerSecond": 0.0
+      },
+      "lifetimePeakFootprintMiB": 208.8
+    }
+  }
+}
