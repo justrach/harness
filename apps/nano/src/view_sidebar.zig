@@ -15,6 +15,9 @@ const rules = @import("rules.zig");
 const workspace = @import("workspace.zig");
 const App = @import("app.zig").App;
 
+/// "No sessions yet": GPUI's default line (φ), up to a device pixel.
+const empty_line = kit.measured(12 * 1.618);
+
 pub const width: f32 = 256;
 pub const titlebar_h: f32 = 38;
 
@@ -301,8 +304,8 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             a.view.session_rows = null;
             const empty = ui.div(c).row().px(8).pb(8);
             defer empty.end();
-            ui.text(c, "No sessions yet", .{ .size = 12, .color = k.faint });
-            window.y += 8 + c.text.lineHeight(.{ .size = 12 });
+            ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
+            window.y += 8 + empty_line;
         } else groups(c, a, k, pins, moving, &window);
     } else regular: {
         // GPUI has no Sessions disclosure when the regular list is empty.
@@ -313,8 +316,8 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (pins.len == 0) {
                 const empty = ui.div(c).row().px(8).pb(8);
                 defer empty.end();
-                ui.text(c, "No sessions yet", .{ .size = 12, .color = k.faint });
-                window.y += 8 + c.text.lineHeight(.{ .size = 12 });
+                ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
+                window.y += 8 + empty_line;
             }
             break :regular;
         }
@@ -350,7 +353,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         } else if (active == 0 and pins.len == 0) {
             const e = ui.div(c).row().px(8).py(6);
             defer e.end();
-            ui.text(c, "No sessions yet", .{ .size = 12, .color = k.faint });
+            ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
         }
     }
     // Show › Archived off: no shelf.

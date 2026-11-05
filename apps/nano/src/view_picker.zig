@@ -485,7 +485,8 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
     defer card.end();
     if (c.rects.get(c.node(card.index).id)) |rect| p.detail_rect = rect;
     const inner = detail_width - 34;
-    const st: ui.TextStyle = .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.text };
+    // A line's height up to a device pixel, as GPUI measures one.
+    const st: ui.TextStyle = .{ .size = 11, .line_height = kit.measured(11 * 1.618), .weight = .medium, .color = k.text };
     {
         const head = ui.div(c).row().gap(8).itemsCenter();
         defer head.end();
@@ -515,8 +516,10 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
         const desc = ui.div(c).column().wFull().gap(12);
         defer desc.end();
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+        // Wrapped lines keep their exact spacing: only the block is rounded.
         var wrap = muted;
         wrap.wrap = true;
+        wrap.line_height = 11 * 1.618;
         ui.text(c, d, wrap);
     }
 }
@@ -561,7 +564,7 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             defer b.end();
             if (b.clicked() and open) back(c, a);
             icons.icon(c, .@"arrow-left", 14, k.text, 14);
-            ui.text(c, "Models", .{ .size = 12, .line_height = 12 * 1.618, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
+            ui.text(c, "Models", .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
         }
         {
             const head = ui.div(c).row().gap(12).itemsCenter();
@@ -571,12 +574,13 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             defer words.end();
             // GPUI's own line height, φ, everywhere on this page.
             kit.ellipsisText(c, m.label, .{ .size = 16, .line_height = 16 * 1.618, .weight = .semibold, .color = k.text }, w - 32 - 32);
-            ui.text(c, c.print("via {s}", .{models.providerInfo(models.route(m)).name}), .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted });
+            ui.text(c, c.print("via {s}", .{models.providerInfo(models.route(m)).name}), .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.muted });
         }
         {
             const r = ui.div(c).row().wFull().itemsCenter();
             defer r.end();
-            const st13: ui.TextStyle = .{ .size = 13, .line_height = 13 * 1.618, .color = k.text };
+            // Medium, as everything in the card inherits (`popover_frame`).
+            const st13: ui.TextStyle = .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.text };
             ui.text(c, if (is_binary) "Thinking" else "Reasoning", st13);
             ui.spacer(c);
             const label = if (st.level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Model default") else "Model default";
@@ -586,11 +590,11 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             slider(c, a, k, accent, levels.len, w - 32 - 28, open);
             const ends = ui.div(c).row().wFull();
             defer ends.end();
-            ui.text(c, if (is_binary) "Off" else "Faster", .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted });
+            ui.text(c, if (is_binary) "Off" else "Faster", .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.muted });
             ui.spacer(c);
-            ui.text(c, if (is_binary) "On" else "Deeper", .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted });
+            ui.text(c, if (is_binary) "On" else "Deeper", .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.muted });
         } else {
-            ui.text(c, "This model has no adjustable reasoning level.", .{ .size = 12, .line_height = 12 * 1.618, .wrap = true, .color = k.muted });
+            ui.text(c, "This model has no adjustable reasoning level.", .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .wrap = true, .color = k.muted });
         }
         if (st.error_text) |e| ui.text(c, e, .{ .size = 12, .line_height = 12 * 1.618, .wrap = true, .color = k.danger });
     }
