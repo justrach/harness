@@ -76,6 +76,8 @@ final class SessionStore {
     @ObservationIgnored private var firstContactQueued = false
     @ObservationIgnored private(set) var outbox: [(batchId: String, bytes: Data)] = []
     @ObservationIgnored private var admitted: Set<String> = []
+    /// Outbox batches a saved file holds, so the room may hear of them.
+    @ObservationIgnored private var durableBatches: Set<String> = []
     /// A command was queued since the outbox last drained: nudge the host
     /// again once it does (see `queueCommand`).
     @ObservationIgnored private(set) var nudgeWhenOutboxDrains = false
@@ -180,10 +182,6 @@ final class SessionStore {
     func start(holdDial: Bool = false) {
         guard !stopped, !started, !offline else { return }
         started = true
-        // Before anything touches the doc (the disk load included): the
-        // projection memo is only correct if it hears every change.
-        let cache = entryCache
-        subscriptions.append(doc.subscribeRoot { cache.observe($0) })
         leaseToken = SnapshotLease.claim(chatId)
         self.holdDial = holdDial
         // Local-first: the last-synced chat2 snapshot renders instantly (even
@@ -194,6 +192,7 @@ final class SessionStore {
             cursorVerified = saved.verified
             firstContactQueued = saved.firstContactQueued
             outbox = saved.outbox
+            durableBatches = Set(saved.outbox.map(\.batchId))
             snapshotBytes = saved.bytes
             project()
         } else if DocDisk.legacySnapshotExists(id: chatId) {
@@ -202,6 +201,14 @@ final class SessionStore {
             // entries; the chat2 catch-up repopulates the transcript.
             adoptLegacyCommands()
         }
+        // After the disk load, and before anything else can change the doc. With
+        // a subscriber attached, loading makes Loro build an event for the whole
+        // history: 2.4 s for a 150k-edit text instead of 1.4 ms, and 455 s for 2M
+        // instead of 22 ms. This runs on the main actor for each of the chats
+        // launch preloads. The memo stays correct: it has heard of nothing yet,
+        // and decodes whatever it has not heard of.
+        let cache = entryCache
+        subscriptions.append(doc.subscribeRoot { cache.observe($0) })
         saver = DocSaver { [weak self] in
             guard let self else { return false }
             guard SnapshotLease.isCurrent(self.chatId, self.leaseToken) else { return false }
@@ -212,6 +219,7 @@ final class SessionStore {
                                     outbox: self.outbox) else {
                 return false
             }
+            self.markDurable(self.outbox.map(\.batchId))
             self.snapshotBytes = DocDisk.chat2SnapshotSize(id: self.chatId)
             return true
         }
@@ -233,8 +241,8 @@ final class SessionStore {
                 guard let self else { return }
                 let batchId = UUID().uuidString.lowercased()
                 self.outbox.append((batchId: batchId, bytes: bytes))
-                _ = self.saver?.commitNow()
-                self.admitDurableBatches()
+                // Admitted once a saved file holds it (flushToDiskAsync).
+                self.saver?.persistNow()
             }
         }
         subscriptions.append(localSub)
@@ -273,6 +281,8 @@ final class SessionStore {
             cursor: { [weak self] in self?.cursor ?? 0 },
             containsFrontier: { [weak self] frontier in
                 guard let self else { return false }
+                self.docJobs += 1
+                defer { self.docJobs -= 1 }
                 return await Self.frontierContained(frontier, in: self.doc)
             },
             applyCheckpoint: { [weak self] bytes, seq in
@@ -395,6 +405,7 @@ final class SessionStore {
         let oldCount = outbox.count
         outbox.removeAll { $0.batchId == batchId }
         admitted.remove(batchId)
+        durableBatches.remove(batchId)
         if outbox.count != oldCount {
             saver?.poke()
         }
@@ -405,9 +416,9 @@ final class SessionStore {
     }
 
     private func admitDurableBatches() {
-        guard !stopped, !outbox.isEmpty, saver?.isDirty == false, let room = chatRoom else { return }
+        guard !stopped, !outbox.isEmpty, let room = chatRoom else { return }
         let generation = lifecycleGeneration
-        for push in outbox where !admitted.contains(push.batchId) {
+        for push in outbox where durableBatches.contains(push.batchId) && !admitted.contains(push.batchId) {
             admitted.insert(push.batchId)
             Task { @MainActor [weak self] in
                 guard let self, !self.stopped,
@@ -416,6 +427,13 @@ final class SessionStore {
                 await room.enqueue(batchId: push.batchId, update: push.bytes)
             }
         }
+    }
+
+    /// Per batch, not "the saver is clean": while rows stream in, the saver is
+    /// dirty again before any save lands, and a send would wait for a quiet room.
+    private func markDurable(_ batchIDs: [String]) {
+        let live = Set(outbox.map(\.batchId))
+        durableBatches.formUnion(batchIDs.filter(live.contains))
     }
 
     var admittedBatchIDs: Set<String> { admitted }
@@ -500,6 +518,8 @@ final class SessionStore {
         let outbox = self.outbox
         let chatId = self.chatId
         let doc = self.doc
+        docJobs += 1
+        defer { docJobs -= 1 }
         return await saver.commitAsync(
             export: { [doc] in try? doc.export(mode: .snapshot) },
             write: { [weak self] snapshot in
@@ -518,6 +538,8 @@ final class SessionStore {
                     return false
                 }
                 self.snapshotBytes = written
+                self.markDurable(outbox.map(\.batchId))
+                self.admitDurableBatches()
                 return true
             }
         )
@@ -653,16 +675,22 @@ final class SessionStore {
         let doc = self.doc
         let cache = started ? entryCache : nil
         let generation = lifecycleGeneration
+        let epoch = queueEpoch
+        docJobs += 1
         Task { @MainActor [weak self] in
             let (decoded, usage) = await Task.detached(priority: .userInitiated) {
                 (Self.decodeEntries(from: doc, cache: cache), Self.contextUsage(from: doc))
             }.value
+            self?.docJobs -= 1
             guard let self, !self.stopped,
                   self.lifecycleGeneration == generation else { return }
             self.projecting = false
             self.lastProjectionAt = .now()
             if let decoded {
-                self.apply(decoded.entries, queue: decoded.queue)
+                // A read from before a deferred write would undo what the
+                // queue already shows; that write projects again when it lands.
+                let current = epoch == self.queueEpoch && self.deferredWrites == 0
+                self.apply(decoded.entries, queue: current ? decoded.queue : self.queue)
             }
             if usage != self.contextUsage { self.contextUsage = usage }
             if self.projectPending {
@@ -684,11 +712,11 @@ final class SessionStore {
     /// main actor a catch-up of many rows exhausted the 10 s scene-update
     /// watchdog and the app was killed (#484). The doc is safe to use from
     /// any thread; `subscribeRoot`'s EntryCache takes its own lock.
-    private func importRemote(_ bytes: Data) async -> Bool {
+    func importRemote(_ bytes: Data) async -> Bool {
         let doc = self.doc
-        return await Task.detached(priority: .userInitiated) {
+        return await docJob {
             (try? doc.importWith(bytes: bytes, origin: "remote")) != nil
-        }.value
+        }
     }
 
     /// Several rows in one import, so a rebuild happens once for the run.
@@ -700,10 +728,73 @@ final class SessionStore {
             return await importRemote(row) ? 0 : 1
         }
         let doc = self.doc
-        return await Task.detached(priority: .userInitiated) {
+        return await docJob {
             if (try? doc.importBatch(bytes: rows)) != nil { return 0 }
             return rows.filter { (try? doc.importWith(bytes: $0, origin: "remote")) == nil }.count
-        }.value
+        }
+    }
+
+    // MARK: The doc's lock
+
+    /// Doc work under way off the main thread. It can hold Loro's lock for
+    /// seconds (see `importRemote`), and a main-actor call into the doc waits for
+    /// it however small that call is: build 63's 0x8BADF00D. All of this work
+    /// starts on the main actor, so this count is exact when read there, and
+    /// while it is zero the main actor may use the doc without waiting.
+    @ObservationIgnored private var docJobs = 0
+    @ObservationIgnored private var deferredWrites = 0
+    @ObservationIgnored private var deferredWriteTail: Task<Void, Never>?
+    /// Moves when a deferred write starts or lands, so a projection can tell it
+    /// read the queue from before one.
+    @ObservationIgnored private var queueEpoch: UInt64 = 0
+    /// The commands as last read, for a view that can't wait for the doc.
+    @ObservationIgnored private var knownCommands: [LoroValue] = []
+
+    var docIsBusy: Bool { docJobs > 0 || deferredWrites > 0 }
+
+    private func docJob<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
+        docJobs += 1
+        defer { docJobs -= 1 }
+        return await Task.detached(priority: .userInitiated) { work() }.value
+    }
+
+    /// Write to the doc without making the main actor wait for it. With the doc
+    /// free this runs now, so a dragged row moves this frame, and returns whether
+    /// it worked. Otherwise it returns nil and the write joins a line off the main
+    /// thread: the caller shows the result itself, and `done` follows the write.
+    @discardableResult
+    func writeDoc(_ work: @escaping @Sendable (LoroDoc) -> Bool,
+                  then done: @escaping @MainActor (Bool) -> Void) -> Bool? {
+        guard docIsBusy else {
+            let ok = work(doc)
+            done(ok)
+            return ok
+        }
+        deferredWrites += 1
+        queueEpoch &+= 1
+        let doc = self.doc
+        let previous = deferredWriteTail
+        deferredWriteTail = Task { @MainActor [weak self] in
+            await previous?.value
+            let ok = await Task.detached(priority: .userInitiated) { work(doc) }.value
+            guard let self else { return }
+            self.deferredWrites -= 1
+            self.queueEpoch &+= 1
+            done(ok)
+        }
+        return nil
+    }
+
+    /// The commands once every write already asked for has landed, read off main.
+    private func readCommands() async -> [LoroValue] {
+        await deferredWriteTail?.value
+        let doc = self.doc
+        return await docJob { doc.getList(id: "commands").getDeepValue().listValue ?? [] }
+    }
+
+    /// What a write the doc hasn't taken yet will make the queue.
+    func showQueue(_ next: [QueuedMessage]) {
+        if next != queue { queue = next }
     }
 
     private func apply(_ decoded: [MessageEntry], queue decodedQueue: [QueuedMessage] = []) {
@@ -981,30 +1072,47 @@ final class SessionStore {
 
     /// schema.rs queue_command, field for field.
     private func queueCommand(kind: String, payload: [String: Any]) {
-        let commands = doc.getList(id: "commands")
-        do {
-            let map = try commands.pushContainer(child: LoroMap())
-            try map.insert(key: "id", v: UUID().uuidString.lowercased())
-            try map.insert(key: "kind", v: kind)
-            try map.insert(key: "payload", v: LoroValue.fromJSON(payload))
-            try map.insert(key: "issuedBy", v: config.deviceId)
-            try map.insert(key: "issuedAt", v: nowMs())
-            if let turnId = lastEntryId {
-                try map.insert(key: "basedOn", v: LoroValue.map(value: [
-                    "turnId": .string(value: turnId),
-                    "frontier": .null,
-                ]))
+        let id = UUID().uuidString.lowercased()
+        let payloadValue = LoroValue.fromJSON(payload)
+        let deviceId = config.deviceId
+        let turnId = lastEntryId
+        let issuedAt = nowMs()
+        let expiresAt = issuedAt + commandDefaultTtlMs
+        knownCommands.append(.map(value: [
+            "issuedBy": .string(value: deviceId),
+            "status": .string(value: "pending"),
+            "expiresAt": .i64(value: expiresAt),
+            "payload": payloadValue,
+        ]))
+        writeDoc({ doc in
+            do {
+                let map = try doc.getList(id: "commands").pushContainer(child: LoroMap())
+                try map.insert(key: "id", v: id)
+                try map.insert(key: "kind", v: kind)
+                try map.insert(key: "payload", v: payloadValue)
+                try map.insert(key: "issuedBy", v: deviceId)
+                try map.insert(key: "issuedAt", v: issuedAt)
+                if let turnId {
+                    try map.insert(key: "basedOn", v: LoroValue.map(value: [
+                        "turnId": .string(value: turnId),
+                        "frontier": .null,
+                    ]))
+                }
+                try map.insert(key: "expiresAt", v: expiresAt)
+                try map.insert(key: "status", v: "pending")
+                doc.commit()
+                return true
+            } catch {
+                return false
             }
-            try map.insert(key: "expiresAt", v: nowMs() + commandDefaultTtlMs)
-            try map.insert(key: "status", v: "pending")
-            doc.commit()
-        } catch {}
+        }, then: { [weak self] _ in
+            // The nudge below can reach the host before this row reaches the
+            // room; the host then catches up, finds nothing to run and goes idle
+            // (#412). The commit's batch joins the outbox on the next main-actor
+            // turn, so arm after it and nudge again once the room has it.
+            Task { @MainActor [weak self] in self?.nudgeWhenOutboxDrains = true }
+        })
         nudgeHost()
-        // That nudge can reach the host before this row reaches the room; the
-        // host then catches up, finds nothing to run and goes idle (#412).
-        // The commit's batch joins the outbox on the next main-actor turn, so
-        // arm after it and nudge again once the room has acknowledged it.
-        Task { @MainActor [weak self] in self?.nudgeWhenOutboxDrains = true }
     }
 
     /// Durable-nudge the host device so a cold host opens the doc and drains
@@ -1020,7 +1128,11 @@ final class SessionStore {
     /// Re-read the queue after a local write, without waiting for the coalesced
     /// whole-doc projection: dragging a row must move it this frame.
     func refreshQueue() {
-        let next = (doc.getDeepValue().mapValue?["queue"]?.listValue ?? [])
+        guard !docIsBusy else {
+            project()
+            return
+        }
+        let next = (doc.getMovableList(id: "queue").getDeepValue().listValue ?? [])
             .compactMap(Self.queuedFrom)
         if next != queue { queue = next }
     }
@@ -1101,8 +1213,11 @@ final class SessionStore {
     /// re-commits the same file; the host's processed ledger keeps execution
     /// exactly-once.
     private func respawnEscorts() {
-        guard let root = doc.getDeepValue().mapValue,
-              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
+        respawnEscorts(from: doc.getList(id: "commands").getDeepValue().listValue ?? [])
+    }
+
+    private func respawnEscorts(from commands: [LoroValue]) {
+        guard !commands.isEmpty else { return }
         let now = nowMs()
         var transfers: [AttachmentTransfer] = []
         var seen = Set<String>()
@@ -1147,6 +1262,16 @@ final class SessionStore {
             pendingSends[ix].started = now
         }
         revision &+= 1
+        guard !docIsBusy else {
+            kickRoom()
+            nudgeHost()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.reissueDeadSends(from: await self.readCommands())
+                self.respawnEscorts(from: await self.readCommands())
+            }
+            return
+        }
         reissueDeadSends()
         kickRoom()
         nudgeHost()
@@ -1159,8 +1284,12 @@ final class SessionStore {
     /// pending command at any time until it expires.
     func undeliverableSends(now: Int64) -> Set<String> {
         guard !pendingSends.isEmpty else { return [] }
-        let commands = doc.getList(id: "commands").getDeepValue().listValue ?? []
-        return Self.undeliverable(pending: pendingSends.map(\.messageId), commands: commands,
+        // A view asks this while it renders, so it never waits for the doc: a
+        // rejection read a moment late is fine, a hung frame isn't.
+        if !docIsBusy {
+            knownCommands = doc.getList(id: "commands").getDeepValue().listValue ?? []
+        }
+        return Self.undeliverable(pending: pendingSends.map(\.messageId), commands: knownCommands,
                                   deviceId: config.deviceId, now: now)
     }
 
@@ -1188,8 +1317,11 @@ final class SessionStore {
     /// dedupes by message id). One re-issue per message (latest attempt);
     /// a live pending unexpired attempt for the same message skips it.
     func reissueDeadSends() {
-        guard let root = doc.getDeepValue().mapValue,
-              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
+        reissueDeadSends(from: doc.getList(id: "commands").getDeepValue().listValue ?? [])
+    }
+
+    private func reissueDeadSends(from commands: [LoroValue]) {
+        guard !commands.isEmpty else { return }
         let landed = Set(entries.map(\.id))
         let now = nowMs()
         struct DeadAttempt {

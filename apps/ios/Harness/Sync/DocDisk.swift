@@ -389,6 +389,7 @@ final class DocSaver {
     private var generation = 0
     private var deadlineGeneration = 0
     private var syncCommits = 0
+    private var lastWrittenGeneration = 0
     private var dirty = false
     var onSaved: (() -> Void)?
     var background: (() async -> Bool)?
@@ -451,6 +452,18 @@ final class DocSaver {
         }
     }
 
+    /// Something that must reach the disk now, not after the debounce: off the
+    /// main thread when `background` is set, so it never waits for the doc's lock
+    /// there. Bumps the generation first, so a save already under way, which
+    /// doesn't hold this change, can't report the saver clean.
+    func persistNow() {
+        dirty = true
+        generation += 1
+        Task { @MainActor [weak self] in
+            await self?.flushFromTimer()
+        }
+    }
+
     func flush() {
         guard dirty else { return }
         _ = commitNow()
@@ -480,8 +493,11 @@ final class DocSaver {
         let expected = generation
         let snapshot = await SnapshotExporter.shared.export(export)
         if generation != expected {
-            if syncCommits == syncCommitsAtStart, let snapshot {
-                _ = write(snapshot)
+            // Older than something already written: writing it would take back
+            // batches that file holds, which may already be in the room.
+            if syncCommits == syncCommitsAtStart, expected > lastWrittenGeneration,
+               let snapshot, write(snapshot) {
+                lastWrittenGeneration = expected
             }
             return false
         }
@@ -490,6 +506,7 @@ final class DocSaver {
             scheduleRetry()
             return false
         }
+        lastWrittenGeneration = expected
         dirty = false
         generation += 1
         deadlineGeneration += 1
