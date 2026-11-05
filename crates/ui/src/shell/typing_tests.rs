@@ -1,11 +1,10 @@
 use super::*;
 
-/// Typing in the composer redraws the composer, not the app: no shell or
-/// app-state notification, and no sidebar rebuild per keystroke (the sidebar
-/// re-renders on every shell notification and costs the most to rebuild).
-#[gpui::test]
-fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
+/// A settled shell with fifty chats in the sidebar and one open.
+pub(super) fn shell_with_chats<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    dir: &tempfile::TempDir,
+) -> (Entity<Shell>, &'a mut gpui::VisualTestContext) {
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::default());
@@ -64,6 +63,16 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
         cx.executor().advance_clock(Duration::from_secs(2));
         cx.run_until_parked();
     }
+    (shell, cx)
+}
+
+/// Typing in the composer redraws the composer, not the app: no shell or
+/// app-state notification, and no sidebar rebuild per keystroke (the sidebar
+/// re-renders on every shell notification and costs the most to rebuild).
+#[gpui::test]
+fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
     cx.update(|window, cx| {
         let focus = shell.read(cx).composer.focus_handle(cx);
         window.focus(&focus, cx);
