@@ -229,6 +229,9 @@ impl Shell {
                 RightSurface::Terminal(_) => {
                     return Err("This terminal is using a shared host. Open an independent terminal tab before moving it to a window.".into());
                 }
+                RightSurface::ToolAccess(_) => {
+                    return Err("Close Tool access before moving this tab to a window.".into());
+                }
                 RightSurface::Picker => TabResource::Empty,
             },
             PanelTab::Empty => TabResource::Empty,

@@ -4245,6 +4245,8 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// Open the Tool Access Map for this chat in the right pane.
+    OpenToolAccess { chat_id: String },
     /// The model-mismatch card: start a new chat on `model`, carrying the
     /// failed prompt over.
     NewChatWithModel { model: String },
@@ -9963,6 +9965,15 @@ impl Transcript {
         if flash.is_some() && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
         }
+        // Animated one-line rows (scramble / dither / result pills) for the
+        // activity rail and compact fold — same ToolItems the chips use.
+        let animated_group = crate::tool_call_rows::from_tools(tools, None);
+        let animated_phase = if collapses && (animated_group.live || !reduce_motion) {
+            motion::pulse_lease(cx.entity_id(), cx);
+            crate::tool_call_rows::pulse_phase(cx.entity_id(), cx)
+        } else {
+            0.0
+        };
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
@@ -10039,6 +10050,23 @@ impl Transcript {
                 let invocation = invocations[ix].clone();
                 let affordance = affordances[ix].clone();
                 if detail.is_none() && invocation.is_none() && affordance.is_none() {
+                    if collapses
+                        && tool.kind == ToolItemKind::Call
+                        && !is_agent_tool(tool)
+                        && let Some(animated) =
+                            animated_group.rows.iter().find(|r| r.id.as_ref() == tool.part_id)
+                    {
+                        return reveal_tool_row(
+                            crate::tool_call_rows::row(
+                                animated,
+                                theme,
+                                animated_phase,
+                                reduce_motion,
+                            ),
+                            crate::tool_call_rows::ROW_HEIGHT,
+                            reveal,
+                        );
+                    }
                     return reveal_tool_row(
                         tool_chip(
                             tool,
@@ -10244,7 +10272,53 @@ impl Transcript {
             div()
                 .overflow_hidden()
                 .h(px(body_height))
-                .child(chips)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(chips)
+                        .when(
+                            collapses
+                                && !animated_group.live
+                                && !animated_group.file_diffs.is_empty(),
+                            |col| {
+                                col.child(crate::tool_call_rows::file_diff_summary(
+                                    &animated_group.file_diffs,
+                                    theme,
+                                ))
+                            },
+                        )
+                        .when(collapses, |col| {
+                            let chat_id = self.chat_id.clone().unwrap_or_default();
+                            col.child(
+                                div()
+                                    .id(SharedString::from(format!("{row_id}-tool-access")))
+                                    .mt(px(4.0))
+                                    .h(px(24.0))
+                                    .px(px(8.0))
+                                    .rounded(px(6.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .cursor_pointer()
+                                    .text_size(px(TOOL_LABEL_SIZE))
+                                    .text_color(theme.text_muted)
+                                    .hover(|s| s.bg(theme.ink(0.06)).text_color(theme.text))
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(TranscriptEvent::OpenToolAccess {
+                                            chat_id: chat_id.clone(),
+                                        });
+                                    }))
+                                    .child(
+                                        crate::icons::icon(crate::icons::WIDGET)
+                                            .size(px(12.0))
+                                            .text_color(theme.text_muted),
+                                    )
+                                    .child("Tool access"),
+                            )
+                        }),
+                )
                 .into_any_element()
         };
 

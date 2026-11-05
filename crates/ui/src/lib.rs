@@ -14,6 +14,8 @@
 
 mod agent_message;
 pub mod agent_work;
+pub mod tool_access;
+pub mod tool_call_rows;
 pub mod annotate;
 pub mod app_menus;
 pub mod appearance;
