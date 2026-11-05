@@ -82,7 +82,8 @@ actor ChatRoomClient {
     /// are async: their Loro import runs off the main actor (#484).
     struct Delegate: Sendable {
         var cursor: @MainActor @Sendable () -> UInt64
-        var containsFrontier: @MainActor @Sendable (Data) -> Bool
+        /// Async: it waits off the main actor for any import holding the doc.
+        var containsFrontier: @MainActor @Sendable (Data) async -> Bool
         var applyCheckpoint: @MainActor @Sendable (Data, UInt64) async -> Bool
         var applyRow: @MainActor @Sendable (Data, UInt64) async -> Void
         /// A contiguous run of rows in one import, the cursor then moved to
@@ -372,6 +373,7 @@ actor ChatRoomClient {
         var contained = state.checkpointSize == 0
         if !contained {
             contained = await delegate.containsFrontier(stateFrame.payload)
+            guard !closed else { return }
         }
         if case .checkpointThenRows = chatPlanCatchUp(cursor: planAfter, state: state,
                                                       frontierContained: contained) {
@@ -810,6 +812,9 @@ actor ChatRoomClient {
         var contained = state.checkpointSize == 0
         if !contained {
             contained = await delegate.containsFrontier(frame.payload)
+            // That can wait out a long import, and this session may have been
+            // replaced meanwhile: its plan must not go out on the new socket.
+            guard gen == generation, !closed else { return }
         }
         // Cursor amnesty, once per client: a cursor above the checkpoint seq
         // claims history the doc may have silently parked and dropped (the
