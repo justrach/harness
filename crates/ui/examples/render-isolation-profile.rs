@@ -16,7 +16,9 @@
 //!
 //! `HARNESS_FRAME_STATS=1` turns on the render counters.
 //! `HARNESS_PROFILE_CHATS=300` adds sessions to the sidebar, and
-//! `HARNESS_PROFILE_SPLIT_PANES=3` restores a split. With either set, the run
+//! `HARNESS_PROFILE_SPLIT_PANES=3` restores a split, and
+//! `HARNESS_PROFILE_SIDEBAR_CLOSED=1` closes the sidebar. With either of the
+//! first two set, the run
 //! also moves the pointer across the window and measures frames left idle
 //! while an agent works. `HARNESS_PROFILE_STEPS=400` lengthens each phase, for
 //! sampling it with `sample`.
@@ -326,6 +328,16 @@ fn main() -> anyhow::Result<()> {
                     .unwrap()
             })?;
         }
+    }
+
+    if env_count("HARNESS_PROFILE_SIDEBAR_CLOSED") > 0 {
+        app.update(|cx| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_action(Box::new(shell::ToggleSidebar), cx)
+            })
+            .unwrap()
+        });
+        settle(&app, Duration::from_secs(1));
     }
 
     // Focus the composer the way a person does (the Jump to the message box

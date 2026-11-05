@@ -10,8 +10,35 @@ const SLOT_MAX_WIDTH: f32 = 260.0;
 const SLOT_HEIGHT: f32 = 26.0;
 const SLOT_MIN_WIDTH: f32 = 72.0;
 const NEW_TAB_ROOM: f32 = 24.0 + GUTTER;
+/// Below this a slot keeps its room for the title; the tooltip still names the
+/// device.
+const SLOT_MIN_WIDTH_FOR_DEVICE: f32 = 220.0;
+
+/// A slot's width is only known while the slots line up with their panels.
+pub(super) fn strip_shows_device(width: Option<f32>) -> bool {
+    width.is_some_and(|width| width >= SLOT_MIN_WIDTH_FOR_DEVICE)
+}
 
 impl Shell {
+    /// The computer a panel's active tab runs on, named as the device menu
+    /// names it.
+    pub(super) fn panel_device_label(&self, panel: u64, cx: &App) -> SharedString {
+        let state = self.state.read(cx);
+        self.workspace_panel_device(panel, cx)
+            .full_id(state)
+            .map_or_else(
+                || {
+                    if cfg!(target_os = "macos") {
+                        "This Mac"
+                    } else {
+                        "This device"
+                    }
+                    .into()
+                },
+                |id| crate::codegraff_sandboxes::friendly_device_name(state, &id).into(),
+            )
+    }
+
     pub(super) fn render_instrument_strip(
         &mut self,
         layout: &WorkspaceLayout,
@@ -152,9 +179,10 @@ impl Shell {
         let dragging_tab = self.workspace_panels.dragging_tab.clone();
         let drag_source = cx.weak_entity();
         let drag_outside = self.workspace_panels.drag_preview_visible.clone();
+        let device = self.panel_device_label(id, cx);
         let tooltip_title = match attention {
-            Some(attention) => format!("{title} · {}", attention.label()),
-            None => title.to_string(),
+            Some(attention) => format!("{title} · {device} · {}", attention.label()),
+            None => format!("{title} · {device}"),
         };
         let shortcut = (ix < 6)
             .then(|| settings::badge_combo(&format!("cmd-alt-{}", ix + 1)))
@@ -326,6 +354,26 @@ impl Shell {
             })
             .child(leading)
             .child(div().flex_1().min_w_0().truncate().child(title))
+            .when(strip_shows_device(width), |slot| {
+                slot.child(
+                    div()
+                        .debug_selector(move || format!("instrument-slot-device-{id}"))
+                        .flex_none()
+                        .max_w(px(110.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(3.0))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .child(
+                            icon(icons::MONITOR)
+                                .size(px(11.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().min_w_0().truncate().child(device)),
+                )
+            })
             .child(add_button)
             .child(menu_button)
             .into_any_element()
@@ -525,6 +573,22 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let chats = ["launch-0", "launch-1", "mobile-0", "launch-2", "mobile-1"];
+        self.state.update(cx, |state, _| {
+            state.devices.retain(|device| device.id != "studio");
+            state.devices.push(harness_proto::Device {
+                id: "studio".into(),
+                name: "Studio computer".into(),
+                platform: "macos".into(),
+                last_seen_at: Some(Utc::now()),
+                created_at: None,
+                version: None,
+                cursor_sdk_version: None,
+                capabilities: vec![],
+            });
+            if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "mobile-0") {
+                chat.device_id = "studio".into();
+            }
+        });
         let layout = self.panel_layout_mut(cx);
         layout.axis = SplitAxis::Horizontal;
         layout.expanded = None;

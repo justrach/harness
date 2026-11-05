@@ -208,6 +208,49 @@ fn layout_ids(layout: &WorkspaceLayout) -> Vec<u64> {
 }
 
 #[gpui::test]
+fn a_slot_names_the_device_its_panel_is_on(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (first, second, _) = three_panels(&shell, cx);
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.devices = vec![harness_proto::Device {
+                id: "studio".into(),
+                name: "Studio computer".into(),
+                platform: "macos".into(),
+                last_seen_at: Some(Utc::now()),
+                created_at: None,
+                version: None,
+                cursor_sdk_version: None,
+                capabilities: vec![],
+            }];
+            let chat = state.chats.iter_mut().find(|chat| chat.id == "chat-3");
+            chat.unwrap().device_id = "studio".into();
+        });
+        cx.notify();
+    });
+    settle(cx);
+    shell.read_with(cx, |shell, cx| {
+        let here = if cfg!(target_os = "macos") {
+            "This Mac"
+        } else {
+            "This device"
+        };
+        assert_eq!(shell.panel_device_label(first, cx), here);
+        assert_eq!(shell.panel_device_label(second, cx), "Studio computer");
+    });
+    assert!(at(cx, format!("instrument-slot-device-{first}")).is_some());
+    assert!(at(cx, format!("instrument-slot-device-{second}")).is_some());
+}
+
+#[test]
+fn a_narrow_slot_gives_its_room_to_the_title() {
+    assert!(instrument_strip::strip_shows_device(Some(300.0)));
+    assert!(!instrument_strip::strip_shows_device(Some(150.0)));
+    assert!(!instrument_strip::strip_shows_device(None));
+}
+
+#[gpui::test]
 fn each_panel_gets_one_slot_and_no_tab_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = shell_with_chats(cx, &dir);
