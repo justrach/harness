@@ -35,7 +35,7 @@ pub mod widgets;
 /// Sidebar drag-resize bounds (px).
 pub const SIDEBAR_MIN: f32 = 224.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
-pub const SIDEBAR_DEFAULT: f32 = 256.0;
+pub const SIDEBAR_DEFAULT: f32 = SIDEBAR_MIN;
 
 /// Independent file explorer width preference and drag bounds (px).
 pub const FILES_PANEL_DEFAULT: f32 = 286.0;
@@ -323,6 +323,25 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
+/// In-process invalidation token, including changes waiting to be written.
+pub fn revision(cx: &App) -> u64 {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.revision)
+        .unwrap_or(0)
+}
+
+/// Device-local closed conversations and unsent chat tabs, newest first.
+/// Closing a placement does not change the conversation's synced archive flag.
+pub fn recently_closed_chats(cx: &App) -> Vec<SavedClosedChat> {
+    with_current(cx, |settings| settings.recently_closed_chats.clone())
+}
+
+/// Entries omitted from the default history list, but still available to search.
+/// Keys use `chat:<conversation id>` or `draft:<recovery record id>`.
+pub fn hidden_history_entries(cx: &App) -> Vec<String> {
+    with_current(cx, |settings| settings.hidden_history_entries.clone())
+}
+
 /// Copy a selected image into Harness's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -489,6 +508,14 @@ pub fn set_archive_sessions_on_close(enabled: bool, cx: &mut App) {
     });
 }
 
+pub fn set_sidebar_task_view(enabled: bool, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.sidebar_task_view = enabled;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.transcript_compact_mode = enabled;
@@ -597,9 +624,9 @@ fn flush_latest(cx: &mut App) {
 pub enum SidebarOrganization {
     ByProject,
     ByDevice,
+    #[default]
     InOneList,
     /// "Needs you", "Today" and "Earlier": chats waiting on you first.
-    #[default]
     ByStatus,
 }
 
@@ -737,12 +764,232 @@ pub struct SavedChatLayout {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SavedChatTab {
+    /// Stable workspace session identity, independent of its optional project.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_icon: Option<String>,
+    pub pinned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<SavedChatLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panel_layout: Option<SavedWorkspacePanels>,
+}
+
+/// A native window's navigation and placement. Session identities may appear
+/// in more than one window; each record owns only that window's panel tabs.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedWorkspaceWindow {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<WindowGeometry>,
+    pub chat_tabs: Vec<SavedChatTab>,
+    pub chat_tab: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_space_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_layout: Option<SavedChatLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_tabs: Option<Vec<String>>,
+    pub project_tabs_version: u8,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub chat_drafts: HashMap<String, SavedWindowChatDraft>,
+}
+
+impl SavedWorkspaceWindow {
+    pub fn from_settings(id: String, settings: &UiSettings) -> Self {
+        Self {
+            id,
+            geometry: settings.window_geometry,
+            chat_tabs: settings.chat_tabs.clone(),
+            chat_tab: settings.chat_tab,
+            last_space_id: settings.last_space_id.clone(),
+            space_filter: settings.space_filter.clone(),
+            last_chat_id: settings.last_chat_id.clone(),
+            chat_layout: settings.chat_layout.clone(),
+            open_tabs: settings.open_tabs.clone(),
+            project_tabs_version: settings.project_tabs_version,
+            chat_drafts: HashMap::new(),
+        }
+    }
+
+    /// Seed one Shell without replacing global preferences or another window.
+    pub fn apply_to_settings(&self, settings: &mut UiSettings) {
+        settings.window_geometry = self.geometry;
+        settings.chat_tabs = self.chat_tabs.clone();
+        settings.chat_tab = self.chat_tab;
+        settings.last_space_id = self.last_space_id.clone();
+        settings.space_filter = self.space_filter.clone();
+        settings.last_chat_id = self.last_chat_id.clone();
+        settings.chat_layout = self.chat_layout.clone();
+        settings.open_tabs = self.open_tabs.clone();
+        settings.project_tabs_version = self.project_tabs_version;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedWindowChatDraft {
+    pub input: SavedCanvasDraft,
+    pub appshots: Vec<SavedWindowAppshot>,
+}
+
+/// Recovery for one closed chat placement. `chat_id == None` is an unsent tab.
+/// Attachment bytes use the existing private draft cache, never this JSON.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedClosedChat {
+    pub id: String,
+    pub chat_id: Option<String>,
+    pub window_id: String,
+    pub session_id: String,
+    pub panel_id: u64,
+    pub tab_index: usize,
+    pub closed_at: i64,
+    pub draft: SavedWindowChatDraft,
+    pub was_new_tab: bool,
+}
+
+/// Screenshot bytes use the private draft cache; app icons are presentation-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedWindowAppshot {
+    pub id: String,
+    pub app_name: String,
+    pub bundle_identifier: Option<String>,
+    pub window_title: Option<String>,
+    pub accessibility_format_version: u32,
+    pub accessibility_content: String,
+    pub accessibility_truncated: bool,
+    pub screenshot: SavedDraftAttachment,
+    pub screenshot_dimensions: Option<(u32, u32)>,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Session-owned panel placement and tabs. Runtime surface handles are never saved.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedWorkspacePanels {
+    pub vertical: bool,
+    pub panels: Vec<SavedWorkspacePanel>,
+    pub focused: u64,
+    pub expanded: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedWorkspacePanel {
+    pub id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_panel_target: Option<SavedCanvasTarget>,
+    pub tabs: Vec<SavedPanelTab>,
+    pub active: usize,
+    pub share: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SavedPanelTab {
+    Chat {
+        id: String,
+    },
+    Draft {
+        draft: SavedCanvasDraft,
+    },
+    New {
+        draft: SavedCanvasDraft,
+    },
+    Browser {
+        owner: String,
+        url: Option<String>,
+    },
+    File {
+        owner: String,
+        path: String,
+    },
+    Files {
+        owner: String,
+        #[serde(
+            default,
+            rename = "targetDeviceId",
+            skip_serializing_if = "Option::is_none"
+        )]
+        target_device_id: Option<String>,
+    },
+    Terminal {
+        owner: String,
+        #[serde(
+            default,
+            rename = "targetDeviceId",
+            skip_serializing_if = "Option::is_none"
+        )]
+        target_device_id: Option<String>,
+    },
+    Diff {
+        owner: String,
+    },
+    Subagent {
+        owner: String,
+        doc: String,
+        title: String,
+    },
+    #[default]
+    #[serde(other)]
+    Empty,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedCanvasDraft {
+    pub harness: Option<harness_proto::HarnessId>,
+    pub model: Option<String>,
+    pub reasoning: Option<harness_proto::ReasoningLevel>,
+    pub target: Option<SavedCanvasTarget>,
+    pub git: Option<SavedCanvasGit>,
+    pub text: String,
+    pub attachments: Vec<SavedDraftAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedCanvasGit {
+    pub branch: Option<String>,
+    pub checkout: crate::pickers::CheckoutKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedCanvasTarget {
+    pub space: Option<String>,
+    pub no_project: bool,
+    pub device: Option<String>,
+}
+
+/// Bytes live in the local draft cache, outside settings JSON. The cache key is a UUID,
+/// not a user-controlled filename or an absolute source path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedDraftAttachment {
+    pub id: String,
+    pub name: String,
+    pub cache_key: String,
+    pub image: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<String>,
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editable: Option<crate::annotate::editable::SavedEditableAnnotation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -750,6 +997,14 @@ pub struct SavedChatTab {
 pub struct UiSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
+    /// None migrates a legacy single window. Some([]) means all windows were
+    /// explicitly closed, so old global navigation must not be migrated again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_windows: Option<Vec<SavedWorkspaceWindow>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recently_closed_chats: Vec<SavedClosedChat>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden_history_entries: Vec<String>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
     /// How messages sent while the agent is working are handled.
@@ -767,15 +1022,17 @@ pub struct UiSettings {
     pub sidebar_organization: SidebarOrganization,
     /// Timestamp used to order active sessions (newest first).
     pub sidebar_sort: SidebarSort,
+    /// Reveal context on hover instead of keeping the context line visible.
+    pub sidebar_compact: bool,
     /// Optional harness branding and repository metadata shown below each
     /// session title.
     pub sidebar_show_project_label: bool,
-    pub sidebar_compact: bool,
     pub sidebar_show_project_icon: bool,
     pub sidebar_show_harness: bool,
     pub sidebar_show_branch: bool,
     /// The Archived accordion below the active session list.
     pub sidebar_show_archived: bool,
+    pub sidebar_show_updated: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -796,6 +1053,12 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// The conversation sidebar lists every project's sessions. Separate from
+    /// `space_filter`, which follows the active session and so can't hold it.
+    pub sidebar_all_projects: bool,
+    /// The sidebar lists open workspaces instead of conversations, with the
+    /// All sessions dashboard beside the project switcher.
+    pub sidebar_task_view: bool,
     /// The chat that was open at quit; launch reopens it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_chat_id: Option<String>,
@@ -817,11 +1080,16 @@ pub struct UiSettings {
     /// the rest of the file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings_section: Option<String>,
-    /// The chat tabs at quit (two or more), in order; launch restores them.
-    /// The active one (`chat_tab`) reopens from `last_chat_id`/`chat_layout`.
+    /// Project views at quit, in order. The legacy field name preserves settings compatibility.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chat_tabs: Vec<SavedChatTab>,
+    /// Manual dashboard order; None represents the Scratchpad. This never
+    /// changes project navigation or admits inactive projects to the overview.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub session_overview_order: Vec<Option<String>>,
     pub chat_tab: usize,
+    /// Saved workspace format; zero identifies older open-tab settings.
+    pub project_tabs_version: u8,
     /// Device-local pins for local profiles; synced profiles use registry pins.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
@@ -903,6 +1171,8 @@ pub struct UiSettings {
     pub diff_split: bool,
     /// Changes pane: wrap long source lines instead of scrolling horizontally.
     pub diff_wrap: bool,
+    /// Changes pane: hide changes that only move whitespace.
+    pub diff_ignore_whitespace: bool,
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
@@ -957,29 +1227,39 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             window_geometry: None,
+            workspace_windows: None,
+            recently_closed_chats: Vec::new(),
+            hidden_history_entries: Vec::new(),
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             sidebar_grouped: false,
-            sidebar_organization: SidebarOrganization::ByStatus,
+            sidebar_organization: SidebarOrganization::ByProject,
             sidebar_sort: SidebarSort::LastUpdated,
-            sidebar_show_project_label: true,
             sidebar_compact: true,
-            sidebar_show_project_icon: true,
+            sidebar_show_project_label: false,
+            sidebar_show_project_icon: false,
             sidebar_show_harness: true,
             sidebar_show_branch: true,
             sidebar_show_archived: true,
+            sidebar_show_updated: true,
             last_space_id: None,
             project_folders_by_device: HashMap::new(),
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
+            sidebar_all_projects: true,
+            // The conversation sidebar is the default. Tests and capture
+            // fixtures written for the workspace sidebar keep rendering it.
+            sidebar_task_view: cfg!(any(test, feature = "appshots-fixture")),
             last_chat_id: None,
             chat_layout: None,
             archive_sessions_on_close: false,
             archive_on_close_chosen: false,
             settings_section: None,
             chat_tabs: Vec::new(),
+            session_overview_order: Vec::new(),
             chat_tab: 0,
+            project_tabs_version: 0,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
             tab_order: std::collections::HashMap::new(),
             space_order: Vec::new(),
@@ -1019,11 +1299,12 @@ impl Default for UiSettings {
             theme_selection: harness_theme::ThemeSelection::default(),
             diff_split: false,
             diff_wrap: false,
+            diff_ignore_whitespace: false,
             code_fences_fit_content: false,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_harness: true,
             transcript_compact_mode: false,
-            write_sans: false,
+            write_sans: true,
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -1133,12 +1414,13 @@ impl ShortcutId {
             ShortcutId::SaveFile => "Save file",
             ShortcutId::BrowserReload => "Reload browser page",
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
-            ShortcutId::ToggleChanges => "Toggle right sidebar",
+            ShortcutId::ToggleChanges => "Show or hide changes",
             ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::SplitTerminal => "Split terminal right",
             ShortcutId::SplitTerminalDown => "Split terminal down",
-            ShortcutId::NewSession => "New chat",
+            // Keep the persisted id/keymap field compatible with saved shortcuts.
+            ShortcutId::NewSession => "New tab",
             ShortcutId::NewProject => "New project",
             ShortcutId::OpenProjectPicker => "Open project picker",
             ShortcutId::OpenModelPicker => "Open model picker",
@@ -1231,6 +1513,7 @@ pub struct KeymapConfig {
     pub toggle_terminal: String,
     pub split_terminal: String,
     pub split_terminal_down: String,
+    /// New-tab shortcut; retain this serialized field name for existing keymaps.
     pub new_session: String,
     pub new_project: String,
     pub open_project_picker: String,
@@ -1526,10 +1809,21 @@ pub fn display_combo(combo: &str) -> String {
     display_combo_on(cfg!(target_os = "macos"), combo)
 }
 
+fn display_combo_parts(combo: &str) -> Vec<&str> {
+    let mut parts: Vec<_> = combo.split('-').collect();
+    // The separator is also a valid key: `mod--` means Cmd/Ctrl+minus.
+    if combo.ends_with("--") || combo == "-" {
+        parts.pop();
+        parts.pop();
+        parts.push("-");
+    }
+    parts
+}
+
 /// [`display_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn display_combo_on(mac: bool, combo: &str) -> String {
-    combo
-        .split('-')
+    display_combo_parts(combo)
+        .into_iter()
         .map(|part| match part {
             "mod" => if mac { "Cmd" } else { "Ctrl" }.to_string(),
             "alt" => if mac { "Opt" } else { "Alt" }.to_string(),
@@ -1554,20 +1848,39 @@ pub fn badge_combo(combo: &str) -> String {
     badge_combo_on(cfg!(target_os = "macos"), combo)
 }
 
+/// Badge for a rebindable shell action, including the binding fallback used
+/// by `shell::apply_keymap` when a persisted combo cannot be parsed.
+pub fn shortcut_badge(cx: &App, id: ShortcutId) -> String {
+    with_current(cx, |settings| {
+        let combo = settings.keymap.get(id);
+        badge_combo(if gpui::Keystroke::parse(&platform_combo(combo)).is_ok() {
+            combo
+        } else {
+            id.default_combo()
+        })
+    })
+}
+
 /// [`badge_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn badge_combo_on(mac: bool, combo: &str) -> String {
     if !mac {
         return display_combo_on(false, combo);
     }
-    let mut parts: Vec<&str> = combo.split('-').collect();
+    let mut parts = display_combo_parts(combo);
     let key = parts.pop().unwrap_or("");
     let mut out = String::new();
-    for glyph in ["ctrl", "alt", "shift", "mod"]
-        .iter()
-        .zip(['⌃', '⌥', '⇧', '⌘'])
-        .filter_map(|(name, glyph)| parts.contains(name).then_some(glyph))
-    {
-        out.push(glyph);
+    for (names, glyph) in [
+        (&["ctrl"][..], '⌃'),
+        (&["alt"][..], '⌥'),
+        (&["shift"][..], '⇧'),
+        (&["mod", "cmd", "super"][..], '⌘'),
+    ] {
+        if names
+            .iter()
+            .any(|name| parts.iter().any(|part| part.eq_ignore_ascii_case(name)))
+        {
+            out.push(glyph);
+        }
     }
     let mut chars = key.chars();
     if let Some(first) = chars.next() {
@@ -1578,6 +1891,120 @@ pub fn badge_combo_on(mac: bool, combo: &str) -> String {
 }
 
 impl UiSettings {
+    pub fn remember_closed_chat(&mut self, record: SavedClosedChat) {
+        let key = record.chat_id.as_ref().map_or_else(
+            || format!("draft:{}", record.id),
+            |chat| format!("chat:{chat}"),
+        );
+        self.unhide_history_entry(&key);
+        // Independent windows can hold different unsent replies for one chat.
+        // Deduplicate the placement, but keep any displaced input recoverable.
+        for previous in &mut self.recently_closed_chats {
+            if previous.id != record.id
+                && record.chat_id.is_some()
+                && previous.chat_id == record.chat_id
+                && (!previous.draft.input.text.is_empty()
+                    || !previous.draft.input.attachments.is_empty()
+                    || !previous.draft.appshots.is_empty())
+                && (previous.draft.input.text != record.draft.input.text
+                    || previous.draft.input.attachments != record.draft.input.attachments
+                    || previous.draft.appshots != record.draft.appshots)
+            {
+                previous.chat_id = None;
+                previous.was_new_tab = false;
+            }
+        }
+        self.recently_closed_chats.retain(|previous| {
+            previous.id != record.id
+                && (record.chat_id.is_none() || previous.chat_id != record.chat_id)
+        });
+        self.recently_closed_chats.insert(0, record);
+        self.recently_closed_chats
+            .sort_by_key(|record| std::cmp::Reverse(record.closed_at));
+    }
+
+    pub fn forget_closed_chat(&mut self, id: &str) {
+        self.recently_closed_chats
+            .retain(|record| record.id != id && record.chat_id.as_deref() != Some(id));
+    }
+
+    /// Discard only the unsent recovery the user actually confirmed. A newer
+    /// close or a changed record must not be removed by a stale dialog.
+    pub fn discard_closed_chat(&mut self, expected: &SavedClosedChat) -> bool {
+        if expected.chat_id.is_some() {
+            return false;
+        }
+        let Some(index) = self
+            .recently_closed_chats
+            .iter()
+            .position(|record| record == expected)
+        else {
+            return false;
+        };
+        self.recently_closed_chats.remove(index);
+        self.hidden_history_entries
+            .retain(|key| key != &format!("draft:{}", expected.id));
+        true
+    }
+
+    pub fn hide_history_entry(&mut self, key: &str) -> bool {
+        if !key
+            .strip_prefix("chat:")
+            .or_else(|| key.strip_prefix("draft:"))
+            .is_some_and(|id| !id.is_empty())
+            || self
+                .hidden_history_entries
+                .iter()
+                .any(|hidden| hidden == key)
+        {
+            return false;
+        }
+        self.hidden_history_entries.push(key.to_owned());
+        true
+    }
+
+    pub fn unhide_history_entry(&mut self, key: &str) {
+        self.hidden_history_entries.retain(|hidden| hidden != key);
+    }
+
+    /// Migration is represented by absence, rather than an empty collection,
+    /// so a later launch cannot resurrect explicitly closed legacy windows.
+    pub fn restorable_workspace_windows(&self) -> Vec<SavedWorkspaceWindow> {
+        self.workspace_windows
+            .clone()
+            .unwrap_or_else(|| vec![SavedWorkspaceWindow::from_settings("main".into(), self)])
+    }
+
+    /// Update only one record against the canonical settings snapshot. This
+    /// deliberately does not deduplicate sessions across independent windows.
+    pub fn upsert_workspace_window(&mut self, record: SavedWorkspaceWindow) {
+        if record.id.trim().is_empty() {
+            return;
+        }
+        let windows = self.workspace_windows.get_or_insert_with(Vec::new);
+        if let Some(existing) = windows.iter_mut().find(|window| window.id == record.id) {
+            *existing = record;
+        } else {
+            windows.push(record);
+        }
+    }
+
+    pub fn remove_workspace_window(&mut self, id: &str) {
+        self.workspace_windows
+            .get_or_insert_with(Vec::new)
+            .retain(|window| window.id != id);
+    }
+
+    /// Reset presentation only; keep organization, ordering, sections and width.
+    pub fn reset_sidebar_display(&mut self) {
+        self.sidebar_compact = true;
+        self.sidebar_show_project_icon = false;
+        self.sidebar_show_project_label = false;
+        self.sidebar_show_harness = true;
+        self.sidebar_show_branch = true;
+        self.sidebar_show_updated = true;
+    }
+
     pub fn sidebar_pins(&self, profile_key: &str) -> &[String] {
         self.sidebar_pinned_session_ids_by_profile
             .get(profile_key)
@@ -1619,6 +2046,19 @@ impl UiSettings {
     pub fn clamped(mut self) -> Self {
         self.transcript_width = normalize_transcript_width(self.transcript_width);
         self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
+        if let Some(windows) = self.workspace_windows.as_mut() {
+            let mut ids = std::collections::HashSet::new();
+            windows.retain_mut(|window| {
+                if window.id.trim().is_empty() || !ids.insert(window.id.clone()) {
+                    return false;
+                }
+                window.geometry = window.geometry.filter(|geometry| geometry.is_valid());
+                window.chat_tab = window
+                    .chat_tab
+                    .min(window.chat_tabs.len().saturating_sub(1));
+                true
+            });
+        }
         self.sidebar_width = clamp_or(
             self.sidebar_width,
             SIDEBAR_MIN,
@@ -1664,22 +2104,40 @@ impl UiSettings {
     }
 
     /// Load from `{data_dir}/ui-settings.json`; defaults on any failure.
-    /// A new install shows less (as #417 and #614 did): a turn's tool steps
-    /// fold into one line and sidebar rows drop branch names. Both stay one
-    /// toggle away, and existing settings files keep what they chose.
-    pub fn first_run() -> Self {
-        Self {
-            transcript_compact_mode: true,
-            sidebar_show_branch: false,
-            ..Self::default()
-        }
-    }
-
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
             Ok(text) => {
                 match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
                     if let Some(settings) = value.as_object_mut() {
+                        // Existing upstream files inherited Geist; the local
+                        // workspace format inherited System UI. Preserve that
+                        // effective choice when a legacy file omitted the font.
+                        // A new installation still uses the platform default.
+                        if !settings.contains_key("uiFontFamily") {
+                            let local_workspace_format = settings.contains_key("workspaceWindows")
+                                || settings
+                                    .get("projectTabsVersion")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .is_some_and(|version| version >= 2)
+                                || settings
+                                    .get("chatTabs")
+                                    .and_then(serde_json::Value::as_array)
+                                    .is_some_and(|tabs| {
+                                        tabs.iter().any(|tab| {
+                                            tab.get("id")
+                                                .and_then(serde_json::Value::as_str)
+                                                .is_some_and(|id| !id.is_empty())
+                                        })
+                                    });
+                            settings.insert(
+                                "uiFontFamily".into(),
+                                serde_json::json!(if local_workspace_format {
+                                    "system"
+                                } else {
+                                    "geist"
+                                }),
+                            );
+                        }
                         let previous_sound = settings
                             .get("soundEnabled")
                             .and_then(serde_json::Value::as_bool)
@@ -1797,7 +2255,7 @@ impl UiSettings {
                     }
                 }
             }
-            Err(_) => Self::first_run(),
+            Err(_) => Self::default(),
         }
     }
 
@@ -1921,6 +2379,219 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.settings_section.as_deref(), Some("nope"));
         assert_eq!(loaded.sidebar_width, 300.0);
+    }
+
+    #[test]
+    fn closed_chat_history_round_trips_drafts_and_deduplicates_conversations() {
+        let mut settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.recently_closed_chats.is_empty());
+        let mut chat = SavedClosedChat {
+            id: "close-one".into(),
+            chat_id: Some("chat-one".into()),
+            window_id: "window-one".into(),
+            session_id: "session-one".into(),
+            panel_id: 7,
+            tab_index: 2,
+            closed_at: 1234,
+            draft: SavedWindowChatDraft {
+                input: SavedCanvasDraft {
+                    text: "Keep this unsent reply".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        settings.remember_closed_chat(chat.clone());
+        settings.remember_closed_chat(SavedClosedChat {
+            id: "unsent-one".into(),
+            ..Default::default()
+        });
+        settings.remember_closed_chat(SavedClosedChat {
+            id: "unsent-two".into(),
+            ..Default::default()
+        });
+        chat.id = "close-again".into();
+        chat.closed_at = 1235;
+        settings.remember_closed_chat(chat.clone());
+        assert_eq!(settings.recently_closed_chats.len(), 3);
+        assert_eq!(settings.recently_closed_chats[0], chat);
+        let dir = tempfile::tempdir().unwrap();
+        settings.save(dir.path()).unwrap();
+        let mut loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.recently_closed_chats, settings.recently_closed_chats);
+        loaded.forget_closed_chat("chat-one");
+        assert_eq!(loaded.recently_closed_chats.len(), 2);
+        loaded.forget_closed_chat("unsent-one");
+        assert_eq!(loaded.recently_closed_chats[0].id, "unsent-two");
+    }
+
+    #[test]
+    fn closed_chat_repeated_closes_preserve_different_window_drafts() {
+        let mut settings = UiSettings::default();
+        let first = SavedClosedChat {
+            id: "close-a".into(),
+            chat_id: Some("same-chat".into()),
+            window_id: "window-a".into(),
+            closed_at: 1,
+            draft: SavedWindowChatDraft {
+                input: SavedCanvasDraft {
+                    text: "Draft from window A".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut second = first.clone();
+        second.id = "close-b".into();
+        second.window_id = "window-b".into();
+        second.closed_at = 2;
+        second.draft.input.text = "Draft from window B".into();
+        settings.remember_closed_chat(first);
+        settings.remember_closed_chat(second);
+        assert_eq!(settings.recently_closed_chats.len(), 2);
+        assert_eq!(
+            settings.recently_closed_chats[0].chat_id.as_deref(),
+            Some("same-chat")
+        );
+        assert_eq!(settings.recently_closed_chats[1].chat_id, None);
+        assert_eq!(
+            settings.recently_closed_chats[1].draft.input.text,
+            "Draft from window A"
+        );
+        settings.forget_closed_chat("same-chat");
+        assert_eq!(settings.recently_closed_chats.len(), 1);
+        assert_eq!(
+            settings.recently_closed_chats[0].draft.input.text,
+            "Draft from window A"
+        );
+    }
+
+    #[test]
+    fn closed_chat_hide_and_exact_draft_discard_persist_without_accepting_stale_confirmation() {
+        let mut settings = UiSettings::default();
+        let original = SavedClosedChat {
+            id: "draft-one".into(),
+            draft: SavedWindowChatDraft {
+                input: SavedCanvasDraft {
+                    text: "Earlier input".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        settings.remember_closed_chat(original.clone());
+        assert!(settings.hide_history_entry("draft:draft-one"));
+        assert!(!settings.hide_history_entry("draft:draft-one"));
+        assert!(!settings.hide_history_entry("draft:"));
+        let mut current = original.clone();
+        current.draft.input.text = "Newer input".into();
+        settings.remember_closed_chat(current.clone());
+        assert!(
+            settings.hidden_history_entries.is_empty(),
+            "a new close is visible again"
+        );
+        settings.hide_history_entry("draft:draft-one");
+        settings.hide_history_entry("chat:keep");
+        assert!(!settings.discard_closed_chat(&original));
+        let mut wrong_id = current.clone();
+        wrong_id.id = "different".into();
+        assert!(!settings.discard_closed_chat(&wrong_id));
+        let chat = SavedClosedChat {
+            id: "saved-chat".into(),
+            chat_id: Some("keep".into()),
+            ..Default::default()
+        };
+        settings.remember_closed_chat(chat.clone());
+        settings.hide_history_entry("chat:keep");
+        assert!(
+            !settings.discard_closed_chat(&chat),
+            "saved chats require engine deletion"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        settings.save(dir.path()).unwrap();
+        let mut loaded = UiSettings::load(dir.path());
+        assert_eq!(
+            loaded.hidden_history_entries,
+            settings.hidden_history_entries
+        );
+        assert!(loaded.discard_closed_chat(&current));
+        assert!(!loaded.discard_closed_chat(&current));
+        assert_eq!(loaded.recently_closed_chats, vec![chat]);
+        assert_eq!(loaded.hidden_history_entries, vec!["chat:keep"]);
+        loaded.save(dir.path()).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path()).recently_closed_chats,
+            loaded.recently_closed_chats
+        );
+    }
+
+    #[test]
+    fn existing_settings_keep_effective_interface_font_when_legacy_field_is_missing() {
+        use crate::typography::UiFontFamily;
+        let dir = tempfile::tempdir().unwrap();
+        for (saved, expected) in [
+            (
+                serde_json::json!({"sidebarWidth": 288}),
+                UiFontFamily::Geist,
+            ),
+            (
+                serde_json::json!({"workspaceWindows": [], "sidebarWidth": 288}),
+                UiFontFamily::System,
+            ),
+            (
+                serde_json::json!({"projectTabsVersion": 2}),
+                UiFontFamily::System,
+            ),
+            (
+                serde_json::json!({"chatTabs": [{"id":"workspace-one"}]}),
+                UiFontFamily::System,
+            ),
+            (
+                serde_json::json!({"uiFontFamily":"geist", "workspaceWindows": []}),
+                UiFontFamily::Geist,
+            ),
+            (
+                serde_json::json!({"uiFontFamily":"system"}),
+                UiFontFamily::System,
+            ),
+        ] {
+            std::fs::write(UiSettings::path(dir.path()), saved.to_string()).unwrap();
+            let restored = UiSettings::load(dir.path());
+            assert_eq!(restored.ui_font_family, expected, "{saved}");
+            restored.save(dir.path()).unwrap();
+            assert_eq!(UiSettings::load(dir.path()).ui_font_family, expected);
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            UiSettings::load(empty.path()).ui_font_family,
+            UiFontFamily::default()
+        );
+    }
+
+    #[test]
+    fn saved_draft_preserves_checkout_choice_and_attachment_annotations() {
+        for checkout in ["local", "newWorktree"] {
+            let saved = serde_json::json!({
+                "git":{"branch":"feature/example", "checkout":checkout},
+                "text":"Review the annotated draft",
+                "attachments":[{"id":"attachment-one", "name":"example.png",
+                    "cacheKey":"00000000-0000-4000-8000-000000000001", "image":true,
+                    "annotations":"1. Keep this label."}]
+            });
+            let draft: SavedCanvasDraft = serde_json::from_value(saved.clone()).unwrap();
+            let written = serde_json::to_value(draft).unwrap();
+            assert_eq!(written["git"], saved["git"]);
+            assert_eq!(written["attachments"], saved["attachments"]);
+        }
+        let legacy: SavedCanvasDraft = serde_json::from_value(serde_json::json!({
+            "attachments":[{"id":"old", "name":"old.txt", "cacheKey":"old-key", "image":false}]
+        }))
+        .unwrap();
+        assert!(legacy.git.is_none());
+        assert!(legacy.attachments[0].annotations.is_none());
     }
 
     #[test]
@@ -2076,6 +2747,150 @@ mod tests {
         let legacy: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
         assert_eq!(legacy.window_geometry, None);
         assert_eq!(legacy.sidebar_width, 300.0);
+    }
+
+    #[test]
+    fn workspace_window_records_migrate_legacy_navigation_once() {
+        let mut settings = UiSettings {
+            last_chat_id: Some("conversation-a".into()),
+            last_space_id: Some("project-a".into()),
+            chat_tabs: vec![SavedChatTab {
+                id: "session-a".into(),
+                selected: Some("conversation-a".into()),
+                ..Default::default()
+            }],
+            project_tabs_version: 2,
+            ..Default::default()
+        };
+        let legacy = settings.restorable_workspace_windows();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].id, "main");
+        assert_eq!(legacy[0].chat_tabs, settings.chat_tabs);
+        assert_eq!(legacy[0].last_chat_id, settings.last_chat_id);
+        assert_eq!(legacy[0].last_space_id, settings.last_space_id);
+        settings.upsert_workspace_window(legacy[0].clone());
+        settings.remove_workspace_window("main");
+        assert_eq!(settings.workspace_windows, Some(Vec::new()));
+        assert!(settings.restorable_workspace_windows().is_empty());
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let reloaded: UiSettings = serde_json::from_str(&encoded).unwrap();
+        assert!(reloaded.restorable_workspace_windows().is_empty());
+    }
+
+    #[test]
+    fn workspace_window_records_round_trip_shared_session_with_independent_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = UiSettings::default();
+        for (window, chat, x) in [("left", "chat-a", 40.0), ("right", "chat-b", 800.0)] {
+            settings.upsert_workspace_window(SavedWorkspaceWindow {
+                id: window.into(),
+                geometry: Some(WindowGeometry {
+                    display_uuid: Some(uuid::Uuid::from_u128(1)),
+                    x,
+                    y: 40.0,
+                    width: 980.0,
+                    height: 700.0,
+                }),
+                chat_tabs: vec![SavedChatTab {
+                    id: "same-session".into(),
+                    selected: Some(chat.into()),
+                    ..Default::default()
+                }],
+                last_chat_id: Some(chat.into()),
+                project_tabs_version: 2,
+                ..Default::default()
+            });
+        }
+        settings.save(dir.path()).unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.workspace_windows, settings.workspace_windows);
+        let windows = loaded.restorable_workspace_windows();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].chat_tabs[0].id, windows[1].chat_tabs[0].id);
+        assert_ne!(windows[0].last_chat_id, windows[1].last_chat_id);
+        assert_ne!(windows[0].geometry, windows[1].geometry);
+    }
+
+    #[test]
+    fn workspace_window_records_merge_interleaved_updates_and_close() {
+        let mut settings = UiSettings::default();
+        let mut left = SavedWorkspaceWindow {
+            id: "left".into(),
+            ..Default::default()
+        };
+        let mut right = SavedWorkspaceWindow {
+            id: "right".into(),
+            ..Default::default()
+        };
+        settings.upsert_workspace_window(left.clone());
+        settings.upsert_workspace_window(right.clone());
+        left.last_chat_id = Some("left-chat".into());
+        settings.upsert_workspace_window(left.clone());
+        right.last_chat_id = Some("right-chat".into());
+        settings.upsert_workspace_window(right.clone());
+        assert_eq!(
+            settings.restorable_workspace_windows(),
+            vec![left, right.clone()]
+        );
+        settings.remove_workspace_window("left");
+        right.space_filter = Some("project-b".into());
+        settings.upsert_workspace_window(right.clone());
+        assert_eq!(settings.restorable_workspace_windows(), vec![right]);
+    }
+
+    #[test]
+    fn workspace_window_record_overlay_preserves_preferences_and_other_windows() {
+        let mut settings = UiSettings {
+            sidebar_width: 310.0,
+            sound_enabled: false,
+            workspace_windows: Some(vec![SavedWorkspaceWindow {
+                id: "other".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let windows = settings.workspace_windows.clone();
+        let record = SavedWorkspaceWindow {
+            id: "focused".into(),
+            last_chat_id: Some("focused-chat".into()),
+            space_filter: Some("focused-project".into()),
+            ..Default::default()
+        };
+        record.apply_to_settings(&mut settings);
+        assert_eq!(settings.last_chat_id, record.last_chat_id);
+        assert_eq!(settings.space_filter, record.space_filter);
+        assert_eq!(settings.workspace_windows, windows);
+        assert_eq!(settings.sidebar_width, 310.0);
+        assert!(!settings.sound_enabled);
+    }
+
+    #[test]
+    fn workspace_window_records_heal_invalid_geometry_and_duplicate_window_ids() {
+        let record = SavedWorkspaceWindow {
+            id: "valid".into(),
+            geometry: Some(WindowGeometry {
+                display_uuid: None,
+                x: f32::NAN,
+                y: 0.0,
+                width: 980.0,
+                height: 700.0,
+            }),
+            chat_tab: usize::MAX,
+            ..Default::default()
+        };
+        let settings = UiSettings {
+            workspace_windows: Some(vec![
+                record.clone(),
+                record,
+                SavedWorkspaceWindow::default(),
+            ]),
+            ..Default::default()
+        }
+        .clamped();
+        let windows = settings.restorable_workspace_windows();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].geometry, None);
+        assert_eq!(windows[0].chat_tab, 0);
     }
 
     #[test]
@@ -2505,17 +3320,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
             window_geometry: None,
+            workspace_windows: None,
+            recently_closed_chats: Vec::new(),
+            hidden_history_entries: Vec::new(),
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             sidebar_grouped: true,
             sidebar_organization: SidebarOrganization::ByDevice,
             sidebar_sort: SidebarSort::Created,
-            sidebar_compact: true,
+            sidebar_compact: false,
             sidebar_show_project_icon: false,
             sidebar_show_project_label: false,
             sidebar_show_harness: false,
             sidebar_show_branch: false,
             sidebar_show_archived: false,
+            sidebar_show_updated: true,
             last_space_id: Some("space-1".into()),
             project_folders_by_device: HashMap::from([(
                 "local".into(),
@@ -2530,6 +3349,8 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            sidebar_all_projects: true,
+            sidebar_task_view: true,
             last_chat_id: Some("b".into()),
             chat_layout: Some(SavedChatLayout {
                 vertical: false,
@@ -2546,10 +3367,13 @@ mod tests {
                     selected: Some("a".into()),
                     project: Some("space-1".into()),
                     layout: None,
+                    ..Default::default()
                 },
                 SavedChatTab::default(),
             ],
             chat_tab: 1,
+            project_tabs_version: 1,
+            session_overview_order: vec![None, Some("space-1".into())],
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (
                     "local".to_string(),
@@ -2622,6 +3446,7 @@ mod tests {
             },
             diff_split: true,
             diff_wrap: true,
+            diff_ignore_whitespace: true,
             code_fences_fit_content: true,
             transcript_width: 960.0,
             open_web_links_in_harness: false,
@@ -2762,20 +3587,73 @@ mod tests {
     fn sidebar_display_defaults_and_preferences_round_trip() {
         let settings: UiSettings = serde_json::from_str("{}").unwrap();
         assert!(settings.sidebar_compact);
-        assert!(settings.sidebar_show_project_icon);
-        assert!(settings.sidebar_show_project_label);
+        assert!(!settings.sidebar_show_project_icon);
+        assert!(!settings.sidebar_show_project_label);
+        assert!(settings.sidebar_show_harness);
+        assert!(settings.sidebar_show_branch);
+        assert!(settings.sidebar_show_updated);
         assert!(settings.sidebar_show_archived);
         let customized = UiSettings {
             sidebar_compact: false,
-            sidebar_show_project_icon: false,
-            sidebar_show_project_label: false,
             sidebar_show_archived: false,
+            sidebar_show_project_icon: true,
+            sidebar_show_project_label: true,
+            sidebar_show_harness: false,
+            sidebar_show_branch: false,
+            sidebar_show_updated: false,
             sidebar_organization: SidebarOrganization::ByProject,
             ..settings
         };
         let restored: UiSettings =
             serde_json::from_str(&serde_json::to_string(&customized).unwrap()).unwrap();
         assert_eq!(restored.clamped(), customized);
+    }
+
+    #[test]
+    fn sidebar_simple_reset_preserves_organization_and_legacy_preferences_load() {
+        let mut settings: UiSettings = serde_json::from_str(
+            r#"{"sidebarShowHarness":true,"sidebarShowBranch":true,"sidebarShowProjectIcon":true,"sidebarShowProjectLabel":true,"sidebarCompact":false,"sidebarWidth":300,"sidebarOrganization":"byProject","sidebarSort":"created"}"#,
+        ).unwrap();
+        assert!(!settings.sidebar_compact);
+        assert!(settings.sidebar_show_harness && settings.sidebar_show_branch);
+        assert!(settings.sidebar_show_project_icon && settings.sidebar_show_project_label);
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["sidebarCompact"],
+            false
+        );
+        settings.sidebar_show_harness = false;
+        settings.sidebar_show_branch = false;
+        settings.sidebar_show_updated = false;
+        settings.reset_sidebar_display();
+        assert!(settings.sidebar_compact);
+        assert!(settings.sidebar_show_harness && settings.sidebar_show_branch);
+        assert!(!settings.sidebar_show_project_icon && !settings.sidebar_show_project_label);
+        assert!(settings.sidebar_show_updated);
+        assert_eq!(settings.sidebar_width, 300.0);
+        assert_eq!(
+            settings.sidebar_organization,
+            SidebarOrganization::ByProject
+        );
+        assert_eq!(settings.sidebar_sort, SidebarSort::Created);
+    }
+
+    #[test]
+    fn sidebar_compact_preserves_explicit_visibility_preferences() {
+        for compact in [false, true] {
+            let settings: UiSettings = serde_json::from_value(serde_json::json!({
+                "sidebarCompact": compact,
+                "sidebarShowHarness": false,
+                "sidebarShowBranch": false,
+                "sidebarShowUpdated": false,
+            }))
+            .unwrap();
+            assert_eq!(settings.sidebar_compact, compact);
+            assert!(!settings.sidebar_show_harness);
+            assert!(!settings.sidebar_show_branch);
+            assert!(!settings.sidebar_show_updated);
+            let saved = serde_json::to_value(settings).unwrap();
+            assert_eq!(saved["sidebarCompact"], compact);
+        }
     }
 
     #[test]
@@ -2814,6 +3692,10 @@ mod tests {
         assert!(loaded.sound_completion_enabled);
         assert!(loaded.sound_input_enabled);
         assert!(loaded.sound_attention_enabled);
+        assert!(
+            loaded.attach_sound_enabled,
+            "older settings default the attachment cue on"
+        );
         assert_eq!(
             loaded.files_autosave_delay_ms,
             FILES_AUTOSAVE_DELAY_DEFAULT_MS
@@ -2892,6 +3774,17 @@ mod tests {
     }
 
     #[test]
+    fn attachment_sound_defaults_on_and_retains_an_explicit_opt_out() {
+        let settings: UiSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.attach_sound_enabled);
+        let mut settings = settings;
+        settings.attach_sound_enabled = false;
+        let restored: UiSettings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert!(!restored.attach_sound_enabled);
+    }
+
+    #[test]
     fn legacy_accent_color_migrates_to_an_explicit_preset() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(UiSettings::path(dir.path()), r#"{"accentColor":"cyan"}"#).unwrap();
@@ -2906,7 +3799,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_ui_font_default_to_geist() {
+    fn legacy_upstream_settings_without_ui_font_keep_geist() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
@@ -2925,6 +3818,19 @@ mod tests {
             loaded.ui_font_size,
             crate::typography::UiFontSize::default()
         );
+
+        // An explicit choice of the previous default remains a user choice.
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"uiFontFamily": "geist", "sidebarWidth": 300}"#,
+        )
+        .unwrap();
+        let explicit = UiSettings::load(dir.path());
+        assert_eq!(
+            explicit.ui_font_family,
+            crate::typography::UiFontFamily::Geist
+        );
+        assert_eq!(explicit.sidebar_width, 300.0);
     }
 
     #[test]
@@ -2951,7 +3857,7 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(
             loaded.ui_font_family,
-            crate::typography::UiFontFamily::Geist
+            crate::typography::UiFontFamily::default()
         );
         assert_eq!(loaded.sidebar_width, 300.0);
     }
@@ -2959,10 +3865,7 @@ mod tests {
     #[test]
     fn missing_and_corrupt_files_yield_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let fresh = UiSettings::load(dir.path());
-        assert_eq!(fresh, UiSettings::first_run());
-        assert!(fresh.transcript_compact_mode && !fresh.sidebar_show_branch);
-        assert_eq!(fresh.sidebar_organization, SidebarOrganization::ByStatus);
+        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
         std::fs::write(UiSettings::path(dir.path()), "{not json").unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
     }
@@ -3218,7 +4121,7 @@ mod tests {
     #[test]
     fn defaults_match_harness() {
         let d = UiSettings::default();
-        assert_eq!(d.sidebar_width, 256.0);
+        assert_eq!(d.sidebar_width, SIDEBAR_MIN);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
@@ -3659,6 +4562,11 @@ mod tests {
         assert_eq!(badge_combo_on(true, "mod-2"), "⌘2");
         assert_eq!(badge_combo_on(true, "mod-shift-a"), "⇧⌘A");
         assert_eq!(badge_combo_on(true, "mod-alt-3"), "⌥⌘3");
+        assert_eq!(badge_combo_on(true, "cmd-shift-n"), "⇧⌘N");
+        assert_eq!(badge_combo_on(true, "super-b"), "⌘B");
+        assert_eq!(badge_combo_on(true, "cmd--"), "⌘-");
+        assert_eq!(badge_combo_on(false, "mod--"), "Ctrl+-");
+        assert_eq!(badge_combo_on(true, "-"), "-");
         // A literal ctrl segment (macOS recorder spelling) is ⌃.
         assert_eq!(badge_combo_on(true, "ctrl-tab"), "⌃Tab");
         // Elsewhere the textual form stands.

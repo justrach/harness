@@ -121,24 +121,21 @@ fn moving_an_archived_session_out_of_a_parked_tab_removes_its_old_reference(
 }
 
 #[gpui::test]
-fn moving_the_focused_archived_session_to_a_new_tab_clears_its_old_selection(
+fn reopening_the_focused_archived_session_preserves_its_existing_placement(
     cx: &mut gpui::TestAppContext,
 ) {
     for split in [false, true] {
         let (_dir, window) = archived_window(cx, split, None);
         window
             .update(cx, |shell, window, cx| {
+                let layout = shell.chat_split.clone();
+                let tabs = shell.chat_tabs.clone();
                 shell.new_chat_tab(Some("current".into()), window, cx);
-                assert!(shell.chat_tabs[0].selected.is_none());
-                if split {
-                    assert_eq!(
-                        shell.chat_tabs[0].split.as_ref().unwrap().panes[0].as_deref(),
-                        Some("peer")
-                    );
-                }
-                shell.switch_chat_tab(0, window, cx);
-                assert!(shell.state.read(cx).selected_chat.is_none());
-                shell.switch_chat_tab(1, window, cx);
+                assert_eq!(shell.chat_split, layout);
+                assert_eq!(
+                    shell.chat_tabs, tabs,
+                    "reopening must not duplicate the conversation"
+                );
                 assert_eq!(
                     shell.state.read(cx).selected_chat.as_deref(),
                     Some("current")
@@ -156,9 +153,15 @@ fn refused_splits_do_not_detach_archived_sessions(cx: &mut gpui::TestAppContext)
         window
             .update(cx, |shell, window, cx| {
                 if at_cap {
-                    while shell.chat_split.as_ref().unwrap().panes.len() < MAX_CHAT_PANES {
-                        shell.split_chat(SplitAxis::Horizontal, window, cx);
+                    let remaining = MAX_CHAT_PANES - shell.chat_split.as_ref().unwrap().panes.len();
+                    for _ in 0..remaining {
+                        shell.split_chat_opening(SplitAxis::Horizontal, None, window, cx);
                     }
+                    assert_eq!(
+                        shell.chat_split.as_ref().unwrap().panes.len(),
+                        MAX_CHAT_PANES,
+                        "legacy split setup must reach the cap in a bounded number of steps"
+                    );
                 }
                 let layout = shell.chat_split.clone();
                 let tabs = shell.chat_tabs.clone();

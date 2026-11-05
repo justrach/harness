@@ -127,7 +127,13 @@ fn running_turn(
         let state = shell.state.read(cx);
         (
             state.indicator_for("current", Utc::now()) == harness_proto::view::Indicator::Working,
-            crate::turn_work::running_command(&state.transcript).is_some(),
+            state.transcript.iter().flat_map(|entry| &entry.parts).any(|part| {
+                matches!(part, MessagePart::Tool {
+                    call: ToolCall::Exec { .. },
+                    resolved: false,
+                    ..
+                })
+            }),
         )
     });
     assert!(
@@ -145,7 +151,9 @@ fn running_turn(
 fn a_running_command_does_not_open_the_work_pane(cx: &mut gpui::TestAppContext) {
     let (_dir, shell, cx) = running_turn(cx);
     assert!(
-        shell.read_with(cx, |shell, cx| !shell.right_pane_open(cx)),
+        shell.read_with(cx, |shell, cx| {
+            !shell.right_pane_open(cx) && shell.diffs.is_empty()
+        }),
         "a running command opened the work pane"
     );
 }

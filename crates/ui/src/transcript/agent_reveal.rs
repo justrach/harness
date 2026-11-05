@@ -2,8 +2,8 @@
 //! bring an agent's spawn chip into view and ring it for a moment.
 //!
 //! - [`agent_reveal_target`] maps the agent (its spawn's part id) to the
-//!   row that shows its chip. In Compact mode the chip sits inside the
-//!   turn's work fold, which the reveal opens first.
+//!   row that shows its chip. A chip inside a collapsed work group is
+//!   revealed by opening that group first; no separate UI mode is introduced.
 //! - A row already inside the reading band (below the titlebar, above the
 //!   composer) only gets the ring. Otherwise the list glides to the row's
 //!   index ([`Transcript::scroll_to_row_at`]), which works for rows the
@@ -18,9 +18,9 @@ use super::{OWN_SEND_TOP_INSET_PX, Row, RowKind, Transcript};
 use crate::motion;
 
 /// How long the ring stays at full strength once the row has landed.
-pub(crate) const FLASH_HOLD_MS: i64 = 350;
+pub(crate) const FLASH_HOLD_MS: i64 = 600;
 /// How long it then takes to fade out.
-pub(crate) const FLASH_FADE_MS: i64 = 900;
+pub(crate) const FLASH_FADE_MS: i64 = 240;
 
 /// The ringed agent and when its row lands (after the glide).
 #[derive(Debug, Clone)]
@@ -122,6 +122,19 @@ pub(crate) fn flash_ring(alpha: f32, color: Hsla) -> AnyElement {
 }
 
 impl Transcript {
+    /// A part id is scoped to a chat, including in detached workspace windows.
+    pub(crate) fn reveal_agent_in_chat(
+        &mut self,
+        chat_id: &str,
+        part_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync(cx);
+        if self.chat_id.as_deref() == Some(chat_id) {
+            self.reveal_agent(part_id, cx);
+        }
+    }
+
     /// Bring the chip of the agent spawned by part `part_id` into view and
     /// ring it. A no-op when no row shows that agent.
     pub fn reveal_agent(&mut self, part_id: &str, cx: &mut Context<Self>) {
@@ -513,10 +526,15 @@ mod tests {
         let flash = transcript.read_with(&visual, |t, _| t.agent_flash_now(reduced));
         assert_eq!(flash.map(|(id, _)| id), Some("s2".to_owned()));
 
-        // The list glides to the chip's row, laying out rows it had not. The
-        // glide's timeline runs on the wall clock, so let real time pass too.
+        // The list glides to the chip's row, laying out rows it had not.
+        // Advance the glide's wall-clock origin without sleeping; delivery
+        // still happens through display callbacks and actual list layout.
+        transcript.update(&mut visual, |t, _| {
+            if let Some(glide) = t.row_glide.as_mut() {
+                glide.started = Instant::now() - glide.total;
+            }
+        });
         for _ in 0..80 {
-            std::thread::sleep(Duration::from_millis(8));
             visual.executor().advance_clock(Duration::from_millis(32));
             draw(&mut visual);
         }
@@ -580,5 +598,52 @@ mod tests {
         assert!(in_reading_band(top, top + 40.0, 0.0, 900.0, 150.0));
         assert!(!in_reading_band(top - 1.0, top + 40.0, 0.0, 900.0, 150.0));
         assert!(!in_reading_band(700.0, 760.0, 0.0, 900.0, 150.0));
+    }
+
+    #[gpui::test]
+    fn an_agent_reveal_is_scoped_to_its_chat_and_cleared_on_switch(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::motion::set_reduced_motion(cx, true);
+            let state = cx.new(|_| crate::state::AppState::new());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("origin".into());
+                state.transcript_replayed = true;
+                state.transcript = long_chat();
+                state.transcript_revision += 1;
+            });
+            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+            transcript.update(cx, |t, cx| {
+                t.reveal_agent_in_chat("other", "s1", cx);
+                assert!(t.agent_flash.is_none());
+                t.reveal_agent_in_chat("origin", "s1", cx);
+                assert_eq!(t.agent_flash_now(true).map(|(id, _)| id), Some("s1".into()));
+            });
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("other".into());
+                state.transcript_revision += 1;
+            });
+            transcript.update(cx, |t, cx| {
+                t.sync(cx);
+                assert!(
+                    t.agent_flash.is_none(),
+                    "same-named parts in another chat must not inherit the highlight"
+                );
+                let before = t.list.logical_scroll_top();
+                t.reveal_agent_in_chat("origin", "s1", cx);
+                t.reveal_agent_in_chat("other", "missing", cx);
+                assert!(t.agent_flash.is_none());
+                let after = t.list.logical_scroll_top();
+                assert_eq!(
+                    (after.item_ix, after.offset_in_item),
+                    (before.item_ix, before.offset_in_item),
+                    "stale or missing targets must not move the view"
+                );
+            });
+        });
     }
 }

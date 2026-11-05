@@ -20,6 +20,42 @@ actions!(
 /// the platform modifier plus Enter sends, whatever the composer's setting.
 pub(super) const WRITE_DOCUMENT_CONTEXT: &str = "WriteDocument";
 
+#[derive(Clone, Copy)]
+enum WriteControl {
+    Expand,
+    Save,
+    Font,
+    Attach,
+    Send,
+}
+
+/// Native tab traversal and activation, shared by the page's small controls.
+fn keyboard_control(
+    element: gpui::Stateful<gpui::Div>,
+    action: WriteControl,
+    accent: gpui::Hsla,
+    cx: &mut Context<Composer>,
+) -> gpui::Stateful<gpui::Div> {
+    let owner = cx.weak_entity();
+    element
+        .tab_index(0)
+        .focus_visible(move |style| style.border_2().border_color(accent))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+            if !event.is_held
+                && event.keystroke.modifiers == gpui::Modifiers::none()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                cx.stop_propagation();
+                this.activate_write_control(action, cx);
+            }
+        }))
+        .on_a11y_action(gpui::AccessibleAction::Click, move |_, _, cx| {
+            owner
+                .update(cx, |this, cx| this.activate_write_control(action, cx))
+                .ok();
+        })
+}
+
 /// Body type on the page, at the default interface size.
 pub const WRITE_TEXT_SIZE: f32 = 18.0;
 /// Baseline to baseline, as a multiple of the type size.
@@ -52,7 +88,7 @@ pub(super) fn bindings() -> Vec<KeyBinding> {
     ]
 }
 
-/// The page's typeface: New York by default, the interface sans from "Aa".
+/// The page starts with the interface face; "Aa" offers an optional serif.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WriteFace {
     pub serif: bool,
@@ -217,6 +253,16 @@ impl ComposerInput {
 }
 
 impl Composer {
+    fn activate_write_control(&mut self, action: WriteControl, cx: &mut Context<Self>) {
+        match action {
+            WriteControl::Expand => self.open_write(cx),
+            WriteControl::Save => self.close_write(cx),
+            WriteControl::Font => self.toggle_write_face(cx),
+            WriteControl::Attach => self.open_file_picker(cx),
+            WriteControl::Send => self.send_from_write(cx),
+        }
+    }
+
     pub fn write_open(&self) -> bool {
         self.write_open
     }
@@ -293,7 +339,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let tip: SharedString = format!(
-            "Write in full screen  {}",
+            "Expand editor  {}",
             crate::settings::badge_combo(toggle_combo())
         )
         .into();
@@ -301,8 +347,9 @@ impl Composer {
             .id("composer-write")
             .debug_selector(|| "composer-write".into())
             .role(Role::Button)
-            .aria_label("Write in full screen")
-            .size(px(28.0))
+            .aria_label("Expand editor")
+            .map(|el| keyboard_control(el, WriteControl::Expand, theme.accent, cx))
+            .size(px(32.0))
             .flex_none()
             .flex()
             .items_center()
@@ -339,90 +386,81 @@ impl Composer {
         }
         let theme = Theme::of(cx).clone();
         let text = self.input.read(cx).text().to_string();
-        let words =
-            crate::write_markdown::word_count_label(crate::write_markdown::word_count(&text));
         let serif = self
             .input
             .read(cx)
             .write_face()
             .is_some_and(|face| face.serif);
+        let available_width = self.last_available_width.unwrap_or(PAGE_MAX_WIDTH);
+        let side_padding = if available_width < 480.0 {
+            20.0
+        } else {
+            PAGE_SIDE_PADDING
+        };
         let column = |el: gpui::Div| {
             el.w_full()
-                .max_w(px(PAGE_MAX_WIDTH + 2.0 * PAGE_SIDE_PADDING))
+                .max_w(px(PAGE_MAX_WIDTH + 2.0 * side_padding))
                 .mx_auto()
-                .px(px(PAGE_SIDE_PADDING))
+                .px(px(side_padding))
         };
-        let quiet_button = |id: &'static str| {
+        let utility = |id: &'static str| {
             div()
                 .id(id)
                 .debug_selector(move || id.into())
                 .role(Role::Button)
-                .h(px(28.0))
-                .px(px(8.0))
+                .size(px(crate::surface_chrome::CONTROL_SIZE + 4.0))
+                .flex_none()
                 .flex()
                 .items_center()
-                .rounded(px(7.0))
+                .justify_center()
+                .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
                 .cursor_pointer()
                 .text_color(theme.text_muted)
-                .hover(|el| el.bg(crate::theme::ink(0.06)).text_color(theme.text))
+                .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
         };
-        let shortcut = crate::settings::badge_combo(toggle_combo());
-        let top_bar = column(div())
-            .flex_none()
-            .h(px(44.0))
-            .relative()
-            .flex()
-            .items_center()
-            .justify_between()
-            .text_size(crate::typography::ui_rems(13.0))
+        let attach = utility("write-attach")
+            .aria_label("Attach files")
+            .map(|el| keyboard_control(el, WriteControl::Attach, theme.accent, cx))
+            .tooltip(|_, cx| {
+                cx.new(|_| AppshotActionTooltip("Attach files".into()))
+                    .into()
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
             .child(
-                quiet_button("write-done")
-                    .ml(px(-8.0))
-                    .aria_label("Done, back to the chat")
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child("Done")
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| {
-                            AppshotActionTooltip(
-                                format!("Back to the chat  Esc · {shortcut}").into(),
-                            )
-                        })
-                        .into()
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.close_write(cx))),
-            )
-            .child(
-                div()
-                    .id("write-words")
-                    .debug_selector(|| "write-words".into())
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .flex()
-                    .justify_center()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_faint)
-                    .child(words),
-            )
-            .child(
-                quiet_button("write-font")
-                    .mr(px(-8.0))
-                    .aria_label(if serif {
-                        "Use sans-serif type"
-                    } else {
-                        "Use serif type"
-                    })
-                    .when(serif, |el| {
-                        el.font_family(WriteFace { serif: true }.family(cx))
-                            .text_size(crate::typography::ui_rems(16.0))
-                    })
-                    .when(!serif, |el| {
-                        el.font_weight(gpui::FontWeight::MEDIUM)
-                            .text_size(crate::typography::ui_rems(14.0))
-                    })
-                    .child("Aa")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_write_face(cx))),
+                crate::icons::icon(crate::icons::PAPERCLIP)
+                    .size(px(crate::surface_chrome::ICON_SIZE + 2.0))
+                    .text_color(theme.text_muted),
             );
+        let font = utility("write-font")
+            .aria_label(if serif {
+                "Use sans-serif type"
+            } else {
+                "Use serif type"
+            })
+            .map(|el| keyboard_control(el, WriteControl::Font, theme.accent, cx))
+            .when(serif, |el| {
+                el.font_family(WriteFace { serif: true }.family(cx))
+                    .text_size(crate::typography::ui_rems(16.0))
+            })
+            .when(!serif, |el| {
+                el.font_weight(gpui::FontWeight::MEDIUM)
+                    .text_size(crate::typography::ui_rems(14.0))
+            })
+            .tooltip(move |_, cx| {
+                cx.new(|_| {
+                    AppshotActionTooltip(
+                        if serif {
+                            "Use sans-serif type"
+                        } else {
+                            "Use serif type"
+                        }
+                        .into(),
+                    )
+                })
+                .into()
+            })
+            .child("Aa")
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_write_face(cx)));
 
         let has_content = composer_has_content(
             &text,
@@ -430,66 +468,104 @@ impl Composer {
             self.staged_comments(cx).len(),
         );
         let enabled = has_content && !self.send_blocked(cx);
-        let label = match self.button_mode(cx) {
-            SendButtonMode::Queue => "Queue",
-            _ => "Send",
-        };
-        let send_hint = crate::settings::badge_combo("mod-enter");
         let send = div()
             .id("write-send")
             .debug_selector(|| "write-send".into())
             .role(Role::Button)
-            .aria_label(if label == "Queue" {
-                "Queue message"
-            } else {
-                "Send message"
-            })
-            .h(px(32.0))
-            .px(px(14.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .rounded_full()
-            .text_size(crate::typography::ui_rems(13.0))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .when(enabled, |el| {
-                el.bg(theme.accent)
-                    .text_color(theme.on_primary_accent())
-                    .cursor_pointer()
-                    .hover(|el| el.opacity(0.88))
-                    .on_click(cx.listener(|this, _, _, cx| this.send_from_write(cx)))
-            })
-            .when(!enabled, |el| {
-                el.bg(crate::theme::ink(0.08)).text_color(theme.text_faint)
-            })
-            .child(label)
-            .child(
-                crate::icons::icon(crate::icons::ARROW_UP)
-                    .size(px(13.0))
-                    .text_color(if enabled {
-                        theme.on_primary_accent()
-                    } else {
-                        theme.text_faint
-                    }),
-            );
-        let attach = div()
-            .id("write-attach")
-            .debug_selector(|| "write-attach".into())
-            .role(Role::Button)
-            .aria_label("Attach files")
-            .size(px(32.0))
+            .aria_label("Send now")
+            .h(px(28.0))
+            .px(px(10.0))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded_full()
-            .cursor_pointer()
-            .hover(|el| el.bg(crate::theme::ink(0.08)))
-            .on_click(cx.listener(|this, _, _, cx| this.open_file_picker(cx)))
+            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+            .border_1()
+            .border_color(theme.border)
+            .text_size(crate::typography::ui_rems(13.0))
+            .text_color(theme.text)
+            .when(enabled, |el| {
+                keyboard_control(el, WriteControl::Send, theme.accent, cx)
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.element_hover))
+                    .on_click(cx.listener(|this, _, _, cx| this.send_from_write(cx)))
+            })
+            .when(!enabled, |el| el.opacity(0.45))
+            .tooltip(|_, cx| {
+                crate::popover::shortcut_tooltip(
+                    "Send now",
+                    crate::settings::badge_combo("mod-enter"),
+                    cx,
+                )
+            })
+            .child("Send now");
+        let shortcut = crate::settings::badge_combo(toggle_combo());
+        let save = crate::popover::btn_primary(&theme, "Save")
+            .id("write-save")
+            .debug_selector(|| "write-save".into())
+            .role(Role::Button)
+            .aria_label("Save draft and return to chat")
+            .h(px(28.0))
+            .py_0()
+            .px(px(12.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+            .map(|el| keyboard_control(el, WriteControl::Save, theme.accent, cx))
+            .tooltip(move |_, cx| {
+                cx.new(|_| {
+                    AppshotActionTooltip(
+                        format!("Keep this draft in the chat  Esc · {shortcut}").into(),
+                    )
+                })
+                .into()
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.close_write(cx)));
+        // Match Browser and Changes: one full-width, 40 px toolbar. The panel
+        // owns its surface and corners; these controls add only the divider.
+        let top_bar = div()
+            .id("write-toolbar")
+            .debug_selector(|| "write-toolbar".into())
+            .w_full()
+            .h(px(40.0))
+            .flex_none()
+            .px(px(crate::surface_chrome::EDGE_INSET))
+            .flex()
+            .items_center()
+            .gap(px(crate::surface_chrome::CONTROL_GAP))
+            .border_b_1()
+            .border_color(theme.border)
             .child(
-                crate::icons::icon(crate::icons::PAPERCLIP)
-                    .size(px(18.0))
-                    .text_color(theme.text_muted),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(crate::surface_chrome::CONTROL_GAP))
+                    .child(attach)
+                    .child(font)
+                    .when(available_width >= 480.0, |left| {
+                        left.child(
+                            div()
+                                .ml(px(6.0))
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_color(theme.text_muted)
+                                .child("Edit message"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(send)
+                    .child(save),
             );
         let failure = self.failure.clone().filter(|_| {
             self.failure_key
@@ -498,48 +574,28 @@ impl Composer {
         });
         let strip = self.render_attachment_strip(&theme, cx);
         let appshot_strip = self.render_appshot_strip(&theme, window, cx);
-        let dock = column(div()).flex_none().pb(px(16.0)).child(
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .rounded(px(COMPOSER_RADIUS))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.composer_bg())
-                .shadow(theme.composer_shadows())
-                .children(appshot_strip)
-                .children(strip)
-                .child(
-                    div()
-                        .h(px(48.0))
-                        .px(px(8.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(attach)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(if failure.is_some() {
-                                    theme.danger
-                                } else {
-                                    theme.text_faint
-                                })
-                                .child(failure.unwrap_or_else(|| {
-                                    format!("{send_hint} to {}", label.to_lowercase()).into()
-                                })),
-                        )
-                        .child(send),
-                )
-                // Completion menus float above the dock, as above the
-                // composer.
-                .children(self.render_file_mention_popup(&theme, cx))
-                .children(self.render_slash_popup(&theme, cx)),
-        );
+        let comments_chip = self.render_comments_chip(&theme, cx);
+        let materials = (strip.is_some() || appshot_strip.is_some() || comments_chip.is_some())
+            .then(|| {
+                column(div())
+                    .id("write-attachments")
+                    .debug_selector(|| "write-attachments".into())
+                    .flex_none()
+                    .max_h(px(180.0))
+                    .overflow_y_scroll()
+                    .pb(px(8.0))
+                    .children(comments_chip)
+                    .children(appshot_strip)
+                    .children(strip)
+            });
+        // Completion menus retain their existing floating placement, anchored
+        // at the editor's bottom edge without adding a second composer surface.
+        let completions = column(div())
+            .flex_none()
+            .h_0()
+            .relative()
+            .children(self.render_file_mention_popup(&theme, cx))
+            .children(self.render_slash_popup(&theme, cx));
 
         div()
             .id("write-page")
@@ -549,7 +605,9 @@ impl Composer {
             .flex()
             .flex_col()
             .pt(px(top_inset))
-            .bg(theme.composer_bg())
+            // The workspace owns the rounded panel surface. A full rectangular
+            // writing fill would cover its corners; keep this page transparent
+            // and leave floating menus/the image viewer outside extra clipping.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 // The input's own Escape closes an open completion menu first
                 // and stops there.
@@ -562,15 +620,27 @@ impl Composer {
                 }
             }))
             .child(top_bar)
+            .children(failure.map(|message| {
+                column(div())
+                    .flex_none()
+                    .pt(px(10.0))
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .text_color(theme.danger)
+                    .child(message)
+            }))
+            .children(materials)
             .child(
                 column(div())
+                    .id("write-page-body")
+                    .debug_selector(|| "write-page-body".into())
                     .flex_1()
                     .min_h_0()
                     .pt(px(12.0))
                     .pb(px(12.0))
                     .child(self.input.clone()),
             )
-            .child(dock)
+            .child(completions)
+            .children(self.render_attachment_preview(window, cx))
             .into_any_element()
     }
 }

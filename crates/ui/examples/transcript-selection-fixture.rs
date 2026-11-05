@@ -64,6 +64,10 @@ fn main() -> anyhow::Result<()> {
         cx.set_global(Theme::light());
         let state = cx.new(|cx| {
             let mut state = AppState::new();
+            state.chats = vec![serde_json::from_value(serde_json::json!({
+                "id": "selection-fixture", "deviceId": "fixture", "archived": false,
+                "createdAt": "2026-10-01T00:00:00Z",
+            })).unwrap()];
             state.selected_chat = Some("selection-fixture".into());
             state.transcript_replayed = true;
             let reset = serde_json::from_value(serde_json::json!([

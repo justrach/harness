@@ -169,6 +169,11 @@ pub mod methods {
     /// `{sessions?: [{source, id}], cwd?}` → import those (or, without `sessions`, every
     /// one the list shows for `cwd`) as chats. Returns `{imported, skipped, errors, chatIds}`.
     pub const EXTERNAL_HISTORY_IMPORT: &str = "ExternalHistoryImport";
+    /// `{reference}` → preview a local or archived Codex conversation without importing it.
+    pub const CODEX_CONVERSATION_PREVIEW: &str = "CodexConversationPreview";
+    /// `{reference, cwd?}` → import a Codex conversation for continuation in graff, or reopen it.
+    /// Returns `{chatId, alreadyImported}`.
+    pub const CODEX_CONVERSATION_IMPORT: &str = "CodexConversationImport";
     /// The account's recent CodeGraff PR-agent runs (`GET /v1/jobs`).
     pub const CODEGRAFF_JOBS: &str = "CodegraffJobs";
     /// Cancel one PR-agent run (`POST /v1/jobs/:id/cancel`).

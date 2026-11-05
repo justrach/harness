@@ -53,6 +53,10 @@ name = "browser-fixture"
 required-features = ["browser-fixture"]
 
 [[example]]
+name = "traffic-lights-fixture"
+required-features = ["browser-fixture"]
+
+[[example]]
 name = "windows-render-fixture"
 required-features = ["windows-render-fixture"]
 
@@ -62,6 +66,10 @@ required-features = ["stall-watch-fixture"]
 
 [[example]]
 name = "appshots-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "error-banner-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -106,6 +114,10 @@ required-features = ["appshots-fixture"]
 
 [[example]]
 name = "build-wait-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "diff-whitespace-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
@@ -169,16 +181,12 @@ name = "onboarding-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
-name = "turn-work-fixture"
-required-features = ["appshots-fixture"]
+name = "new-project-fixture"
+required-features = ["project-palette-fixture"]
 
 [[example]]
 name = "agent-reveal-fixture"
 required-features = ["appshots-fixture"]
-
-[[example]]
-name = "new-project-fixture"
-required-features = ["project-palette-fixture"]
 
 [[example]]
 name = "chat-mode-fixture"
@@ -209,7 +217,7 @@ harness-syntax.workspace = true
 harness-theme.workspace = true
 harness-visual.workspace = true
 gpui.workspace = true
-gpui_platform.workspace = true
+gpui_platform = { workspace = true, features = ["scene-capture"] }
 gpui_tokio.workspace = true
 reqwest.workspace = true
 gpui-base.workspace = true
@@ -246,6 +254,7 @@ rust-embed = "=8.7.2"
 libc.workspace = true
 objc = "0.2"
 wry = { version = "0.56", default-features = false, features = ["os-webview"] }
+raw-window-handle = "0.6"
 objc2 = "0.6"
 block2 = "0.6"
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSBitmapImageRep", "NSImage", "NSEvent", "NSResponder", "NSView", "NSWindow"] }
@@ -271,3 +280,51 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[[example]]
+name = "menu-review-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "project-selector-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "session-overview-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "tab-tear-off-fixture"
+required-features = ["appshots-fixture", "browser-fixture"]
+
+[[example]]
+name = "harp-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "menu-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "gallery-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "annotation-review-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "markup-comment-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "viewed-image-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "accounts-provider-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "keep-awake-fixture"
+required-features = ["appshots-fixture"]

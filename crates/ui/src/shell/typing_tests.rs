@@ -18,6 +18,7 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
             cx,
         );
         settings::init(settings::UiSettings::default(), dir.path(), cx);
+        crate::motion::set_reduced_motion(cx, true);
     });
     let data_dir = dir.path().to_path_buf();
     let (shell, cx) = cx.add_window_view(|_, cx| {
@@ -41,6 +42,7 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
             state.workspace_scope = Some(WorkspaceScope::Local);
             state.local_device_id = Some("local".into());
             state.chats_synced = true;
+            state.no_project = true;
             state.chats = (0..50)
                 .map(|i| {
                     serde_json::from_value(serde_json::json!({
@@ -66,6 +68,8 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
         let focus = shell.read(cx).composer.focus_handle(cx);
         window.focus(&focus, cx);
     });
+    // Establish keyboard focus styling before measuring keystroke invalidation.
+    cx.simulate_keystrokes("right");
     cx.run_until_parked();
     let state = shell.read_with(cx, |shell, _| shell.state.clone());
     let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));

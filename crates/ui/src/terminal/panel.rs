@@ -306,6 +306,8 @@ fn selection_scroll_lines(geometry: GridGeometry, position: gpui::Point<Pixels>)
 struct TerminalTab {
     key: u64,
     title: SharedString,
+    /// An explicit open waiting for the engine or its project row to arrive.
+    pending_open: bool,
     terminal_id: Option<String>,
     target_device_id: Option<String>,
     emulator: Emulator,
@@ -379,6 +381,9 @@ pub struct TerminalPanel {
     /// explicitly (no ensure-on-open/chat-switch), and closing the last tab
     /// must not dispatch the bottom drawer's [`ToggleTerminal`].
     embedded: bool,
+    pinned_chat: Option<String>,
+    /// An explicit projectless panel destination; Some(None) means this device.
+    pinned_device: Option<Option<String>>,
     /// The right pane is in its width tween. Keep painting the retained grid
     /// through the changing clip, but do not feed transient widths into the
     /// emulator: alternate-screen rows truncate rather than reflow.
@@ -414,6 +419,20 @@ pub struct TerminalPanel {
 }
 
 impl TerminalPanel {
+    /// Keep the same PTYs and grids while moving this panel to another window.
+    pub(crate) fn rebind_window_state(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        let owner = self.selected_chat(cx);
+        self._observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
+        self.state = state;
+        self.pinned_chat = Some(owner);
+        // These are coordinates in the old window, rather than PTY state.
+        self.geometry = None;
+        self.geometries.clear();
+        self.selection_drag = None;
+        self.selection_scroll_task = None;
+        cx.notify();
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
         Self {
@@ -423,6 +442,8 @@ impl TerminalPanel {
             chats: HashMap::new(),
             open: false,
             embedded: false,
+            pinned_chat: None,
+            pinned_device: None,
             resize_suspended: false,
             window_corner_bl: false,
             window_corner_br: false,
@@ -444,6 +465,194 @@ impl TerminalPanel {
         let mut panel = Self::new(state, cx);
         panel.embedded = true;
         panel
+    }
+
+    /// Independent workspace panels retain their original session when chat focus changes.
+    pub fn pin_session(&mut self, session: String) {
+        self.pinned_chat = Some(session);
+    }
+
+    /// Pin a new independent terminal without changing the app-wide device pick.
+    pub(crate) fn pin_device(&mut self, device: Option<String>) {
+        self.pinned_device = Some(device);
+    }
+
+    pub(crate) fn device_target(&self, cx: &App) -> Option<String> {
+        self.active_tab(cx)
+            .map(|tab| tab.target_device_id.clone())
+            .unwrap_or_else(|| self.chat_target(&self.selected_chat(cx), cx))
+    }
+
+    /// Saving an inactive workspace must not borrow the currently visible
+    /// dock's host. Every owner retains the destination of its own active PTY.
+    pub(crate) fn device_target_for_owner(&self, owner: &str, cx: &App) -> Option<String> {
+        self.chats
+            .get(owner)
+            .and_then(|tabs| tabs.tabs.get(tabs.active))
+            .map(|tab| tab.target_device_id.clone())
+            .unwrap_or_else(|| self.state.read(cx).terminal_target_device(owner))
+    }
+
+    /// Stable owner for restoring an independently placed workspace terminal.
+    pub(crate) fn session_owner(&self, cx: &App) -> String {
+        self.selected_chat(cx)
+    }
+
+    /// Lift a legacy dock or surface into an independent host. The terminal
+    /// grids and PTY identities move; only entity-bound stream/timer tasks are
+    /// replaced. No open, close or command replay belongs to this operation.
+    pub(crate) fn take_window_tabs(
+        &mut self,
+        owner: &str,
+        key: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<(Entity<TerminalPanel>, u64), String> {
+        let tabs = self
+            .chats
+            .get(owner)
+            .ok_or_else(|| "This terminal is no longer available.".to_string())?;
+        let selected: Vec<_> = tabs
+            .tabs
+            .iter()
+            .filter(|tab| key.is_none_or(|key| tab.key == key))
+            .collect();
+        if selected.is_empty() {
+            return Err("This terminal is no longer available.".into());
+        }
+        // An outstanding open/action has a callback tied to the old host.
+        // Moving it before attachment could orphan or close the arriving PTY.
+        if selected
+            .iter()
+            .any(|tab| tab.terminal_id.is_none() && tab.exited.is_none() && !tab.pending_open)
+        {
+            return Err(
+                "The terminal is still starting. Try moving it again once it is ready.".into(),
+            );
+        }
+        if self.engine(cx).is_none()
+            && selected
+                .iter()
+                .any(|tab| tab.terminal_id.is_some() && tab.exited.is_none())
+        {
+            return Err("Reconnect before moving this terminal.".into());
+        }
+
+        let mut moved = if let Some(key) = key {
+            let tabs = self.chats.get_mut(owner).expect("validated terminal owner");
+            let index = tabs
+                .tabs
+                .iter()
+                .position(|tab| tab.key == key)
+                .expect("validated terminal key");
+            let mut keep_split_focus = false;
+            if let Some(split) = tabs.split {
+                if split.contains(index) {
+                    let survivor = if split.first == index {
+                        split.second
+                    } else {
+                        split.first
+                    };
+                    tabs.split = None;
+                    tabs.active = shift_index_after_close(survivor, index);
+                    keep_split_focus = true;
+                } else {
+                    tabs.split = Some(TerminalSplit {
+                        first: shift_index_after_close(split.first, index),
+                        second: shift_index_after_close(split.second, index),
+                        ..split
+                    });
+                }
+            }
+            let tab = tabs.tabs.remove(index);
+            if !keep_split_focus {
+                tabs.active = active_after_close(tabs.active, index, tabs.tabs.len());
+            }
+            ChatTabs {
+                tabs: vec![tab],
+                active: 0,
+                split: None,
+            }
+        } else {
+            self.chats.remove(owner).expect("validated terminal owner")
+        };
+        let active_key = moved.tabs[moved.active.min(moved.tabs.len() - 1)].key;
+        let tab_seq = moved.tabs.iter().map(|tab| tab.key).max().unwrap_or(0);
+        for tab in &mut moved.tabs {
+            // The receiver resumes after last_seq against the same live PTY.
+            tab._run = None;
+            tab.flush_task = None;
+            tab.resize_task = None;
+            self.geometries.remove(&tab.key);
+        }
+        self.geometry = None;
+        self.drag = None;
+        self.selection_drag = None;
+        self.selection_scroll_task = None;
+        self.rail_tab_key = None;
+        if self.selected_chat(cx) == owner
+            && self
+                .chats
+                .get(owner)
+                .is_none_or(|tabs| tabs.tabs.is_empty())
+        {
+            // A removed dock must not lazily spawn a replacement on a later
+            // unrelated state notification while the source window remains.
+            self.open = false;
+            self.focus_pending = false;
+        }
+        let state = self.state.clone();
+        let owner = owner.to_owned();
+        let embedded = self.embedded || key.is_some();
+        let pinned_device = self.pinned_device.clone();
+        let destination = cx.new(move |cx| {
+            let mut panel = Self::new(state, cx);
+            panel.embedded = embedded;
+            panel.open = true;
+            panel.focus_pending = true;
+            panel.pinned_chat = Some(owner.clone());
+            panel.pinned_device = pinned_device;
+            panel.last_selected = Some(owner.clone());
+            panel.tab_seq = tab_seq;
+            panel.chats.insert(owner, moved);
+            panel.resume_window_tabs(cx);
+            panel
+        });
+        cx.notify();
+        Ok((destination, active_key))
+    }
+
+    fn resume_window_tabs(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let tabs: Vec<_> = self
+            .chats
+            .iter()
+            .flat_map(|(chat, tabs)| {
+                tabs.tabs.iter().map(|tab| {
+                    (
+                        chat.clone(),
+                        tab.key,
+                        tab.terminal_id.clone(),
+                        tab.target_device_id.clone(),
+                        tab.exited.is_none(),
+                        !tab.coalescer.is_empty(),
+                    )
+                })
+            })
+            .collect();
+        for (chat, key, id, target, live, buffered) in tabs {
+            if live && let Some(id) = id {
+                let run = Self::spawn_stream(chat.clone(), key, engine.clone(), target, id, cx);
+                self.tab_mut(&chat, key).unwrap()._run = Some(run);
+                if buffered {
+                    self.tab_mut(&chat, key).unwrap().flush_task =
+                        Some(Self::schedule_flush(chat.clone(), key, cx));
+                }
+                self.schedule_resize(&chat, key, cx);
+            }
+        }
+        self.start_pending_tabs(cx);
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -553,6 +762,7 @@ impl TerminalPanel {
         entry.tabs.push(TerminalTab {
             key,
             title: title.into(),
+            pending_open: false,
             terminal_id: None,
             target_device_id: None,
             emulator: Emulator::new(80, 24),
@@ -631,12 +841,34 @@ impl TerminalPanel {
     }
 
     /// Close the selected chat's tab `key` (surface-tab ✕).
+    /// Close every terminal this panel holds for its chat.
+    pub fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chat = self.selected_chat(cx);
+        let keys: Vec<u64> = self
+            .chats
+            .get(&chat)
+            .map(|tabs| tabs.tabs.iter().map(|tab| tab.key).collect())
+            .unwrap_or_default();
+        for key in keys {
+            self.close_tab(&chat, key, window, cx);
+        }
+    }
+
+    /// Whether this panel's chat is showing two terminals side by side.
+    #[cfg(test)]
+    pub(crate) fn is_split(&self, cx: &App) -> bool {
+        self.chats
+            .get(&self.selected_chat(cx))
+            .is_some_and(|tabs| tabs.split.is_some())
+    }
+
     pub fn close_tab_by_key(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
         let chat = self.selected_chat(cx);
         self.close_tab(&chat, key, window, cx);
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        self.start_pending_tabs(cx);
         let selected_key = self.selected_chat(cx);
         let prev = self.last_selected.clone();
         let switched = Some(selected_key.clone()) != prev;
@@ -679,11 +911,15 @@ impl TerminalPanel {
     /// engine checks the chat's cwd against its OWN filesystem and fails with
     /// "Session working directory is unavailable" (user report).
     fn chat_target(&self, chat: &str, cx: &App) -> Option<String> {
-        self.state.read(cx).terminal_target_device(chat)
+        self.pinned_device
+            .clone()
+            .unwrap_or_else(|| self.state.read(cx).terminal_target_device(chat))
     }
 
     fn selected_chat(&self, cx: &App) -> String {
-        self.state.read(cx).panel_session_key()
+        self.pinned_chat
+            .clone()
+            .unwrap_or_else(|| self.state.read(cx).panel_session_key())
     }
 
     fn ensure_tab(&mut self, cx: &mut Context<Self>) {
@@ -728,21 +964,58 @@ impl TerminalPanel {
     // ---- open / stream lifecycle ----
 
     fn open_tab(&mut self, chat: String, cx: &mut Context<Self>) {
-        let Some(engine) = self.engine(cx) else {
-            return;
-        };
         let tab_no = self
             .chats
             .get(&chat)
             .map_or(1, |entry| entry.tabs.len() + 1);
-        let key = self.reserve_tab_for_chat(chat.clone(), format!("Terminal {tab_no}"), cx);
         let target = self.chat_target(&chat, cx);
-        let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
-        let run = Self::spawn_session(chat.clone(), key, engine, target, None, cwd, cx);
+        let key = self.reserve_tab_for_chat(chat.clone(), format!("Terminal {tab_no}"), cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
-            tab._run = Some(run);
+            tab.pending_open = true;
+            tab.target_device_id = target;
         }
+        self.start_pending_tabs(cx);
         cx.notify();
+    }
+
+    fn start_pending_tabs(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine(cx) else {
+            return;
+        };
+        let pending: Vec<_> = self
+            .chats
+            .iter()
+            .filter(|(chat, _)| !self.should_wait_for_canvas_project(chat, cx))
+            .flat_map(|(chat, tabs)| {
+                tabs.tabs
+                    .iter()
+                    .filter(|tab| tab.pending_open)
+                    .map(|tab| (chat.clone(), tab.key))
+            })
+            .collect();
+        for (chat, key) in pending {
+            let target = if chat == CANVAS_PANEL_PREFIX {
+                // The projectless key has no device identity. Keep the device
+                // chosen when this tab was requested, including local/None.
+                self.tab_mut(&chat, key).unwrap().target_device_id.clone()
+            } else {
+                self.chat_target(&chat, cx)
+            };
+            let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
+            let tab = self.tab_mut(&chat, key).unwrap();
+            // Claim it before spawning: unrelated state notifications must not
+            // launch another PTY while this one's open RPC is in flight.
+            tab.pending_open = false;
+            tab._run = Some(Self::spawn_session(
+                chat,
+                key,
+                engine.clone(),
+                target,
+                None,
+                cwd,
+                cx,
+            ));
+        }
     }
 
     /// OpenTerminal, then pump SubscribeTerminal with reconnect backoff.
@@ -805,6 +1078,10 @@ impl TerminalPanel {
                     if let Some(tab) = panel.tab_mut(&chat, key) {
                         tab.terminal_id = Some(terminal_id.clone());
                         tab.target_device_id = target.clone();
+                        // Prepaint may have measured a different viewport while
+                        // OpenTerminal was in flight. Reconcile after the id and
+                        // host are known even if no later layout change occurs.
+                        panel.schedule_resize(&chat, key, cx);
                         cx.notify();
                         true
                     } else {
@@ -827,6 +1104,26 @@ impl TerminalPanel {
                 return;
             }
 
+            let stream = this.update(cx, |_, cx| {
+                Self::spawn_stream(chat, key, engine, target, terminal_id, cx)
+            });
+            if let Ok(stream) = stream {
+                stream.await;
+            }
+        })
+    }
+
+    /// Subscribe without reopening a PTY. Also used when a live grid moves to
+    /// a different host entity and resumes from its existing sequence cursor.
+    fn spawn_stream(
+        chat: String,
+        key: u64,
+        engine: EngineHandle,
+        target: Option<String>,
+        terminal_id: String,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
             let mut attempt: u32 = 0;
             loop {
                 let Ok(after_seq) = this.update(cx, |panel, _| {
@@ -1069,8 +1366,7 @@ impl TerminalPanel {
         }
         let (cols, rows) = (geometry.cols, geometry.rows);
         let chat = self.selected_chat(cx);
-        let engine = self.engine(cx);
-        let target = {
+        {
             let Some(tab) = self.tab_mut(&chat, key) else {
                 return;
             };
@@ -1078,10 +1374,18 @@ impl TerminalPanel {
                 return;
             }
             tab.emulator.resize(cols, rows);
-            tab.target_device_id.clone()
-        };
-        if let (Some(engine), Some(tab)) = (engine, self.tab_mut(&chat, key)) {
-            let id = tab.terminal_id.clone();
+        }
+        self.schedule_resize(&chat, key, cx);
+        // Deliberately no cx.notify(): this runs during prepaint of the
+        // current frame, which already paints the resized grid.
+    }
+
+    fn schedule_resize(&mut self, chat: &str, key: u64, cx: &mut Context<Self>) {
+        if let (Some(engine), Some(tab)) = (self.engine(cx), self.tab_mut(chat, key)) {
+            if tab.terminal_id.is_none() {
+                return;
+            }
+            let chat = chat.to_string();
             tab.resize_task = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(RESIZE_DEBOUNCE_MS))
@@ -1089,16 +1393,20 @@ impl TerminalPanel {
                 // Re-read the *current* size — later prepaints may have
                 // resized again inside the debounce window.
                 let Ok(current) = this.update(cx, |panel, _| {
-                    panel
-                        .tab_mut(&chat, key)
-                        .map(|t| (t.terminal_id.clone(), t.emulator.cols(), t.emulator.rows()))
+                    panel.tab_mut(&chat, key).map(|t| {
+                        (
+                            t.terminal_id.clone(),
+                            t.target_device_id.clone(),
+                            t.emulator.cols(),
+                            t.emulator.rows(),
+                        )
+                    })
                 }) else {
                     return;
                 };
-                let Some((stored_id, cols, rows)) = current else {
+                let Some((Some(id), target, cols, rows)) = current else {
                     return;
                 };
-                let Some(id) = stored_id.or(id) else { return };
                 let _ = engine
                     .client()
                     .call(
@@ -1111,15 +1419,13 @@ impl TerminalPanel {
                     .await;
             }));
         }
-        // Deliberately no cx.notify(): this runs during prepaint of the
-        // current frame, which already paints the resized grid.
     }
 
     /// Snapshot for the paint element of one tab (the focused pane, or a
     /// split neighbor).
     pub fn grid_snapshot(&self, key: u64, cx: &App) -> Option<GridSnapshot> {
-        let chat = self.state.read(cx).selected_chat.as_deref()?;
-        let tab = self.chats.get(chat)?.tabs.iter().find(|t| t.key == key)?;
+        let chat = self.selected_chat(cx);
+        let tab = self.chats.get(&chat)?.tabs.iter().find(|t| t.key == key)?;
         Some(GridSnapshot {
             lines: tab.emulator.lines(),
             cursor: tab.emulator.cursor(),
@@ -1735,7 +2041,7 @@ impl TerminalPanel {
                             .rounded(px(6.0))
                             .when(!selected, |el| el.invisible())
                             .cursor_pointer()
-                            .hover(|s| s.bg(crate::theme::ink(0.09)))
+                            .hover(|s| s.bg(theme.element_hover))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(&chat_close2, key, window, cx);
@@ -2036,6 +2342,11 @@ impl Render for TerminalPanel {
             window.focus(&self.focus_handle, cx);
         }
         let focused = self.focus_handle.is_focused(window);
+        let starting = self.active_tab(cx).is_some_and(|tab| {
+            tab.terminal_id.is_none()
+                && tab.exited.is_none()
+                && (tab.pending_open || tab._run.is_some())
+        });
         let scrollbar = self.render_scrollbar(&theme, cx);
 
         // Embedded (right-pane surface host): the shell's surface tabs
@@ -2102,6 +2413,17 @@ impl Render for TerminalPanel {
                         cx.stop_propagation();
                     }))
                     .child(self.render_grids(&chat, focused, &theme, cx))
+                    .when(starting, |body| {
+                        body.child(
+                            div()
+                                .absolute()
+                                .top(px(12.0))
+                                .left(px(12.0))
+                                .text_size(crate::typography::ui_rems(13.0))
+                                .text_color(theme.text_muted)
+                                .child("Starting terminal…"),
+                        )
+                    })
                     .children(scrollbar),
             )
             .into_any_element()
@@ -2111,6 +2433,755 @@ impl Render for TerminalPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal_reply(
+        replies: &tokio::sync::mpsc::Sender<String>,
+        request: &harness_rpc::ClientFrame,
+        value: serde_json::Value,
+    ) {
+        replies
+            .try_send(
+                serde_json::to_string(&harness_rpc::ServerFrame {
+                    id: request.id,
+                    ok: Some(value),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    fn terminal_request(
+        requests: &mut tokio::sync::mpsc::Receiver<String>,
+    ) -> harness_rpc::ClientFrame {
+        serde_json::from_str(&requests.try_recv().expect("terminal RPC request")).unwrap()
+    }
+
+    #[gpui::test]
+    fn terminal_window_handoff_resumes_same_pty_cursor_and_buffered_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel(64);
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.set_test_engine(EngineHandle::from_test_client(harness_rpc::RpcClient::new(
+                out, inbound,
+            )));
+            state
+        });
+        let source = cx.new(|cx| {
+            let mut panel = TerminalPanel::new_embedded(state, cx);
+            panel.pin_session("owner".into());
+            panel
+        });
+        let keys = source.update(cx, |panel, cx| {
+            let first = panel.reserve_tab_for_chat("owner".into(), "First", cx);
+            panel.tab_mut("owner", first).unwrap().exited = Some(0);
+            let live = panel.reserve_tab_for_chat("owner".into(), "Live", cx);
+            let last = panel.reserve_tab_for_chat("owner".into(), "Last", cx);
+            panel.tab_mut("owner", last).unwrap().exited = Some(0);
+            let tabs = panel.chats.get_mut("owner").unwrap();
+            tabs.split = Some(TerminalSplit {
+                axis: SplitAxis::Horizontal,
+                first: 0,
+                second: 2,
+                focus: SplitFocus::Second,
+            });
+            assert!(panel.attach_reserved_session(
+                "owner",
+                live,
+                TerminalSession {
+                    id: "same-pty".into(),
+                    cwd: "/fixture".into(),
+                    shell: "sh".into(),
+                },
+                Some("remote".into()),
+                cx
+            ));
+            (first, live, last)
+        });
+        cx.run_until_parked();
+        let original = terminal_request(&mut requests);
+        assert_eq!(
+            original.method.as_deref(),
+            Some(methods::SUBSCRIBE_TERMINAL)
+        );
+        replies
+            .try_send(
+                serde_json::to_string(&harness_rpc::ServerFrame {
+                    id: original.id,
+                    item: Some(
+                        serde_json::to_value(TerminalEvent::Data {
+                            seq: 4,
+                            data: encode_base64(b"$ before"),
+                        })
+                        .unwrap(),
+                    ),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        let (destination, key) = source.update(cx, |panel, cx| {
+            let flush = TerminalPanel::schedule_flush("owner".into(), keys.1, cx);
+            let tab = panel.tab_mut("owner", keys.1).unwrap();
+            tab.coalescer.push(b"typed");
+            tab.flush_task = Some(flush);
+            tab.scroll_remainder = 0.75;
+            panel.take_window_tabs("owner", Some(keys.1), cx).unwrap()
+        });
+        assert_eq!(key, keys.1);
+        cx.run_until_parked();
+        let mut resumed = None;
+        while let Ok(frame) = requests.try_recv() {
+            let request: harness_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+            assert!(!matches!(
+                request.method.as_deref(),
+                Some(methods::OPEN_TERMINAL | methods::CLOSE_TERMINAL)
+            ));
+            if request.method.as_deref() == Some(methods::SUBSCRIBE_TERMINAL) {
+                assert!(
+                    resumed.replace(request).is_none(),
+                    "one destination subscription"
+                );
+            }
+        }
+        let resumed = resumed.expect("destination resumes the live stream");
+        assert_eq!(resumed.params["terminalId"], "same-pty");
+        assert_eq!(resumed.params["afterSeq"], 4);
+        assert_eq!(resumed.params["targetDeviceId"], "remote");
+        source.read_with(cx, |panel, _| {
+            let tabs = &panel.chats["owner"];
+            assert_eq!(
+                tabs.tabs.iter().map(|tab| tab.key).collect::<Vec<_>>(),
+                [keys.0, keys.2]
+            );
+            assert_eq!(tabs.active, 1);
+            let split = tabs.split.unwrap();
+            assert_eq!((split.first, split.second), (0, 1));
+        });
+        replies
+            .try_send(
+                serde_json::to_string(&harness_rpc::ServerFrame {
+                    id: resumed.id,
+                    item: Some(
+                        serde_json::to_value(TerminalEvent::Data {
+                            seq: 5,
+                            data: encode_base64(b" after"),
+                        })
+                        .unwrap(),
+                    ),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        destination.read_with(cx, |panel, _| {
+            let tab = &panel.chats["owner"].tabs[0];
+            assert_eq!(tab.terminal_id.as_deref(), Some("same-pty"));
+            assert_eq!(tab.last_seq, 5);
+            assert_eq!(tab.emulator.row_text(0), "$ before after");
+            assert_eq!(tab.scroll_remainder, 0.75);
+        });
+        cx.executor()
+            .advance_clock(Duration::from_millis(COALESCE_MS + 1));
+        cx.run_until_parked();
+        let write = terminal_request(&mut requests);
+        assert_eq!(write.method.as_deref(), Some(methods::WRITE_TERMINAL));
+        assert_eq!(write.params["terminalId"], "same-pty");
+        assert_eq!(
+            decode_base64(write.params["data"].as_str().unwrap()),
+            b"typed"
+        );
+        assert_eq!(write.params["targetDeviceId"], "remote");
+        assert!(
+            requests.try_recv().is_err(),
+            "buffer is written exactly once"
+        );
+    }
+
+    #[gpui::test]
+    fn terminal_window_handoff_preserves_whole_dock_selection_and_scrollback(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let state = cx.new(|_| AppState::new());
+        let source = cx.new(|cx| {
+            let mut panel = TerminalPanel::new(state, cx);
+            panel.pin_session("owner".into());
+            panel.open = true;
+            panel
+        });
+        let (keys, text, offset) = source.update(cx, |panel, cx| {
+            let mut keys = Vec::new();
+            for title in ["One", "Two"] {
+                let key = panel.reserve_tab_for_chat("owner".into(), title, cx);
+                let tab = panel.tab_mut("owner", key).unwrap();
+                tab.exited = Some(0);
+                for _ in 0..40 {
+                    tab.emulator.feed(b"kept history\r\n");
+                }
+                tab.emulator.scroll(5);
+                let point = tab.emulator.grid_point(0, 0);
+                tab.emulator
+                    .start_selection(SelectionType::Lines, point, Side::Left);
+                keys.push(key);
+            }
+            let tabs = panel.chats.get_mut("owner").unwrap();
+            tabs.split = Some(TerminalSplit {
+                axis: SplitAxis::Vertical,
+                first: 0,
+                second: 1,
+                focus: SplitFocus::Second,
+            });
+            (
+                keys,
+                tabs.tabs[1].emulator.selection_text(),
+                tabs.tabs[1].emulator.display_offset(),
+            )
+        });
+        let (destination, active) = source.update(cx, |panel, cx| {
+            panel.take_window_tabs("owner", None, cx).unwrap()
+        });
+        assert_eq!(active, keys[1]);
+        source.read_with(cx, |panel, _| {
+            assert!(!panel.chats.contains_key("owner"));
+            assert!(
+                !panel.open,
+                "removing the dock must not auto-open another PTY"
+            );
+        });
+        destination.read_with(cx, |panel, _| {
+            assert!(
+                !panel.embedded,
+                "a whole dock retains its internal tab strip"
+            );
+            let tabs = &panel.chats["owner"];
+            assert_eq!(tabs.active, 1);
+            assert_eq!(tabs.split.unwrap().axis, SplitAxis::Vertical);
+            assert_eq!(tabs.tabs[1].emulator.selection_text(), text);
+            assert_eq!(tabs.tabs[1].emulator.display_offset(), offset);
+            assert!(offset > 0);
+            assert!(text.is_some());
+            assert_eq!(
+                tabs.tabs.iter().map(|tab| tab.key).collect::<Vec<_>>(),
+                keys
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_window_handoff_rejects_inflight_attachment_without_mutating_source(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let state = cx.new(|_| AppState::new());
+        let source = cx.new(|cx| TerminalPanel::new_embedded(state, cx));
+        source.update(cx, |panel, cx| {
+            let ready = panel.reserve_tab_for_chat("owner".into(), "Finished", cx);
+            panel.tab_mut("owner", ready).unwrap().exited = Some(0);
+            let starting = panel.reserve_tab_for_chat("owner".into(), "Action starting", cx);
+            panel
+                .tab_mut("owner", starting)
+                .unwrap()
+                .coalescer
+                .push(b"buffered");
+            assert!(panel.take_window_tabs("owner", None, cx).is_err());
+            assert!(panel.take_window_tabs("owner", Some(starting), cx).is_err());
+            assert!(panel.take_window_tabs("owner", Some(u64::MAX), cx).is_err());
+            assert_eq!(panel.chats["owner"].tabs.len(), 2);
+            assert_eq!(panel.chats["owner"].active, 1);
+            assert!(
+                !panel
+                    .tab_mut("owner", starting)
+                    .unwrap()
+                    .coalescer
+                    .is_empty()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_window_handoff_pending_dock_opens_once_in_its_new_host(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(64);
+        let state = cx.new(|_| AppState::new());
+        let source = cx.new(|cx| {
+            let mut panel = TerminalPanel::new(state.clone(), cx);
+            panel.pin_session("owner".into());
+            panel
+        });
+        let (destination, key) = source.update(cx, |panel, cx| {
+            panel.set_open(true, cx);
+            panel.take_window_tabs("owner", None, cx).unwrap()
+        });
+        destination.read_with(cx, |panel, _| {
+            let tab = &panel.chats["owner"].tabs[0];
+            assert_eq!(tab.key, key);
+            assert!(tab.pending_open);
+        });
+        state.update(cx, |state, cx| {
+            state.set_test_engine(EngineHandle::from_test_client(harness_rpc::RpcClient::new(
+                out, inbound,
+            )));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let open = terminal_request(&mut requests);
+        assert_eq!(open.method.as_deref(), Some(methods::OPEN_TERMINAL));
+        assert_eq!(open.params["chatId"], "owner");
+        assert!(
+            requests.try_recv().is_err(),
+            "the old dock cannot open a replacement"
+        );
+    }
+
+    #[gpui::test]
+    fn terminal_open_before_engine_ready_starts_the_reserved_pinned_tab_once(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(64);
+        let (replies, inbound) = tokio::sync::mpsc::channel(64);
+        let state = cx.new(|_| AppState::new());
+        let panel = cx.new(|cx| {
+            let mut panel = TerminalPanel::new_embedded(state.clone(), cx);
+            panel.pin_session("original-chat".into());
+            panel
+        });
+        let key = panel.update(cx, |panel, cx| {
+            panel.set_open(true, cx);
+            let key = panel.open_tab_for_selected(cx).unwrap();
+            assert_ne!(key, 0);
+            assert!(panel.grid_snapshot(key, cx).is_some());
+            assert!(panel.tab_mut("original-chat", key).unwrap().pending_open);
+            key
+        });
+        state.update(cx, |state, cx| {
+            state.selected_chat = Some("other-chat".into());
+            state.set_test_engine(EngineHandle::from_test_client(harness_rpc::RpcClient::new(
+                out, inbound,
+            )));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let open = terminal_request(&mut requests);
+        assert_eq!(open.method.as_deref(), Some(methods::OPEN_TERMINAL));
+        assert_eq!(open.params["chatId"], "original-chat");
+        for _ in 0..3 {
+            state.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        }
+        assert!(
+            requests.try_recv().is_err(),
+            "open must be sent exactly once"
+        );
+        terminal_reply(
+            &replies,
+            &open,
+            serde_json::json!({ "id": "terminal", "cwd": "/fixture", "shell": "sh" }),
+        );
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        let subscribe = terminal_request(&mut requests);
+        assert_eq!(
+            subscribe.method.as_deref(),
+            Some(methods::SUBSCRIBE_TERMINAL)
+        );
+        replies
+            .try_send(
+                serde_json::to_string(&harness_rpc::ServerFrame {
+                    id: subscribe.id,
+                    item: Some(
+                        serde_json::to_value(TerminalEvent::Data {
+                            seq: 1,
+                            data: encode_base64(b"$ ready"),
+                        })
+                        .unwrap(),
+                    ),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            let tabs = &panel.chats["original-chat"];
+            assert_eq!(tabs.tabs.len(), 1);
+            assert_eq!(tabs.tabs[0].key, key);
+            assert_eq!(tabs.tabs[0].terminal_id.as_deref(), Some("terminal"));
+            let snapshot = panel.grid_snapshot(key, cx).unwrap();
+            let text: String = snapshot.lines[0].iter().map(|cell| cell.ch).collect();
+            assert_eq!(text.trim_end(), "$ ready");
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_pending_close_does_not_open_after_engine_ready(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(64);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        let (panel, cx) =
+            cx.add_window_view(|_, cx| TerminalPanel::new_embedded(state.clone(), cx));
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_open(true, cx);
+            let key = panel.open_tab_for_selected(cx).unwrap();
+            assert!(panel.active_tab(cx).unwrap().pending_open);
+            panel.close_tab_by_key(key, window, cx);
+            assert!(panel.active_tab(cx).is_none());
+        });
+        state.update(cx, |state, cx| {
+            state.set_test_engine(EngineHandle::from_test_client(harness_rpc::RpcClient::new(
+                out, inbound,
+            )));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            requests.try_recv().is_err(),
+            "closed pending tab must stay closed"
+        );
+        panel.read_with(cx, |panel, cx| assert!(panel.active_tab(cx).is_none()));
+    }
+
+    #[gpui::test]
+    fn terminal_pending_canvas_waits_for_its_project_before_opening(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(64);
+        let (_replies, inbound) = tokio::sync::mpsc::channel(64);
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("local".into());
+            state.selected_space = Some("project".into());
+            state.set_test_engine(EngineHandle::from_test_client(harness_rpc::RpcClient::new(
+                out, inbound,
+            )));
+            state
+        });
+        let panel = cx.new(|cx| {
+            let mut panel = TerminalPanel::new_embedded(state.clone(), cx);
+            panel.pin_session("space-canvas:project".into());
+            panel
+        });
+        panel.update(cx, |panel, cx| {
+            let key = panel.open_tab_for_selected(cx).unwrap();
+            assert!(
+                panel
+                    .tab_mut("space-canvas:project", key)
+                    .unwrap()
+                    .pending_open
+            );
+        });
+        cx.run_until_parked();
+        assert!(requests.try_recv().is_err(), "project cwd is not known yet");
+        state.update(cx, |state, cx| {
+            state.selected_space = None;
+            state.no_project = true;
+            state.spaces = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "project", "deviceId": "remote", "name": "Project",
+                    "path": "/fixture/project", "createdAt": chrono::Utc::now(),
+                }))
+                .unwrap(),
+            ];
+            state.spaces_synced = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let open = terminal_request(&mut requests);
+        assert_eq!(open.method.as_deref(), Some(methods::OPEN_TERMINAL));
+        assert_eq!(open.params["chatId"], "space-canvas:project");
+        assert_eq!(open.params["cwd"], "/fixture/project");
+        assert_eq!(open.params["targetDeviceId"], "remote");
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(
+            requests.try_recv().is_err(),
+            "project sync must not duplicate the open"
+        );
+    }
+
+    #[gpui::test]
+    fn terminal_pending_projectless_open_keeps_the_requested_device(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        for original_target in [None, Some("original-device")] {
+            let (out, mut requests) = tokio::sync::mpsc::channel(64);
+            let (_replies, inbound) = tokio::sync::mpsc::channel(64);
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.selected_device = original_target.map(str::to_owned);
+                state.no_project = true;
+                state
+            });
+            let panel = cx.new(|cx| {
+                let mut panel = TerminalPanel::new_embedded(state.clone(), cx);
+                panel.pin_session(CANVAS_PANEL_PREFIX.into());
+                panel
+            });
+            panel.update(cx, |panel, cx| {
+                panel.open_tab_for_selected(cx).unwrap();
+            });
+            state.update(cx, |state, cx| {
+                state.selected_device = Some("another-device".into());
+                state.set_test_engine(EngineHandle::from_test_client(harness_rpc::RpcClient::new(
+                    out, inbound,
+                )));
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let open = terminal_request(&mut requests);
+            assert_eq!(open.method.as_deref(), Some(methods::OPEN_TERMINAL));
+            assert_eq!(open.params["chatId"], CANVAS_PANEL_PREFIX);
+            assert_eq!(open.params["cwd"], "~");
+            assert_eq!(open.params["targetDeviceId"].as_str(), original_target);
+            assert!(requests.try_recv().is_err());
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_slow_remote_open_reconciles_the_latest_viewport_after_attach(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        // Cover an attach both before and after the original resize debounce.
+        for delay_ms in [20, RESIZE_DEBOUNCE_MS * 2] {
+            let (out, mut requests) = tokio::sync::mpsc::channel(64);
+            let (replies, inbound) = tokio::sync::mpsc::channel(64);
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("local".into());
+                state.spaces = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "remote-project", "deviceId": "remote", "name": "Remote",
+                        "path": "/fixture/project", "createdAt": chrono::Utc::now(),
+                    }))
+                    .unwrap(),
+                ];
+                state.spaces_synced = true;
+                state.set_test_engine(EngineHandle::from_test_client(harness_rpc::RpcClient::new(
+                    out, inbound,
+                )));
+                state
+            });
+            let panel = cx.new(|cx| {
+                let mut panel = TerminalPanel::new_embedded(state, cx);
+                panel.pin_session("space-canvas:remote-project".into());
+                panel
+            });
+            let key = panel.update(cx, |panel, cx| panel.open_tab_for_selected(cx).unwrap());
+            cx.run_until_parked();
+            let open = terminal_request(&mut requests);
+            assert_eq!(open.method.as_deref(), Some(methods::OPEN_TERMINAL));
+            assert_eq!(open.params["targetDeviceId"], "remote");
+            assert_eq!(open.params["cwd"], "/fixture/project");
+            assert_eq!(open.params["cols"], 80);
+            assert_eq!(open.params["rows"], 24);
+            panel.update(cx, |panel, cx| {
+                panel.on_grid_metrics(
+                    key,
+                    GridGeometry {
+                        cols: 132,
+                        rows: 38,
+                        ..test_geometry()
+                    },
+                    cx,
+                );
+            });
+            cx.executor().advance_clock(Duration::from_millis(delay_ms));
+            cx.run_until_parked();
+            assert!(
+                requests.try_recv().is_err(),
+                "cannot resize before attachment"
+            );
+            terminal_reply(
+                &replies,
+                &open,
+                serde_json::json!({ "id": "remote-terminal", "cwd": "/fixture/project", "shell": "sh" }),
+            );
+            runtime.block_on(async { tokio::task::yield_now().await });
+            cx.run_until_parked();
+            let subscribe = terminal_request(&mut requests);
+            assert_eq!(
+                subscribe.method.as_deref(),
+                Some(methods::SUBSCRIBE_TERMINAL)
+            );
+            assert_eq!(subscribe.params["targetDeviceId"], "remote");
+            // No further paint or manual window resize: attachment itself must
+            // deliver the viewport measured while OpenTerminal was in flight.
+            cx.executor()
+                .advance_clock(Duration::from_millis(RESIZE_DEBOUNCE_MS + 1));
+            cx.run_until_parked();
+            let initial_resize = terminal_request(&mut requests);
+            assert_eq!(
+                initial_resize.method.as_deref(),
+                Some(methods::RESIZE_TERMINAL)
+            );
+            assert_eq!(initial_resize.params["terminalId"], "remote-terminal");
+            assert_eq!(initial_resize.params["targetDeviceId"], "remote");
+            assert_eq!(initial_resize.params["cols"], 132);
+            assert_eq!(initial_resize.params["rows"], 38);
+            terminal_reply(&replies, &initial_resize, serde_json::Value::Null);
+            runtime.block_on(async { tokio::task::yield_now().await });
+            cx.run_until_parked();
+            // A later layout during debounce must replace the initial size.
+            panel.update(cx, |panel, cx| {
+                panel.on_grid_metrics(
+                    key,
+                    GridGeometry {
+                        cols: 136,
+                        rows: 40,
+                        ..test_geometry()
+                    },
+                    cx,
+                );
+                panel.on_grid_metrics(
+                    key,
+                    GridGeometry {
+                        cols: 144,
+                        rows: 42,
+                        ..test_geometry()
+                    },
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            cx.executor()
+                .advance_clock(Duration::from_millis(RESIZE_DEBOUNCE_MS + 1));
+            cx.run_until_parked();
+            let resize = terminal_request(&mut requests);
+            assert_eq!(resize.method.as_deref(), Some(methods::RESIZE_TERMINAL));
+            assert_eq!(resize.params["terminalId"], "remote-terminal");
+            assert_eq!(resize.params["targetDeviceId"], "remote");
+            assert_eq!(resize.params["cols"], 144);
+            assert_eq!(resize.params["rows"], 42);
+            assert!(requests.try_recv().is_err(), "resize must stay coalesced");
+        }
+    }
+
+    #[gpui::test]
+    fn grid_snapshot_renders_canvas_without_a_selected_chat(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        cx.update(|cx| {
+            for project in [None, Some("project".to_string())] {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.selected_space = project;
+                    state
+                });
+                let panel = cx.new(|cx| TerminalPanel::new(state, cx));
+                panel.update(cx, |panel, cx| {
+                    let owner = panel.selected_chat(cx);
+                    let key = panel.reserve_tab_for_chat(owner.clone(), "Terminal 1", cx);
+                    panel
+                        .tab_mut(&owner, key)
+                        .unwrap()
+                        .emulator
+                        .feed(b"$ ready");
+                    let snapshot = panel.grid_snapshot(key, cx).expect("canvas terminal grid");
+                    let text: String = snapshot.lines[0].iter().map(|cell| cell.ch).collect();
+                    assert_eq!(text.trim_end(), "$ ready");
+                    assert!(snapshot.cursor.is_some());
+                });
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn grid_snapshot_keeps_the_pinned_session_when_chat_focus_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("original-chat".into());
+            state
+        });
+        let panel = cx.new(|cx| {
+            let mut panel = TerminalPanel::new_embedded(state.clone(), cx);
+            panel.pin_session("original-chat".into());
+            panel
+        });
+        let key = panel.update(cx, |panel, cx| {
+            let key = panel.reserve_tab_for_chat("original-chat".into(), "Terminal 1", cx);
+            panel
+                .tab_mut("original-chat", key)
+                .unwrap()
+                .emulator
+                .feed(b"$ original session");
+            key
+        });
+        state.update(cx, |state, cx| {
+            state.selected_chat = Some("other-chat".into());
+            cx.notify();
+        });
+        cx.update(|cx| {
+            let snapshot = panel
+                .read(cx)
+                .grid_snapshot(key, cx)
+                .expect("pinned terminal grid");
+            let text: String = snapshot.lines[0].iter().map(|cell| cell.ch).collect();
+            assert_eq!(text.trim_end(), "$ original session");
+            assert!(snapshot.cursor.is_some());
+        });
+    }
 
     #[gpui::test]
     fn slow_trackpad_scroll_accumulates_per_terminal(cx: &mut gpui::TestAppContext) {

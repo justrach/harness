@@ -7,8 +7,8 @@ use std::{
 };
 
 use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, ListAlignment, ListState, Pixels, Point, Render,
-    SharedString, Subscription, Task, Window, div, prelude::*, px,
+    App, Context, Entity, EventEmitter, FocusHandle, ListAlignment, ListState, Pixels, Point,
+    Render, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 use harness_proto::ListWorkspaceDirectoryRequest;
 
@@ -22,6 +22,9 @@ pub mod document;
 pub mod editor;
 pub mod editor_adapter;
 mod git_status;
+mod explorer_chrome;
+#[cfg(feature = "appshots-fixture")]
+mod explorer_fixture;
 mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;
@@ -73,6 +76,17 @@ use crate::surface_chrome::{
 };
 
 pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
+    toolbar_button_base(id, label).tooltip(move |_, cx| {
+        cx.new(|_| preview::FileEditorTooltip { text: label.into() })
+            .into()
+    })
+}
+
+/// Shared chrome for callers that provide their own dynamic hover label.
+pub(super) fn toolbar_button_base(
+    id: &'static str,
+    label: &'static str,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .size(px(TOOLBAR_BUTTON_SIZE))
@@ -89,10 +103,6 @@ pub(super) fn toolbar_button(id: &'static str, label: &'static str) -> gpui::Sta
             window.prevent_default()
         })
         .hover(|style| style.bg(crate::theme::wash(0.14)))
-        .tooltip(move |_, cx| {
-            cx.new(|_| preview::FileEditorTooltip { text: label.into() })
-                .into()
-        })
         .tooltip_show_delay(Duration::from_millis(350))
 }
 
@@ -178,6 +188,7 @@ pub enum FilesEvent {
     FileRenamed { old_path: String, new_path: String },
     WordWrapChanged(bool),
     ShowAllFilesChanged(bool),
+    AddProject,
     CloseReady,
     CloseCancelled,
 }
@@ -212,6 +223,7 @@ struct EditorContextMenu {
 pub struct FilesSurface {
     state: Entity<AppState>,
     chat_id: String,
+    preferred_device_id: Option<String>,
     review_comment_flush_source: u64,
     presentation: FilesPresentation,
     editor_path: Option<String>,
@@ -226,6 +238,8 @@ pub struct FilesSurface {
     /// Floating rail state for the file tree (the menu-scrollbar treatment).
     tree_bar: crate::popover::MenuScrollbarState,
     tree_focus: FocusHandle,
+    choosing_project: bool,
+    explorer_controls: HashMap<String, FocusHandle>,
     search: Entity<ComposerInput>,
     search_restore_tree_focus: bool,
     search_state: FileSearchState,
@@ -251,9 +265,8 @@ impl Render for FilesSurface {
         }
         let theme = crate::theme::Theme::of(cx).clone();
         let is_editor = self.presentation.is_editor();
-        // Both presentations carry a secondary header of the same height
-        // directly under the titlebar: the editor's breadcrumb toolbar, or the
-        // explorer's search + visibility toolbar.
+        // Explorer chrome follows the browser toolbar; editors retain their
+        // existing breadcrumb and document controls.
         let header = if is_editor {
             self.render_editor_header(&theme, cx)
         } else {
@@ -277,6 +290,14 @@ impl Render for FilesSurface {
             .flex()
             .bg(crate::theme::ink(0.0))
             .flex_col()
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.choosing_project {
+                    this.choosing_project = false;
+                    this.tree_focus.focus(window, cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
             .children(header)
             .child(div().flex_1().min_h_0().w_full().child(body))
             .children(editor_context_menu)
@@ -284,11 +305,61 @@ impl Render for FilesSurface {
 }
 
 impl FilesSurface {
+    /// Adopt a new window without reopening documents or replacing file watches.
+    pub(crate) fn rebind_window_state(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        let pending_flush = self.window_review_comment_flush_pending();
+        let key = self.chat_id.clone();
+        let source = self.review_comment_flush_source;
+        self.state.update(cx, |state, cx| {
+            state.finish_review_comment_flush(&key, source);
+            cx.notify();
+        });
+        self._observe = cx.observe(&state, |this: &mut Self, _, cx| {
+            if this.sync_target(cx) {
+                this.ensure_loaded(cx);
+            }
+            this.sync_active_markdown_comments(cx);
+        });
+        self.state = state;
+        if pending_flush {
+            self.state.update(cx, |state, cx| {
+                state.begin_review_comment_flush(&key, source);
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
+    /// Engine target identity, independent of the shell's workspace cache key.
+    pub(crate) fn session_owner(&self) -> &str {
+        &self.chat_id
+    }
+
+    /// The new-panel choice scopes only this explorer and its folder picker.
+    pub(crate) fn prefer_device(&mut self, device_id: Option<String>) {
+        self.preferred_device_id = device_id;
+    }
+
+    pub(crate) fn preferred_device_id(&self, cx: &App) -> Option<String> {
+        self.request_context
+            .as_ref()
+            .map(|context| {
+                context
+                    .target_device_id
+                    .clone()
+                    .or_else(|| self.state.read(cx).local_device_id.clone())
+            })
+            .unwrap_or_else(|| self.preferred_device_id.clone())
+    }
+
     fn render_explorer(
         &mut self,
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        if self.request_context.is_none() || self.choosing_project {
+            return self.render_project_choices(theme, cx);
+        }
         let phase = self.tree.node("").map(|root| root.load.clone());
         let content = if !self.search_state.query.is_empty() {
             self.render_search_results(cx)
@@ -317,7 +388,7 @@ impl FilesSurface {
                         .border_1()
                         .border_color(theme.border)
                         .bg(crate::theme::wash(0.04))
-                        .hover(|style| style.bg(crate::theme::wash(0.09)))
+                        .hover(|style| style.bg(theme.element_hover))
                         .cursor_pointer()
                         .flex()
                         .items_center()
@@ -387,7 +458,7 @@ impl FilesSurface {
                                 .role(gpui::Role::Button)
                                 .aria_label("Refresh workspace files now")
                                 .text_color(theme.text_muted)
-                                .hover(|style| style.bg(crate::theme::wash(0.07)))
+                                .hover(|style| style.bg(theme.element_hover))
                                 .child("Refresh now")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.refresh(cx);
@@ -486,7 +557,7 @@ impl FilesSurface {
             ComposerInput::new("Search files", cx)
                 .with_single_line()
                 .with_accessibility_role(gpui::Role::SearchInput)
-                .with_text_metrics(11.0, 16.0)
+                .with_text_metrics(13.0, 20.0)
         });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => this.on_search_edited(cx),
@@ -535,6 +606,7 @@ impl FilesSurface {
         let mut surface = Self {
             state,
             chat_id,
+            preferred_device_id: None,
             review_comment_flush_source: NEXT_REVIEW_COMMENT_FLUSH_SOURCE
                 .fetch_add(1, Ordering::Relaxed),
             presentation,
@@ -549,6 +621,8 @@ impl FilesSurface {
             tree_list_generation: 0,
             tree_bar: crate::popover::MenuScrollbarState::default(),
             tree_focus: cx.focus_handle(),
+            choosing_project: false,
+            explorer_controls: HashMap::new(),
             search,
             search_restore_tree_focus: false,
             search_state: FileSearchState::default(),
@@ -617,6 +691,12 @@ impl FilesSurface {
         action: editor::EditorContextAction,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let shortcut = crate::settings::badge_combo(match action {
+            editor::EditorContextAction::Cut => "mod-x",
+            editor::EditorContextAction::Copy => "mod-c",
+            editor::EditorContextAction::Paste => "mod-v",
+            editor::EditorContextAction::SelectAll => "mod-a",
+        });
         crate::popover::menu_row(theme, false, id)
             .id(id)
             .when(!enabled, |row| row.opacity(0.38).cursor_default())
@@ -625,7 +705,8 @@ impl FilesSurface {
                     this.dispatch_editor_context_action(editor.clone(), action, window, cx)
                 }))
             })
-            .child(label)
+            .child(div().flex_1().min_w_0().child(label))
+            .child(crate::popover::kbd_hint(theme, &shortcut))
             .into_any_element()
     }
 
@@ -1051,87 +1132,7 @@ impl FilesSurface {
         cx.notify();
     }
 
-    /// The explorer's secondary header: the same toolbar band the editor
-    /// carries directly under the titlebar (search field + visibility eye).
-    fn render_explorer_header(
-        &mut self,
-        theme: &crate::theme::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        use gpui::Focusable;
-        let include_ignored = self.tree.include_ignored();
-        let search_focus = self.search.focus_handle(cx);
-        toolbar(theme)
-            .id("files-explorer-header")
-            .debug_selector(|| "files-explorer-header".into())
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    this.close_search(cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .child(
-                crate::surface_chrome::input()
-                    .id("files-search")
-                    .debug_selector(|| "files-search".into())
-                    .overflow_hidden()
-                    .cursor_text()
-                    .hover(|style| style.bg(crate::theme::ink(0.055)))
-                    // Clicking the field's padding focuses the input too.
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        move |_, window, cx| {
-                            window.focus(&search_focus, cx);
-                            cx.stop_propagation();
-                        },
-                    )
-                    .child(
-                        crate::icons::icon(crate::icons::MAGNIFER)
-                            .size(px(12.0))
-                            .flex_none()
-                            .text_color(theme.text_faint),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .child(self.search.clone()),
-                    ),
-            )
-            .child(
-                toolbar_button(
-                    "files-toggle-ignored",
-                    if include_ignored {
-                        "Hide hidden and ignored files"
-                    } else {
-                        "Show all files (even hidden)"
-                    },
-                )
-                .debug_selector(|| "files-toggle-ignored".into())
-                .when(include_ignored, |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.toggle_ignored(cx);
-                }))
-                .child(
-                    crate::icons::icon(if include_ignored {
-                        crate::icons::EYE
-                    } else {
-                        crate::icons::EYE_CLOSED
-                    })
-                    .size(px(crate::surface_chrome::ICON_SIZE))
-                    .text_color(if include_ignored {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    }),
-                ),
-            )
-            .into_any_element()
-    }
+
 }
 
 #[cfg(test)]
@@ -1139,6 +1140,22 @@ mod explorer_tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn projectless_files_offer_folder_selection_instead_of_an_error(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let (files, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            FilesSurface::new_explorer(state, "space-canvas:".into(), false, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("files-add-project").is_some());
+        assert!(cx.debug_bounds("files-search").is_none());
+        files.read_with(cx, |files, _| assert!(files.request_context.is_none()));
+    }
 
     #[gpui::test]
     fn explorer_header_search_and_visibility_toggle(cx: &mut TestAppContext) {
@@ -1149,8 +1166,16 @@ mod explorer_tests {
             cx.set_global(crate::theme::Theme::default());
         });
         let (files, cx) = cx.add_window_view(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            FilesSurface::new_explorer(state, "chat".into(), false, cx)
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.local_device_id = Some("device".into());
+                state.spaces.push(harness_proto::Space {
+                    id: "project".into(), device_id: "device".into(), path: "/fixtures/project".into(), name: None,
+                    git_detected: false, git_checked_at: None, checkout_id: None, created_at: chrono::Utc::now(),
+                });
+                state
+            });
+            FilesSurface::new_explorer(state, "space-canvas:project".into(), false, cx)
         });
         cx.update(|window, _| window.activate_window());
         let show_all = Rc::new(RefCell::new(None));
@@ -1163,11 +1188,11 @@ mod explorer_tests {
             })
         });
         cx.update(|window, cx| window.draw(cx).clear());
-        // The explorer header is the same band as the editor header.
+        // Explorer chrome aligns with the browser toolbar.
         let header = cx.debug_bounds("files-explorer-header").unwrap();
         assert_eq!(
             header.size.height,
-            px(crate::surface_chrome::HEADER_HEIGHT)
+            px(explorer_chrome::EXPLORER_HEADER_HEIGHT)
         );
         let bounds = cx.debug_bounds("files-search").unwrap();
         assert!(bounds.top() >= header.top() && bounds.bottom() <= header.bottom());
@@ -1227,3 +1252,6 @@ mod explorer_tests {
         assert_eq!(*paths.borrow(), ["src/main.rs", "README.md"]);
     }
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("../menu_review/files.rs");

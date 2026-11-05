@@ -397,7 +397,7 @@ impl Element for LinkRanges {
                         .role(Role::Button)
                         .aria_label(label)
                         .when(!enabled, |el| el.opacity(0.45))
-                        .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
+                        .focus_visible(|s| s.bg(theme.element_hover))
                         .on_click(move |_, window, cx| {
                             if enabled {
                                 activate_link(target.clone(), action, ui.as_ref(), window, cx);
@@ -432,7 +432,7 @@ impl Element for LinkRanges {
                     } else {
                         "Open links in Harness, unchecked"
                     })
-                    .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
+                    .focus_visible(|s| s.bg(theme.element_hover))
                     .on_click(move |_, window, cx| {
                         crate::settings::update(
                             crate::settings::SavePolicy::Immediate,
@@ -1609,4 +1609,16 @@ mod rendered_tests {
             .detach();
         });
     }
+}
+
+#[cfg(feature = "appshots-fixture")]
+pub(crate) fn review_link() -> AnyElement {
+    let text = gpui::StyledText::new("Documentation");
+    let layout = text.layout().clone();
+    LinkRanges {
+        id: "review-link".into(), child: text.into_any_element(), layout: Some(layout),
+        selection_key: None,
+        links: vec![(0..13, LinkTarget::new("Documentation", "https://example.com/docs"))],
+        ui: Some(LinkUi { source_session: None, handler: Rc::new(|_,_,_| LinkOutcome::Rejected) }),
+    }.into_any_element()
 }

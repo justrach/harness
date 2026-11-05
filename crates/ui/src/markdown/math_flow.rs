@@ -158,10 +158,27 @@ fn fragments_styled(
     words
 }
 
+#[cfg(test)]
 fn flatten_prose(runs: &[InlineRun], theme: &Theme, bold: bool) -> render::FlatText {
+    flatten_prose_weighted(
+        runs,
+        theme,
+        if bold {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        },
+    )
+}
+
+fn flatten_prose_weighted(
+    runs: &[InlineRun],
+    theme: &Theme,
+    weight: gpui::FontWeight,
+) -> render::FlatText {
     use unicode_segmentation::UnicodeSegmentation;
 
-    let mut flat = render::flatten_runs(runs, theme, bold);
+    let mut flat = render::flatten_runs_weighted(runs, theme, weight);
     // Platform shapers deliberately break ligatures between styled runs. A
     // style boundary inside a grapheme must therefore move to its end: the
     // leading codepoint owns the cluster's paint style. Source/link/code byte
@@ -227,19 +244,50 @@ pub(super) fn render_aligned(
     window: &gpui::Window,
     align: TableAlign,
 ) -> AnyElement {
+    render_aligned_weighted(
+        runs,
+        size,
+        line_height,
+        if bold {
+            gpui::FontWeight::SEMIBOLD
+        } else {
+            gpui::FontWeight::NORMAL
+        },
+        ix,
+        opts,
+        theme,
+        window,
+        align,
+    )
+}
+
+/// Preserve the surrounding heading/table weight in prose beside an equation.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_aligned_weighted(
+    runs: &[InlineRun],
+    size: f32,
+    line_height: f32,
+    weight: gpui::FontWeight,
+    ix: usize,
+    opts: &RenderOptions,
+    theme: &Theme,
+    window: &gpui::Window,
+    align: TableAlign,
+) -> AnyElement {
+    let bold = weight.0 >= gpui::FontWeight::SEMIBOLD.0;
     let scale = f32::from(window.rem_size()) / 16.0;
     let size_px = size * scale;
     let line_height_px = line_height * scale;
     let words = fragments_styled(runs, size_px, theme, bold);
     // A shared baseline across a wrapped flow gives fractions/scripts their
     // actual ascent and depth, rather than centering an image in a text row.
-    let metrics = render::flatten_runs(
+    let metrics = render::flatten_runs_weighted(
         &[InlineRun {
             text: "M".into(),
             style: Default::default(),
         }],
         theme,
-        bold,
+        weight,
     );
     let shaped = window
         .text_system()
@@ -359,7 +407,7 @@ pub(super) fn render_aligned(
             } else {
                 // Malformed or unsupported commands stay visibly literal; a
                 // failed typeset must never masquerade as a successful layout.
-                let flat = flatten_prose(&fragment.runs, theme, bold);
+                let flat = flatten_prose_weighted(&fragment.runs, theme, weight);
                 let content = render::flat_text_presented_element_with_key(
                     &flat,
                     fragment_ix,
@@ -430,6 +478,38 @@ mod regression_tests;
 mod tests {
     use super::*;
     use crate::markdown::parser::{Block, parse_full};
+
+    #[test]
+    fn math_flow_keeps_heading_and_table_prose_weights() {
+        let theme = Theme::dark();
+        let tree = parse_full(r"Before $x$ **after**");
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!()
+        };
+        for base in [gpui::FontWeight::MEDIUM, gpui::FontWeight::BOLD] {
+            let words =
+                fragments_styled(runs, 17.0, &theme, base.0 >= gpui::FontWeight::SEMIBOLD.0);
+            let prose: Vec<_> = words
+                .iter()
+                .flatten()
+                .filter(|fragment| fragment.copy.is_none())
+                .map(|fragment| flatten_prose_weighted(&fragment.runs, &theme, base))
+                .collect();
+            let before = prose
+                .iter()
+                .find(|flat| flat.text.contains("Before"))
+                .unwrap();
+            assert_eq!(before.runs[0].font.weight, base);
+            let after = prose
+                .iter()
+                .find(|flat| flat.text.contains("after"))
+                .unwrap();
+            assert_eq!(
+                after.runs[0].font.weight.0,
+                base.0.max(gpui::FontWeight::SEMIBOLD.0)
+            );
+        }
+    }
 
     #[test]
     fn math_flow_keeps_punctuation_and_source_for_copy() {

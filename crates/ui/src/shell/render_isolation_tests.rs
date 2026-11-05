@@ -337,3 +337,241 @@ fn a_growing_composer_redraws_the_transcript_under_it(cx: &mut gpui::TestAppCont
         "the transcript kept the clearance of the shorter composer"
     );
 }
+fn show_two_chats(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) {
+    use super::workspace_panels::{PanelTab, WorkspacePanel};
+    shell.update(cx, |shell, cx| {
+        shell.boot_restored = true;
+        shell.ensure_workspace_sessions(cx);
+        let layout = shell.panel_layout_mut(cx);
+        layout.panels = ["chat-1", "chat-2"]
+            .into_iter()
+            .enumerate()
+            .map(|(id, chat)| WorkspacePanel {
+                id: id as u64,
+                tabs: vec![PanelTab::Chat(chat.into())],
+                active: 0,
+                share: 0.5,
+            })
+            .collect();
+        layout.focused = 0;
+        layout.next_id = 2;
+        layout.last_selected = Some(Some("chat-1".into()));
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+/// A second visible chat has its own transcript entity and a parked draft.
+/// Typing in the active panel must not rebuild either transcript or consume
+/// the other panel's draft; promotion must keep the peer entity and its state.
+#[gpui::test]
+fn cached_workspace_peers_stay_idle_while_typing_and_follow_panel_focus(
+    cx: &mut gpui::TestAppContext,
+) {
+    use super::workspace_panels::PanelTab;
+    use crate::transcript::entity_render_total;
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = open_chat(cx, dir.path().to_path_buf());
+    show_two_chats(&shell, cx);
+    let (main, peer) = shell.read_with(cx, |shell, _| {
+        (
+            shell.transcript.entity_id(),
+            shell.workspace_panels.peers["chat-2"].0.entity_id(),
+        )
+    });
+    assert!(
+        entity_render_total(peer) > 0,
+        "the inactive chat must actually be rendered"
+    );
+    cx.simulate_keystrokes("right");
+    cx.run_until_parked();
+    let before = (entity_render_total(main), entity_render_total(peer));
+    cx.simulate_input("Draft for the first panel");
+    cx.run_until_parked();
+    assert_eq!(
+        (entity_render_total(main), entity_render_total(peer)),
+        before,
+        "typing must reuse both visible transcripts"
+    );
+    shell.update_in(cx, |shell, window, cx| {
+        shell.focus_workspace_tab(1, PanelTab::Chat("chat-2".into()), window, cx);
+    });
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(
+            shell.transcript.entity_id(),
+            peer,
+            "focus promotes the retained peer"
+        );
+        assert_eq!(
+            shell.composer.read(cx).parked_chat_input("chat-1", cx).text,
+            "Draft for the first panel"
+        );
+        assert_eq!(shell.composer.read(cx).input.read(cx).text(), "");
+    });
+    cx.simulate_input("Draft for the second panel");
+    cx.run_until_parked();
+    shell.update_in(cx, |shell, window, cx| {
+        shell.focus_workspace_tab(0, PanelTab::Chat("chat-1".into()), window, cx);
+    });
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.transcript.entity_id(), main);
+        assert_eq!(
+            shell.composer.read(cx).input.read(cx).text(),
+            "Draft for the first panel"
+        );
+        assert_eq!(
+            shell.composer.read(cx).parked_chat_input("chat-2", cx).text,
+            "Draft for the second panel"
+        );
+    });
+}
+
+/// These are actual picker/state transitions, not an unconditional cache flush:
+/// target and model changes must invalidate the cached composer and retain its
+/// unsent text while the corresponding selections are read back.
+#[gpui::test]
+fn cached_composer_tracks_device_project_and_model_without_losing_the_draft(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::transcript::entity_render_total;
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = open_chat(cx, dir.path().to_path_buf());
+    let (state, composer) =
+        shell.read_with(cx, |shell, _| (shell.state.clone(), shell.composer.clone()));
+    state.update(cx, |state, cx| state.select_chat(None, cx));
+    cx.run_until_parked();
+    composer.update(cx, |composer, cx| {
+        composer
+            .input
+            .update(cx, |input, cx| input.set_text("Keep this draft", cx))
+    });
+    cx.run_until_parked();
+
+    let before = entity_render_total(composer.entity_id());
+    state.update(cx, |state, cx| {
+        state.select_device("other-computer".into(), cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        entity_render_total(composer.entity_id()) > before,
+        "device change left the composer cache stale"
+    );
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.selected_device.as_deref(), Some("other-computer"))
+    });
+
+    let before = entity_render_total(composer.entity_id());
+    state.update(cx, |state, cx| {
+        state.select_space(Some("project".into()), cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        entity_render_total(composer.entity_id()) > before,
+        "project change left the composer cache stale"
+    );
+    state.read_with(cx, |state, _| {
+        assert_eq!(state.selected_space.as_deref(), Some("project"))
+    });
+
+    let before = entity_render_total(composer.entity_id());
+    let pickers = composer.read_with(cx, |composer, _| composer.pickers().clone());
+    pickers.update(cx, |pickers, cx| {
+        pickers.adopt_canvas_draft(
+            Some(crate::pickers::CanvasDraft {
+                harness: Some(harness_proto::HarnessId::Mock),
+                model: Some("cache-fixture-model".into()),
+                ..Default::default()
+            }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(
+        entity_render_total(composer.entity_id()) > before,
+        "model change left the composer cache stale"
+    );
+    pickers.read_with(cx, |pickers, cx| {
+        assert_eq!(
+            pickers.canvas_draft(cx).model.as_deref(),
+            Some("cache-fixture-model")
+        )
+    });
+    composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.input.read(cx).text(), "Keep this draft")
+    });
+}
+
+/// The real tab detach path creates a separate AppState and composer. A late
+/// shared capability result/settings change must reach both caches without
+/// moving either draft or making the windows share a composer.
+#[gpui::test]
+fn detached_window_composer_caches_receive_shared_invalidations(cx: &mut gpui::TestAppContext) {
+    use super::workspace_panels::PanelTab;
+    use crate::transcript::entity_render_total;
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = open_chat(cx, dir.path().to_path_buf());
+    show_two_chats(&shell, cx);
+    cx.simulate_input("Original window draft");
+    cx.run_until_parked();
+    let destination = shell.update_in(cx, |shell, window, cx| {
+        shell
+            .move_workspace_tab_to_new_window(1, PanelTab::Chat("chat-2".into()), None, window, cx)
+            .unwrap()
+    });
+    let source_composer = shell.read_with(cx, |shell, _| shell.composer.clone());
+    let detached_composer = cx.update(|_, cx| {
+        destination
+            .update(cx, |shell, _, cx| {
+                shell.debug_gate = Some(GatePhase::Ready);
+                shell.splash = SplashPhase::Gone;
+                shell.composer.update(cx, |composer, cx| {
+                    composer
+                        .input
+                        .update(cx, |input, cx| input.set_text("Detached window draft", cx))
+                });
+                cx.notify();
+                shell.composer.clone()
+            })
+            .unwrap()
+    });
+    cx.run_until_parked();
+    assert_ne!(source_composer.entity_id(), detached_composer.entity_id());
+    assert!(entity_render_total(source_composer.entity_id()) > 0);
+    assert!(entity_render_total(detached_composer.entity_id()) > 0);
+
+    let before = (
+        entity_render_total(source_composer.entity_id()),
+        entity_render_total(detached_composer.entity_id()),
+    );
+    cx.update(|_, cx| cx.set_global(crate::composer::DictationAvailabilityChanged));
+    cx.run_until_parked();
+    assert!(
+        entity_render_total(source_composer.entity_id()) > before.0,
+        "original window missed the late capability result"
+    );
+    assert!(
+        entity_render_total(detached_composer.entity_id()) > before.1,
+        "detached window missed the late capability result"
+    );
+
+    let before = (
+        entity_render_total(source_composer.entity_id()),
+        entity_render_total(detached_composer.entity_id()),
+    );
+    cx.update(|_, cx| {
+        settings::update(settings::SavePolicy::Immediate, cx, |next| {
+            next.attach_sound_enabled = !next.attach_sound_enabled;
+        });
+    });
+    cx.run_until_parked();
+    assert!(entity_render_total(source_composer.entity_id()) > before.0);
+    assert!(entity_render_total(detached_composer.entity_id()) > before.1);
+    source_composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.input.read(cx).text(), "Original window draft")
+    });
+    detached_composer.read_with(cx, |composer, cx| {
+        assert_eq!(composer.input.read(cx).text(), "Detached window draft")
+    });
+}

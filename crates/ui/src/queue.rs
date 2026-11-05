@@ -57,18 +57,7 @@ struct QueueActionTooltip {
 
 impl Render for QueueActionTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        let card = div()
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(crate::popover::surface_bg(theme))
-            .text_size(px(10.5))
-            .text_color(theme.text_muted)
-            .child(self.label.clone());
-        crate::frost::frosted(6.0, crate::frost::MENU_BLUR, card)
+        crate::popover::tooltip_label(Theme::of(cx), self.label.clone())
     }
 }
 
@@ -660,7 +649,7 @@ impl Composer {
             .rounded(px(ROW_RADIUS))
             .when(being_edited, |el| el.bg(crate::theme::ink(0.06)))
             .when(!being_edited && !being_removed, |el| {
-                el.hover(|s| s.bg(crate::theme::ink(0.04)))
+                el.hover(|s| s.bg(theme.element_hover))
             })
             .when(being_removed, |el| el.opacity(0.55))
             .cursor(gpui::CursorStyle::Arrow)
@@ -1103,7 +1092,7 @@ impl Composer {
             .opacity(0.72)
             .when(enabled, |el| {
                 el.cursor_pointer()
-                    .hover(|s| s.opacity(1.0).bg(crate::theme::ink(0.07)))
+                    .hover(|s| s.opacity(1.0).bg(theme.element_hover))
                     .tab_index(0)
                     .focus_visible(move |s| s.bg(accent.opacity(0.18)).text_color(accent))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1178,7 +1167,7 @@ impl Composer {
             .when(enabled, |el| {
                 el.cursor_pointer()
                     .tab_index(0)
-                    .hover(|s| s.bg(crate::theme::ink(0.07)).text_color(theme.text))
+                    .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
                     .focus_visible(move |s| s.bg(accent.opacity(0.18)).text_color(accent))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| {
@@ -1503,9 +1492,13 @@ impl Composer {
         }
         // Peer coordination must never borrow the human's composer. This
         // also protects stale click handlers when a queue frame has changed.
-        if self.state.read(cx).queue.iter().any(|item| {
-            item.id == id && crate::agent_message::parse(&item.text).is_some()
-        }) {
+        if self
+            .state
+            .read(cx)
+            .queue
+            .iter()
+            .any(|item| item.id == id && crate::agent_message::parse(&item.text).is_some())
+        {
             self.failure = Some("Agent messages stay in the queue, not your composer".into());
             cx.notify();
             return;
@@ -2521,13 +2514,18 @@ mod appshot_edit_tests {
                 state.queue = vec![harness_doc::QueuedMessage::new("peer", text, "host")];
             });
             composer.update(cx, |composer, cx| {
-                composer.input.update(cx, |input, cx| input.set_text("My actual draft", cx));
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("My actual draft", cx));
                 composer.begin_queue_edit("peer".into(), cx);
                 assert_eq!(composer.input.read(cx).text(), "My actual draft");
                 assert!(composer.editing_queued.is_none());
                 assert!(composer.queue_edit_pending_id.is_none());
                 assert!(composer.queue_edit_draft.is_none());
-                assert_eq!(composer.failure.as_deref(), Some("Agent messages stay in the queue, not your composer"));
+                assert_eq!(
+                    composer.failure.as_deref(),
+                    Some("Agent messages stay in the queue, not your composer")
+                );
             });
             assert_eq!(state.read_with(cx, |state, _| state.queue.len()), 1);
         }
@@ -2579,11 +2577,7 @@ mod steer_delivery_tests {
         serde_json::from_str(&requests.try_recv().expect("expected RPC request")).unwrap()
     }
 
-    fn answer(
-        replies: &tokio::sync::mpsc::Sender<String>,
-        request: &ClientFrame,
-        kind: ReplyKind,
-    ) {
+    fn answer(replies: &tokio::sync::mpsc::Sender<String>, request: &ClientFrame, kind: ReplyKind) {
         let frame = match kind {
             ReplyKind::Accepted => ServerFrame {
                 id: request.id,
@@ -2601,7 +2595,9 @@ mod steer_delivery_tests {
                 ..Default::default()
             },
         };
-        replies.try_send(serde_json::to_string(&frame).unwrap()).unwrap();
+        replies
+            .try_send(serde_json::to_string(&frame).unwrap())
+            .unwrap();
     }
 
     fn run_row_steer(cx: &mut gpui::TestAppContext, kind: ReplyKind) {
@@ -2693,9 +2689,12 @@ mod steer_delivery_tests {
                 assert!(state.read_with(cx, |state, _| {
                     !state.message_is_in_transcript("steer-chat", "queued-id")
                 }));
-                assert_eq!(state.read_with(cx, |state, _| {
-                    visible_queue_items(state, "steer-chat").len()
-                }), 1);
+                assert_eq!(
+                    state.read_with(cx, |state, _| {
+                        visible_queue_items(state, "steer-chat").len()
+                    }),
+                    1
+                );
             }
         }
     }

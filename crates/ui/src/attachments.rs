@@ -27,6 +27,18 @@ use crate::state::EngineHandle;
 use crate::theme::ink;
 use harness_rpc::methods;
 
+#[cfg(target_os = "macos")]
+mod gallery;
+#[cfg(target_os = "macos")]
+mod preview;
+#[cfg(target_os = "macos")]
+pub(crate) use preview::image_preview_layout;
+#[cfg(target_os = "macos")]
+pub(crate) use gallery::{
+    GallerySaveReport, GallerySaveSource, decode_gallery_thumbnail, gallery_lightbox,
+    read_gallery_thumbnail, save_gallery_images,
+};
+
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
 /// Base64 chars per `UploadChunk`, sized against the relay's hard ceiling:
@@ -193,6 +205,9 @@ pub fn user_message_rail_text(content: &str) -> String {
 #[derive(Clone)]
 pub struct StagedAttachment {
     pub id: String,
+    /// Retained reference when the original cached bytes are unavailable.
+    /// This placeholder must be resolved or explicitly removed before sending.
+    pub unavailable: Option<crate::settings::SavedDraftAttachment>,
     /// File name; images get a type-matching extension (use-attachments.ts
     /// `ensureExtension` — agents sniff images by extension).
     pub name: String,
@@ -201,16 +216,27 @@ pub struct StagedAttachment {
     /// Numbered notes from [`crate::annotate`], sent with the prompt when
     /// this image was annotated (the image is the flattened copy).
     pub annotations: Option<Arc<str>>,
+    #[cfg(target_os = "macos")]
+    pub editable: Option<crate::annotate::EditableAnnotation>,
+    /// Keep the document/reference when its original cache entry cannot be
+    /// restored. The flattened image remains usable, but cannot be re-edited.
+    #[cfg(target_os = "macos")]
+    pub unavailable_editable: Option<crate::annotate::editable::SavedEditableAnnotation>,
 }
 
 impl StagedAttachment {
     pub fn from_image(name: String, image: Arc<Image>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            unavailable: None,
             name,
             image: Some(image),
             file: None,
             annotations: None,
+            #[cfg(target_os = "macos")]
+            editable: None,
+            #[cfg(target_os = "macos")]
+            unavailable_editable: None,
         }
     }
 
@@ -220,6 +246,14 @@ impl StagedAttachment {
             (None, Some(file)) => file,
             (None, None) => &[],
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn editing_unavailable(&self) -> bool {
+        self.unavailable_editable.is_some()
+            // Older annotated drafts retain their notes and flattened image,
+            // but have no original/document that can safely be edited again.
+            || (self.annotations.is_some() && self.editable.is_none())
     }
 }
 
@@ -316,10 +350,15 @@ pub fn stage_any_file(path: &Path) -> Result<StagedAttachment, String> {
     let bytes = std::fs::read(path).map_err(|_| format!("{display_name} could not be read."))?;
     Ok(StagedAttachment {
         id: uuid::Uuid::new_v4().to_string(),
+        unavailable: None,
         name: display_name,
         image: None,
         file: Some(bytes.into()),
         annotations: None,
+        #[cfg(target_os = "macos")]
+        editable: None,
+        #[cfg(target_os = "macos")]
+        unavailable_editable: None,
     })
 }
 
@@ -425,6 +464,12 @@ pub async fn upload_attachment(
     attachment: &StagedAttachment,
     progress: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<String, String> {
+    if attachment.unavailable.is_some() {
+        return Err(format!(
+            "{} needs reattaching. Reattach it or remove it before sending.",
+            attachment.name
+        ));
+    }
     let b64 = BASE64.encode(attachment.bytes());
     let ranges = chunk_ranges(b64.len());
     let deadline = executor.timer(attachment_deadline(ranges.len()));
@@ -968,6 +1013,19 @@ pub(crate) fn store_error_for(source: &AttachmentKey) {
     );
 }
 
+/// Explicit retry releases only a failed read. In-flight and loaded sources
+/// retain their claims, so repeated clicks cannot start duplicate requests.
+#[cfg(target_os = "macos")]
+pub(crate) fn retry_attachment_for(source: &AttachmentKey) -> bool {
+    let mut cache = cache().lock().unwrap();
+    if matches!(cache.map.get(source), Some(CacheEntry::Error { .. })) {
+        cache.map.remove(source);
+        true
+    } else {
+        false
+    }
+}
+
 /// Seed the cache after a successful upload (composer send path) so the just-
 /// sent bubble's thumbnails render from local bytes instead of a round-trip.
 pub fn seed_attachment(device_id: &str, path: &str, name: &str, image: Arc<Image>) {
@@ -986,6 +1044,10 @@ pub struct PreviewImage {
     pub(crate) viewer: crate::image_viewer::ImageView,
     /// Set when the preview offers Annotate (crate::annotate).
     pub(crate) annotate: Option<crate::annotate::editor::AnnotateHook>,
+    #[cfg(target_os = "macos")]
+    pub(crate) editable: Option<crate::annotate::EditableAnnotation>,
+    #[cfg(target_os = "macos")]
+    pub(crate) unavailable_editable: bool,
 }
 
 impl PreviewImage {
@@ -995,6 +1057,10 @@ impl PreviewImage {
             image,
             viewer: Default::default(),
             annotate: None,
+            #[cfg(target_os = "macos")]
+            editable: None,
+            #[cfg(target_os = "macos")]
+            unavailable_editable: false,
         }
     }
 
@@ -1005,6 +1071,22 @@ impl PreviewImage {
     ) -> Self {
         self.annotate = Some(crate::annotate::editor::AnnotateHook::new(on_done));
         self
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn with_editable_state(
+        mut self,
+        editable: Option<crate::annotate::EditableAnnotation>,
+        unavailable: bool,
+    ) -> Self {
+        self.editable = editable;
+        self.unavailable_editable = unavailable;
+        self
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn edit_unavailable(&self) -> bool {
+        self.unavailable_editable
     }
 
     /// Whether the preview is in annotate mode (its Escape and clicks are
@@ -1027,10 +1109,46 @@ impl PreviewImage {
         window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) {
+        #[cfg(target_os = "macos")]
+        self.open_annotate_mode(
+            crate::annotate::editor::EditorMode::Markup,
+            owner,
+            return_focus,
+            window,
+            cx,
+        );
+        #[cfg(not(target_os = "macos"))]
         if let Some(hook) = &self.annotate {
             hook.open(
                 self.name.clone(),
                 self.image.clone(),
+                owner,
+                return_focus,
+                window,
+                cx,
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn open_annotate_mode(
+        &self,
+        mode: crate::annotate::editor::EditorMode,
+        owner: gpui::EntityId,
+        return_focus: gpui::FocusHandle,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) {
+        // Never pretend baked pixels are the original editable document.
+        if self.edit_unavailable() {
+            return;
+        }
+        if let Some(hook) = &self.annotate {
+            hook.open_mode(
+                self.name.clone(),
+                self.image.clone(),
+                self.editable.clone(),
+                mode,
                 owner,
                 return_focus,
                 window,
@@ -1053,6 +1171,19 @@ pub fn lightbox(
 }
 
 /// Sanitized SVG variants retain their source's natural logical dimensions.
+#[cfg(target_os = "macos")]
+pub(crate) fn lightbox_with_size(
+    window: &mut gpui::Window,
+    preview: &PreviewImage,
+    focus: &gpui::FocusHandle,
+    natural_size: Option<Size<gpui::Pixels>>,
+    on_close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    self::preview::lightbox(window, preview, focus, natural_size, on_close, cx)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn lightbox_with_size(
     window: &mut gpui::Window,
     preview: &PreviewImage,
@@ -1171,7 +1302,13 @@ pub(crate) fn lightbox_with_size(
                         }
                     })
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                    .child(div().w(max_w).h(max_h).child(content))
+                    .child(
+                        div()
+                            .debug_selector(|| "attachment-lightbox-frame".into())
+                            .w(max_w)
+                            .h(max_h)
+                            .child(content),
+                    )
                     .child(
                         div()
                             .max_w(max_w)

@@ -21,7 +21,7 @@ use crate::{
     theme::Theme,
 };
 
-pub const SEARCH_ROW_HEIGHT: f32 = 27.0;
+pub const SEARCH_ROW_HEIGHT: f32 = 36.0;
 const SEARCH_RESULT_LIMIT: usize = 200;
 
 #[derive(Debug, Clone)]
@@ -416,6 +416,12 @@ impl FilesSurface {
         self.reveal_search_result(row.as_match(), cx);
     }
 
+    #[cfg(feature = "appshots-fixture")]
+    pub(super) fn fixture_search_results(&mut self) {
+        self.search_state.tree.rebuild(&self.search_state.results);
+        self.search_list.reset_with_uniform_height(self.search_state.visible_len(), px(SEARCH_ROW_HEIGHT));
+    }
+
     pub(super) fn reset_search_results(&mut self) {
         self.search_state.tree.clear();
         self.search_list.reset(0);
@@ -560,6 +566,8 @@ impl FilesSurface {
         }
         div()
             .id("files-search-results")
+            .px(px(8.0))
+            .py(px(8.0))
             .role(gpui::Role::Tree)
             .aria_label("Fuzzy workspace file results")
             .flex_1()
@@ -618,17 +626,18 @@ impl FilesSurface {
             .aria_selected(selected)
             .when(row.has_children, |element| element.aria_expanded(expanded))
             .h(px(SEARCH_ROW_HEIGHT))
+            .rounded(px(6.0))
             .w_full()
             .flex_none()
             .pl(px(padding))
             .pr(px(8.0))
             .flex()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(6.0))
             .cursor_pointer()
             .when(selected, |element| element.bg(crate::theme::wash(0.1)))
             .when(!selected, |element| {
-                element.hover(|style| style.bg(crate::theme::wash(0.055)))
+                element.hover(|style| style.bg(theme.element_hover))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.search_state.active = index;
@@ -642,7 +651,7 @@ impl FilesSurface {
             })
             .child(
                 div()
-                    .size(px(14.0))
+                    .size(px(16.0))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -668,7 +677,7 @@ impl FilesSurface {
                     WorkspaceEntryKind::Symlink => FileIconIdentity::symlink(&row.name),
                 };
                 file_icons::icon(identity, theme.appearance)
-                    .size(px(14.0))
+                    .size(px(16.0))
                     .flex_none()
             })
             .child(
@@ -676,7 +685,7 @@ impl FilesSurface {
                     .min_w_0()
                     .truncate()
                     .font_family(theme.font_sans.clone())
-                    .text_size(px(11.5))
+                    .text_size(crate::typography::ui_rems(13.0))
                     .text_color(if let Some(value) = decoration {
                         value.color(&theme)
                     } else if is_directory {
@@ -699,7 +708,7 @@ fn centered_search_message(message: SharedString, color: gpui::Hsla) -> AnyEleme
         .justify_center()
         .px(px(24.0))
         .text_center()
-        .text_size(px(11.5))
+        .text_size(crate::typography::ui_rems(13.0))
         .text_color(color)
         .child(message)
         .into_any_element()

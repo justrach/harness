@@ -474,6 +474,10 @@ unsafe fn build_window_class(name: &'static str, superclass: &Class) -> *const C
             window_did_resize as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
+            sel!(windowDidUpdate:),
+            window_did_update as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
             sel!(windowDidChangeOcclusionState:),
             window_did_change_occlusion_state as extern "C" fn(&Object, Sel, id),
         );
@@ -733,11 +737,15 @@ impl MacWindowState {
                 };
 
                 let close_frame = buttons.close.frame();
-                let minimize_frame = buttons.minimize.frame();
                 let button_width = Pixels::from(close_frame.size.width);
                 let button_height = Pixels::from(close_frame.size.height);
+                // Keep AppKit's original spacing even if a later layout resets
+                // only one of the live buttons before this repair runs.
+                let original = self.traffic_light_frames.as_ref().unwrap();
                 let button_padding = Pixels::from(
-                    minimize_frame.origin.x - close_frame.origin.x - close_frame.size.width,
+                    original.minimize.origin.x
+                        - original.close.origin.x
+                        - original.close.size.width,
                 );
                 let container_height =
                     button_height + traffic_light_position.y + traffic_light_position.y;
@@ -748,6 +756,30 @@ impl MacWindowState {
 
                 let minimize_x = traffic_light_position.x + button_width + button_padding;
                 let zoom_x = minimize_x + button_width + button_padding;
+
+                let origins = [
+                    (buttons.close.frame().origin, traffic_light_position.x),
+                    (buttons.minimize.frame().origin, minimize_x),
+                    (buttons.zoom.frame().origin, zoom_x),
+                ];
+                let actual_titlebar = titlebar_container.frame();
+                let unchanged = [
+                    actual_titlebar.origin.x - titlebar_frame.origin.x,
+                    actual_titlebar.origin.y - titlebar_frame.origin.y,
+                    actual_titlebar.size.width - titlebar_frame.size.width,
+                    actual_titlebar.size.height - titlebar_frame.size.height,
+                ]
+                .into_iter()
+                .all(|delta| delta.abs() < 0.01)
+                    && origins.into_iter().all(|(origin, x)| {
+                        (origin.x - x.to_f64()).abs() < 0.01
+                            && (origin.y - traffic_light_position.y.to_f64()).abs() < 0.01
+                    });
+                // windowDidUpdate also runs after our own frame changes. Avoid
+                // invalidating AppKit's layout or tracking areas on that path.
+                if unchanged {
+                    return;
+                }
 
                 titlebar_container.setFrame(titlebar_frame);
                 buttons.close.setFrameOrigin(Objc2NSPoint::new(
@@ -830,6 +862,10 @@ impl MacWindowState {
     }
 
     fn start_display_link(&mut self) {
+        if self.closed.load(Ordering::Acquire) {
+            self.stop_display_link();
+            return;
+        }
         let visible = unsafe {
             self.native_window
                 .occlusionState()
@@ -1492,6 +1528,9 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
+        // Logical removal precedes the queued AppKit close. Pending native
+        // callbacks must stop using the GPUI handle during that interval.
+        this.closed.store(true, Ordering::Release);
         this.renderer.destroy();
         if let Some(renderer) = &this.overlay_renderer {
             renderer.destroy();
@@ -2417,6 +2456,11 @@ impl PlatformWindow for MacWindow {
         this.renderer.render_to_image(scene)
     }
 
+    #[cfg(feature = "scene-capture")]
+    fn capture_scene(&self, scene: &gpui::Scene) -> anyhow::Result<image::RgbaImage> {
+        self.0.lock().renderer.capture_scene(scene)
+    }
+
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
         let mut lock = self.0.lock();
 
@@ -3019,6 +3063,18 @@ extern "C" fn window_did_resize(this: &Object, _: Sel, _: id) {
     window_state.as_ref().lock().move_traffic_light();
 }
 
+extern "C" fn window_did_update(this: &Object, _: Sel, _: id) {
+    // AppKit can relayout or recreate its standard buttons without a resize,
+    // title, activation, or appearance callback. Repair after that native pass.
+    // It may also update synchronously inside a setter that already owns this
+    // lock; that setter's existing repair covers the reentrant case.
+    let window_state = unsafe { get_window_state(this) };
+    let Some(mut state) = window_state.try_lock() else {
+        return;
+    };
+    state.move_traffic_light();
+}
+
 extern "C" fn window_will_enter_fullscreen(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -3160,6 +3216,9 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
                 callback(Default::default());
 
                 let mut lock = window_state.lock();
+                if lock.closed.load(Ordering::Acquire) {
+                    return;
+                }
                 lock.request_frame_callback = Some(callback);
                 lock.set_presents_with_transaction(false);
                 lock.start_display_link();
@@ -3172,6 +3231,9 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
     executor
         .spawn(async move {
             let mut lock = window_state.as_ref().lock();
+            if lock.closed.load(Ordering::Acquire) {
+                return;
+            }
             if is_active {
                 lock.move_traffic_light();
             }
@@ -3267,6 +3329,9 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
+    if lock.closed.load(Ordering::Acquire) {
+        return;
+    }
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.set_presents_with_transaction(true);
         lock.detach_display_link();
@@ -3274,6 +3339,9 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
         callback(Default::default());
 
         let mut lock = window_state.lock();
+        if lock.closed.load(Ordering::Acquire) {
+            return;
+        }
         lock.request_frame_callback = Some(callback);
         lock.set_presents_with_transaction(false);
         lock.start_display_link();
@@ -3319,11 +3387,17 @@ extern "C" fn step(view: *mut c_void) {
     let view = view as id;
     let window_state = unsafe { get_window_state(&*view) };
     let mut lock = window_state.lock();
+    if lock.closed.load(Ordering::Acquire) {
+        return;
+    }
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
         drop(lock);
         callback(Default::default());
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        if !lock.closed.load(Ordering::Acquire) {
+            lock.request_frame_callback = Some(callback);
+        }
     }
     crate::frame_stats::step_end(began);
 }

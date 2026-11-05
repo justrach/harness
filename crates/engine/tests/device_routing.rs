@@ -1772,3 +1772,91 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
     core_a.shutdown().await;
     core_b.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keep_awake_settings_route_only_to_the_requested_computer() {
+    let (relay_url, relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core_b = assemble(&dirs.path().join("b"), "device-b");
+    let _host = core_b.start_host_relay(&relay_url);
+    let core_a = assemble(&dirs.path().join("a"), "device-a");
+    let mut links = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    links.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(links));
+    let client = harness_rpc::memory_client(core_a.rpc_service());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let initial = loop {
+        match client
+            .call(
+                methods::GET_KEEP_AWAKE,
+                serde_json::json!({"targetDeviceId": "device-b"}),
+            )
+            .await
+        {
+            Ok(value) => break value,
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "relay unavailable: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+    assert_eq!(
+        initial,
+        serde_json::json!({"enabled": false, "supported": harness_engine::keep_awake::SUPPORTED})
+    );
+    // EngineCore assembly does not start its power watcher: only temporary
+    // registry preferences change here, never this Mac's IOKit assertions.
+    let changed = client
+        .call(
+            methods::SET_KEEP_AWAKE,
+            serde_json::json!({"enabled": true, "targetDeviceId": "device-b"}),
+        )
+        .await;
+    if harness_engine::keep_awake::SUPPORTED {
+        assert_eq!(changed.unwrap()["enabled"], true);
+        assert!(core_b.registry.keep_awake());
+    } else {
+        assert!(changed.unwrap_err().to_string().contains("not supported"));
+        assert!(!core_b.registry.keep_awake());
+    }
+    assert!(
+        !core_a.registry.keep_awake(),
+        "a remote preference must not change this computer"
+    );
+    client
+        .call(
+            methods::SET_KEEP_AWAKE,
+            serde_json::json!({"enabled": false, "targetDeviceId": "device-b"}),
+        )
+        .await
+        .unwrap();
+    assert!(!core_b.registry.keep_awake());
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+    relay.abort();
+}
+
+#[tokio::test]
+async fn keep_awake_offline_target_never_falls_back_to_local_preferences() {
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let core = assemble(dirs.path(), "local-computer");
+    let client = harness_rpc::memory_client(core.rpc_service());
+    for method in [methods::GET_KEEP_AWAKE, methods::SET_KEEP_AWAKE] {
+        let error = client
+            .call(
+                method,
+                serde_json::json!({"enabled": true, "targetDeviceId": "offline-computer"}),
+            )
+            .await
+            .expect_err("remote request must not run locally");
+        assert!(
+            error.to_string().contains("remote routing unavailable"),
+            "{error}"
+        );
+    }
+    assert!(!core.registry.keep_awake());
+    core.shutdown().await;
+}

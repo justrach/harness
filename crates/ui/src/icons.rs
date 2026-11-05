@@ -48,8 +48,13 @@ macro_rules! icon_assets {
 }
 
 icon_assets![
+    (SESSION_ATTENTION, "session-attention"),
     (PROJECT_DEFAULT, "project-default"),
     (REMOTE_SERVER, "remote-server"),
+    // Original compact cloud-computer glyphs in the shared linear family.
+    (CPU, "cpu"),
+    (MEMORY, "memory"),
+    (PAUSE, "pause"),
     // Service-tier bolt, drawn in the toolbar family's linear weight.
     (FAST_TIER, "fast-tier"),
     // Solar Icons (Linear), CC BY 4.0 — 480 Design.
@@ -128,6 +133,8 @@ icon_assets![
     (SPLIT_COLUMNS, "split-columns"),
     // Long-line wrapping toggle shared by changes and agent Markdown fences.
     (WRAP_TEXT, "wrap-text"),
+    // The changes pane's ignore-whitespace toggle: a space-bar bracket.
+    (WHITESPACE, "whitespace"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),
@@ -190,6 +197,8 @@ icon_assets![
     (ANNOTATE_TEXT, "annotate-text"),
     (ANNOTATE_RECT, "annotate-rect"),
     (UNDO, "undo"),
+    (REDO, "redo"),
+    (ERASER, "eraser"),
     // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
     // restore stacked squares) in the same style as `close` — drawn for the
     // client-side-decoration window controls; no system glyph font exists on

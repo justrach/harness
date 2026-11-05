@@ -136,11 +136,14 @@ struct FrameDirtyAccumulator {
 #[derive(Clone)]
 pub(crate) struct WindowInvalidator {
     inner: Rc<RefCell<WindowInvalidatorInner>>,
+    /// Frame callbacks can outlive a handle removed by an earlier callback.
+    removed: Rc<Cell<bool>>,
 }
 
 impl WindowInvalidator {
     pub fn new() -> Self {
         WindowInvalidator {
+            removed: Rc::new(Cell::new(false)),
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
                 dirty: true,
                 draw_phase: DrawPhase::None,
@@ -166,6 +169,20 @@ impl WindowInvalidator {
             true
         } else {
             false
+        }
+    }
+
+    /// Like [`Self::invalidate_view`], without notifying the view's observers.
+    fn redraw_view(&self, entity: EntityId) {
+        let mut inner = self.inner.borrow_mut();
+        inner.update_count += 1;
+        inner.dirty_views.insert(entity);
+        if inner.draw_phase == DrawPhase::None {
+            Self::record_frame_dirty(&mut inner);
+            inner.dirty = true;
+            if let Some(request) = &inner.frame_requester {
+                request();
+            }
         }
     }
 
@@ -1602,8 +1619,12 @@ impl Window {
             // The cap last sent to the platform window.
             let mut reported_frame_interval_cap = None;
             move |request_frame_options| {
+                if invalidator.removed.get() {
+                    return;
+                }
                 let thermal_state = handle
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
+                    .map_err(|error| anyhow::anyhow!("native frame thermal callback: {error:#}"))
                     .log_err();
 
                 // Throttle animation frames: an inactive window to ~30fps, thermal pressure
@@ -1644,6 +1665,7 @@ impl Window {
                         // `complete_frame`) or the compositor won't send another callback.
                         handle
                             .update(&mut cx, |_, window, _| window.complete_frame())
+                            .map_err(|error| anyhow::anyhow!("native frame throttle callback: {error:#}"))
                             .log_err();
                         return;
                     }
@@ -1656,9 +1678,20 @@ impl Window {
                         .update(&mut cx, |_, window, cx| {
                             for callback in next_frame_callbacks {
                                 callback(window, cx);
+                                if window.removed {
+                                    break;
+                                }
                             }
                         })
+                        .map_err(|error| anyhow::anyhow!("native next frame callback: {error:#}"))
                         .log_err();
+                }
+
+                // A next-frame callback may close its own popup. Its handle
+                // is removed before update returns; no draw or completion is
+                // owed to that destroyed surface.
+                if invalidator.removed.get() {
+                    return;
                 }
 
                 // Keep presenting if input was recently arriving at a high rate (>= 60fps).
@@ -1681,12 +1714,18 @@ impl Window {
                                 window.present();
                                 arena_clear_needed.clear();
                             })
+                            .map_err(|error| anyhow::anyhow!("native frame draw callback: {error:#}"))
                             .log_err();
                     })
                 } else if needs_present {
                     handle
                         .update(&mut cx, |_, window, _| window.present())
+                        .map_err(|error| anyhow::anyhow!("native frame present callback: {error:#}"))
                         .log_err();
+                }
+
+                if invalidator.removed.get() {
+                    return;
                 }
 
                 handle
@@ -1699,11 +1738,12 @@ impl Window {
                                 && window.input_rate_tracker.borrow().is_high_rate())
                         {
                             window.platform_window.pause_frame_requests();
-                            // Pausing clears the platform's cap, so the first
-                            // frame after an idle isn't held to it.
+                            // Pausing clears the platform cap so the first frame
+                            // after idle is not held to the old animation rate.
                             reported_frame_interval_cap = None;
                         }
                     })
+                    .map_err(|error| anyhow::anyhow!("native frame completion callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1712,6 +1752,7 @@ impl Window {
             move |_, _| {
                 handle
                     .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window resize callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1720,6 +1761,7 @@ impl Window {
             move || {
                 handle
                     .update(&mut cx, |_, window, cx| window.bounds_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window move callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1728,6 +1770,7 @@ impl Window {
             move || {
                 handle
                     .update(&mut cx, |_, window, cx| window.appearance_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window appearance callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1736,6 +1779,7 @@ impl Window {
             move || {
                 handle
                     .update(&mut cx, |_, window, cx| window.button_layout_changed(cx))
+                    .map_err(|error| anyhow::anyhow!("native window button layout callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1757,6 +1801,7 @@ impl Window {
 
                         SystemWindowTabController::update_last_active(cx, window.handle.id);
                     })
+                    .map_err(|error| anyhow::anyhow!("native window activation callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1768,6 +1813,7 @@ impl Window {
                         window.hovered.set(active);
                         window.refresh();
                     })
+                    .map_err(|error| anyhow::anyhow!("native window hover callback: {error:#}"))
                     .log_err();
             }
         }));
@@ -1776,6 +1822,7 @@ impl Window {
             Box::new(move |event| {
                 handle
                     .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
+                    .map_err(|error| anyhow::anyhow!("native window input callback: {error:#}"))
                     .log_err()
                     .unwrap_or(DispatchEventResult::default())
             })
@@ -1792,6 +1839,7 @@ impl Window {
                         }
                         None
                     })
+                    .map_err(|error| anyhow::anyhow!("native window control hit test callback: {error:#}"))
                     .log_err()
                     .unwrap_or(None)
             })
@@ -2042,6 +2090,15 @@ impl Window {
         self.handle
     }
 
+    /// Redraw the root view on the next frame, for a change only its own
+    /// render shows. Unlike [`Self::refresh`] cached views keep their last
+    /// frame, and unlike notifying the root its observers do not run.
+    pub fn redraw_root(&self) {
+        if let Some(root) = &self.root {
+            self.invalidator.redraw_view(root.entity_id());
+        }
+    }
+
     /// Mark the window as dirty, scheduling it to be redrawn on the next frame.
     pub fn refresh(&mut self) {
         if self.invalidator.not_drawing() {
@@ -2053,6 +2110,7 @@ impl Window {
     /// Close this window.
     pub fn remove_window(&mut self) {
         self.removed = true;
+        self.invalidator.removed.set(true);
     }
 
     /// Obtain the currently focused [`FocusHandle`]. If no elements are focused, returns `None`.
@@ -2461,6 +2519,12 @@ impl Window {
         self.platform_window.bounds()
     }
 
+    /// Look up a selector in the last painted frame for native fixture checks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn debug_bounds(&self, selector: &str) -> Option<Bounds<Pixels>> {
+        self.rendered_frame.debug_bounds.get(selector).copied()
+    }
+
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
@@ -2468,6 +2532,18 @@ impl Window {
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
+    }
+
+    /// Read back the last rendered app scene for an in-app drag preview.
+    ///
+    /// This captures only GPUI content owned by this window. It neither reads
+    /// the desktop nor captures native child views. The returned pixels are
+    /// RGBA at the window's device scale. This synchronizes with the GPU, so
+    /// capture once at drag pickup rather than on every pointer movement.
+    #[cfg(feature = "scene-capture")]
+    pub fn capture_scene(&self) -> anyhow::Result<image::RgbaImage> {
+        self.platform_window
+            .capture_scene(&self.rendered_frame.scene)
     }
 
     /// Set the content size of the window.
@@ -7155,6 +7231,31 @@ mod tests {
             "resize must wake a parked window"
         );
         assert!(!platform.simulate_display_tick());
+    }
+
+    #[test]
+    fn window_closing_during_next_frame_stops_later_callbacks() {
+        let mut cx = TestAppContext::single();
+        let handle = cx.add_window(|_, _| RootView {
+            explicit_size: false,
+            child_bounds: Rc::new(Cell::new(Bounds::default())),
+        });
+        let later_callback = Rc::new(Cell::new(false));
+        let mut platform = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.active.set(true);
+                window.on_next_frame(|window, _| window.remove_window());
+                let later_callback = later_callback.clone();
+                window.on_next_frame(move |_, _| later_callback.set(true));
+                window.platform_window.as_test().unwrap().clone()
+            })
+            .unwrap();
+        assert!(platform.simulate_display_tick());
+        assert!(
+            !later_callback.get(),
+            "callbacks cannot keep using a removed surface"
+        );
+        assert!(cx.update(|cx| cx.windows().is_empty()));
     }
 
     #[test]

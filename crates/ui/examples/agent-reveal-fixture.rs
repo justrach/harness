@@ -8,7 +8,8 @@
 //! - `after-revealed.png`: after the click, the transcript at the agent's
 //!   chip with its ring.
 //!
-//! `cargo run -p harness-ui --features appshots-fixture --example agent-reveal-fixture -- <dir>`
+//! `cargo run -p harness-ui --features appshots-fixture --example agent-reveal-fixture -- <dir> <light|dark> <width>`
+//! Run each appearance/width in a fresh process; all content is synthetic.
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -25,7 +26,6 @@ use harness_ui::{
 };
 use serde_json::{Value, json};
 
-const WIDTH: f32 = 760.0;
 const HEIGHT: f32 = 820.0;
 const FOOTER: f32 = 44.0;
 
@@ -187,6 +187,17 @@ fn save(window: gpui::AnyWindowHandle, cx: &mut AsyncApp, path: PathBuf) -> anyh
 
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
+    let tone = std::env::args().nth(2).unwrap_or_else(|| "light".into());
+    anyhow::ensure!(
+        matches!(tone.as_str(), "light" | "dark"),
+        "appearance must be light or dark"
+    );
+    let width = std::env::args()
+        .nth(3)
+        .map(|v| v.parse::<f32>())
+        .transpose()?
+        .unwrap_or(960.0);
+    anyhow::ensure!(width >= 384.0, "fixture width must be at least 384 px");
     std::fs::create_dir_all(&output)?;
     let data = tempfile::tempdir()?;
     let runtime = tokio::runtime::Runtime::new()?;
@@ -198,7 +209,9 @@ fn main() -> anyhow::Result<()> {
         .run(move |cx| {
             gpui_tokio::init(cx);
             gpui_base::init(cx);
-            let options = settings::UiSettings::default();
+            let mut options = settings::UiSettings::default();
+            options.theme_selection.light = "warm-harp-light".into();
+            options.theme_selection.dark = "warm-harp-dark".into();
             settings::init(options.clone(), data.path(), cx);
             let fonts = harness_ui::typography::register_fonts(cx);
             harness_ui::typography::init(
@@ -213,7 +226,11 @@ fn main() -> anyhow::Result<()> {
             );
             harness_ui::theme_library::init(data.path().to_path_buf(), cx);
             appearance::init(
-                appearance::AppearanceMode::Dark,
+                if tone == "light" {
+                    appearance::AppearanceMode::Light
+                } else {
+                    appearance::AppearanceMode::Dark
+                },
                 options.theme_selection,
                 options.accent,
                 options.surface,
@@ -236,7 +253,7 @@ fn main() -> anyhow::Result<()> {
                         window_background: Theme::of(cx).window_background_appearance(),
                         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                             point(px(20.), px(40.)),
-                            size(px(WIDTH), px(HEIGHT)),
+                            size(px(width), px(HEIGHT)),
                         ))),
                         ..Default::default()
                     },
@@ -278,7 +295,7 @@ fn main() -> anyhow::Result<()> {
                             host.clickable = clickable;
                             cx.notify();
                         });
-                        move_to(window, cx, point(px(WIDTH / 2.0), px(200.0)));
+                        move_to(window, cx, point(px(width / 2.0), px(200.0)));
                         pause(cx, 700).await;
                         move_to(window, cx, at);
                         pause(cx, 800).await;

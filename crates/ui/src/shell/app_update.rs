@@ -1,12 +1,7 @@
-//! Harness's own desktop updates, after the background download: the
-//! titlebar update control, the automatic restart into a staged update once
-//! nothing would be interrupted, and the one-time "Updated" confirmation on
-//! the version it restarted into.
-//!
-//! Automatic updates stay out of sight: no control while an update downloads
-//! or waits for its own restart, and no heads-up for a restart while another
-//! app is in front. The control shows only when the person has something to
-//! do (a failure, updates set to manual, or "Later" chosen).
+//! Harness's own desktop updates stay quiet while they download and wait
+//! for a safe restart. The titlebar control appears for manual updates,
+//! failures, or a staged version postponed with "Later". A foreground
+//! restart gets a countdown; a quiet background restart does not.
 //!
 //! The rules live in pure functions ([`update_control`],
 //! [`auto_restart_decision`], [`updated_confirmation`]) with their own tests;
@@ -58,10 +53,8 @@ pub(super) enum UpdateControl {
     Advisory,
     /// Desktop install with automatic updates off: a click downloads.
     Available,
-    /// A download the person started (automatic ones show nothing).
     Downloading,
-    /// Staged, and it won't restart into it on its own. `on_quit` = it
-    /// installs when Harness quits.
+    /// Staged. `on_quit` means it also installs when Harness quits.
     Ready {
         on_quit: bool,
     },
@@ -69,8 +62,7 @@ pub(super) enum UpdateControl {
 }
 
 /// The control for this frame and the version it is about, or `None` when
-/// there is nothing to show. `postponed` is the version "Later" was chosen
-/// for. Pure.
+/// there is nothing to show. Pure.
 pub(super) fn update_control(
     status: Option<&harness_update::UpdateStatus>,
     flow: &UpdateFlow,
@@ -82,7 +74,6 @@ pub(super) fn update_control(
 ) -> Option<(UpdateControl, String)> {
     if desktop_update {
         match flow {
-            // It restarts into the update on its own: nothing to do.
             UpdateFlow::Ready(staged)
                 if env_auto_update
                     && restart_setting
@@ -98,7 +89,6 @@ pub(super) fn update_control(
                     staged.version.clone(),
                 ));
             }
-            UpdateFlow::Downloading if env_auto_update => return None,
             UpdateFlow::Downloading | UpdateFlow::Failed(_) | UpdateFlow::Idle => {}
         }
     }
@@ -108,6 +98,7 @@ pub(super) fn update_control(
         return (dismissed != Some(latest.as_str())).then_some((UpdateControl::Advisory, latest));
     }
     let control = match flow {
+        UpdateFlow::Idle | UpdateFlow::Downloading if env_auto_update => return None,
         UpdateFlow::Idle => UpdateControl::Available,
         UpdateFlow::Downloading => UpdateControl::Downloading,
         UpdateFlow::Failed(message) => UpdateControl::Failed(message.clone()),
@@ -328,8 +319,25 @@ pub(super) fn updated_confirmation(
 // Shell state
 // ---------------------------------------------------------------------------
 
+/// Weak window roots let readiness checks include peers without reading the
+/// currently leased native window or retaining closed windows.
+#[derive(Default)]
+struct UpdateWindows(Vec<gpui::WeakEntity<Shell>>);
+impl gpui::Global for UpdateWindows {}
+
+struct SharedAppUpdate {
+    owner: gpui::WeakEntity<Shell>,
+    flow: UpdateFlow,
+    dismissed: Option<String>,
+    postponed: Option<String>,
+}
+impl gpui::Global for SharedAppUpdate {}
+
 /// The shell's app-update UI state beyond the download flow itself.
 pub(super) struct AppUpdateUi {
+    /// The version whose "Restart to update" row was dismissed with its ×.
+    pub restart_dismissed: Option<String>,
+    entity_id: Option<gpui::EntityId>,
     /// Render an inert ready-update button for manual layout testing in a
     /// debug build. This never stages an update or starts a restart watcher.
     pub dev_preview: bool,
@@ -344,8 +352,6 @@ pub(super) struct AppUpdateUi {
     /// the window-level listeners so recording input never re-renders.
     pub last_input: Rc<Cell<Instant>>,
     pub _keystrokes: Option<Subscription>,
-    /// The version whose "Restart to update" was dismissed.
-    pub restart_dismissed: Option<String>,
     /// "Updated to vX", shown once after coming back on a new version.
     pub updated_to: Option<String>,
     pub updated_task: Option<Task<()>>,
@@ -354,10 +360,11 @@ pub(super) struct AppUpdateUi {
 impl AppUpdateUi {
     pub(super) fn new() -> Self {
         Self {
+            restart_dismissed: None,
+            entity_id: None,
             dev_preview: cfg!(debug_assertions)
                 && std::env::var("HARNESS_DEV_APP_UPDATE").as_deref() == Ok("1"),
             postponed: None,
-            restart_dismissed: None,
             countdown_started: None,
             watch: None,
             last_input: Rc::new(Cell::new(Instant::now())),
@@ -406,6 +413,16 @@ impl Shell {
     /// from `Shell::new`; an interceptor sees every key before anything can
     /// stop it.
     pub(super) fn observe_update_input(&mut self, cx: &mut Context<Self>) {
+        self.app_update.entity_id = Some(cx.entity_id());
+        if !cx.has_global::<UpdateWindows>() {
+            cx.set_global(UpdateWindows::default());
+        }
+        let weak = cx.weak_entity();
+        let windows = &mut cx.global_mut::<UpdateWindows>().0;
+        windows.retain(|window| window.upgrade().is_some());
+        windows.push(weak);
+        cx.observe_global::<SharedAppUpdate>(|_, cx| cx.notify())
+            .detach();
         let last = self.app_update.last_input.clone();
         self.app_update._keystrokes = Some(cx.intercept_keystrokes(move |_, _, _| {
             last.set(Instant::now());
@@ -438,8 +455,24 @@ impl Shell {
     /// Publish the flow for Settings → Devices' version card, so it offers
     /// the same next step as the titlebar control. Called each render; the
     /// global (and its observers) only change when the phase does.
-    pub(super) fn publish_update_phase(&self, cx: &mut App) {
+    pub(super) fn publish_update_phase(&self, cx: &mut Context<Self>) {
         use crate::settings::devices::{SharedUpdatePhase, UpdatePhase};
+        if !self.owns_app_services(cx) {
+            return;
+        }
+        if cx.try_global::<SharedAppUpdate>().is_none_or(|shared| {
+            shared.owner.entity_id() != cx.entity_id()
+                || shared.flow != self.update_flow
+                || shared.dismissed != self.update_dismissed
+                || shared.postponed != self.app_update.postponed
+        }) {
+            cx.set_global(SharedAppUpdate {
+                owner: cx.weak_entity(),
+                flow: self.update_flow.clone(),
+                dismissed: self.update_dismissed.clone(),
+                postponed: self.app_update.postponed.clone(),
+            });
+        }
         let phase = match &self.update_flow {
             UpdateFlow::Idle => UpdatePhase::Idle,
             UpdateFlow::Downloading => UpdatePhase::Downloading,
@@ -454,32 +487,12 @@ impl Shell {
         }
     }
 
-    fn update_control_now(&self, cx: &App) -> Option<(UpdateControl, String)> {
-        if self.app_update.dev_preview {
-            return Some((UpdateControl::Ready { on_quit: false }, "preview".into()));
-        }
-        let control = update_control(
-            self.state.read(cx).update.as_ref(),
-            &self.update_flow,
-            self.install.supports_desktop_update(),
-            self.update_dismissed.as_deref(),
-            harness_update::desktop_auto_update_enabled(),
-            settings::with_current(cx, |s| s.restart_to_install_updates),
-            self.app_update.postponed.as_deref(),
-        );
-        if !matches!(self.update_flow, UpdateFlow::Ready(_)) {
-            return control;
-        }
-        match self.restart_place_now() {
-            Some((RestartPlace::Titlebar, version)) => Some((
-                control.map_or(UpdateControl::Ready { on_quit: true }, |(control, _)| {
-                    control
-                }),
-                version,
-            )),
-            // The sidebar's row has it, or it was dismissed for this version.
-            Some((RestartPlace::SidebarRow, _)) | None => None,
-        }
+    /// The sidebar with a footer to hold the row. Settings' sidebar is its own
+    /// menu, and the task view has no room beside its session list.
+    fn restart_row_fits(&self) -> bool {
+        !self.settings.sidebar_collapsed
+            && !self.settings.sidebar_task_view
+            && matches!(self.route, Route::Chat)
     }
 
     pub(super) fn restart_place_now(&self) -> Option<(RestartPlace, String)> {
@@ -490,8 +503,7 @@ impl Shell {
         restart_place(
             &self.update_flow,
             self.install.supports_desktop_update(),
-            // Settings' sidebar is its own menu, without the footer.
-            !self.settings.sidebar_collapsed && matches!(self.route, Route::Chat),
+            self.restart_row_fits(),
             self.app_update.restart_dismissed.as_deref(),
         )
     }
@@ -598,6 +610,56 @@ impl Shell {
         )
     }
 
+    fn update_control_now(&self, cx: &App) -> Option<(UpdateControl, String)> {
+        if self.app_update.dev_preview {
+            return Some((UpdateControl::Ready { on_quit: false }, "preview".into()));
+        }
+        let shared = cx.try_global::<SharedAppUpdate>().filter(|shared| {
+            shared.owner.upgrade().is_some()
+                && Some(shared.owner.entity_id()) != self.app_update.entity_id
+        });
+        let flow = shared.map_or(&self.update_flow, |shared| &shared.flow);
+        let control = update_control(
+            self.state.read(cx).update.as_ref(),
+            flow,
+            self.install.supports_desktop_update(),
+            shared.map_or(self.update_dismissed.as_deref(), |shared| {
+                shared.dismissed.as_deref()
+            }),
+            harness_update::desktop_auto_update_enabled(),
+            settings::with_current(cx, |s| s.restart_to_install_updates),
+            shared.map_or(self.app_update.postponed.as_deref(), |shared| {
+                shared.postponed.as_deref()
+            }),
+        );
+        // Automatic restart can wait indefinitely for an idle moment. Keep a
+        // manual restart in the titlebar while it waits.
+        if let UpdateFlow::Ready(staged) = flow
+            && self.install.supports_desktop_update()
+        {
+            if self.app_update.countdown_started.is_some() {
+                return None;
+            }
+            // The sidebar row offers it, or it was dismissed for this version.
+            let place = restart_place(
+                flow,
+                true,
+                self.restart_row_fits(),
+                self.app_update.restart_dismissed.as_deref(),
+            );
+            if !matches!(place, Some((RestartPlace::Titlebar, _))) {
+                return None;
+            }
+            return Some(control.unwrap_or_else(|| {
+                (
+                    UpdateControl::Ready { on_quit: true },
+                    staged.version.clone(),
+                )
+            }));
+        }
+        control
+    }
+
     /// Width the titlebar's left cluster gains while the update control
     /// shows, for the rows that start past the cluster.
     pub(super) fn titlebar_update_slot(&self, cx: &App) -> f32 {
@@ -606,18 +668,6 @@ impl Shell {
         } else {
             0.0
         }
-    }
-
-    /// Width the titlebar's left cluster gains for the cloud and update
-    /// controls, for the rows that start past the cluster.
-    pub(super) fn titlebar_extra_slots(&self, cx: &App) -> f32 {
-        self.titlebar_cloud_slot(cx) + self.titlebar_update_slot(cx)
-    }
-
-    /// How many of those controls show.
-    pub(super) fn titlebar_extra_slot_count(&self, cx: &App) -> usize {
-        usize::from(self.titlebar_cloud_slot(cx) > 0.0)
-            + usize::from(self.titlebar_update_slot(cx) > 0.0)
     }
 
     /// The update control in the titlebar's left cluster, at the cluster's
@@ -723,32 +773,57 @@ impl Shell {
     }
 
     fn restart_inputs_now<'a>(&'a self, now: Instant, cx: &App) -> RestartInputs<'a> {
-        let terminals = |panel: &Option<Entity<TerminalPanel>>| {
-            panel
-                .as_ref()
-                .map_or(0, |panel| panel.read(cx).live_tab_count())
-        };
-        RestartInputs {
+        let mut inputs = RestartInputs {
             flow: &self.update_flow,
             enabled: harness_update::desktop_auto_update_enabled()
                 && settings::with_current(cx, |s| s.restart_to_install_updates),
             postponed: self.app_update.postponed.as_deref(),
-            running_turns: self.state.read(cx).local_busy_turns(Utc::now()),
-            unsaved_edits: !self.all_file_edits_flushed(cx),
-            unsent_input: self.has_unsent_composer_input(cx),
-            live_terminals: terminals(&self.terminal) + terminals(&self.right_terminal),
-            idle_for: now.saturating_duration_since(self.app_update.last_input.get()),
+            running_turns: 0,
+            unsaved_edits: false,
+            unsent_input: false,
+            live_terminals: 0,
+            idle_for: Duration::MAX,
             frontmost: cx.active_window().is_some(),
             countdown_for: self
                 .app_update
                 .countdown_started
                 .map(|started| now.saturating_duration_since(started)),
+        };
+        self.add_window_restart_inputs(&mut inputs, now, cx);
+        if let Some(windows) = cx.try_global::<UpdateWindows>() {
+            for peer in windows.0.iter().filter_map(|window| window.upgrade()) {
+                if Some(peer.entity_id()) != self.app_update.entity_id {
+                    peer.read(cx)
+                        .add_window_restart_inputs(&mut inputs, now, cx);
+                }
+            }
         }
+        inputs
+    }
+
+    fn add_window_restart_inputs(&self, inputs: &mut RestartInputs<'_>, now: Instant, cx: &App) {
+        inputs.running_turns += self.state.read(cx).local_busy_turns(Utc::now());
+        inputs.unsaved_edits |= !self.all_file_edits_flushed(cx);
+        inputs.unsent_input |= self.has_unsent_composer_input(cx);
+        let mut terminals = std::collections::HashSet::new();
+        for terminal in self
+            .terminal
+            .iter()
+            .chain(self.right_terminal.iter())
+            .chain(self.workspace_panels.terminals.values())
+        {
+            if terminals.insert(terminal.entity_id()) {
+                inputs.live_terminals += terminal.read(cx).live_tab_count();
+            }
+        }
+        inputs.idle_for = inputs
+            .idle_for
+            .min(now.saturating_duration_since(self.app_update.last_input.get()));
     }
 
     /// Unsent composer input anywhere: the live composer (with every chat's
-    /// stashed draft) and the new-session canvases parked in other tabs and
-    /// split panes.
+    /// stashed draft), new-session canvases parked in other tabs and split
+    /// panes, and review comments that have not been sent yet.
     pub(super) fn has_unsent_composer_input(&self, cx: &App) -> bool {
         let parked = |draft: &Option<crate::pickers::CanvasDraft>| {
             draft
@@ -761,7 +836,18 @@ impl Shell {
                 .as_ref()
                 .is_some_and(|split| split.drafts.iter().any(parked))
         };
-        self.composer.read(cx).has_unsent_input(cx)
+        self.state.read(cx).has_review_comments()
+            || self
+                .diffs
+                .values()
+                .any(|changes| changes.read(cx).has_pending_review_draft(cx))
+            || self.composer.read(cx).has_unsent_input(cx)
+            || self.workspace_panels.drafts.values().any(|draft| {
+                draft
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| !input.text.trim().is_empty() || !input.stage.is_empty())
+            })
             || split(&self.chat_split)
             || self
                 .chat_tabs
@@ -781,8 +867,6 @@ impl Shell {
         let now = Instant::now();
         let decision = auto_restart_decision(&self.restart_inputs_now(now, cx));
         match (decision, self.app_update.countdown_started) {
-            // Working in another app: restart behind it, without a heads-up
-            // the person wouldn't see.
             (AutoRestart::Restart, None) if cx.active_window().is_none() => {
                 self.restart_into_update_now(true, cx);
                 self.still_staged()
@@ -813,8 +897,8 @@ impl Shell {
         }
     }
 
-    /// After a restart attempt: keep watching if it backed out (an unsaved
-    /// edit appeared) and left the update staged.
+    /// A last-moment blocker leaves the staged update in place. Keep the
+    /// watcher alive so removing that blocker can allow a later restart.
     fn still_staged(&self) -> Option<Duration> {
         matches!(self.update_flow, UpdateFlow::Ready(_)).then_some(AUTO_RESTART_POLL)
     }
@@ -823,7 +907,9 @@ impl Shell {
     /// moment and never prompts or discards: anything unsaved puts the
     /// update back and the watcher keeps waiting.
     fn restart_into_update_now(&mut self, background: bool, cx: &mut Context<Self>) {
-        if !self.all_file_edits_flushed(cx) {
+        if auto_restart_decision(&self.restart_inputs_now(Instant::now(), cx))
+            != AutoRestart::Restart
+        {
             return;
         }
         let UpdateFlow::Ready(staged) = std::mem::replace(&mut self.update_flow, UpdateFlow::Idle)
@@ -835,7 +921,7 @@ impl Shell {
         } else {
             Relaunch::Foreground
         };
-        self.install_and_relaunch(staged, relaunch, cx);
+        self.defer_update_install(staged, relaunch, true, cx);
     }
 
     /// Swap the staged bundle in, arm the relauncher and quit. The marker
@@ -847,6 +933,64 @@ impl Shell {
         relaunch: Relaunch,
         cx: &mut Context<Self>,
     ) {
+        if let Some(owner) = self.app_services_peer(cx) {
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |shell, cx| {
+                    shell.install_and_relaunch(staged, relaunch, cx)
+                });
+            });
+            return;
+        }
+        self.defer_update_install(staged, relaunch, false, cx);
+    }
+
+    fn defer_update_install(
+        &mut self,
+        staged: StagedUpdate,
+        relaunch: Relaunch,
+        automatic: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_flow = UpdateFlow::Ready(staged.clone());
+        if !automatic {
+            // A cancelled save dialog must not turn into an automatic restart.
+            self.app_update.postponed = Some(staged.version.clone());
+            self.app_update.watch = None;
+            self.app_update.countdown_started = None;
+        }
+        let owner = cx.weak_entity();
+        cx.defer(move |cx| {
+            if automatic {
+                let _ = owner.update(cx, |shell, cx| {
+                    if auto_restart_decision(&shell.restart_inputs_now(Instant::now(), cx))
+                        == AutoRestart::Restart
+                    {
+                        shell.perform_update_install(staged, relaunch, cx);
+                    } else {
+                        shell.watch_for_quiet_restart(cx);
+                    }
+                });
+                return;
+            }
+            // Outside the initiating Shell lease, every window can use its
+            // existing Save/Discard/Cancel flow before any bundle is changed.
+            if !prepare_windows_for_update(&staged, cx) {
+                return;
+            }
+            let _ = owner.update(cx, |shell, cx| {
+                shell.perform_update_install(staged, relaunch, cx)
+            });
+        });
+        cx.notify();
+    }
+
+    fn perform_update_install(
+        &mut self,
+        staged: StagedUpdate,
+        relaunch: Relaunch,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_flow = UpdateFlow::Idle;
         // Publish this window's tabs and layout so the quit's settings flush
         // writes them for the relaunch to restore.
         self.schedule_save(cx);
@@ -1026,9 +1170,395 @@ impl Shell {
     }
 }
 
+fn prepare_windows_for_update(staged: &StagedUpdate, cx: &mut App) -> bool {
+    let windows: Vec<_> = cx
+        .try_global::<UpdateWindows>()
+        .into_iter()
+        .flat_map(|windows| &windows.0)
+        .filter_map(|window| window.upgrade())
+        .collect();
+    let mut ready = true;
+    let mut blocked = None;
+    for window in windows {
+        let window_ready = window.update(cx, |shell, cx| {
+            shell.prepare_exit(PendingExit::InstallUpdate(staged.clone()), cx)
+        });
+        if !window_ready {
+            blocked.get_or_insert(window.entity_id());
+        }
+        ready &= window_ready;
+    }
+    if let Some(blocked) = blocked {
+        for window in cx
+            .windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<Shell>())
+        {
+            if window
+                .entity(cx)
+                .is_ok_and(|shell| shell.entity_id() == blocked)
+            {
+                let _ = window.update(cx, |_, window, _| window.activate_window());
+                break;
+            }
+        }
+    }
+    ready
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn peer_window(
+        source: gpui::WindowHandle<Shell>,
+        cx: &mut gpui::TestAppContext,
+    ) -> gpui::WindowHandle<Shell> {
+        let (state, boot) = source
+            .read_with(cx, |shell, _| (shell.state.clone(), shell.boot.clone()))
+            .unwrap();
+        cx.add_window(|_, cx| {
+            let state = cx.new(|cx| AppState::for_window(&state, cx));
+            Shell::new(state, boot, cx)
+        })
+    }
+
+    #[gpui::test]
+    fn peer_windows_read_the_owners_update_phase_without_overwriting_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::settings::devices::{SharedUpdatePhase, UpdatePhase};
+        let (_dir, owner) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        let peer = peer_window(owner, cx);
+        for window in [owner, peer] {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.app_update.dev_preview = false;
+                    shell.install = harness_update::InstallKind::MacApp {
+                        bundle: PathBuf::from("/nonexistent/Harness.app"),
+                    };
+                    shell
+                        .state
+                        .update(cx, |state, _| state.update = Some(status("9.9.9", true)));
+                })
+                .unwrap();
+        }
+        owner
+            .update(cx, |shell, _, cx| {
+                assert!(shell.owns_app_services(cx));
+                shell.update_flow = UpdateFlow::Downloading;
+                shell.publish_update_phase(cx);
+            })
+            .unwrap();
+        peer.update(cx, |shell, _, cx| {
+            assert!(matches!(shell.update_flow, UpdateFlow::Idle));
+            shell.publish_update_phase(cx);
+            assert_eq!(cx.global::<SharedUpdatePhase>().0, UpdatePhase::Downloading);
+            if harness_update::desktop_auto_update_enabled() {
+                assert!(shell.update_control_now(cx).is_none());
+            } else {
+                assert_eq!(
+                    shell.update_control_now(cx).unwrap().0,
+                    UpdateControl::Downloading
+                );
+            }
+        })
+        .unwrap();
+        owner
+            .update(cx, |shell, _, cx| {
+                shell.update_flow = ready("9.9.9");
+                shell.publish_update_phase(cx);
+            })
+            .unwrap();
+        peer.update(cx, |shell, _, cx| {
+            shell.publish_update_phase(cx);
+            assert_eq!(cx.global::<SharedUpdatePhase>().0, UpdatePhase::Ready("9.9.9".into()));
+            assert!(matches!(shell.update_control_now(cx), Some((UpdateControl::Ready { .. }, version)) if version == "9.9.9"));
+            assert!(matches!(shell.update_flow, UpdateFlow::Idle), "peers display the flow without owning its staged installer");
+        }).unwrap();
+        owner
+            .update(cx, |shell, _, cx| {
+                shell.postpone_auto_restart(cx);
+                shell.publish_update_phase(cx);
+            })
+            .unwrap();
+        peer.update(cx, |shell, _, cx| {
+            shell.publish_update_phase(cx);
+            assert_eq!(cx.global::<SharedAppUpdate>().postponed.as_deref(), Some("9.9.9"));
+            assert!(shell.app_update.postponed.is_none(), "the peer reads the owner's Later choice");
+            assert!(matches!(shell.update_control_now(cx), Some((UpdateControl::Ready { .. }, version)) if version == "9.9.9"));
+        }).unwrap();
+        owner
+            .update(cx, |shell, _, cx| {
+                shell.update_flow = UpdateFlow::Failed("offline".into());
+                shell.publish_update_phase(cx);
+            })
+            .unwrap();
+        peer.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.update_control_now(cx),
+                Some((UpdateControl::Failed("offline".into()), "9.9.9".into()))
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn automatic_restart_keeps_polling_after_a_peer_blocks_the_final_check(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (dir, owner) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        let peer = peer_window(owner, cx);
+        let now = Instant::now();
+        for window in [owner, peer] {
+            window
+                .update(cx, |shell, _, _| {
+                    shell
+                        .app_update
+                        .last_input
+                        .set(now - Duration::from_secs(120));
+                })
+                .unwrap();
+        }
+        owner
+            .update(cx, |shell, _, cx| {
+                shell.update_flow = ready("9.9.9");
+                assert_eq!(
+                    auto_restart_decision(&RestartInputs {
+                        enabled: true,
+                        ..shell.restart_inputs_now(now, cx)
+                    }),
+                    AutoRestart::Restart
+                );
+            })
+            .unwrap();
+        peer.update(cx, |shell, _, _| {
+            shell.workspace_panels.drafts.insert(
+                99,
+                crate::pickers::CanvasDraft {
+                    input: Some(crate::pickers::CanvasInput {
+                        text: "Keep this unsent note".into(),
+                        stage: Vec::new(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+        owner
+            .update(cx, |shell, _, cx| {
+                shell.restart_into_update_now(true, cx);
+                assert!(matches!(shell.update_flow, UpdateFlow::Ready(_)));
+                assert_eq!(shell.still_staged(), Some(AUTO_RESTART_POLL));
+                assert_eq!(shell.auto_restart_tick(cx), Some(AUTO_RESTART_POLL));
+                assert!(shell.app_update.countdown_started.is_none());
+                shell.update_flow = UpdateFlow::Failed("installer failed".into());
+                assert_eq!(shell.still_staged(), None);
+                assert_eq!(shell.auto_restart_tick(cx), None);
+            })
+            .unwrap();
+        assert!(!dir.path().join(RELAUNCH_MARKER).exists());
+    }
+
+    #[gpui::test]
+    fn automatic_restart_waits_for_review_comments_from_another_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, owner) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        let comment = crate::comments::ReviewComment::new(
+            "src/example.rs",
+            crate::comments::CommentSide::New,
+            12,
+            "Please keep this review note",
+        );
+        owner
+            .update(cx, |shell, _, cx| {
+                shell.update_flow = ready("9.9.9");
+                shell
+                    .app_update
+                    .last_input
+                    .set(Instant::now() - Duration::from_secs(120));
+                shell.state.update(cx, |state, _| {
+                    state.add_review_comment("unselected-chat", comment.clone());
+                });
+                assert_eq!(
+                    auto_restart_decision(&RestartInputs {
+                        enabled: true,
+                        ..shell.restart_inputs_now(Instant::now(), cx)
+                    }),
+                    AutoRestart::Wait(RestartBlocker::UnsentInput)
+                );
+                shell.state.update(cx, |state, _| {
+                    state.remove_review_comment("unselected-chat", &comment.id);
+                });
+                assert!(!shell.has_unsent_composer_input(cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn automatic_restart_waits_for_a_typed_diff_comment_after_switching_chats(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, owner) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        owner
+            .update(cx, |shell, window, cx| {
+                shell.update_flow = ready("9.9.9");
+                shell
+                    .app_update
+                    .last_input
+                    .set(Instant::now() - Duration::from_secs(120));
+                let changes = cx.new(|cx| Changes::new(shell.state.clone(), cx));
+                changes.update(cx, |changes, cx| {
+                    changes.review_working_tree("current".into(), cx);
+                    changes.test_open_review_draft("Keep this unfinished review note", window, cx);
+                });
+                shell.diffs.insert(99, changes);
+                shell
+                    .state
+                    .update(cx, |state, cx| state.select_chat(Some("peer".into()), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        owner
+            .read_with(cx, |shell, cx| {
+                assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
+                assert!(
+                    !shell.state.read(cx).has_review_comments(),
+                    "the note is still being typed, not staged"
+                );
+                assert!(shell.has_unsent_composer_input(cx));
+                assert_eq!(
+                    auto_restart_decision(&RestartInputs {
+                        enabled: true,
+                        ..shell.restart_inputs_now(Instant::now(), cx)
+                    }),
+                    AutoRestart::Wait(RestartBlocker::UnsentInput)
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn restart_readiness_includes_peer_panel_drafts_and_latest_pointer_input(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_dir, owner) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        let peer = peer_window(owner, cx);
+        let now = Instant::now();
+        owner
+            .update(cx, |shell, _, _| {
+                shell.update_flow = ready("9.9.9");
+                shell
+                    .app_update
+                    .last_input
+                    .set(now - Duration::from_secs(120));
+            })
+            .unwrap();
+        peer.update(cx, |shell, _, _| {
+            shell
+                .app_update
+                .last_input
+                .set(now - Duration::from_secs(2));
+            shell.workspace_panels.drafts.insert(
+                99,
+                crate::pickers::CanvasDraft {
+                    input: Some(crate::pickers::CanvasInput {
+                        text: "Unsent review note".into(),
+                        stage: Vec::new(),
+                    }),
+                    ..Default::default()
+                },
+            );
+        })
+        .unwrap();
+        owner
+            .update(cx, |shell, _, cx| {
+                let inputs = shell.restart_inputs_now(now, cx);
+                assert!(inputs.unsent_input);
+                assert_eq!(inputs.idle_for, Duration::from_secs(2));
+                assert_eq!(
+                    auto_restart_decision(&RestartInputs {
+                        enabled: true,
+                        ..inputs
+                    }),
+                    AutoRestart::Wait(RestartBlocker::UnsentInput)
+                );
+            })
+            .unwrap();
+        peer.update(cx, |shell, _, _| shell.workspace_panels.drafts.clear())
+            .unwrap();
+        owner
+            .update(cx, |shell, _, cx| {
+                let inputs = shell.restart_inputs_now(now, cx);
+                assert!(!inputs.unsent_input);
+                assert_eq!(
+                    auto_restart_decision(&RestartInputs {
+                        enabled: true,
+                        ..inputs
+                    }),
+                    AutoRestart::Wait(RestartBlocker::UserActive)
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn manual_update_waits_for_a_dirty_peer_before_attempting_the_install(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (dir, owner) = chat_tabs::navigation_tests::fixture(cx, false, None);
+        let peer = peer_window(owner, cx);
+        peer.update(cx, |shell, _, cx| {
+            let state = shell.state.clone();
+            let files = cx.new(|cx| {
+                let mut files =
+                    FilesSurface::new(state, "current".into(), false, 1000, 13.0, false, false, cx);
+                files.seed_pending_exit_test_document(false);
+                files
+            });
+            shell.file_surfaces.insert(0, files);
+            shell
+                .file_surface_keys
+                .insert(("current".into(), "current".into(), "test.rs".into()), 0);
+        })
+        .unwrap();
+        owner
+            .update(cx, |shell, _, cx| {
+                assert!(shell.owns_app_services(cx));
+                shell.install = harness_update::InstallKind::MacApp {
+                    bundle: PathBuf::from("/nonexistent/Harness.app"),
+                };
+                assert!(shell.restart_inputs_now(Instant::now(), cx).unsaved_edits);
+                shell.apply_staged_update(
+                    StagedUpdate {
+                        path: PathBuf::from("/nonexistent/staged"),
+                        version: "9.9.9".into(),
+                    },
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        owner
+            .read_with(cx, |shell, _| {
+                assert!(
+                    matches!(shell.update_flow, UpdateFlow::Ready(_)),
+                    "no install attempt may replace Ready while the peer has unsaved edits"
+                )
+            })
+            .unwrap();
+        peer.update(cx, |shell, _, cx| {
+            assert!(matches!(
+                shell.pending_exit,
+                Some(PendingExit::InstallUpdate(_))
+            ));
+            shell.cancel_file_close(RightSurface::File(0), cx);
+            assert!(shell.pending_exit.is_none());
+        })
+        .unwrap();
+        assert!(!dir.path().join(RELAUNCH_MARKER).exists());
+    }
 
     fn status(latest: &str, available: bool) -> harness_update::UpdateStatus {
         harness_update::UpdateStatus {
@@ -1046,48 +1576,6 @@ mod tests {
             path: PathBuf::from("/tmp/staged"),
             version: version.into(),
         })
-    }
-
-    /// An update set to restart on its own still offers "Restart to update": that restart waits
-    /// for a quiet moment that may never come while agents run. Before, nothing showed at all.
-    #[test]
-    fn a_staged_update_always_offers_a_restart() {
-        // Set to restart on its own: the titlebar control stays hidden...
-        assert_eq!(
-            update_control(None, &ready("0.2.135"), true, None, true, true, None),
-            None
-        );
-        // ...so the restart is offered in the sidebar's footer, or the titlebar when it's shut.
-        assert_eq!(
-            restart_place(&ready("0.2.135"), true, true, None),
-            Some((RestartPlace::SidebarRow, "0.2.135".into()))
-        );
-        assert_eq!(
-            restart_place(&ready("0.2.135"), true, false, None),
-            Some((RestartPlace::Titlebar, "0.2.135".into()))
-        );
-    }
-
-    #[test]
-    fn restart_to_update_shows_only_for_a_staged_update_not_dismissed() {
-        for flow in [
-            UpdateFlow::Idle,
-            UpdateFlow::Downloading,
-            UpdateFlow::Failed("offline".into()),
-        ] {
-            assert_eq!(restart_place(&flow, true, true, None), None);
-        }
-        // No in-app updates for this install (a package manager owns it).
-        assert_eq!(restart_place(&ready("0.2.135"), false, true, None), None);
-        // Dismissed for this version; the next version shows again.
-        assert_eq!(
-            restart_place(&ready("0.2.135"), true, true, Some("0.2.135")),
-            None
-        );
-        assert_eq!(
-            restart_place(&ready("0.2.136"), true, true, Some("0.2.135")),
-            Some((RestartPlace::SidebarRow, "0.2.136".into()))
-        );
     }
 
     #[test]
@@ -1112,24 +1600,11 @@ mod tests {
         let v = "0.2.135".to_string();
         assert_eq!(
             control(Some(&available), &UpdateFlow::Idle, true, None),
-            Some((UpdateControl::Available, v.clone()))
-        );
-        // An automatic download shows nothing; one the person started does.
-        assert_eq!(
-            control(Some(&available), &UpdateFlow::Downloading, true, None),
             None
         );
         assert_eq!(
-            update_control(
-                Some(&available),
-                &UpdateFlow::Downloading,
-                true,
-                None,
-                false,
-                true,
-                None
-            ),
-            Some((UpdateControl::Downloading, v.clone()))
+            control(Some(&available), &UpdateFlow::Downloading, true, None),
+            None
         );
         assert_eq!(
             control(
@@ -1140,38 +1615,15 @@ mod tests {
             ),
             Some((UpdateControl::Failed("offline".into()), v.clone()))
         );
-        // Staged for its own restart: nothing to show.
+        // Automatic updates stay quiet even if the feed moved on since.
         assert_eq!(
-            control(Some(&available), &ready("0.2.135"), true, None),
-            None
-        );
-        // Staged and waiting on the person: the staged version, even if the
-        // feed moved on since.
-        let later = Some("0.2.135");
-        assert_eq!(
-            update_control(
+            control(
                 Some(&status("0.2.136", true)),
                 &ready("0.2.135"),
                 true,
-                None,
-                true,
-                true,
-                later
+                None
             ),
-            Some((UpdateControl::Ready { on_quit: true }, v.clone()))
-        );
-        assert_eq!(
-            update_control(
-                Some(&available),
-                &ready("0.2.135"),
-                true,
-                None,
-                true,
-                true,
-                Some("0.2.134")
-            ),
-            None,
-            "Later for an older version doesn't hold this one"
+            None
         );
         assert_eq!(
             update_control(
@@ -1218,13 +1670,76 @@ mod tests {
     }
 
     #[test]
+    fn manual_updates_and_later_keep_their_next_action_visible() {
+        let available = status("0.2.136", true);
+        assert_eq!(
+            update_control(
+                Some(&available),
+                &UpdateFlow::Idle,
+                true,
+                None,
+                false,
+                true,
+                None
+            ),
+            Some((UpdateControl::Available, "0.2.136".into()))
+        );
+        assert_eq!(
+            update_control(
+                Some(&available),
+                &UpdateFlow::Downloading,
+                true,
+                None,
+                false,
+                true,
+                None
+            ),
+            Some((UpdateControl::Downloading, "0.2.136".into()))
+        );
+        // Later applies only to that staged version, independently of the feed.
+        assert_eq!(
+            update_control(
+                Some(&available),
+                &ready("0.2.135"),
+                true,
+                None,
+                true,
+                true,
+                Some("0.2.135")
+            ),
+            Some((UpdateControl::Ready { on_quit: true }, "0.2.135".into()))
+        );
+        assert_eq!(
+            update_control(
+                None,
+                &ready("0.2.135"),
+                true,
+                None,
+                true,
+                true,
+                Some("0.2.135")
+            ),
+            Some((UpdateControl::Ready { on_quit: true }, "0.2.135".into()))
+        );
+        assert_eq!(
+            update_control(
+                Some(&available),
+                &ready("0.2.136"),
+                true,
+                None,
+                true,
+                true,
+                Some("0.2.135")
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn update_control_labels_say_what_a_click_does() {
         let label = |control| update_control_label(&control, "0.2.135");
         assert_eq!(label(UpdateControl::Downloading), "Downloading v0.2.135…");
-        assert_eq!(
-            label(UpdateControl::Ready { on_quit: true }),
-            "v0.2.135 is ready — it installs when you quit. Click to restart now."
-        );
+        assert!(label(UpdateControl::Ready { on_quit: true }).contains("installs when you quit"));
         assert!(
             label(UpdateControl::Ready { on_quit: false }).contains("Click to restart and install")
         );
@@ -1393,5 +1908,27 @@ mod tests {
         // The swap failed and the old version came back: say nothing.
         assert_eq!(updated_confirmation(Some(&marker), "0.2.134"), None);
         assert_eq!(updated_confirmation(None, "0.2.135"), None);
+    }
+
+    #[test]
+    fn restart_to_update_shows_only_for_a_staged_update_not_dismissed() {
+        for flow in [
+            UpdateFlow::Idle,
+            UpdateFlow::Downloading,
+            UpdateFlow::Failed("offline".into()),
+        ] {
+            assert_eq!(restart_place(&flow, true, true, None), None);
+        }
+        // No in-app updates for this install (a package manager owns it).
+        assert_eq!(restart_place(&ready("0.2.135"), false, true, None), None);
+        // Dismissed for this version; the next version shows again.
+        assert_eq!(
+            restart_place(&ready("0.2.135"), true, true, Some("0.2.135")),
+            None
+        );
+        assert_eq!(
+            restart_place(&ready("0.2.136"), true, true, Some("0.2.135")),
+            Some((RestartPlace::SidebarRow, "0.2.136".into()))
+        );
     }
 }

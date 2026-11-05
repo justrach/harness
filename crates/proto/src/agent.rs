@@ -151,6 +151,7 @@ pub fn context_label(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
     }
+    let tokens = u128::from(tokens);
     let thousands = (tokens + 500) / 1_000;
     if thousands < 1_000 {
         return format!("{thousands}k");
@@ -794,6 +795,7 @@ mod tests {
             (1_005_000, "1.01M"),
             (512, "512"),
             (0, "0"),
+            (u64::MAX, "18446744073709.55M"),
         ] {
             assert_eq!(context_label(tokens), label, "{tokens}");
         }

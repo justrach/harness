@@ -10,12 +10,18 @@
 //! The editor view lives in [`editor`]. Coordinates are image pixels: what
 //! the agent sees in the flattened file is what the boxes say.
 
+#[cfg(target_os = "macos")]
+pub mod editable;
 pub mod editor;
+#[cfg(target_os = "macos")]
+pub use editable::EditableAnnotation;
 
 use std::io::Cursor;
 
 /// The four marker colors, in toolbar order. Red is the default.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum MarkColor {
     #[default]
     Red,
@@ -70,10 +76,13 @@ pub enum Tool {
     #[default]
     Rect,
     Text,
+    Pen,
+    Eraser,
+    Comment,
 }
 
 /// An axis-aligned box in image pixels, origin top-left.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImageRect {
     pub x: f32,
     pub y: f32,
@@ -105,15 +114,21 @@ impl ImageRect {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Shape {
     /// A box with a numbered pin at its top-left corner and an optional note.
     Rect(ImageRect),
     /// Free text whose top-left corner sits at `(x, y)`, `size` px tall type.
     Text { x: f32, y: f32, size: f32 },
+    /// Freehand points and width in image pixels, independent of editor zoom.
+    Stroke { points: Vec<(f32, f32)>, width: f32 },
+    /// A plain outline without a pin or note.
+    MarkupRect { rect: ImageRect, width: f32 },
+    /// A numbered point; its body is sent as prompt text, never painted.
+    Comment { x: f32, y: f32 },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Annotation {
     pub id: u64,
     pub shape: Shape,
@@ -126,21 +141,40 @@ impl Annotation {
     pub fn is_rect(&self) -> bool {
         matches!(self.shape, Shape::Rect(_))
     }
+
+    pub fn is_comment(&self) -> bool {
+        matches!(self.shape, Shape::Rect(_) | Shape::Comment { .. })
+    }
 }
 
 /// Smallest box a drag commits, in image pixels per side. Anything smaller
 /// is a click, not a box.
 pub const MIN_BOX: f32 = 4.0;
+/// Keep a gesture bounded before it enters the undo history or draft file.
+pub const MAX_STROKE_POINTS: usize = 8192;
 /// Undo depth. Each add, remove, recolor or note change is one step.
 const UNDO_LIMIT: usize = 100;
 
 /// Every mark on one image, with selection and undo.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Annotations {
     items: Vec<Annotation>,
+    #[serde(skip)]
     selected: Option<u64>,
+    #[serde(skip)]
     undo: Vec<Vec<Annotation>>,
+    #[serde(skip)]
+    redo: Vec<Vec<Annotation>>,
+    #[serde(skip)]
+    erase_origin: Option<Vec<Annotation>>,
     next_id: u64,
+}
+
+impl PartialEq for Annotations {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items && self.next_id == other.next_id
+    }
 }
 
 impl Annotations {
@@ -150,6 +184,48 @@ impl Annotations {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Validate serialized editable state against its original image before
+    /// using it for hit testing or rendering. Undo/selection are not persisted.
+    pub fn is_valid_for_image(&self, size: (f32, f32)) -> bool {
+        if !size.0.is_finite() || !size.1.is_finite() || size.0 <= 0.0 || size.1 <= 0.0 {
+            return false;
+        }
+        let point = |x: f32, y: f32| {
+            x.is_finite()
+                && y.is_finite()
+                && x >= 0.0
+                && y >= 0.0
+                && x <= size.0 + 0.01
+                && y <= size.1 + 0.01
+        };
+        let width = |w: f32| w.is_finite() && w > 0.0 && w <= MAX_SIDE as f32;
+        let rect = |r: &ImageRect| {
+            point(r.x, r.y)
+                && point(r.right(), r.bottom())
+                && r.w.is_finite()
+                && r.h.is_finite()
+                && r.w >= MIN_BOX
+                && r.h >= MIN_BOX
+        };
+        let mut ids = std::collections::HashSet::new();
+        self.items.iter().all(|item| {
+            item.id != 0
+                && ids.insert(item.id)
+                && match &item.shape {
+                    Shape::Rect(r) => rect(r),
+                    Shape::MarkupRect { rect: r, width: w } => rect(r) && width(*w),
+                    Shape::Text { x, y, size } => point(*x, *y) && width(*size),
+                    Shape::Comment { x, y } => point(*x, *y),
+                    Shape::Stroke { points, width: w } => {
+                        !points.is_empty()
+                            && points.len() <= MAX_STROKE_POINTS
+                            && width(*w)
+                            && points.iter().all(|&(x, y)| point(x, y))
+                    }
+                }
+        })
     }
 
     pub fn get(&self, id: u64) -> Option<&Annotation> {
@@ -166,18 +242,94 @@ impl Annotations {
 
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
+            || self
+                .erase_origin
+                .as_ref()
+                .is_some_and(|items| *items != self.items)
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     fn checkpoint(&mut self) {
+        self.end_erase();
+        self.push_undo(self.items.clone());
+        self.redo.clear();
+    }
+
+    fn push_undo(&mut self, items: Vec<Annotation>) {
         if self.undo.len() == UNDO_LIMIT {
             self.undo.remove(0);
         }
-        self.undo.push(self.items.clone());
+        self.undo.push(items);
     }
 
     fn mint(&mut self) -> u64 {
-        self.next_id += 1;
+        self.next_id = self
+            .next_id
+            .max(self.items.iter().map(|item| item.id).max().unwrap_or(0))
+            .checked_add(1)
+            .unwrap_or(1);
+        while self.items.iter().any(|item| item.id == self.next_id) {
+            self.next_id = self.next_id.checked_add(1).unwrap_or(1);
+        }
         self.next_id
+    }
+
+    fn add_shape(&mut self, shape: Shape, color: MarkColor) -> u64 {
+        self.checkpoint();
+        let id = self.mint();
+        self.items.push(Annotation {
+            id,
+            shape,
+            color,
+            text: String::new(),
+        });
+        self.selected = Some(id);
+        id
+    }
+
+    pub fn add_stroke(
+        &mut self,
+        points: Vec<(f32, f32)>,
+        width: f32,
+        color: MarkColor,
+    ) -> Option<u64> {
+        if points.is_empty()
+            || points.len() > MAX_STROKE_POINTS
+            || !points.iter().all(|&(x, y)| x.is_finite() && y.is_finite())
+            || !width.is_finite()
+            || width <= 0.0
+        {
+            return None;
+        }
+        Some(self.add_shape(Shape::Stroke { points, width }, color))
+    }
+
+    pub fn add_markup_rect(
+        &mut self,
+        rect: ImageRect,
+        width: f32,
+        color: MarkColor,
+    ) -> Option<u64> {
+        if ![rect.x, rect.y, rect.w, rect.h, width]
+            .iter()
+            .all(|v| v.is_finite())
+            || rect.w < MIN_BOX
+            || rect.h < MIN_BOX
+            || width <= 0.0
+        {
+            return None;
+        }
+        Some(self.add_shape(Shape::MarkupRect { rect, width }, color))
+    }
+
+    pub fn add_comment(&mut self, at: (f32, f32), color: MarkColor) -> Option<u64> {
+        if !at.0.is_finite() || !at.1.is_finite() {
+            return None;
+        }
+        Some(self.add_shape(Shape::Comment { x: at.0, y: at.1 }, color))
     }
 
     /// Add a box. A box under [`MIN_BOX`] on either side is rejected (it
@@ -228,14 +380,21 @@ impl Annotations {
             return false;
         };
         let item = &self.items[index];
+        if matches!(item.shape, Shape::Stroke { .. } | Shape::MarkupRect { .. }) {
+            return false;
+        }
         if !item.is_rect() && text.is_empty() {
-            // Placing text and then typing nothing undoes the placement too.
-            self.items.remove(index);
+            // A new empty text/comment cancels its placement. Clearing an
+            // existing mark is a deletion that Undo must be able to restore.
             if let Some(previous) = self.undo.last()
                 && previous.iter().all(|a| a.id != id)
             {
                 self.undo.pop();
+            } else {
+                self.checkpoint();
             }
+            self.items.remove(index);
+            self.redo.clear();
             if self.selected == Some(id) {
                 self.selected = None;
             }
@@ -244,7 +403,18 @@ impl Annotations {
         if item.text == text {
             return false;
         }
-        self.checkpoint();
+        // On desktop, placing a text label or point comment and entering its
+        // first words is one edit. Legacy numbered regions keep their history.
+        let initial_desktop_text = cfg!(target_os = "macos")
+            && matches!(item.shape, Shape::Text { .. } | Shape::Comment { .. })
+            && item.text.is_empty()
+            && self
+                .undo
+                .last()
+                .is_some_and(|previous| previous.iter().all(|previous| previous.id != id));
+        if !initial_desktop_text {
+            self.checkpoint();
+        }
         self.items[index].text = text.to_string();
         true
     }
@@ -280,24 +450,165 @@ impl Annotations {
     }
 
     pub fn undo(&mut self) -> bool {
+        self.end_erase();
         let Some(previous) = self.undo.pop() else {
             return false;
         };
-        self.items = previous;
+        self.redo.push(std::mem::replace(&mut self.items, previous));
         if self.selected().is_none() {
             self.selected = None;
         }
         true
     }
 
-    /// A box's pin number: 1, 2, 3 in drawing order, counting boxes only.
-    /// Text marks carry no pin.
+    pub fn redo(&mut self) -> bool {
+        self.end_erase();
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        let previous = std::mem::replace(&mut self.items, next);
+        self.push_undo(previous);
+        if self.selected().is_none() {
+            self.selected = None;
+        }
+        true
+    }
+
+    /// Erase entire added markup objects, retaining the original image and
+    /// comments. All segments between begin/end form a single Undo step.
+    pub fn begin_erase(&mut self) {
+        self.end_erase();
+        self.erase_origin = Some(self.items.clone());
+    }
+
+    pub fn erase_segment(&mut self, from: (f32, f32), to: (f32, f32), radius: f32) -> bool {
+        if self.erase_origin.is_none()
+            || ![from.0, from.1, to.0, to.1, radius]
+                .iter()
+                .all(|v| v.is_finite())
+            || radius < 0.0
+        {
+            return false;
+        }
+        let count = self.items.len();
+        self.items
+            .retain(|item| !markup_hit(item, from, to, radius));
+        let changed = count != self.items.len();
+        if changed {
+            self.redo.clear();
+            if self.selected().is_none() {
+                self.selected = None;
+            }
+        }
+        changed
+    }
+
+    pub fn end_erase(&mut self) -> bool {
+        let Some(previous) = self.erase_origin.take() else {
+            return false;
+        };
+        if previous == self.items {
+            return false;
+        }
+        self.push_undo(previous);
+        self.redo.clear();
+        true
+    }
+
+    /// Number only legacy region comments and point comments, in drawing order.
     pub fn number(&self, id: u64) -> Option<usize> {
         self.items
             .iter()
-            .filter(|a| a.is_rect())
+            .filter(|a| a.is_comment())
             .position(|a| a.id == id)
             .map(|index| index + 1)
+    }
+}
+
+fn point_segment_distance_sq(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f64 {
+    let (px, py) = (point.0 as f64, point.1 as f64);
+    let (ax, ay, bx, by) = (a.0 as f64, a.1 as f64, b.0 as f64, b.1 as f64);
+    let (dx, dy) = (bx - ax, by - ay);
+    let length = dx * dx + dy * dy;
+    let t = if length > 0.0 {
+        ((px - ax) * dx + (py - ay) * dy) / length
+    } else {
+        0.0
+    }
+    .clamp(0.0, 1.0);
+    (px - ax - t * dx).powi(2) + (py - ay - t * dy).powi(2)
+}
+
+fn segment_distance_sq(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: (f32, f32)) -> f64 {
+    let cross = |p: (f32, f32), q: (f32, f32), r: (f32, f32)| {
+        (q.0 as f64 - p.0 as f64) * (r.1 as f64 - p.1 as f64)
+            - (q.1 as f64 - p.1 as f64) * (r.0 as f64 - p.0 as f64)
+    };
+    let overlaps = a.0.min(b.0) <= c.0.max(d.0)
+        && c.0.min(d.0) <= a.0.max(b.0)
+        && a.1.min(b.1) <= c.1.max(d.1)
+        && c.1.min(d.1) <= a.1.max(b.1);
+    if overlaps && cross(a, b, c) * cross(a, b, d) <= 0.0 && cross(c, d, a) * cross(c, d, b) <= 0.0
+    {
+        return 0.0;
+    }
+    point_segment_distance_sq(a, c, d)
+        .min(point_segment_distance_sq(b, c, d))
+        .min(point_segment_distance_sq(c, a, b))
+        .min(point_segment_distance_sq(d, a, b))
+}
+
+fn rect_edges(rect: ImageRect) -> [((f32, f32), (f32, f32)); 4] {
+    let a = (rect.x, rect.y);
+    let b = (rect.right(), rect.y);
+    let c = (rect.right(), rect.bottom());
+    let d = (rect.x, rect.bottom());
+    [(a, b), (b, c), (c, d), (d, a)]
+}
+
+fn markup_hit(item: &Annotation, from: (f32, f32), to: (f32, f32), radius: f32) -> bool {
+    match &item.shape {
+        Shape::Stroke { points, width } => {
+            let tolerance = (radius as f64 + *width as f64 / 2.0).powi(2);
+            if points.len() == 1 {
+                return point_segment_distance_sq(points[0], from, to) <= tolerance;
+            }
+            points
+                .windows(2)
+                .any(|p| segment_distance_sq(from, to, p[0], p[1]) <= tolerance)
+        }
+        Shape::MarkupRect { rect, width } => {
+            let inset = (*width / 2.0).min(rect.w / 2.0).min(rect.h / 2.0);
+            let outline = ImageRect {
+                x: rect.x + inset,
+                y: rect.y + inset,
+                w: (rect.w - inset * 2.0).max(0.0),
+                h: (rect.h - inset * 2.0).max(0.0),
+            };
+            let tolerance = (radius as f64 + *width as f64 / 2.0).powi(2);
+            rect_edges(outline)
+                .iter()
+                .any(|&(a, b)| segment_distance_sq(from, to, a, b) <= tolerance)
+        }
+        Shape::Text { x, y, size } => {
+            let m = SCREEN_METRICS.scaled(*size / TEXT_MARK_SIZE);
+            let (advance, _) = measure(&single_line(&item.text), *size);
+            let rect = ImageRect {
+                x: *x,
+                y: *y,
+                w: advance + 2.0 * m.chip_pad_x,
+                h: *size * 1.4 + 2.0 * m.chip_pad_y,
+            };
+            let inside = |p: (f32, f32)| {
+                p.0 >= rect.x && p.0 <= rect.right() && p.1 >= rect.y && p.1 <= rect.bottom()
+            };
+            inside(from)
+                || inside(to)
+                || rect_edges(rect)
+                    .iter()
+                    .any(|&(a, b)| segment_distance_sq(from, to, a, b) <= (radius as f64).powi(2))
+        }
+        Shape::Rect(_) | Shape::Comment { .. } => false,
     }
 }
 
@@ -317,13 +628,22 @@ pub const PROMPT_HEADER: &str = "Annotations";
 /// ```
 pub fn prompt_block(name: &str, annotations: &Annotations) -> Option<String> {
     let items = annotations.items();
-    if items.is_empty() {
+    if items.is_empty()
+        || items
+            .iter()
+            .all(|item| matches!(item.shape, Shape::Stroke { .. } | Shape::MarkupRect { .. }))
+    {
         return None;
     }
     let round = |v: f32| v.round() as i64;
-    let mut lines = vec![format!(
-        "{PROMPT_HEADER} on {name} (boxes are x,y,w,h in image pixels):"
-    )];
+    let mut lines = vec![if items
+        .iter()
+        .any(|item| matches!(item.shape, Shape::Comment { .. }))
+    {
+        format!("{PROMPT_HEADER} on {name} (coordinates are image pixels):")
+    } else {
+        format!("{PROMPT_HEADER} on {name} (boxes are x,y,w,h in image pixels):")
+    }];
     let mut number = 0;
     for item in items {
         if let Shape::Rect(r) = &item.shape {
@@ -340,6 +660,19 @@ pub fn prompt_block(name: &str, annotations: &Annotations) -> Option<String> {
                 round(r.y),
                 round(r.w),
                 round(r.h)
+            ));
+        } else if let Shape::Comment { x, y } = &item.shape {
+            number += 1;
+            let note = item.text.trim();
+            let note = if note.is_empty() {
+                "(no note)".into()
+            } else {
+                note.replace("\r\n", "\n").replace('\n', "\n   ")
+            };
+            lines.push(format!(
+                "{number}. [point {},{}] {note}",
+                round(*x),
+                round(*y)
             ));
         }
     }
@@ -561,7 +894,7 @@ pub fn overlay_svg(width: f32, height: f32, annotations: &Annotations, factor: f
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">"
     );
     let font = "font-family=\"Geist\" font-weight=\"500\"";
-    // Boxes first, then pins and text on top, so a pin is never under a box.
+    // Drawing objects first, then pins and text, so comments remain legible.
     for item in annotations.items() {
         if let Shape::Rect(r) = &item.shape {
             let inset = m.stroke / 2.0;
@@ -575,16 +908,47 @@ pub fn overlay_svg(width: f32, height: f32, annotations: &Annotations, factor: f
                 MarkColor::hex(item.color.rgb()),
                 m.stroke
             ));
+        } else if let Shape::MarkupRect { rect: r, width } = &item.shape {
+            let inset = (*width / 2.0).min(r.w / 2.0).min(r.h / 2.0);
+            svg.push_str(&format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{width}\"/>",
+                r.x + inset, r.y + inset, (r.w - inset * 2.0).max(0.0),
+                (r.h - inset * 2.0).max(0.0), m.box_radius,
+                MarkColor::hex(item.color.rgb())
+            ));
+        } else if let Shape::Stroke { points, width } = &item.shape {
+            if let [point] = points.as_slice() {
+                svg.push_str(&format!(
+                    "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\"/>",
+                    point.0,
+                    point.1,
+                    width / 2.0,
+                    MarkColor::hex(item.color.rgb())
+                ));
+            } else if !points.is_empty() {
+                let points = points
+                    .iter()
+                    .map(|&(x, y)| format!("{x},{y}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                svg.push_str(&format!("<polyline points=\"{points}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{width}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+                    MarkColor::hex(item.color.rgb())));
+            }
         }
     }
     for item in annotations.items() {
         match &item.shape {
-            Shape::Rect(r) => {
+            Shape::Rect(_) | Shape::Comment { .. } => {
                 let number = annotations.number(item.id).unwrap_or(0).to_string();
                 let radius = m.pin_diameter / 2.0;
+                let (x, y) = match &item.shape {
+                    Shape::Rect(r) => (r.x, r.y),
+                    Shape::Comment { x, y } => (*x, *y),
+                    _ => unreachable!(),
+                };
                 // The pin's center sits on the box's corner, kept on the image.
-                let cx = r.x.clamp(radius, (width - radius).max(radius));
-                let cy = r.y.clamp(radius, (height - radius).max(radius));
+                let cx = x.clamp(radius, (width - radius).max(radius));
+                let cy = y.clamp(radius, (height - radius).max(radius));
                 let (_, cap) = measure(&number, m.pin_text);
                 svg.push_str(&format!(
                     "<circle cx=\"{cx}\" cy=\"{cy}\" r=\"{radius}\" fill=\"{}\"/>",
@@ -620,6 +984,7 @@ pub fn overlay_svg(width: f32, height: f32, annotations: &Annotations, factor: f
                     escape_xml(&text)
                 ));
             }
+            Shape::Stroke { .. } | Shape::MarkupRect { .. } => {}
         }
     }
     svg.push_str("</svg>");
@@ -671,6 +1036,8 @@ pub struct Annotated {
     pub name: String,
     pub png: Vec<u8>,
     pub notes: Option<String>,
+    #[cfg(target_os = "macos")]
+    pub editable: Option<EditableAnnotation>,
 }
 
 impl Annotated {
@@ -678,6 +1045,10 @@ impl Annotated {
     pub fn into_staged(self) -> crate::attachments::StagedAttachment {
         let mut staged = crate::attachments::stage_png_bytes(self.name, self.png);
         staged.annotations = self.notes.map(Into::into);
+        #[cfg(target_os = "macos")]
+        {
+            staged.editable = self.editable;
+        }
         staged
     }
 }

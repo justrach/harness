@@ -590,6 +590,186 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
     files
 }
 
+/// The most cells the line matcher fills for one change block. A reformat is
+/// matched by its common prefix and suffix first, so only a block that really
+/// was rewritten comes near this, and it stays shown as changed.
+const WHITESPACE_MATCH_CELLS: usize = 4_000_000;
+/// Context lines kept around a change when a hunk is rebuilt, as `git diff`.
+const WHITESPACE_CONTEXT_LINES: usize = 3;
+
+fn without_whitespace(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Which deletion and addition in one change block are the same line once
+/// whitespace is ignored: in-order pairs of (deletion, addition) indices.
+fn whitespace_equal_pairs(dels: &[&DiffLine], adds: &[&DiffLine]) -> Vec<(usize, usize)> {
+    let dels: Vec<String> = dels.iter().map(|l| without_whitespace(&l.text)).collect();
+    let adds: Vec<String> = adds.iter().map(|l| without_whitespace(&l.text)).collect();
+    let prefix = dels
+        .iter()
+        .zip(&adds)
+        .take_while(|(del, add)| del == add)
+        .count();
+    let suffix = dels[prefix..]
+        .iter()
+        .rev()
+        .zip(adds[prefix..].iter().rev())
+        .take_while(|(del, add)| del == add)
+        .count();
+    let mut pairs: Vec<(usize, usize)> = (0..prefix).map(|ix| (ix, ix)).collect();
+    let del_mid = &dels[prefix..dels.len() - suffix];
+    let add_mid = &adds[prefix..adds.len() - suffix];
+    let (rows, columns) = (del_mid.len(), add_mid.len());
+    if rows > 0
+        && columns > 0
+        && rows.saturating_add(1).saturating_mul(columns + 1) <= WHITESPACE_MATCH_CELLS
+    {
+        // Longest common subsequence, walked forward so pairs stay in order.
+        let mut lengths = vec![0u32; (rows + 1) * (columns + 1)];
+        let at = |row: usize, column: usize| row * (columns + 1) + column;
+        for row in (0..rows).rev() {
+            for column in (0..columns).rev() {
+                lengths[at(row, column)] = if del_mid[row] == add_mid[column] {
+                    lengths[at(row + 1, column + 1)] + 1
+                } else {
+                    lengths[at(row + 1, column)].max(lengths[at(row, column + 1)])
+                };
+            }
+        }
+        let (mut row, mut column) = (0, 0);
+        while row < rows && column < columns {
+            if del_mid[row] == add_mid[column] {
+                pairs.push((prefix + row, prefix + column));
+                row += 1;
+                column += 1;
+            } else if lengths[at(row + 1, column)] >= lengths[at(row, column + 1)] {
+                row += 1;
+            } else {
+                column += 1;
+            }
+        }
+    }
+    for ix in 0..suffix {
+        pairs.push((dels.len() - suffix + ix, adds.len() - suffix + ix));
+    }
+    pairs
+}
+
+/// Turn each deletion and addition that differ only in whitespace into one
+/// context line carrying both line numbers. False when nothing changed.
+fn fold_whitespace_pairs(lines: &[DiffLine]) -> Option<Vec<DiffLine>> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut folded = false;
+    let mut ix = 0;
+    while ix < lines.len() {
+        if !matches!(lines[ix].kind, LineKind::Del | LineKind::Add) {
+            out.push(lines[ix].clone());
+            ix += 1;
+            continue;
+        }
+        let dels: Vec<&DiffLine> = lines[ix..]
+            .iter()
+            .take_while(|line| line.kind == LineKind::Del)
+            .collect();
+        let adds: Vec<&DiffLine> = lines[ix + dels.len()..]
+            .iter()
+            .take_while(|line| line.kind == LineKind::Add)
+            .collect();
+        let pairs = whitespace_equal_pairs(&dels, &adds);
+        folded |= !pairs.is_empty();
+        let (mut del, mut add) = (0, 0);
+        for (pair_del, pair_add) in pairs {
+            out.extend(dels[del..pair_del].iter().map(|line| (*line).clone()));
+            out.extend(adds[add..pair_add].iter().map(|line| (*line).clone()));
+            out.push(DiffLine {
+                kind: LineKind::Context,
+                old_no: dels[pair_del].old_no,
+                new_no: adds[pair_add].new_no,
+                text: adds[pair_add].text.clone(),
+            });
+            del = pair_del + 1;
+            add = pair_add + 1;
+        }
+        out.extend(dels[del..].iter().map(|line| (*line).clone()));
+        out.extend(adds[add..].iter().map(|line| (*line).clone()));
+        ix += dels.len() + adds.len();
+    }
+    folded.then_some(out)
+}
+
+/// Cut a rebuilt hunk down to its real changes with the usual context around
+/// them. A reindented function would otherwise show every line as context.
+fn rebuild_hunks(header: &str, lines: &[DiffLine]) -> Vec<Hunk> {
+    let mut windows: Vec<std::ops::Range<usize>> = Vec::new();
+    for (ix, line) in lines.iter().enumerate() {
+        if !matches!(line.kind, LineKind::Del | LineKind::Add) {
+            continue;
+        }
+        let start = ix.saturating_sub(WHITESPACE_CONTEXT_LINES);
+        let end = (ix + WHITESPACE_CONTEXT_LINES + 1).min(lines.len());
+        match windows.last_mut() {
+            Some(last) if start <= last.end => last.end = end,
+            _ => windows.push(start..end),
+        }
+    }
+    // A note like `\ No newline at end of file` belongs to the line above it.
+    for window in &mut windows {
+        while lines
+            .get(window.end)
+            .is_some_and(|line| line.kind == LineKind::Meta)
+        {
+            window.end += 1;
+        }
+    }
+    let heading = header.splitn(3, "@@").nth(2).unwrap_or_default();
+    windows
+        .into_iter()
+        .map(|window| {
+            let body = &lines[window.clone()];
+            let start =
+                |number: fn(&DiffLine) -> Option<u32>| body.iter().find_map(number).unwrap_or(0);
+            let count =
+                |number: fn(&DiffLine) -> Option<u32>| body.iter().filter_map(number).count();
+            let (old_start, new_start) = (start(|l| l.old_no), start(|l| l.new_no));
+            let (old_count, new_count) = (count(|l| l.old_no), count(|l| l.new_no));
+            // The function name only describes the hunk's original first line.
+            let heading = if window.start == 0 { heading } else { "" };
+            Hunk {
+                header: format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@{heading}"),
+                lines: body.to_vec(),
+            }
+        })
+        .collect()
+}
+
+/// Hide changes that only move whitespace (`git diff -w`, done on the parsed
+/// patch so it works against any host without asking it for a second diff).
+pub fn ignore_whitespace_changes(files: &mut [FileDiff]) {
+    for file in files {
+        let had_hunks = !file.hunks.is_empty();
+        let mut hunks = Vec::with_capacity(file.hunks.len());
+        for hunk in std::mem::take(&mut file.hunks) {
+            match fold_whitespace_pairs(&hunk.lines) {
+                Some(lines) => hunks.extend(rebuild_hunks(&hunk.header, &lines)),
+                None => hunks.push(hunk),
+            }
+        }
+        file.hunks = hunks;
+        let count = |kind: LineKind| {
+            file.hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .filter(|line| line.kind == kind)
+                .count() as u32
+        };
+        (file.additions, file.deletions) = (count(LineKind::Add), count(LineKind::Del));
+        if had_hunks && file.hunks.is_empty() {
+            file.notices.push("Only whitespace changed".to_string());
+        }
+    }
+}
+
 /// Derived per-file notice rows (new/deleted/renamed/binary + parser notices).
 pub fn file_notices(file: &FileDiff) -> Vec<String> {
     let mut notices = Vec::new();
@@ -825,8 +1005,18 @@ pub fn line_anchor(line: &DiffLine) -> Option<(CommentSide, u32)> {
 // Resolution + states (pure)
 // ---------------------------------------------------------------------------
 
-/// The diff shown for a chat: `checkout_id` match first, then device+cwd,
-/// then cwd alone (§1.11).
+/// A bound review never resolves to another device or checkout.
+fn resolve_review_diff<'a>(diffs: &'a [CheckoutDiff], chat: &Chat) -> Option<&'a CheckoutDiff> {
+    diffs.iter().find(|diff| {
+        diff.device_id == chat.device_id
+            && match chat.checkout_id.as_deref() {
+                Some(checkout) => diff.checkout_id == checkout,
+                None => chat.cwd.as_deref() == Some(diff.cwd.as_str()),
+            }
+    })
+}
+
+/// The ordinary Diff tab resolves checkout ID, then device+cwd, then cwd alone.
 pub fn resolve_diff<'a>(diffs: &'a [CheckoutDiff], chat: &Chat) -> Option<&'a CheckoutDiff> {
     if let Some(checkout_id) = chat.checkout_id.as_deref()
         && let Some(diff) = diffs.iter().find(|d| d.checkout_id == checkout_id)
@@ -1233,6 +1423,15 @@ impl FileHorizontalState {
             max_gutter_width: self.geometry.max_gutter_width,
         }
     }
+}
+
+/// Ends a [`ParsedDiff`] key when whitespace changes are hidden. The same
+/// patch with and without it is one diff, so the reader's place survives.
+const IGNORE_WHITESPACE_KEY: &str = ":ignore-whitespace";
+
+fn same_patch(a: &str, b: &str) -> bool {
+    a.strip_suffix(IGNORE_WHITESPACE_KEY).unwrap_or(a)
+        == b.strip_suffix(IGNORE_WHITESPACE_KEY).unwrap_or(b)
 }
 
 struct ParsedDiff {
@@ -1660,10 +1859,14 @@ pub struct Changes {
     list: ListState,
     /// What the pane diffs against (toolbar dropdown).
     scope: DiffScope,
+    /// A review stays with the chat that opened it, even when another panel gains focus.
+    review_chat_id: Option<String>,
     /// Unified or side-by-side (toolbar toggle, persisted per user).
     mode: DiffMode,
     /// Wrap long source lines instead of exposing the horizontal code plane.
     wrap_lines: bool,
+    /// Hide changes that only move whitespace ([`ignore_whitespace_changes`]).
+    ignore_whitespace: bool,
     /// Comparison ref for [`DiffScope::Branch`] — preset to the repo's
     /// default branch once the branch list lands.
     base_ref: Option<String>,
@@ -1696,11 +1899,6 @@ pub struct Changes {
     _observe: Subscription,
 }
 
-/// The review footer's words. Undo discards the whole working tree (the
-/// engine has no per-turn revert), so the label says "all".
-pub(crate) const REVIEW_FOOTER_NOTE: &str = "Undo reverts every uncommitted file.";
-pub(crate) const REVIEW_UNDO_LABEL: &str = "Undo all changes";
-
 /// What the working-tree trash button asks the shell to confirm and send.
 #[derive(Debug, Clone)]
 pub struct DiscardWorkingTreeRequest {
@@ -1715,12 +1913,11 @@ pub struct DiscardWorkingTreeRequest {
 pub enum ChangesEvent {
     /// A History row was clicked — open this commit as its own diff tab.
     OpenCommit(GitHistoryCommit),
+    /// Close this review tab; never changes files or ends the chat.
+    DoneReview(gpui::AnyWindowHandle),
     /// The working-tree trash button was clicked. The shell owns the global
     /// confirmation dialog and only then dispatches the destructive RPC.
     DiscardWorkingTree(DiscardWorkingTreeRequest),
-    /// The footer's "Keep changes": the review is done, close the pane.
-    /// Nothing on disk changes (edits are already in the working tree).
-    KeepChanges,
 }
 
 impl gpui::EventEmitter<ChangesEvent> for Changes {}
@@ -1729,22 +1926,25 @@ struct DiffHeaderTooltip(&'static str);
 
 impl Render for DiffHeaderTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text)
-            .child(self.0)
+        crate::popover::tooltip_label(Theme::of(cx), self.0)
     }
 }
 
 impl Changes {
+    /// Move the existing diff/history view, preserving its watches and viewport.
+    pub(crate) fn rebind_window_state(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        self._observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
+        self.state = state.clone();
+        if let Some(history) = &self.history {
+            history.update(cx, |history, cx| history.rebind_window_state(state, cx));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn window_state(&self) -> Entity<AppState> {
+        self.state.clone()
+    }
+
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         let settings = crate::settings::current(cx);
@@ -1753,6 +1953,7 @@ impl Changes {
             state,
             mode,
             wrap_lines: settings.diff_wrap,
+            ignore_whitespace: settings.diff_ignore_whitespace,
             diffs: Vec::new(),
             started: false,
             error: None,
@@ -1769,6 +1970,7 @@ impl Changes {
             // fast wheel flicks from outrunning measurement.
             list: ListState::new(0, ListAlignment::Top, px(1024.0)),
             scope: DiffScope::default(),
+            review_chat_id: None,
             base_ref: None,
             branches: Vec::new(),
             branches_for: None,
@@ -1819,6 +2021,79 @@ impl Changes {
         self.scope == DiffScope::History
     }
 
+    pub(crate) fn can_review_working_tree(&self, chat_id: &str, cx: &App) -> bool {
+        !matches!(self.scope, DiffScope::Commit | DiffScope::History)
+            && (!self.has_pending_review_draft(cx) || self.comment_context_key(cx) == chat_id)
+    }
+
+    pub(crate) fn context_chat_id(&self, cx: &App) -> Option<String> {
+        self.review_chat_id
+            .clone()
+            .or_else(|| self.state.read(cx).selected_chat.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_review(&self) -> bool {
+        self.review_chat_id.is_some()
+    }
+
+    pub(crate) fn review_working_tree(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.review_chat_id = Some(chat_id);
+        self.set_scope(DiffScope::WorkingTree, cx);
+        self.sync(cx);
+        cx.notify();
+    }
+
+    fn context_chat(&self, cx: &App) -> Option<Chat> {
+        let state = self.state.read(cx);
+        match self.review_chat_id.as_deref() {
+            Some(id) => state.chat_row(id).cloned(),
+            None => state.selected_chat_row().cloned(),
+        }
+    }
+
+    /// Show a synthetic patch as the working tree (`diff-whitespace-fixture`).
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_working_tree_diff(&mut self, diff: CheckoutDiff, cx: &mut Context<Self>) {
+        self.scope = DiffScope::WorkingTree;
+        self.fixture_review_diff(diff, cx);
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_ignore_whitespace(&mut self, ignore: bool, cx: &mut Context<Self>) {
+        if self.ignore_whitespace != ignore {
+            self.toggle_ignore_whitespace(cx);
+        }
+    }
+
+    #[cfg(any(test, feature = "appshots-fixture"))]
+    pub(crate) fn fixture_review_diff(&mut self, diff: CheckoutDiff, cx: &mut Context<Self>) {
+        self.watch_task = None;
+        self.started = true;
+        self.watch_target = self.desired_target(cx);
+        self.diffs = vec![diff];
+        self.error = None;
+        self.sync(cx);
+    }
+
+    /// Exercise the production comment editor against the synthetic review patch.
+    #[cfg(feature = "appshots-fixture")]
+    pub(crate) fn fixture_review_comment(
+        &mut self,
+        stage: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if stage {
+            self.commit_draft(cx);
+        } else {
+            self.open_draft("src/greeting.rs".into(), CommentSide::New, 2, window, cx);
+            self.draft.as_ref().unwrap().input.update(cx, |input, cx| {
+                input.set_text("Could we keep this greeting a little shorter?", cx);
+            });
+        }
+    }
+
     /// The surface-tab title (contextual, user request): the pinned commit's
     /// subject (short sha for subject-less commits), else the scope's label.
     pub fn tab_title(&self) -> gpui::SharedString {
@@ -1828,6 +2103,9 @@ impl Changes {
                 return subject.to_string().into();
             }
             return commit.sha.chars().take(7).collect::<String>().into();
+        }
+        if self.review_chat_id.is_some() && self.scope == DiffScope::WorkingTree {
+            return "Review changes".into();
         }
         gpui::SharedString::from(self.scope.label())
     }
@@ -1839,7 +2117,7 @@ impl Changes {
     /// and the pane sits on "Preparing diff…" forever (user report).
     fn desired_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let device = state.selected_chat_row()?.device_id.clone();
+        let device = self.context_chat(cx)?.device_id;
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -1931,9 +2209,12 @@ impl Changes {
     }
 
     fn resolved(&self, cx: &App) -> Option<CheckoutDiff> {
-        let state = self.state.read(cx);
-        let chat = state.selected_chat_row()?;
-        resolve_diff(&self.diffs, chat).cloned()
+        let chat = self.context_chat(cx)?;
+        if self.review_chat_id.is_some() {
+            resolve_review_diff(&self.diffs, &chat).cloned()
+        } else {
+            resolve_diff(&self.diffs, &chat).cloned()
+        }
     }
 
     /// The checkout root the scoped RPCs address: the watch-resolved diff's
@@ -1942,7 +2223,7 @@ impl Changes {
         if let Some(diff) = self.resolved(cx) {
             return Some(diff.cwd);
         }
-        self.state.read(cx).selected_chat_row()?.cwd.clone()
+        self.context_chat(cx)?.cwd
     }
 
     /// The diff the pane currently displays: the watch stream for the working
@@ -1955,7 +2236,7 @@ impl Changes {
         }
     }
 
-    fn discard_request(&self, cx: &App) -> Option<DiscardWorkingTreeRequest> {
+    pub(crate) fn discard_request(&self, cx: &App) -> Option<DiscardWorkingTreeRequest> {
         if self.scope != DiffScope::WorkingTree {
             return None;
         }
@@ -1963,7 +2244,7 @@ impl Changes {
         if diff.truncated || (diff.files.is_empty() && diff.patch.trim().is_empty()) {
             return None;
         }
-        let chat = self.state.read(cx).selected_chat_row()?;
+        let chat = self.context_chat(cx)?;
         Some(DiscardWorkingTreeRequest {
             chat_id: chat.id.clone(),
             checkout_id: diff.checkout_id,
@@ -1971,6 +2252,64 @@ impl Changes {
             target_device_id: self.desired_target(cx),
             file_count: diff.files.len(),
         })
+    }
+
+    fn review_footer(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        self.review_chat_id.as_ref()?;
+        let request = self.discard_request(cx);
+        let pending_note = self.has_pending_review_draft(cx);
+        Some(div()
+            .id("changes-review-footer")
+            .flex_none().px(px(12.0)).py(px(10.0))
+            .border_t_1().border_color(theme.border).bg(theme.surface_raised)
+            .flex().flex_col().gap(px(8.0))
+            .when(cfg!(target_os = "macos"), |footer| {
+                footer.flex_row().flex_wrap().items_center().gap(px(10.0)).bg(theme.bg).rounded_b(px(9.0))
+            })
+            .child(div().text_size(px(11.0)).text_color(theme.text_muted)
+                .when(cfg!(target_os = "macos"), |label| label.flex_1().min_w(px(180.0)))
+                .child(if pending_note {
+                    "Save or cancel your note before finishing this review."
+                } else if self.scope == DiffScope::WorkingTree {
+                    "All uncommitted changes, including your edits."
+                } else {
+                    "Reviewing a different scope. Return to Working tree to discard all changes."
+                }))
+            .child(div().flex().flex_wrap().items_center().justify_end().gap(px(6.0))
+                .when(cfg!(target_os = "macos"), |actions| actions.max_w_full().flex_shrink(0.0))
+                .when(self.scope == DiffScope::WorkingTree, |row| row.child(
+                    popover::btn_ghost(theme, "Discard all uncommitted changes…", "review-discard")
+                        .id("review-discard").role(gpui::Role::Button)
+                        .aria_label("Discard all uncommitted changes").text_color(theme.danger)
+                        .when(request.is_none(), |button| button.opacity(0.35))
+                        .when_some(request, |button, request| {
+                            let keyboard_request = request.clone();
+                            button.tab_index(0).focus_visible(|style| style.border_1().border_color(theme.accent))
+                                .on_key_down(cx.listener(move |_, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation(); cx.emit(ChangesEvent::DiscardWorkingTree(keyboard_request.clone()));
+                                    }
+                                }))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(ChangesEvent::DiscardWorkingTree(request.clone()));
+                                }))
+                        })
+                ))
+                .child(popover::btn_primary(theme, "Done reviewing")
+                    .id("review-done").role(gpui::Role::Button).aria_label("Done reviewing")
+                    .when(pending_note, |button| button.opacity(0.35))
+                    .when(!pending_note, |button| button.tab_index(0)
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
+                        .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation(); cx.emit(ChangesEvent::DoneReview(window.window_handle()));
+                            }
+                        }))
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            cx.emit(ChangesEvent::DoneReview(window.window_handle()));
+                        }))))
+            )
+            .into_any_element())
     }
 
     /// Scope discriminant folded into the parse key, so a scope or base
@@ -1990,10 +2329,15 @@ impl Changes {
 
     fn parse_key(&self, diff: &CheckoutDiff) -> String {
         format!(
-            "{}:{}:{}",
+            "{}:{}:{}{}",
             diff.checkout_id,
             diff.checksum,
-            self.scope_key()
+            self.scope_key(),
+            if self.ignore_whitespace {
+                IGNORE_WHITESPACE_KEY
+            } else {
+                ""
+            }
         )
     }
 
@@ -2037,9 +2381,7 @@ impl Changes {
                             .is_some_and(|base| changes.branches.contains(base));
                         if !keep {
                             let current = changes
-                                .state
-                                .read(cx)
-                                .selected_chat_row()
+                                .context_chat(cx)
                                 .and_then(|chat| chat.branch.clone());
                             changes.base_ref =
                                 default_base_ref(&changes.branches, current.as_deref());
@@ -2070,12 +2412,7 @@ impl Changes {
             self.scoped_task = None;
             return;
         }
-        let Some(chat_id) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone())
-        else {
+        let Some(chat_id) = self.context_chat(cx).map(|chat| chat.id.clone()) else {
             return;
         };
         let Some(cwd) = self.scoped_cwd(cx) else {
@@ -2320,10 +2657,17 @@ impl Changes {
         let additions = diff.additions;
         let deletions = diff.deletions;
         let file_count = diff.files.len();
+        let ignore_whitespace = self.ignore_whitespace;
         self.parse_task = Some(cx.spawn(async move |this, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { parse_patch(&patch) })
+                .spawn(async move {
+                    let mut files = parse_patch(&patch);
+                    if ignore_whitespace {
+                        ignore_whitespace_changes(&mut files);
+                    }
+                    files
+                })
                 .await;
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
@@ -2336,9 +2680,42 @@ impl Changes {
                 } else {
                     files.len()
                 };
+                let (additions, deletions) = if ignore_whitespace {
+                    (
+                        files.iter().map(|file| file.additions).sum(),
+                        files.iter().map(|file| file.deletions).sum(),
+                    )
+                } else {
+                    (additions, deletions)
+                };
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
-                changes.folds.clear();
+                // The toggle shows the same files, so folds and place stay.
+                let same_diff = changes
+                    .parsed
+                    .as_ref()
+                    .is_some_and(|parsed| same_patch(&parsed.key, &key));
+                let top = changes.list.logical_scroll_top().item_ix;
+                let anchor_file = same_diff
+                    .then(|| {
+                        changes
+                            .row_ranges
+                            .iter()
+                            .position(|range| range.contains(&top))
+                    })
+                    .flatten();
+                if !same_diff {
+                    changes.folds.clear();
+                }
                 changes.highlights.clear();
+                let collapsed: Vec<bool> = files
+                    .iter()
+                    .map(|file| {
+                        changes
+                            .folds
+                            .get(&file.path)
+                            .is_some_and(|fold| fold.collapsed)
+                    })
+                    .collect();
                 let staged = changes.staged_comments(cx);
                 let draft = changes.draft_anchor();
                 let (rows, ranges) = flatten_rows(
@@ -2348,7 +2725,7 @@ impl Changes {
                         .as_ref()
                         .map(|(path, side, line)| (path.as_str(), *side, *line)),
                     changes.mode,
-                    |_| false,
+                    |ix| collapsed.get(ix).copied().unwrap_or(false),
                 );
                 changes.comment_key = comment_state_key(&staged, draft.as_ref());
                 // The uniform hint keeps offsets for never-rendered rows
@@ -2360,6 +2737,12 @@ impl Changes {
                     .reset_with_uniform_height(rows.len(), row_height);
                 changes.rows = rows;
                 changes.row_ranges = ranges;
+                if let Some(start) = anchor_file
+                    .and_then(|ix| changes.row_ranges.get(ix))
+                    .map(|range| range.start)
+                {
+                    changes.list.scroll_to_reveal_item(start);
+                }
                 changes.parsed = Some(ParsedDiff {
                     key,
                     truncated,
@@ -2630,6 +3013,18 @@ impl Changes {
         self.reflatten(cx);
     }
 
+    fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
+        self.ignore_whitespace = !self.ignore_whitespace;
+        let ignore = self.ignore_whitespace;
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            settings.diff_ignore_whitespace = ignore;
+        });
+        // A draft's `+` may sit on a line that's about to become context.
+        self.hover = None;
+        self.sync(cx);
+        cx.notify();
+    }
+
     fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
         self.wrap_lines = !self.wrap_lines;
         self.reset_horizontal_scroll();
@@ -2700,11 +3095,40 @@ impl Changes {
         cx.notify();
     }
 
+    /// An unfinished note is in-memory user input and must block automatic restart.
+    pub(crate) fn has_pending_review_draft(&self, cx: &App) -> bool {
+        self.draft
+            .as_ref()
+            .is_some_and(|draft| !draft.input.read(cx).text().trim().is_empty())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_review_draft(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_draft("synthetic.rs".into(), CommentSide::New, 1, window, cx);
+        self.draft
+            .as_ref()
+            .unwrap()
+            .input
+            .clone()
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    fn comment_context_key(&self, cx: &App) -> String {
+        self.review_chat_id
+            .clone()
+            .unwrap_or_else(|| self.state.read(cx).composer_key())
+    }
+
     /// Cloned because rendering borrows `self` mutably a moment later.
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
         let state = self.state.read(cx);
         state
-            .review_comments(&state.composer_key())
+            .review_comments(&self.comment_context_key(cx))
             .iter()
             .filter(|comment| {
                 self.draft
@@ -2734,11 +3158,10 @@ impl Changes {
             .clone()
     }
 
-    /// A draft belongs to the checkout it was opened over. Chat navigation
-    /// swaps both the diff under it and the composer it would stage onto, so
-    /// the half-written note is dropped rather than following the user across.
+    /// A draft belongs to the review's chat. Ordinary unbound Diff tabs follow
+    /// selection, but a bound review keeps its draft when another chat is focused.
     fn discard_stale_draft(&mut self, cx: &mut Context<Self>) {
-        let key = self.state.read(cx).composer_key();
+        let key = self.comment_context_key(cx);
         if self.draft.as_ref().is_some_and(|draft| draft.key != key) {
             self.draft = None;
             self.sync_comment_rows(cx);
@@ -2854,7 +3277,7 @@ impl Changes {
             _ => {}
         });
         let handle = input.read(cx).focus_handle(cx);
-        let key = self.state.read(cx).composer_key();
+        let key = self.comment_context_key(cx);
         let old_path = self.old_path_of(&path);
         self.draft = Some(CommentDraft {
             editing_id: None,
@@ -2874,7 +3297,7 @@ impl Changes {
     fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(comment) = state
-            .review_comments(&state.composer_key())
+            .review_comments(&self.comment_context_key(cx))
             .iter()
             .find(|comment| comment.id == id && !comment.is_file())
             .cloned()
@@ -2932,8 +3355,8 @@ impl Changes {
     }
 
     fn remove_comment(&mut self, id: &str, cx: &mut Context<Self>) {
+        let key = self.comment_context_key(cx);
         self.state.update(cx, |state, cx| {
-            let key = state.composer_key();
             state.remove_review_comment(&key, id);
             cx.notify();
         });
@@ -3109,11 +3532,7 @@ impl Changes {
         let active = self.active_diff(cx);
         let engine = self.state.read(cx).engine().cloned();
         let target = self.desired_target(cx);
-        let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone());
+        let chat_id = self.context_chat(cx).map(|chat| chat.id.clone());
         let mode = self.scope.mode().to_string();
         let base_ref = self.base_ref.clone();
         let commit_sha = (self.scope == DiffScope::Commit)
@@ -3670,6 +4089,72 @@ impl Changes {
         )
     }
 
+    /// Workspace diffs sit on the same content plane as browser controls.
+    /// The surrounding panel already owns the outer outline and corner shape.
+    pub(crate) fn workspace_toolbar(theme: &Theme) -> gpui::Div {
+        if cfg!(target_os = "macos") {
+            div()
+                .h(px(40.0))
+                .w_full()
+                .flex_none()
+                .px(px(crate::surface_chrome::EDGE_INSET))
+                .flex()
+                .items_center()
+                .gap(px(crate::surface_chrome::CONTROL_GAP))
+                .bg(theme.bg)
+                .rounded_t(px(9.0))
+                .border_b_1()
+                .border_color(theme.border)
+        } else {
+            crate::surface_chrome::toolbar(theme)
+        }
+    }
+
+    fn compact_review_header(&self) -> bool {
+        cfg!(target_os = "macos") && self.review_chat_id.is_some()
+    }
+
+    /// A review needs one control row, rather than a toolbar followed by a
+    /// second scope summary. Counts remain visible alongside the scope; a
+    /// partial snapshot still gets the full warning row below.
+    fn render_review_summary(&self, theme: &Theme) -> Option<AnyElement> {
+        if !self.compact_review_header() {
+            return None;
+        }
+        let parsed = self.parsed.as_ref()?;
+        let files = if parsed.file_count == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", parsed.file_count)
+        };
+        Some(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .pl(px(8.0))
+                .text_size(px(11.0))
+                .child(div().flex_none().text_color(theme.text_muted).child(files))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(theme.font_mono.clone())
+                        .text_color(add_color(theme))
+                        .child(format!("+{}", parsed.additions)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(theme.font_mono.clone())
+                        .text_color(del_color(theme))
+                        .child(format!("−{}", parsed.deletions)),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// A small hover-washed icon button for the pane header. The header lives
     /// inside the titlebar drag strip, so the button occludes and swallows the
     /// mouse-down (same discipline as the shell's `header_icon_button`).
@@ -3737,10 +4222,14 @@ impl Changes {
             self.mode.is_split(),
             theme,
         )
+        .role(gpui::Role::Button)
+        .aria_label("Side-by-side diff")
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_mode(cx);
         }))
+        .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Side-by-side diff")).into())
+        .tooltip_show_delay(Duration::from_millis(350))
         .into_any_element()
     }
 
@@ -3751,11 +4240,35 @@ impl Changes {
             self.wrap_lines,
             theme,
         )
+        .role(gpui::Role::Button)
+        .aria_label("Wrap long lines")
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_wrap(cx);
         }))
         .tooltip(|_, cx| cx.new(|_| DiffHeaderTooltip("Wrap long lines")).into())
+        .tooltip_show_delay(Duration::from_millis(350))
+        .into_any_element()
+    }
+
+    fn whitespace_toggle(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        Self::header_toggle(
+            "changes-ignore-whitespace",
+            crate::icons::WHITESPACE,
+            self.ignore_whitespace,
+            theme,
+        )
+        .debug_selector(|| "changes-ignore-whitespace".into())
+        .role(gpui::Role::Button)
+        .aria_label("Hide whitespace changes")
+        .on_click(cx.listener(|this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_ignore_whitespace(cx);
+        }))
+        .tooltip(|_, cx| {
+            cx.new(|_| DiffHeaderTooltip("Hide whitespace changes"))
+                .into()
+        })
         .tooltip_show_delay(Duration::from_millis(350))
         .into_any_element()
     }
@@ -3803,9 +4316,17 @@ impl Changes {
                         .child(SharedString::from(commit.subject.clone())),
                 )
                 .child(self.split_toggle(&theme, cx))
+                .child(self.whitespace_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
+                        .role(gpui::Role::Button)
+                        .aria_label("Collapse or expand all files")
+                        .tooltip(|_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Collapse or expand all files"))
+                                .into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(350))
                         .on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_collapse_all(cx);
@@ -3815,9 +4336,7 @@ impl Changes {
         }
         let scope = self.scope;
         let history_branch = (scope == DiffScope::History).then(|| {
-            self.state
-                .read(cx)
-                .selected_chat_row()
+            self.context_chat(cx)
                 .and_then(|chat| chat.branch.clone())
                 .unwrap_or_else(|| "HEAD".to_string())
         });
@@ -3841,7 +4360,11 @@ impl Changes {
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
-                crate::theme::wash(0.05),
+                crate::theme::wash(if self.compact_review_header() {
+                    0.0
+                } else {
+                    0.05
+                }),
                 crate::theme::wash(0.14),
             ))
             .on_hover(motion::hover_listener("changes-scope-trigger"))
@@ -3949,13 +4472,22 @@ impl Changes {
                 .flex()
                 .items_center()
                 .gap(px(crate::surface_chrome::CONTROL_GAP))
-                .when(scope == DiffScope::WorkingTree, |element| {
-                    element.child(discard_button)
-                })
+                .when(
+                    scope == DiffScope::WorkingTree && self.review_chat_id.is_none(),
+                    |element| element.child(discard_button),
+                )
                 .child(self.split_toggle(&theme, cx))
+                .child(self.whitespace_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
+                        .role(gpui::Role::Button)
+                        .aria_label("Collapse or expand all files")
+                        .tooltip(|_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Collapse or expand all files"))
+                                .into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(350))
                         .on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_collapse_all(cx);
@@ -3985,7 +4517,12 @@ impl Changes {
             })
             .children(self.render_ref_selector(&theme, cx))
             .when(scope != DiffScope::History, |element| {
-                element.child(div().flex_1())
+                element.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .children(self.render_review_summary(&theme)),
+                )
             })
             .child(trailing)
             .into_any_element()
@@ -4027,9 +4564,7 @@ impl Changes {
             return None;
         }
         let branch = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .context_chat(cx)
             .and_then(|chat| chat.branch.clone())
             .unwrap_or_else(|| "HEAD".to_string());
         let base = self.base_ref.clone().unwrap_or_else(|| "…".to_string());
@@ -4224,6 +4759,9 @@ impl Changes {
 
     fn render_header_strip(&self, theme: &Theme) -> Option<AnyElement> {
         let parsed = self.parsed.as_ref()?;
+        if self.compact_review_header() && !parsed.truncated {
+            return None;
+        }
         Some(
             div()
                 .flex_none()
@@ -4920,16 +5458,13 @@ impl Render for Changes {
         let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let no_chat = self.context_chat(cx).is_none();
         let phase = if no_chat {
             DiffPhase::Clean
         } else {
             diff_phase(active.as_ref())
         };
         let error = self.error.clone();
-        let show_review_footer = matches!(phase, DiffPhase::List)
-            && scope == DiffScope::WorkingTree
-            && self.discard_request(cx).is_some();
         // Scoped fetch failures replace the content area. "no turn recorded"
         // is the expected pre-first-turn state, not an error; "unknown
         // method" is version skew — the chat's host engine predates
@@ -5069,49 +5604,7 @@ impl Render for Changes {
                 )
             })
             .child(content)
-            .when(show_review_footer, |el| el.child(self.render_review_footer(&theme, cx)))
-            .into_any_element()
-    }
-}
-
-impl Changes {
-    /// "Undo" / "Keep changes" under a working-tree diff. Undo goes through
-    /// the shell's existing discard confirmation, which names exactly what it
-    /// throws away (every uncommitted change in the checkout).
-    fn render_review_footer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .flex_none()
-            .px(px(Theme::SPACE_MD))
-            .py(px(Theme::SPACE_SM))
-            .border_t_1()
-            .border_color(theme.border)
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .child(SharedString::from(REVIEW_FOOTER_NOTE)),
-            )
-            .child(
-                crate::popover::btn_ghost(theme, REVIEW_UNDO_LABEL, "changes-review-undo")
-                    .id("changes-review-undo")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(request) = this.discard_request(cx) {
-                            cx.emit(ChangesEvent::DiscardWorkingTree(request));
-                        }
-                    })),
-            )
-            .child(
-                crate::popover::btn_primary(theme, "Keep changes")
-                    .id("changes-review-keep")
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ChangesEvent::KeepChanges))),
-            )
+            .children(self.review_footer(&theme, cx))
             .into_any_element()
     }
 }
@@ -5121,11 +5614,194 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    /// Lines 1..=`count` of a block, each indented by `from` then by `to`.
+    fn reindent_patch(count: usize, from: &str, to: &str, edit_line: Option<usize>) -> String {
+        let mut patch = format!("diff --git a/a.rs b/a.rs\n@@ -1,{count} +1,{count} @@ fn top()\n");
+        for line in 1..=count {
+            patch.push_str(&format!("-{from}line {line}\n"));
+        }
+        for line in 1..=count {
+            let text = if edit_line == Some(line) {
+                format!("{to}edited {line}")
+            } else {
+                format!("{to}line {line}")
+            };
+            patch.push_str(&format!("+{text}\n"));
+        }
+        patch
+    }
+
     #[test]
-    fn review_undo_says_it_reverts_everything_uncommitted() {
-        assert!(REVIEW_UNDO_LABEL.contains("all"));
-        assert!(REVIEW_FOOTER_NOTE.contains("every uncommitted file"));
-        assert!(!REVIEW_FOOTER_NOTE.contains('\u{2014}') && !REVIEW_UNDO_LABEL.contains('\u{2014}'));
+    fn a_file_that_only_moved_whitespace_says_so_and_shows_no_lines() {
+        let mut files = parse_patch(&reindent_patch(4, "  ", "\t", None));
+        assert_eq!((files[0].additions, files[0].deletions), (4, 4));
+        ignore_whitespace_changes(&mut files);
+        assert!(files[0].hunks.is_empty());
+        assert_eq!((files[0].additions, files[0].deletions), (0, 0));
+        assert_eq!(file_notices(&files[0]), ["Only whitespace changed"]);
+    }
+
+    #[test]
+    fn a_reindent_with_one_real_edit_shows_that_edit_with_normal_context() {
+        let mut files = parse_patch(&reindent_patch(20, "", "    ", Some(10)));
+        ignore_whitespace_changes(&mut files);
+        let file = &files[0];
+        assert_eq!((file.additions, file.deletions), (1, 1));
+        assert_eq!(file.hunks.len(), 1);
+        let hunk = &file.hunks[0];
+        assert_eq!(hunk.header, "@@ -7,7 +7,7 @@", "not the hunk's first line");
+        let kinds: Vec<_> = hunk.lines.iter().map(|line| line.kind).collect();
+        use LineKind::{Add, Context, Del};
+        assert_eq!(
+            kinds,
+            [
+                Context, Context, Context, Del, Add, Context, Context, Context
+            ]
+        );
+        // Context shows the new text, numbered on both sides.
+        assert_eq!(hunk.lines[0].text, "    line 7");
+        assert_eq!(
+            (hunk.lines[0].old_no, hunk.lines[0].new_no),
+            (Some(7), Some(7))
+        );
+        assert_eq!(hunk.lines[3].text, "line 10");
+        assert_eq!(hunk.lines[4].text, "    edited 10");
+    }
+
+    #[test]
+    fn edits_far_apart_become_separate_hunks_and_the_first_keeps_its_heading() {
+        let mut patch = String::from("diff --git a/a.rs b/a.rs\n@@ -1,12 +1,12 @@ fn top()\n");
+        for line in 1..=12 {
+            patch.push_str(&format!("-line {line}\n"));
+        }
+        for line in 1..=12 {
+            let edited = matches!(line, 1 | 12);
+            patch.push_str(&format!(
+                "+  {} {line}\n",
+                if edited { "edit" } else { "line" }
+            ));
+        }
+        let mut files = parse_patch(&patch);
+        ignore_whitespace_changes(&mut files);
+        let headers: Vec<_> = files[0].hunks.iter().map(|h| h.header.as_str()).collect();
+        assert_eq!(headers, ["@@ -1,4 +1,4 @@ fn top()", "@@ -9,4 +9,4 @@"]);
+    }
+
+    #[test]
+    fn real_changes_stay_exactly_as_they_were() {
+        const REAL: &str = "diff --git a/a.rs b/a.rs\n\
+            @@ -1,3 +1,4 @@ fn top()\n ctx\n-old line\n+new line\n+\n ctx 2\n\
+            diff --git a/new.rs b/new.rs\nnew file mode 100644\n@@ -0,0 +1,2 @@\n+  a\n+  b\n";
+        let parsed = parse_patch(REAL);
+        let mut files = parsed.clone();
+        ignore_whitespace_changes(&mut files);
+        assert_eq!(
+            files, parsed,
+            "an added blank line still counts, as in git -w"
+        );
+    }
+
+    #[test]
+    fn a_line_only_matches_within_its_own_change_block_and_in_order() {
+        // `a` and `b` swapped: only one of them can be the same line.
+        let mut files = parse_patch("diff --git a/x b/x\n@@ -1,2 +1,2 @@\n-a\n-b\n+ b\n+ a\n");
+        ignore_whitespace_changes(&mut files);
+        assert_eq!((files[0].additions, files[0].deletions), (1, 1));
+    }
+
+    #[test]
+    fn a_whole_file_reformat_is_matched_without_filling_a_table() {
+        // 40,000 lines would need 1.6 billion cells if it reached the matcher.
+        let mut files = parse_patch(&reindent_patch(40_000, "", "  ", None));
+        ignore_whitespace_changes(&mut files);
+        assert!(files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn a_rewrite_too_big_to_match_stays_shown_as_changed() {
+        let mut patch = String::from("diff --git a/x b/x\n@@ -1,3000 +1,3000 @@\n");
+        for line in 0..3000 {
+            patch.push_str(&format!("-old {line}\n"));
+        }
+        for line in 0..3000 {
+            patch.push_str(&format!("+new {line}\n"));
+        }
+        let parsed = parse_patch(&patch);
+        let mut files = parsed.clone();
+        ignore_whitespace_changes(&mut files);
+        assert_eq!(files, parsed);
+    }
+
+    #[gpui::test]
+    fn the_toggle_hides_whitespace_keeps_folds_and_is_remembered(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.chats = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "chat", "deviceId": "d", "cwd": "/fixtures/a",
+                        "archived": false, "createdAt": Utc::now(),
+                    }))
+                    .unwrap(),
+                ];
+                state.selected_chat = Some("chat".into());
+                state.local_device_id = Some("d".into());
+                state
+            });
+            Changes::new(state, cx)
+        });
+        let patch = format!(
+            "{}{}",
+            reindent_patch(3, "", "  ", None),
+            "diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n-before\n+after\n"
+        );
+        let diff: CheckoutDiff = serde_json::from_value(serde_json::json!({
+            "checkoutId": "c", "deviceId": "d", "cwd": "/fixtures/a", "patch": patch, "checksum": "sum",
+            "additions": 4, "deletions": 4, "truncated": false, "files": [],
+            "updatedAt": Utc::now(),
+        }))
+        .unwrap();
+        window
+            .update(cx, |changes, _, cx| {
+                changes.scope = DiffScope::WorkingTree;
+                changes.fixture_review_diff(diff, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let totals = |cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |changes, _, _| {
+                    let parsed = changes.parsed.as_ref().unwrap();
+                    (parsed.additions, parsed.deletions, parsed.files.len())
+                })
+                .unwrap()
+        };
+        assert_eq!(totals(cx), (4, 4, 2));
+        window
+            .update(cx, |changes, _, cx| {
+                changes.toggle_collapse_all(cx);
+                assert!(changes.folds["b.rs"].collapsed);
+                changes.toggle_ignore_whitespace(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(totals(cx), (1, 1, 2), "both files stay, with real totals");
+        window
+            .update(cx, |changes, _, cx| {
+                assert!(changes.folds["b.rs"].collapsed, "folds survive the toggle");
+                let saved = crate::settings::current(cx);
+                assert!(saved.diff_ignore_whitespace);
+                changes.toggle_ignore_whitespace(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(totals(cx), (4, 4, 2));
     }
 
     #[gpui::test]
@@ -5192,6 +5868,85 @@ mod tests {
                     changes.commit_draft(cx);
                     assert!(changes.state.read(cx).review_comments("").is_empty());
                 }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn review_comments_and_draft_stay_with_origin_after_chat_focus_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.selected_chat = Some("origin".into());
+                state
+            });
+            Changes::new(state, cx)
+        });
+        window
+            .update(cx, |changes, window, cx| {
+                changes.review_working_tree("origin".into(), cx);
+                let other_note =
+                    ReviewComment::new("other.rs", CommentSide::New, 1, "Other chat note");
+                changes.state.update(cx, |state, _| {
+                    state.add_review_comment("other", other_note.clone())
+                });
+                changes.open_draft("source.rs".into(), CommentSide::New, 2, window, cx);
+                changes
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .clone()
+                    .update(cx, |input, cx| {
+                        input.set_text("Keep this with the original review", cx)
+                    });
+                changes
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("other".into()));
+                changes.discard_stale_draft(cx);
+                assert!(changes.has_pending_review_draft(cx));
+                assert!(changes.can_review_working_tree("origin", cx));
+                assert!(
+                    !changes.can_review_working_tree("other", cx),
+                    "another chat must open a new tab instead of discarding this note"
+                );
+                assert!(
+                    changes.draft.is_some(),
+                    "focusing another chat must retain this review's draft"
+                );
+                changes.commit_draft(cx);
+                assert!(!changes.has_pending_review_draft(cx));
+                assert!(changes.state.read(cx).has_review_comments());
+                let comment = changes.staged_comments(cx).pop().unwrap();
+                assert_eq!(comment.body, "Keep this with the original review");
+                assert_eq!(changes.state.read(cx).review_comments("origin").len(), 1);
+                changes.edit_comment(&comment.id, window, cx);
+                changes
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .clone()
+                    .update(cx, |input, cx| {
+                        input.set_text("Revised on the original chat", cx)
+                    });
+                changes.commit_draft(cx);
+                assert_eq!(
+                    changes.state.read(cx).review_comments("origin")[0].body,
+                    "Revised on the original chat"
+                );
+                changes.remove_comment(&comment.id, cx);
+                assert!(changes.state.read(cx).review_comments("origin").is_empty());
+                assert_eq!(
+                    changes.state.read(cx).review_comments("other"),
+                    &[other_note]
+                );
             })
             .unwrap();
     }
@@ -6054,6 +6809,57 @@ rename to new_name.rs
     }
 
     #[test]
+    fn review_diff_never_falls_back_to_another_device_or_checkout() {
+        let diffs = vec![
+            diff("co-1", "other-device", "/repo", "x"),
+            diff("co-2", "local", "/repo", "y"),
+        ];
+        assert!(resolve_review_diff(&diffs, &chat(Some("co-1"), "local", Some("/repo"))).is_none());
+        assert_eq!(
+            resolve_review_diff(&diffs, &chat(None, "local", Some("/repo")))
+                .unwrap()
+                .checkout_id,
+            "co-2"
+        );
+    }
+
+    #[gpui::test]
+    fn review_scope_is_explicit_and_discard_stays_bound_to_origin(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                let mut origin = chat(Some("review-checkout"), "origin-device", Some("/repo"));
+                origin.id = "origin".into();
+                let mut other = chat(Some("other-checkout"), "other-device", Some("/elsewhere"));
+                other.id = "other".into();
+                state.chats = vec![origin, other];
+                state.selected_chat = Some("origin".into());
+                state
+            });
+            let changes = cx.new(|cx| Changes::new(state.clone(), cx));
+            changes.update(cx, |changes, cx| {
+                changes.scope = DiffScope::LatestTurn;
+                changes.review_working_tree("origin".into(), cx);
+                assert_eq!(changes.scope, DiffScope::WorkingTree);
+                changes.diffs = vec![diff("review-checkout", "origin-device", "/repo", "patch")];
+                state.update(cx, |state, _| state.selected_chat = Some("other".into()));
+                assert_eq!(changes.context_chat(cx).unwrap().id, "origin");
+                let request = changes.discard_request(cx).unwrap();
+                assert_eq!(request.chat_id, "origin");
+                assert_eq!(request.checkout_id, "review-checkout");
+                assert_eq!(request.target_device_id.as_deref(), Some("origin-device"));
+                changes.diffs[0].truncated = true;
+                assert!(changes.discard_request(cx).is_none());
+                changes.diffs[0].truncated = false;
+                changes.scope = DiffScope::LatestTurn;
+                assert!(changes.discard_request(cx).is_none());
+            });
+        });
+    }
+
+    #[test]
     fn diff_resolution_prefers_checkout_id_then_cwd() {
         let diffs = vec![
             diff("co-1", "dev-a", "/repo/one", "x"),
@@ -6495,3 +7301,6 @@ rename to new_name.rs
         assert!(full_highlights(&file, Lang::Rust, &response).is_none());
     }
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("menu_review/changes.rs");

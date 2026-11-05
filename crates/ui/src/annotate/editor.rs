@@ -27,6 +27,17 @@ use crate::motion;
 use crate::theme::{Theme, hairline, ink};
 use crate::typography::ui_rems;
 
+#[cfg(target_os = "macos")]
+mod desktop;
+
+/// Two distinct ways to describe an image: draw into it, or pin a comment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorMode {
+    #[default]
+    Markup,
+    Comment,
+}
+
 /// The rules' type sizes (DESIGN.md typography): body and caption here;
 /// text marks use the title size (TEXT_MARK_SIZE).
 const TEXT_BODY: f32 = 12.0;
@@ -44,7 +55,9 @@ const POPOVER_GAP: f32 = 8.0;
 /// The one entry tween: short, ease-out, snapped under reduced motion.
 const ENTER: motion::MotionSpec = motion::MotionSpec::new(180, motion::EASE_OUT_QUINT);
 /// Lightbox layout this view mirrors (attachments::lightbox_with_size).
+#[cfg(not(target_os = "macos"))]
 const BOX_W: f32 = 0.9;
+#[cfg(not(target_os = "macos"))]
 const BOX_H: f32 = 0.85;
 const CAPTION_GAP: f32 = 12.0;
 
@@ -54,6 +67,77 @@ pub(crate) fn tabular() -> FontFeatures {
 
 fn rgb(value: u32) -> Hsla {
     gpui::rgb(value).into()
+}
+
+fn editor_surface(theme: &Theme) -> Hsla {
+    if cfg!(target_os = "macos") {
+        theme.surface_overlay.alpha(1.0)
+    } else {
+        crate::popover::surface_bg(theme)
+    }
+}
+
+fn editor_border(theme: &Theme) -> Hsla {
+    if cfg!(target_os = "macos") {
+        theme.border
+    } else {
+        hairline(0.10)
+    }
+}
+
+/// Clamp the editor card in window space, then return image-relative bounds.
+/// A small image may be narrower than the card; its parent must not be used as
+/// the clipping boundary for the input.
+#[cfg(target_os = "macos")]
+pub(super) fn note_popover_bounds(
+    preferred: (f32, f32),
+    image_origin: gpui::Point<Pixels>,
+    frame: Bounds<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    gutter: Pixels,
+) -> Bounds<Pixels> {
+    let width = px(POPOVER_WIDTH).min((viewport.width - gutter * 2.0).max(px(1.0)));
+    let height = px(HIT + 2.0 * POPOVER_PAD);
+    let left = (image_origin.x + px(preferred.0))
+        .clamp(gutter, (viewport.width - gutter - width).max(gutter));
+    let top =
+        (image_origin.y + px(preferred.1)).clamp(gutter, (frame.bottom() - height).max(gutter));
+    Bounds::new(
+        gpui::point(left - image_origin.x, top - image_origin.y),
+        gpui::size(width, height),
+    )
+}
+
+/// Prefer the side of a point pin, then move above/below when a narrow window
+/// forces the field over its anchor. The pin remains visible while typing.
+#[cfg(target_os = "macos")]
+pub(super) fn comment_popover_bounds(
+    pin: (f32, f32),
+    diameter: f32,
+    image_origin: gpui::Point<Pixels>,
+    frame: Bounds<Pixels>,
+    viewport: gpui::Size<Pixels>,
+    gutter: Pixels,
+) -> Bounds<Pixels> {
+    let height = HIT + 2.0 * POPOVER_PAD;
+    let clearance = diameter / 2.0 + POPOVER_GAP;
+    let mut card = note_popover_bounds(
+        (pin.0 + clearance, pin.1 - height / 2.0),
+        image_origin,
+        frame,
+        viewport,
+        gutter,
+    );
+    let left = f32::from(card.origin.x);
+    let right = left + f32::from(card.size.width);
+    if left < pin.0 + clearance && right > pin.0 - clearance {
+        let above = image_origin.y + px(pin.1 - clearance - height);
+        let below = image_origin.y + px(pin.1 + clearance);
+        let top = if above >= gutter { above } else { below };
+        card.origin.y =
+            top.clamp(gutter, (frame.bottom() - px(height)).max(gutter)) - image_origin.y;
+    }
+    card
 }
 
 /// Called with the flattened result when Done is pressed.
@@ -90,6 +174,83 @@ impl AnnotateHook {
     /// Enter annotate mode for `image`. `owner` is the view rendering the
     /// lightbox; `return_focus` gets focus back on Cancel.
     pub fn open(
+        &self,
+        name: SharedString,
+        image: Arc<Image>,
+        owner: gpui::EntityId,
+        return_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            self.open_mode(
+                name,
+                image,
+                None,
+                EditorMode::Markup,
+                owner,
+                return_focus,
+                window,
+                cx,
+            );
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        self.open_legacy(name, image, owner, return_focus, window, cx);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn open_mode(
+        &self,
+        name: SharedString,
+        image: Arc<Image>,
+        editable: Option<crate::annotate::EditableAnnotation>,
+        mode: EditorMode,
+        owner: gpui::EntityId,
+        return_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let cell = self.editor.clone();
+        let on_cancel: OnCancel = Rc::new(move |window, cx| {
+            cell.borrow_mut().take();
+            window.focus(&return_focus, cx);
+            cx.notify(owner);
+        });
+        let cell = self.editor.clone();
+        let on_done = self.on_done.clone();
+        let finish: OnDone = Rc::new(move |annotated, window, cx| {
+            cell.borrow_mut().take();
+            on_done(annotated, window, cx);
+            cx.notify(owner);
+        });
+        let editor = cx.new(|cx| {
+            let (name, image) = editable
+                .as_ref()
+                .map(|state| (state.original_name.clone().into(), state.original.clone()))
+                .unwrap_or((name, image));
+            let mut editor = AnnotateEditor::new(name, image, finish, on_cancel, window, cx);
+            if let Some(state) = editable {
+                editor.doc = state.document;
+                editor.had_editable = true;
+            }
+            editor.mode = mode;
+            editor.tool = if mode == EditorMode::Comment {
+                Tool::Comment
+            } else {
+                Tool::Pen
+            };
+            editor
+        });
+        let focus = editor.read(cx).focus.clone();
+        *self.editor.borrow_mut() = Some(editor);
+        window.focus(&focus, cx);
+        cx.notify(owner);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn open_legacy(
         &self,
         name: SharedString,
         image: Arc<Image>,
@@ -145,6 +306,12 @@ pub struct AnnotateEditor {
     on_done: OnDone,
     on_cancel: OnCancel,
     _note_events: gpui::Subscription,
+    #[cfg(target_os = "macos")]
+    mode: EditorMode,
+    #[cfg(target_os = "macos")]
+    had_editable: bool,
+    #[cfg(target_os = "macos")]
+    desktop: desktop::DesktopTools,
 }
 
 impl EventEmitter<()> for AnnotateEditor {}
@@ -176,6 +343,10 @@ impl AnnotateEditor {
             ) {
                 this.finish_editing(window, cx);
             }
+            #[cfg(target_os = "macos")]
+            if matches!(event, ComposerInputEvent::Edited) {
+                cx.notify();
+            }
         });
         let size = image_size(&image.bytes).unwrap_or((1.0, 1.0));
         Self {
@@ -195,6 +366,12 @@ impl AnnotateEditor {
             on_done,
             on_cancel,
             _note_events: subscription,
+            #[cfg(target_os = "macos")]
+            mode: EditorMode::Markup,
+            #[cfg(target_os = "macos")]
+            had_editable: false,
+            #[cfg(target_os = "macos")]
+            desktop: desktop::DesktopTools::new(cx),
         }
     }
 
@@ -220,11 +397,43 @@ impl AnnotateEditor {
     }
 
     fn begin_editing(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            if self.editing == Some(id) {
+                window.focus(&self.note.read(cx).focus_handle(cx), cx);
+                return;
+            }
+            if self.editing.is_some() {
+                self.finish_editing(window, cx);
+            }
+        }
         let Some(item) = self.doc.get(id) else {
             return;
         };
-        let (text, placeholder) = if item.is_rect() {
-            (item.text.clone(), "Add a note…")
+        #[cfg(target_os = "macos")]
+        {
+            self.mode = if item.is_comment() {
+                EditorMode::Comment
+            } else {
+                EditorMode::Markup
+            };
+            self.tool = if item.is_comment() {
+                Tool::Comment
+            } else {
+                Tool::Text
+            };
+            self.desktop.width_hovered = false;
+            self.desktop.color_open = false;
+        }
+        let (text, placeholder) = if item.is_comment() {
+            (
+                item.text.clone(),
+                if cfg!(target_os = "macos") {
+                    "Add a comment…"
+                } else {
+                    "Add a note…"
+                },
+            )
         } else {
             (item.text.clone(), "Add text…")
         };
@@ -258,7 +467,17 @@ impl AnnotateEditor {
             let text = self.note.read(cx).text().to_string();
             self.doc.commit_text(id, &text);
         }
-        if self.doc.is_empty() {
+        let can_save_empty = cfg!(target_os = "macos") && {
+            #[cfg(target_os = "macos")]
+            {
+                self.had_editable
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        };
+        if self.doc.is_empty() && !can_save_empty {
             self.cancel(window, cx);
             return;
         }
@@ -266,7 +485,21 @@ impl AnnotateEditor {
             Ok(png) => {
                 let name = annotated_name(&self.name);
                 let notes = prompt_block(&name, &self.doc);
-                (self.on_done.clone())(Annotated { name, png, notes }, window, cx);
+                (self.on_done.clone())(
+                    Annotated {
+                        name,
+                        png,
+                        notes,
+                        #[cfg(target_os = "macos")]
+                        editable: Some(crate::annotate::EditableAnnotation {
+                            original_name: self.name.to_string(),
+                            original: self.image.clone(),
+                            document: self.doc.clone(),
+                        }),
+                    },
+                    window,
+                    cx,
+                );
             }
             Err(err) => {
                 self.error = Some(format!("Couldn't save the annotations: {err}").into());
@@ -276,10 +509,44 @@ impl AnnotateEditor {
     }
 
     fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            self.finish_gesture();
+            let cancelled_empty_note = self.editing.is_some_and(|id| {
+                self.doc.get(id).is_some_and(|item| {
+                    !item.is_rect()
+                        && item.text.is_empty()
+                        && self.note.read(cx).text().trim().is_empty()
+                })
+            });
+            if self.editing.is_some() {
+                self.finish_editing(window, cx);
+            }
+            if cancelled_empty_note {
+                return;
+            }
+        }
         self.editing = None;
         self.doc.undo();
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn redo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_gesture();
+        if self.editing.is_some() {
+            self.finish_editing(window, cx);
+        }
+        self.editing = None;
+        self.doc.redo();
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_document(&self) -> Annotations {
+        self.doc.clone()
     }
 
     fn remove(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -335,6 +602,16 @@ impl AnnotateEditor {
 
     pub fn set_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
         self.tool = tool;
+        #[cfg(target_os = "macos")]
+        {
+            self.mode = if tool == Tool::Comment {
+                EditorMode::Comment
+            } else {
+                EditorMode::Markup
+            };
+            self.desktop.width_hovered = false;
+            self.desktop.color_open = false;
+        }
         cx.notify();
     }
 
@@ -347,6 +624,7 @@ impl AnnotateEditor {
         self.done(window, cx);
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn on_image_down(
         &mut self,
         event: &MouseDownEvent,
@@ -370,10 +648,12 @@ impl AnnotateEditor {
                 let at = (at.0.clamp(0.0, self.size.0), at.1.clamp(0.0, self.size.1));
                 self.place_text(at, window, cx);
             }
+            _ => {}
         }
         cx.notify();
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn on_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.drag.is_none() || event.pressed_button != Some(MouseButton::Left) {
             return;
@@ -385,6 +665,7 @@ impl AnnotateEditor {
         cx.notify();
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn on_up(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.drag.take() else {
             return;
@@ -416,6 +697,7 @@ impl AnnotateEditor {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let note_focused = self.note.read(cx).focus_handle(cx).is_focused(window);
@@ -480,10 +762,12 @@ fn bar(theme: &Theme) -> gpui::Div {
         .p(px(PAD))
         .gap(px(2.0))
         .rounded(px(BAR_RADIUS))
-        .bg(crate::popover::surface_bg(theme))
+        .bg(editor_surface(theme))
         .border_1()
-        .border_color(hairline(0.10))
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        .border_color(editor_border(theme))
+        .when(cfg!(target_os = "macos") || !theme.is_frost(), |el| {
+            el.shadow_lg()
+        })
         .text_color(theme.text)
 }
 
@@ -495,9 +779,21 @@ impl Render for AnnotateEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let viewport = window.viewport_size();
+        #[cfg(target_os = "macos")]
+        let layout = crate::attachments::image_preview_layout(viewport);
+        #[cfg(target_os = "macos")]
+        let (box_w, box_h, frame) = (
+            f32::from(layout.frame.size.width),
+            f32::from(layout.frame.size.height),
+            layout.frame,
+        );
+        #[cfg(not(target_os = "macos"))]
         let box_w = f32::from(viewport.width) * BOX_W;
+        #[cfg(not(target_os = "macos"))]
         let box_h = f32::from(viewport.height) * BOX_H;
+        #[cfg(not(target_os = "macos"))]
         let frame = self.frame.get();
+        #[cfg(not(target_os = "macos"))]
         let frame = if frame.size.width > px(0.0) {
             frame
         } else {
@@ -515,6 +811,8 @@ impl Render for AnnotateEditor {
 
         // Marks, in screen pixels relative to the image's top-left.
         let mut marks: Vec<AnyElement> = Vec::new();
+        #[cfg(target_os = "macos")]
+        marks.extend(self.desktop_marks(scale));
         for item in self.doc.items() {
             if let Shape::Rect(r) = &item.shape {
                 let color = rgb(item.color.rgb());
@@ -535,6 +833,10 @@ impl Render for AnnotateEditor {
         }
         if let Some(drag) = self.drag {
             let r = ImageRect::from_drag(drag.start, drag.current, self.size);
+            #[cfg(target_os = "macos")]
+            let stroke = self.width_value();
+            #[cfg(not(target_os = "macos"))]
+            let stroke = m.stroke;
             marks.push(
                 div()
                     .absolute()
@@ -542,7 +844,7 @@ impl Render for AnnotateEditor {
                     .top(px(r.y * scale))
                     .w(px(r.w * scale))
                     .h(px(r.h * scale))
-                    .border(px(m.stroke))
+                    .border(px(stroke))
                     .border_color(rgb(self.color.rgb()))
                     .rounded(px(m.box_radius))
                     .into_any_element(),
@@ -551,14 +853,18 @@ impl Render for AnnotateEditor {
         for item in self.doc.items() {
             let id = item.id;
             match &item.shape {
-                Shape::Rect(r) => {
+                Shape::Rect(ImageRect { x, y, .. }) | Shape::Comment { x, y } => {
                     let number = self.doc.number(id).unwrap_or(0);
                     let d = m.pin_diameter;
-                    let cx_ = (r.x * scale).clamp(d / 2.0, (image_w - d / 2.0).max(d / 2.0));
-                    let cy_ = (r.y * scale).clamp(d / 2.0, (image_h - d / 2.0).max(d / 2.0));
+                    let cx_ = (x * scale).clamp(d / 2.0, (image_w - d / 2.0).max(d / 2.0));
+                    let cy_ = (y * scale).clamp(d / 2.0, (image_h - d / 2.0).max(d / 2.0));
                     marks.push(
                         div()
                             .id(("annotate-pin", id))
+                            .debug_selector(move || format!("annotate-comment-{id}"))
+                            .role(gpui::Role::Button)
+                            .aria_label(format!("Edit comment {number}"))
+                            .tab_index(0)
                             .absolute()
                             .left(px(cx_ - d / 2.0))
                             .top(px(cy_ - d / 2.0))
@@ -584,6 +890,20 @@ impl Render for AnnotateEditor {
                                     this.begin_editing(id, window, cx);
                                 }),
                             )
+                            .when(cfg!(target_os = "macos"), |el| {
+                                el.focus_visible(|style| {
+                                    style.border_2().border_color(gpui::white())
+                                })
+                                .on_key_down(cx.listener(
+                                    move |this, event: &KeyDownEvent, window, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            cx.stop_propagation();
+                                            this.begin_editing(id, window, cx);
+                                        }
+                                    },
+                                ))
+                            })
                             .child(number.to_string())
                             .into_any_element(),
                     );
@@ -614,8 +934,13 @@ impl Render for AnnotateEditor {
                             .cursor_pointer()
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
+                                cx.listener(move |this, event, window, cx| {
                                     cx.stop_propagation();
+                                    #[cfg(target_os = "macos")]
+                                    if this.tool == Tool::Eraser {
+                                        this.on_image_down(event, window, cx);
+                                        return;
+                                    }
                                     this.begin_editing(id, window, cx);
                                 }),
                             )
@@ -623,6 +948,7 @@ impl Render for AnnotateEditor {
                             .into_any_element(),
                     );
                 }
+                Shape::Stroke { .. } | Shape::MarkupRect { .. } => {}
             }
         }
 
@@ -634,9 +960,12 @@ impl Render for AnnotateEditor {
             let (left, top) = match &item.shape {
                 Shape::Rect(r) => {
                     let below = r.bottom() * scale + POPOVER_GAP;
+                    #[cfg(target_os = "macos")]
+                    let viewport_bottom = box_h - offset.1;
+                    #[cfg(not(target_os = "macos"))]
                     let viewport_bottom =
-                        f32::from(viewport.height) - f32::from(frame.origin.y) - offset.1;
-                    let top = if below + height > viewport_bottom - 64.0 {
+                        f32::from(viewport.height) - f32::from(frame.origin.y) - offset.1 - 64.0;
+                    let top = if below + height > viewport_bottom {
                         r.y * scale - POPOVER_GAP - height
                     } else {
                         below
@@ -644,22 +973,56 @@ impl Render for AnnotateEditor {
                     (r.x * scale, top)
                 }
                 Shape::Text { x, y, .. } => (x * scale, y * scale),
+                Shape::Comment { x, y } => (x * scale + 22.0, y * scale - 20.0),
+                Shape::Stroke { .. } | Shape::MarkupRect { .. } => (0.0, 0.0),
             };
+            #[cfg(not(target_os = "macos"))]
             let left = left.min((image_w - POPOVER_WIDTH).max(0.0)).max(0.0);
+            #[cfg(not(target_os = "macos"))]
+            let width = POPOVER_WIDTH;
+            #[cfg(target_os = "macos")]
+            let (left, top, width) = {
+                let image_origin = frame.origin + gpui::point(px(offset.0), px(offset.1));
+                let bounds = if let Shape::Comment { x, y } = item.shape {
+                    let radius = m.pin_diameter / 2.0;
+                    let pin = (
+                        (x * scale).clamp(radius, (image_w - radius).max(radius)),
+                        (y * scale).clamp(radius, (image_h - radius).max(radius)),
+                    );
+                    comment_popover_bounds(
+                        pin,
+                        m.pin_diameter,
+                        image_origin,
+                        frame,
+                        viewport,
+                        layout.gutter,
+                    )
+                } else {
+                    note_popover_bounds((left, top), image_origin, frame, viewport, layout.gutter)
+                };
+                (
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                )
+            };
             marks.push(
                 div()
                     .id("annotate-note")
+                    .debug_selector(|| "annotate-note".into())
                     .absolute()
                     .left(px(left))
                     .top(px(top))
-                    .w(px(POPOVER_WIDTH))
+                    .w(px(width))
                     .h(px(height))
                     .p(px(POPOVER_PAD))
                     .rounded(px(POPOVER_RADIUS))
-                    .bg(crate::popover::surface_bg(&theme))
+                    .bg(editor_surface(&theme))
                     .border_1()
-                    .border_color(hairline(0.10))
-                    .when(!theme.is_frost(), |el| el.shadow_lg())
+                    .border_color(editor_border(&theme))
+                    .when(cfg!(target_os = "macos") || !theme.is_frost(), |el| {
+                        el.shadow_lg()
+                    })
                     .flex()
                     .items_center()
                     .gap(px(2.0))
@@ -671,6 +1034,32 @@ impl Render for AnnotateEditor {
                             .pl(px(8.0))
                             .child(self.note.clone()),
                     )
+                    .when(cfg!(target_os = "macos") && item.is_comment(), |el| {
+                        el.child(
+                            icon_button(
+                                "annotate-note-save",
+                                icons::CHECK,
+                                "Save comment",
+                                false,
+                                true,
+                                &theme,
+                            )
+                            .debug_selector(|| "annotate-note-save".into())
+                            .role(gpui::Role::Button)
+                            .tab_index(0)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.finish_editing(window, cx)),
+                            )
+                            .on_key_down(cx.listener(
+                                |this, event: &KeyDownEvent, window, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        cx.stop_propagation();
+                                        this.finish_editing(window, cx);
+                                    }
+                                },
+                            )),
+                        )
+                    })
                     .child(
                         div()
                             .id("annotate-note-delete")
@@ -681,6 +1070,22 @@ impl Render for AnnotateEditor {
                             .justify_center()
                             .rounded(px(POPOVER_RADIUS - POPOVER_PAD))
                             .aria_label("Delete annotation")
+                            .when(cfg!(target_os = "macos"), |el| {
+                                el.role(gpui::Role::Button)
+                                    .tab_index(0)
+                                    .focus_visible(|style| style.bg(theme.element_hover))
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &KeyDownEvent, window, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                cx.stop_propagation();
+                                                this.remove(id, window, cx);
+                                            }
+                                        },
+                                    ))
+                            })
                             .cursor_pointer()
                             .hover(|s| s.bg(ink(0.06)))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -700,6 +1105,7 @@ impl Render for AnnotateEditor {
         let owner = cx.entity_id();
         let image_layer = div()
             .id("annotate-image")
+            .debug_selector(|| "annotate-image".into())
             .absolute()
             .left(px(offset.0))
             .top(px(offset.1))
@@ -708,6 +1114,7 @@ impl Render for AnnotateEditor {
             .cursor(match self.tool {
                 Tool::Rect => CursorStyle::Crosshair,
                 Tool::Text => CursorStyle::IBeam,
+                _ => CursorStyle::Crosshair,
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_image_down))
             .child(
@@ -719,152 +1126,208 @@ impl Render for AnnotateEditor {
             )
             .children(marks);
 
-        let tool_button =
-            |tool: Tool, icon: &'static str, label: &'static str, cx: &mut Context<Self>| {
+        #[cfg(not(target_os = "macos"))]
+        let toolbar = {
+            let tool_button =
+                |tool: Tool, icon: &'static str, label: &'static str, cx: &mut Context<Self>| {
+                    icon_button(
+                        match tool {
+                            Tool::Text => "annotate-tool-text",
+                            Tool::Rect => "annotate-tool-rect",
+                            _ => "annotate-legacy-tool",
+                        },
+                        icon,
+                        label,
+                        self.tool == tool,
+                        true,
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_tool(tool, cx)))
+                };
+            let mut tools = bar(&theme)
+                .child(tool_button(Tool::Text, icons::ANNOTATE_TEXT, "Text", cx))
+                .child(tool_button(
+                    Tool::Rect,
+                    icons::ANNOTATE_RECT,
+                    "Rectangle",
+                    cx,
+                ))
+                .child(divider());
+            for color in MarkColor::ALL {
+                let active = self.color == color;
+                tools = tools.child(
+                    div()
+                        .id(("annotate-color", color as usize))
+                        .size(px(HIT))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .aria_label(color.label())
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_color(color, cx)))
+                        .child(
+                            div()
+                                .size(px(20.0))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .border_2()
+                                .border_color(if active {
+                                    theme.text
+                                } else {
+                                    gpui::transparent_black()
+                                })
+                                .child(div().size(px(12.0)).rounded_full().bg(rgb(color.rgb()))),
+                        ),
+                );
+            }
+            let can_undo = self.doc.can_undo();
+            tools = tools.child(divider()).child(
                 icon_button(
-                    match tool {
-                        Tool::Text => "annotate-tool-text",
-                        Tool::Rect => "annotate-tool-rect",
-                    },
-                    icon,
-                    label,
-                    self.tool == tool,
-                    true,
+                    "annotate-undo",
+                    icons::UNDO,
+                    "Undo",
+                    false,
+                    can_undo,
                     &theme,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.set_tool(tool, cx)))
-            };
-        let mut tools = bar(&theme)
-            .child(tool_button(Tool::Text, icons::ANNOTATE_TEXT, "Text", cx))
-            .child(tool_button(
-                Tool::Rect,
-                icons::ANNOTATE_RECT,
-                "Rectangle",
-                cx,
-            ))
-            .child(divider());
-        for color in MarkColor::ALL {
-            let active = self.color == color;
-            tools = tools.child(
-                div()
-                    .id(("annotate-color", color as usize))
-                    .size(px(HIT))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .aria_label(color.label())
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_color(color, cx)))
-                    .child(
-                        div()
-                            .size(px(20.0))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_2()
-                            .border_color(if active {
-                                theme.text
-                            } else {
-                                gpui::transparent_black()
-                            })
-                            .child(div().size(px(12.0)).rounded_full().bg(rgb(color.rgb()))),
-                    ),
+                .when(can_undo, |el| {
+                    el.on_click(cx.listener(|this, _, window, cx| this.undo(window, cx)))
+                }),
             );
-        }
-        let can_undo = self.doc.can_undo();
-        tools = tools.child(divider()).child(
-            icon_button(
-                "annotate-undo",
-                icons::UNDO,
-                "Undo",
-                false,
-                can_undo,
-                &theme,
-            )
-            .when(can_undo, |el| {
-                el.on_click(cx.listener(|this, _, window, cx| this.undo(window, cx)))
-            }),
-        );
-        let has_marks = !self.doc.is_empty();
-        let actions = bar(&theme)
-            .gap(px(PAD))
-            .child(
-                div()
-                    .id("annotate-cancel")
-                    .h(px(HIT))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(BAR_RADIUS - PAD))
-                    .text_size(ui_rems(TEXT_BODY))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(ink(0.06)))
-                    .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx)))
-                    .child("Cancel"),
-            )
-            .child(
-                div()
-                    .id("annotate-done")
-                    .h(px(HIT))
-                    .px(px(14.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(BAR_RADIUS - PAD))
-                    .bg(theme.solid)
-                    .text_size(ui_rems(TEXT_BODY))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.on_solid)
-                    .when(has_marks, |el| {
-                        el.cursor_pointer().hover(|s| s.opacity(0.9))
-                    })
-                    .when(!has_marks, |el| el.opacity(0.5))
-                    .on_click(cx.listener(|this, _, window, cx| this.done(window, cx)))
-                    .child("Done"),
-            );
-        let toolbar = div()
-            .absolute()
-            .bottom(px(16.0))
-            .left_0()
-            .right_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(8.0))
-            .when_some(self.error.clone(), |el, err| {
-                el.child(
+            let tools = tools
+                .id("annotate-tools")
+                .debug_selector(|| "annotate-tools".into());
+            let has_marks = !self.doc.is_empty();
+            let actions = bar(&theme)
+                .id("annotate-actions")
+                .debug_selector(|| "annotate-actions".into())
+                .gap(px(PAD))
+                .child(
                     div()
+                        .id("annotate-cancel")
+                        .h(px(HIT))
                         .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(Theme::CONTROL_RADIUS))
-                        .bg(crate::popover::surface_bg(&theme))
-                        .text_size(ui_rems(TEXT_CAPTION))
-                        .text_color(theme.text)
-                        .child(err),
+                        .flex()
+                        .items_center()
+                        .rounded(px(BAR_RADIUS - PAD))
+                        .text_size(ui_rems(TEXT_BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(ink(0.06)))
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx)))
+                        .child("Cancel"),
                 )
-            })
-            .child(
+                .child(
+                    div()
+                        .id("annotate-done")
+                        .h(px(HIT))
+                        .px(px(14.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(BAR_RADIUS - PAD))
+                        .bg(theme.solid)
+                        .text_size(ui_rems(TEXT_BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.on_solid)
+                        .when(has_marks, |el| {
+                            el.cursor_pointer().hover(|s| s.opacity(0.9))
+                        })
+                        .when(!has_marks, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, window, cx| this.done(window, cx)))
+                        .child("Done"),
+                );
+            let controls = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(tools)
+                .child(actions);
+            #[cfg(target_os = "macos")]
+            let controls = controls.when(layout.compact, |el| el.flex_col());
+            let inline_error = if cfg!(target_os = "macos") {
+                None
+            } else {
+                self.error.clone()
+            };
+            let toolbar = div()
+                .absolute()
+                .when(!cfg!(target_os = "macos"), |el| el.bottom(px(16.0)))
+                .left_0()
+                .right_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(8.0))
+                .when_some(inline_error, |el, err| {
+                    el.child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .rounded(px(Theme::CONTROL_RADIUS))
+                            .bg(editor_surface(&theme))
+                            .text_size(ui_rems(TEXT_CAPTION))
+                            .text_color(theme.text)
+                            .child(err),
+                    )
+                });
+            #[cfg(target_os = "macos")]
+            let toolbar = toolbar.top(layout.footer_top).px(layout.gutter).child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(tools)
-                    .child(actions),
+                    .id("annotate-filename")
+                    .debug_selector(|| "annotate-filename".into())
+                    .max_w(viewport.width - layout.gutter * 2.0)
+                    .h(px(18.0))
+                    .px(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(editor_surface(&theme))
+                    .truncate()
+                    .text_size(ui_rems(TEXT_CAPTION))
+                    .line_height(px(18.0))
+                    .text_color(theme.text)
+                    .child(self.name.clone()),
             );
-        let toolbar: AnyElement = if motion::reduced_motion(cx) {
-            toolbar.into_any_element()
-        } else {
+            let toolbar = toolbar.child(controls);
+            let toolbar: AnyElement = if motion::reduced_motion(cx) {
+                toolbar.into_any_element()
+            } else {
+                toolbar
+                    .with_animation("annotate-enter", ENTER.animation(), |el, t| {
+                        el.opacity(t).mb(px((1.0 - t) * -8.0))
+                    })
+                    .into_any_element()
+            };
             toolbar
-                .with_animation("annotate-enter", ENTER.animation(), |el, t| {
-                    el.opacity(t).mb(px((1.0 - t) * -8.0))
-                })
-                .into_any_element()
         };
+        #[cfg(target_os = "macos")]
+        let toolbar = self.desktop_toolbar(viewport, &theme, window, cx);
+        #[cfg(target_os = "macos")]
+        let error_banner = self.error.clone().map(|error| {
+            div()
+                .absolute()
+                .top((layout.footer_top - px(44.0)).max(layout.gutter))
+                .max_w(viewport.width - layout.gutter * 2.0)
+                .h(px(32.0))
+                .px(px(12.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .bg(editor_surface(&theme))
+                .border_1()
+                .border_color(editor_border(&theme))
+                .shadow_lg()
+                .truncate()
+                .text_size(ui_rems(TEXT_CAPTION))
+                .line_height(px(30.0))
+                .text_color(theme.text)
+                .child(error)
+                .into_any_element()
+        });
+        #[cfg(not(target_os = "macos"))]
+        let error_banner: Option<AnyElement> = None;
 
         div()
             .id("annotate-editor")
@@ -886,6 +1349,13 @@ impl Render for AnnotateEditor {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    #[cfg(target_os = "macos")]
+                    {
+                        this.desktop.width_hovered = false;
+                        this.desktop.color_open = false;
+                        this.desktop.width_dragging = false;
+                        cx.notify();
+                    }
                     if this.editing.is_some() {
                         this.finish_editing(window, cx);
                     }
@@ -894,9 +1364,14 @@ impl Render for AnnotateEditor {
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
+                    .id("annotate-frame")
+                    .debug_selector(|| "annotate-frame".into())
                     .w(px(box_w))
                     .h(px(box_h))
                     .relative()
+                    .when(cfg!(target_os = "macos"), |el| {
+                        el.absolute().left(frame.origin.x).top(frame.origin.y)
+                    })
                     .child(image_layer)
                     .child(
                         gpui::canvas(
@@ -912,13 +1387,27 @@ impl Render for AnnotateEditor {
                         .inset_0(),
                     ),
             )
-            // Keeps the lightbox's caption line so the image does not shift.
-            .child(
-                div()
-                    .text_size(ui_rems(TEXT_CAPTION))
-                    .text_color(gpui::transparent_black())
-                    .child(self.name.clone()),
-            )
+            .when(!cfg!(target_os = "macos"), |el| {
+                // Keeps the legacy lightbox's caption line so the image does not shift.
+                el.child(
+                    div()
+                        .text_size(ui_rems(TEXT_CAPTION))
+                        .text_color(gpui::transparent_black())
+                        .child(self.name.clone()),
+                )
+            })
+            .children(error_banner)
             .child(toolbar)
+            .when(cfg!(target_os = "macos"), |el| {
+                #[cfg(target_os = "macos")]
+                {
+                    el.children(self.desktop_width_control(viewport, &theme, window, cx))
+                        .children(self.desktop_popover(viewport, &theme, window, cx))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    el
+                }
+            })
     }
 }

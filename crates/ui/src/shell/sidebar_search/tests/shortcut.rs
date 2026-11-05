@@ -50,14 +50,35 @@ fn shortcut_fixture(
                 state.connection = crate::state::ConnectionStatus::Ready;
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
+                state.spaces = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "one", "deviceId": "local", "path": "/fixture/one",
+                        "createdAt": "2026-10-01T00:00:00Z",
+                    }))
+                    .unwrap(),
+                ];
                 cx.notify();
             });
+            // The live application restores its initial workspace after sync.
+            // This isolated shell skips bootstrap, so establish that state here.
+            shell.boot_restored = true;
+            shell.ensure_workspace_sessions(cx);
             window.focus(&shell.composer.focus_handle(cx), cx);
             cx.notify();
         });
     });
     cx.run_until_parked();
     (dir, shell, cx)
+}
+
+fn open_workspace_search(
+    shell: &Entity<Shell>,
+    cx: &mut gpui::VisualTestContext,
+) -> Entity<ComposerInput> {
+    press_keys(cx, &platform_combo("mod-f"));
+    shell.read_with(cx, |shell, _| {
+        shell.sidebar_search.as_ref().unwrap().input.clone()
+    })
 }
 
 #[gpui::test]
@@ -97,8 +118,8 @@ fn sidebar_search_shortcut_reveals_and_focuses_search(cx: &mut gpui::TestAppCont
 #[gpui::test]
 fn sidebar_search_shortcut_refocuses_without_toggling_or_resetting(cx: &mut gpui::TestAppContext) {
     let (_dir, shell, cx) = shortcut_fixture(cx);
-    // Start with the existing magnifier path to cover an already-open search.
-    let input = super::edge_cases::open_search(&shell, cx);
+    // Open through the workspace shortcut, then exercise an already-open search.
+    let input = open_workspace_search(&shell, cx);
     super::edge_cases::query(&input, "sidebar", cx);
     cx.update(|_, cx| {
         shell.update(cx, |shell, cx| shell.toggle_sidebar_search_archived(cx));
@@ -125,4 +146,56 @@ fn sidebar_search_shortcut_refocuses_without_toggling_or_resetting(cx: &mut gpui
     }
     press_keys(cx, "x");
     input.read_with(cx, |input, _| assert_eq!(input.text(), "sidebarx"));
+}
+
+#[gpui::test]
+fn closing_workspace_search_returns_typing_to_composer(cx: &mut gpui::TestAppContext) {
+    for escape in [false, true] {
+        let (_dir, shell, cx) = shortcut_fixture(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.chats = vec![chat("current", "Current session", false, "one")];
+                state.select_chat(Some("current".into()), cx);
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let composer = shell.read_with(cx, |shell, _| shell.composer.clone());
+        let input = composer.read_with(cx, |composer, _| composer.input.clone());
+        cx.update(|window, cx| {
+            assert!(
+                shell
+                    .read(cx)
+                    .shortcut_focus
+                    .contains(&composer.focus_handle(cx), window)
+            );
+        });
+        open_workspace_search(&shell, cx);
+        press_keys(cx, "q escape");
+        cx.update(|window, cx| {
+            if escape {
+                let keystroke = Keystroke::parse("escape").unwrap();
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
+                    cx,
+                );
+            } else {
+                shell.update(cx, |shell, cx| shell.toggle_sidebar_search(window, cx));
+            }
+            assert!(shell.read(cx).sidebar_search.is_none());
+            // Assert before Shell's deferred recovery can mask stale focus.
+            assert!(composer.focus_handle(cx).is_focused(window));
+            assert!(shell.read(cx).shortcut_focus.contains_focused(window, cx));
+        });
+        press_keys(cx, "d r a f t");
+        input.read_with(cx, |input, _| assert_eq!(input.text(), "draft"));
+    }
 }

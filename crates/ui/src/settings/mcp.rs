@@ -502,7 +502,7 @@ impl Render for McpPage {
                     widgets::ghost_action(&theme)
                         .id("mcp-retry")
                         .mt(px(8.0))
-                        .hover(|s| s.bg(crate::theme::ink(0.06)))
+                        .hover(|s| s.bg(theme.element_hover))
                         .on_click(cx.listener(|this, _, _, cx| this.load(cx)))
                         .child(SharedString::from("Retry")),
                 )

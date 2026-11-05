@@ -42,7 +42,7 @@ impl Pickers {
                 .justify_center()
                 .cursor_pointer()
                 .when(!favorites_view, |el| {
-                    el.hover(|s| s.bg(crate::theme::ink(0.06)))
+                    el.hover(|s| s.bg(theme.element_hover))
                 })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.setting_menu = None;
@@ -85,7 +85,7 @@ impl Pickers {
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .when(!is_viewed, |el| el.hover(|s| s.bg(crate::theme::ink(0.06))))
+                        .when(!is_viewed, |el| el.hover(|s| s.bg(theme.element_hover)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.setting_menu = None;
                             this.model_rail = ModelRail::Harness;

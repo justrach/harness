@@ -306,7 +306,7 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
         .px(px(20.0))
         .py(px(14.0))
         .when(!first, |el| el.border_t_1().border_color(theme.border))
-        .hover(|s| s.bg(ink(0.015)))
+        .hover(|s| s.bg(theme.element_hover))
         .flex()
         .flex_row()
         .items_center()

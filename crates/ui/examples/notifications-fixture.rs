@@ -19,6 +19,10 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("warn").init();
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     let light = std::env::args().nth(2).as_deref() == Some("light");
+    let width: f32 = std::env::args()
+        .nth(3)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1100.0);
     let suffix = if light { "light" } else { "dark" };
     std::fs::create_dir_all(&output)?;
     let temp = tempfile::tempdir()?;
@@ -30,6 +34,7 @@ fn main() -> anyhow::Result<()> {
         std::env::set_var("HARNESS_OPEN_ROUTE", "settings/notifications");
         std::env::set_var("HARNESS_IPC_PORT", ipc_port.to_string());
         std::env::set_var("HARNESS_DATA_DIR", temp.path().join("engine"));
+        std::env::set_var("HARNESS_DISABLE_SOUND", "1");
     }
     let runtime = tokio::runtime::Runtime::new()?;
     let core = runtime.block_on(async {
@@ -125,7 +130,7 @@ fn main() -> anyhow::Result<()> {
                         window_background: theme::Theme::of(cx).window_background_appearance(),
                         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
                             gpui::point(px(20.), px(40.)),
-                            size(px(1100.), px(820.)),
+                            size(px(width), px(820.)),
                         ))),
                         ..Default::default()
                     },

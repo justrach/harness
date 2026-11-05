@@ -1,23 +1,40 @@
 //! Native project selector review fixture, with isolated synthetic data.
-//! Run under a desktop/Xvfb, then click the sidebar's "All projects" selector.
+//! Pass --output=<path>, --sidebar-width=224|320, and optionally --light.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use harness_ui::*;
+use std::time::Duration;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let light = args.iter().any(|arg| arg == "--light");
+    let sidebar_width = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--sidebar-width=")?.parse::<f32>().ok())
+        .unwrap_or(256.0)
+        .clamp(settings::SIDEBAR_MIN, settings::SIDEBAR_MAX);
+    let output = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--output=").map(std::path::PathBuf::from));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
     tracing_subscriber::fmt().with_env_filter("warn").init();
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().to_path_buf();
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
         gpui_tokio::init(cx);
         gpui_base::init(cx);
-        let settings = settings::UiSettings::default();
+        let mut settings = settings::UiSettings::default();
+        settings.sidebar_width = sidebar_width;
+        settings.space_filter = Some("a".into());
+        settings.theme_selection.light = "warm-harp-light".into();
+        settings.theme_selection.dark = "warm-harp-dark".into();
         settings::init(settings.clone(), data.clone(), cx);
         let fonts = typography::register_fonts(cx);
         typography::init(settings.ui_font_family.clone(), settings.ui_font_size,
             settings.terminal_font_family.clone(), settings.terminal_font_size,
             settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
         theme_library::init(data.clone(), cx);
-        appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection,
+        appearance::init(if light { appearance::AppearanceMode::Light } else { appearance::AppearanceMode::Dark }, settings.theme_selection,
             settings.accent, settings.surface, cx);
         history::init(settings.git_history_columns, settings.git_history_column_widths,
             settings.git_history_column_order, settings.git_history_author_display, cx);
@@ -48,11 +65,26 @@ fn main() {
         let boot = EngineBootConfig { data_dir: data, ipc_port: 0, edge_url: String::new(),
             edge_token: None, org_id: None, codegraff_client_id: None,
             default_harness: HarnessId::ClaudeCode };
-        cx.open_window(WindowOptions {
+        let window = cx.open_window(WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(680.))))),
             ..Default::default()
         }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
         state.update(cx, |_, cx| cx.notify());
         cx.activate(true);
+        if let Some(output) = output {
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                window.update(cx, |shell, window, cx| {
+                    shell.fixture_project_selector(sidebar_width, window, cx);
+                }).unwrap();
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                let capture_window: gpui::AnyWindowHandle = window.into();
+                capture_window.update(cx, |_, window, cx| {
+                    window.draw(cx).clear();
+                    window.render_to_image().unwrap().save(output).unwrap();
+                }).unwrap();
+                cx.update(|cx| cx.quit());
+            }).detach();
+        }
     });
 }

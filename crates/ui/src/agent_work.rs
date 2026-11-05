@@ -44,6 +44,9 @@ use crate::state::AppState;
 use crate::theme::Theme;
 use crate::typography::{CAP_CENTER_NUDGE, TEXT_BODY, TEXT_TITLE, TabularNums};
 
+mod control;
+pub use control::{AgentWorkControl, RevealChatAgent};
+
 /// One spinner turn: linear, clockwise, shared by every spinner.
 pub const SPIN: MotionSpec = MotionSpec::new(1000, CubicBezier::new(0.0, 0.0, 1.0, 1.0));
 /// Enter transition for a substep or a step changing state.
@@ -1089,6 +1092,16 @@ const ROW_WASH_Y: f32 = 5.0;
 /// where the chip itself still opens the subagent's own tab. No Stop or
 /// Review buttons.
 pub fn agents(work: &Work, p: &Palette, phase: f32, on_row: Option<&RevealAgent>) -> AnyElement {
+    agents_with_active(work, p, phase, on_row, None)
+}
+
+fn agents_with_active(
+    work: &Work,
+    p: &Palette,
+    phase: f32,
+    on_row: Option<&RevealAgent>,
+    active: Option<usize>,
+) -> AnyElement {
     let (count, word) = agents_header(work);
     let header = div()
         .flex()
@@ -1160,8 +1173,12 @@ pub fn agents(work: &Work, p: &Palette, phase: f32, on_row: Option<&RevealAgent>
             .py(px(ROW_WASH_Y))
             .rounded(px(CHIP_RADIUS))
             .cursor_pointer()
+            .when(active == Some(ix), |row| row.bg(wash))
             .hover(move |s| s.bg(wash))
-            .on_click(move |_, window, cx| open(&id, window, cx))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                open(&id, window, cx);
+            })
             .into_any_element()
     });
     div()
@@ -1194,6 +1211,16 @@ pub fn work_card(
     phase: f32,
     on_agent: Option<&RevealAgent>,
 ) -> AnyElement {
+    work_card_with_active(work, p, phase, on_agent, None)
+}
+
+fn work_card_with_active(
+    work: &Work,
+    p: &Palette,
+    phase: f32,
+    on_agent: Option<&RevealAgent>,
+    active: Option<usize>,
+) -> AnyElement {
     card(p)
         .when(!work.steps.is_empty(), |c| {
             c.child(timeline(&work.steps, p, phase))
@@ -1202,7 +1229,7 @@ pub fn work_card(
             c.when(!work.steps.is_empty(), |c| {
                 c.child(div().h(px(1.0)).bg(p.card_border))
             })
-            .child(agents(work, p, phase, on_agent))
+            .child(agents_with_active(work, p, phase, on_agent, active))
         })
         .when(!work.tools.is_empty(), |c| {
             c.child(tool_chips(&work.tools, p))
@@ -1247,6 +1274,17 @@ pub fn footer_chip(
     theme: &Theme,
     view: EntityId,
     on_reveal: Option<RevealAgent>,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    footer_chip_inner(state, theme, view, on_reveal, true, cx)
+}
+
+fn footer_chip_inner(
+    state: Entity<AppState>,
+    theme: &Theme,
+    view: EntityId,
+    on_reveal: Option<RevealAgent>,
+    allow_hover: bool,
     cx: &mut App,
 ) -> Option<AnyElement> {
     let dismissed = take_dismissed(view);
@@ -1311,7 +1349,7 @@ pub fn footer_chip(
             .debug_selector(|| "agent-work-chip".into())
             // hoverable: the card stays open while the pointer moves from
             // the chip into it, so its agent rows can be clicked
-            .when(!dismissed, |chip| {
+            .when(!dismissed && allow_hover, |chip| {
                 chip.hoverable_tooltip(move |_, cx| {
                     hover_card(state.clone(), view, on_reveal.clone(), cx)
                 })

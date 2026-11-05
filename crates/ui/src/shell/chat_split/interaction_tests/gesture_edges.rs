@@ -2,6 +2,15 @@ use super::*;
 
 mod lifecycle;
 
+fn toggle_legacy_pane_zoom(shell: &mut Shell, cx: &mut Context<Shell>) {
+    // The test host renders legacy split panes. The public action targets the
+    // workspace panels, so update this host's layout and run its normal sync.
+    let split = shell.chat_split.as_mut().unwrap();
+    split.zoomed = !split.zoomed;
+    shell.sync_chat_panes(cx);
+    cx.notify();
+}
+
 // Distinct message IDs keep the global selection registry and test bounds
 // faithful to real sessions, even when every pane displays identical text.
 fn entry_for(view: &Entity<Transcript>, text: &str) -> SessionMessageEntry {
@@ -271,7 +280,7 @@ fn pane_press_does_not_survive_tab_or_layout_changes(cx: &mut gpui::TestAppConte
                         // Tab slots can be reused, so identity matters even
                         // when the numeric slot and selected session match.
                         "tab" => shell.chat_tab_id = uuid::Uuid::new_v4(),
-                        "zoom" => shell.toggle_chat_pane_zoom(cx),
+                        "zoom" => toggle_legacy_pane_zoom(shell, cx),
                         "close-other-pane" => {
                             let split = shell.chat_split.as_mut().unwrap();
                             split.panes.pop();

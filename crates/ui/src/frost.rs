@@ -29,6 +29,13 @@ pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) ->
     }
 }
 
+/// A panel's hover controls frost in with the pointer, so they sit at radius 0
+/// whenever it is elsewhere. The renderer treats any blur as at least 1px, and
+/// pays a render pass and a GPU blur for it: at 0 there is nothing to ask for.
+fn paints_blur(frost: bool, blur_radius: f32) -> bool {
+    frost && blur_radius > 0.0
+}
+
 pub struct Frosted {
     corner_radius: f32,
     blur_radius: f32,
@@ -79,7 +86,7 @@ impl Element for Frosted {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if Theme::of(cx).is_frost() {
+        if paints_blur(Theme::of(cx).is_frost(), self.blur_radius) {
             window.paint_layer(bounds, |window| {
                 window.paint_backdrop_blur(
                     bounds,
@@ -173,5 +180,18 @@ impl IntoElement for Layered {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MENU_BLUR, paints_blur};
+
+    #[test]
+    fn nothing_to_blur_costs_no_blur_pass() {
+        assert!(paints_blur(true, MENU_BLUR));
+        assert!(paints_blur(true, 0.5));
+        assert!(!paints_blur(true, 0.0));
+        assert!(!paints_blur(false, MENU_BLUR));
     }
 }
