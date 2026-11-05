@@ -133,6 +133,8 @@ icon_assets![
     (SPLIT_COLUMNS, "split-columns"),
     // Long-line wrapping toggle shared by changes and agent Markdown fences.
     (WRAP_TEXT, "wrap-text"),
+    // The changes pane's ignore-whitespace toggle: a space-bar bracket.
+    (WHITESPACE, "whitespace"),
     (ALT_ARROW_LEFT, "alt-arrow-left"),
     (ALT_ARROW_RIGHT, "alt-arrow-right"),
     (SMARTPHONE, "smartphone"),

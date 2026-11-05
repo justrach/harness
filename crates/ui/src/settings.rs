@@ -1171,6 +1171,8 @@ pub struct UiSettings {
     pub diff_split: bool,
     /// Changes pane: wrap long source lines instead of scrolling horizontally.
     pub diff_wrap: bool,
+    /// Changes pane: hide changes that only move whitespace.
+    pub diff_ignore_whitespace: bool,
     /// Agent-sent Markdown fences: wrap long lines to the chat width instead
     /// of exposing their horizontal scroll plane.
     pub code_fences_fit_content: bool,
@@ -1297,6 +1299,7 @@ impl Default for UiSettings {
             theme_selection: harness_theme::ThemeSelection::default(),
             diff_split: false,
             diff_wrap: false,
+            diff_ignore_whitespace: false,
             code_fences_fit_content: false,
             transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
             open_web_links_in_harness: true,
@@ -3443,6 +3446,7 @@ mod tests {
             },
             diff_split: true,
             diff_wrap: true,
+            diff_ignore_whitespace: true,
             code_fences_fit_content: true,
             transcript_width: 960.0,
             open_web_links_in_harness: false,

@@ -117,6 +117,10 @@ name = "build-wait-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "diff-whitespace-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "transcript-selection-fixture"
 required-features = ["appshots-fixture"]
 

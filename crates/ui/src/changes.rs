@@ -590,6 +590,186 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
     files
 }
 
+/// The most cells the line matcher fills for one change block. A reformat is
+/// matched by its common prefix and suffix first, so only a block that really
+/// was rewritten comes near this, and it stays shown as changed.
+const WHITESPACE_MATCH_CELLS: usize = 4_000_000;
+/// Context lines kept around a change when a hunk is rebuilt, as `git diff`.
+const WHITESPACE_CONTEXT_LINES: usize = 3;
+
+fn without_whitespace(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Which deletion and addition in one change block are the same line once
+/// whitespace is ignored: in-order pairs of (deletion, addition) indices.
+fn whitespace_equal_pairs(dels: &[&DiffLine], adds: &[&DiffLine]) -> Vec<(usize, usize)> {
+    let dels: Vec<String> = dels.iter().map(|l| without_whitespace(&l.text)).collect();
+    let adds: Vec<String> = adds.iter().map(|l| without_whitespace(&l.text)).collect();
+    let prefix = dels
+        .iter()
+        .zip(&adds)
+        .take_while(|(del, add)| del == add)
+        .count();
+    let suffix = dels[prefix..]
+        .iter()
+        .rev()
+        .zip(adds[prefix..].iter().rev())
+        .take_while(|(del, add)| del == add)
+        .count();
+    let mut pairs: Vec<(usize, usize)> = (0..prefix).map(|ix| (ix, ix)).collect();
+    let del_mid = &dels[prefix..dels.len() - suffix];
+    let add_mid = &adds[prefix..adds.len() - suffix];
+    let (rows, columns) = (del_mid.len(), add_mid.len());
+    if rows > 0
+        && columns > 0
+        && rows.saturating_add(1).saturating_mul(columns + 1) <= WHITESPACE_MATCH_CELLS
+    {
+        // Longest common subsequence, walked forward so pairs stay in order.
+        let mut lengths = vec![0u32; (rows + 1) * (columns + 1)];
+        let at = |row: usize, column: usize| row * (columns + 1) + column;
+        for row in (0..rows).rev() {
+            for column in (0..columns).rev() {
+                lengths[at(row, column)] = if del_mid[row] == add_mid[column] {
+                    lengths[at(row + 1, column + 1)] + 1
+                } else {
+                    lengths[at(row + 1, column)].max(lengths[at(row, column + 1)])
+                };
+            }
+        }
+        let (mut row, mut column) = (0, 0);
+        while row < rows && column < columns {
+            if del_mid[row] == add_mid[column] {
+                pairs.push((prefix + row, prefix + column));
+                row += 1;
+                column += 1;
+            } else if lengths[at(row + 1, column)] >= lengths[at(row, column + 1)] {
+                row += 1;
+            } else {
+                column += 1;
+            }
+        }
+    }
+    for ix in 0..suffix {
+        pairs.push((dels.len() - suffix + ix, adds.len() - suffix + ix));
+    }
+    pairs
+}
+
+/// Turn each deletion and addition that differ only in whitespace into one
+/// context line carrying both line numbers. False when nothing changed.
+fn fold_whitespace_pairs(lines: &[DiffLine]) -> Option<Vec<DiffLine>> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut folded = false;
+    let mut ix = 0;
+    while ix < lines.len() {
+        if !matches!(lines[ix].kind, LineKind::Del | LineKind::Add) {
+            out.push(lines[ix].clone());
+            ix += 1;
+            continue;
+        }
+        let dels: Vec<&DiffLine> = lines[ix..]
+            .iter()
+            .take_while(|line| line.kind == LineKind::Del)
+            .collect();
+        let adds: Vec<&DiffLine> = lines[ix + dels.len()..]
+            .iter()
+            .take_while(|line| line.kind == LineKind::Add)
+            .collect();
+        let pairs = whitespace_equal_pairs(&dels, &adds);
+        folded |= !pairs.is_empty();
+        let (mut del, mut add) = (0, 0);
+        for (pair_del, pair_add) in pairs {
+            out.extend(dels[del..pair_del].iter().map(|line| (*line).clone()));
+            out.extend(adds[add..pair_add].iter().map(|line| (*line).clone()));
+            out.push(DiffLine {
+                kind: LineKind::Context,
+                old_no: dels[pair_del].old_no,
+                new_no: adds[pair_add].new_no,
+                text: adds[pair_add].text.clone(),
+            });
+            del = pair_del + 1;
+            add = pair_add + 1;
+        }
+        out.extend(dels[del..].iter().map(|line| (*line).clone()));
+        out.extend(adds[add..].iter().map(|line| (*line).clone()));
+        ix += dels.len() + adds.len();
+    }
+    folded.then_some(out)
+}
+
+/// Cut a rebuilt hunk down to its real changes with the usual context around
+/// them. A reindented function would otherwise show every line as context.
+fn rebuild_hunks(header: &str, lines: &[DiffLine]) -> Vec<Hunk> {
+    let mut windows: Vec<std::ops::Range<usize>> = Vec::new();
+    for (ix, line) in lines.iter().enumerate() {
+        if !matches!(line.kind, LineKind::Del | LineKind::Add) {
+            continue;
+        }
+        let start = ix.saturating_sub(WHITESPACE_CONTEXT_LINES);
+        let end = (ix + WHITESPACE_CONTEXT_LINES + 1).min(lines.len());
+        match windows.last_mut() {
+            Some(last) if start <= last.end => last.end = end,
+            _ => windows.push(start..end),
+        }
+    }
+    // A note like `\ No newline at end of file` belongs to the line above it.
+    for window in &mut windows {
+        while lines
+            .get(window.end)
+            .is_some_and(|line| line.kind == LineKind::Meta)
+        {
+            window.end += 1;
+        }
+    }
+    let heading = header.splitn(3, "@@").nth(2).unwrap_or_default();
+    windows
+        .into_iter()
+        .map(|window| {
+            let body = &lines[window.clone()];
+            let start =
+                |number: fn(&DiffLine) -> Option<u32>| body.iter().find_map(number).unwrap_or(0);
+            let count =
+                |number: fn(&DiffLine) -> Option<u32>| body.iter().filter_map(number).count();
+            let (old_start, new_start) = (start(|l| l.old_no), start(|l| l.new_no));
+            let (old_count, new_count) = (count(|l| l.old_no), count(|l| l.new_no));
+            // The function name only describes the hunk's original first line.
+            let heading = if window.start == 0 { heading } else { "" };
+            Hunk {
+                header: format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@{heading}"),
+                lines: body.to_vec(),
+            }
+        })
+        .collect()
+}
+
+/// Hide changes that only move whitespace (`git diff -w`, done on the parsed
+/// patch so it works against any host without asking it for a second diff).
+pub fn ignore_whitespace_changes(files: &mut [FileDiff]) {
+    for file in files {
+        let had_hunks = !file.hunks.is_empty();
+        let mut hunks = Vec::with_capacity(file.hunks.len());
+        for hunk in std::mem::take(&mut file.hunks) {
+            match fold_whitespace_pairs(&hunk.lines) {
+                Some(lines) => hunks.extend(rebuild_hunks(&hunk.header, &lines)),
+                None => hunks.push(hunk),
+            }
+        }
+        file.hunks = hunks;
+        let count = |kind: LineKind| {
+            file.hunks
+                .iter()
+                .flat_map(|hunk| &hunk.lines)
+                .filter(|line| line.kind == kind)
+                .count() as u32
+        };
+        (file.additions, file.deletions) = (count(LineKind::Add), count(LineKind::Del));
+        if had_hunks && file.hunks.is_empty() {
+            file.notices.push("Only whitespace changed".to_string());
+        }
+    }
+}
+
 /// Derived per-file notice rows (new/deleted/renamed/binary + parser notices).
 pub fn file_notices(file: &FileDiff) -> Vec<String> {
     let mut notices = Vec::new();
@@ -1245,6 +1425,15 @@ impl FileHorizontalState {
     }
 }
 
+/// Ends a [`ParsedDiff`] key when whitespace changes are hidden. The same
+/// patch with and without it is one diff, so the reader's place survives.
+const IGNORE_WHITESPACE_KEY: &str = ":ignore-whitespace";
+
+fn same_patch(a: &str, b: &str) -> bool {
+    a.strip_suffix(IGNORE_WHITESPACE_KEY).unwrap_or(a)
+        == b.strip_suffix(IGNORE_WHITESPACE_KEY).unwrap_or(b)
+}
+
 struct ParsedDiff {
     /// `checkout_id:checksum` — identity of the parsed content.
     key: String,
@@ -1676,6 +1865,8 @@ pub struct Changes {
     mode: DiffMode,
     /// Wrap long source lines instead of exposing the horizontal code plane.
     wrap_lines: bool,
+    /// Hide changes that only move whitespace ([`ignore_whitespace_changes`]).
+    ignore_whitespace: bool,
     /// Comparison ref for [`DiffScope::Branch`] — preset to the repo's
     /// default branch once the branch list lands.
     base_ref: Option<String>,
@@ -1762,6 +1953,7 @@ impl Changes {
             state,
             mode,
             wrap_lines: settings.diff_wrap,
+            ignore_whitespace: settings.diff_ignore_whitespace,
             diffs: Vec::new(),
             started: false,
             error: None,
@@ -1855,7 +2047,21 @@ impl Changes {
         }
     }
 
+    /// Show a synthetic patch as the working tree (`diff-whitespace-fixture`).
     #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_working_tree_diff(&mut self, diff: CheckoutDiff, cx: &mut Context<Self>) {
+        self.scope = DiffScope::WorkingTree;
+        self.fixture_review_diff(diff, cx);
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_ignore_whitespace(&mut self, ignore: bool, cx: &mut Context<Self>) {
+        if self.ignore_whitespace != ignore {
+            self.toggle_ignore_whitespace(cx);
+        }
+    }
+
+    #[cfg(any(test, feature = "appshots-fixture"))]
     pub(crate) fn fixture_review_diff(&mut self, diff: CheckoutDiff, cx: &mut Context<Self>) {
         self.watch_task = None;
         self.started = true;
@@ -2118,10 +2324,15 @@ impl Changes {
 
     fn parse_key(&self, diff: &CheckoutDiff) -> String {
         format!(
-            "{}:{}:{}",
+            "{}:{}:{}{}",
             diff.checkout_id,
             diff.checksum,
-            self.scope_key()
+            self.scope_key(),
+            if self.ignore_whitespace {
+                IGNORE_WHITESPACE_KEY
+            } else {
+                ""
+            }
         )
     }
 
@@ -2441,10 +2652,17 @@ impl Changes {
         let additions = diff.additions;
         let deletions = diff.deletions;
         let file_count = diff.files.len();
+        let ignore_whitespace = self.ignore_whitespace;
         self.parse_task = Some(cx.spawn(async move |this, cx| {
             let files = cx
                 .background_executor()
-                .spawn(async move { parse_patch(&patch) })
+                .spawn(async move {
+                    let mut files = parse_patch(&patch);
+                    if ignore_whitespace {
+                        ignore_whitespace_changes(&mut files);
+                    }
+                    files
+                })
                 .await;
             this.update(cx, |changes, cx| {
                 // Late results for a superseded diff are re-checked by key.
@@ -2457,9 +2675,42 @@ impl Changes {
                 } else {
                     files.len()
                 };
+                let (additions, deletions) = if ignore_whitespace {
+                    (
+                        files.iter().map(|file| file.additions).sum(),
+                        files.iter().map(|file| file.deletions).sum(),
+                    )
+                } else {
+                    (additions, deletions)
+                };
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
-                changes.folds.clear();
+                // The toggle shows the same files, so folds and place stay.
+                let same_diff = changes
+                    .parsed
+                    .as_ref()
+                    .is_some_and(|parsed| same_patch(&parsed.key, &key));
+                let top = changes.list.logical_scroll_top().item_ix;
+                let anchor_file = same_diff
+                    .then(|| {
+                        changes
+                            .row_ranges
+                            .iter()
+                            .position(|range| range.contains(&top))
+                    })
+                    .flatten();
+                if !same_diff {
+                    changes.folds.clear();
+                }
                 changes.highlights.clear();
+                let collapsed: Vec<bool> = files
+                    .iter()
+                    .map(|file| {
+                        changes
+                            .folds
+                            .get(&file.path)
+                            .is_some_and(|fold| fold.collapsed)
+                    })
+                    .collect();
                 let staged = changes.staged_comments(cx);
                 let draft = changes.draft_anchor();
                 let (rows, ranges) = flatten_rows(
@@ -2469,7 +2720,7 @@ impl Changes {
                         .as_ref()
                         .map(|(path, side, line)| (path.as_str(), *side, *line)),
                     changes.mode,
-                    |_| false,
+                    |ix| collapsed.get(ix).copied().unwrap_or(false),
                 );
                 changes.comment_key = comment_state_key(&staged, draft.as_ref());
                 // The uniform hint keeps offsets for never-rendered rows
@@ -2481,6 +2732,12 @@ impl Changes {
                     .reset_with_uniform_height(rows.len(), row_height);
                 changes.rows = rows;
                 changes.row_ranges = ranges;
+                if let Some(start) = anchor_file
+                    .and_then(|ix| changes.row_ranges.get(ix))
+                    .map(|range| range.start)
+                {
+                    changes.list.scroll_to_reveal_item(start);
+                }
                 changes.parsed = Some(ParsedDiff {
                     key,
                     truncated,
@@ -2749,6 +3006,18 @@ impl Changes {
         // A draft's `+` sits in a column that may not exist after the swap.
         self.hover = None;
         self.reflatten(cx);
+    }
+
+    fn toggle_ignore_whitespace(&mut self, cx: &mut Context<Self>) {
+        self.ignore_whitespace = !self.ignore_whitespace;
+        let ignore = self.ignore_whitespace;
+        crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
+            settings.diff_ignore_whitespace = ignore;
+        });
+        // A draft's `+` may sit on a line that's about to become context.
+        self.hover = None;
+        self.sync(cx);
+        cx.notify();
     }
 
     fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
@@ -3977,6 +4246,28 @@ impl Changes {
         .into_any_element()
     }
 
+    fn whitespace_toggle(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        Self::header_toggle(
+            "changes-ignore-whitespace",
+            crate::icons::WHITESPACE,
+            self.ignore_whitespace,
+            theme,
+        )
+        .debug_selector(|| "changes-ignore-whitespace".into())
+        .role(gpui::Role::Button)
+        .aria_label("Hide whitespace changes")
+        .on_click(cx.listener(|this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_ignore_whitespace(cx);
+        }))
+        .tooltip(|_, cx| {
+            cx.new(|_| DiffHeaderTooltip("Hide whitespace changes"))
+                .into()
+        })
+        .tooltip_show_delay(Duration::from_millis(350))
+        .into_any_element()
+    }
+
     /// The pane-header controls: scope dropdown, `{branch} → {base ⌄}` ref
     /// selector (branch scope), fold-all. Rendered BY THE SHELL inside the
     /// session titlebar's trailing section (the band above the pane) — the
@@ -4020,6 +4311,7 @@ impl Changes {
                         .child(SharedString::from(commit.subject.clone())),
                 )
                 .child(self.split_toggle(&theme, cx))
+                .child(self.whitespace_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
@@ -4180,6 +4472,7 @@ impl Changes {
                     |element| element.child(discard_button),
                 )
                 .child(self.split_toggle(&theme, cx))
+                .child(self.whitespace_toggle(&theme, cx))
                 .child(self.wrap_toggle(&theme, cx))
                 .child(
                     Self::header_button("changes-fold-all", crate::icons::FOLD_VERTICAL, &theme)
@@ -5315,6 +5608,196 @@ impl Render for Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    /// Lines 1..=`count` of a block, each indented by `from` then by `to`.
+    fn reindent_patch(count: usize, from: &str, to: &str, edit_line: Option<usize>) -> String {
+        let mut patch = format!("diff --git a/a.rs b/a.rs\n@@ -1,{count} +1,{count} @@ fn top()\n");
+        for line in 1..=count {
+            patch.push_str(&format!("-{from}line {line}\n"));
+        }
+        for line in 1..=count {
+            let text = if edit_line == Some(line) {
+                format!("{to}edited {line}")
+            } else {
+                format!("{to}line {line}")
+            };
+            patch.push_str(&format!("+{text}\n"));
+        }
+        patch
+    }
+
+    #[test]
+    fn a_file_that_only_moved_whitespace_says_so_and_shows_no_lines() {
+        let mut files = parse_patch(&reindent_patch(4, "  ", "\t", None));
+        assert_eq!((files[0].additions, files[0].deletions), (4, 4));
+        ignore_whitespace_changes(&mut files);
+        assert!(files[0].hunks.is_empty());
+        assert_eq!((files[0].additions, files[0].deletions), (0, 0));
+        assert_eq!(file_notices(&files[0]), ["Only whitespace changed"]);
+    }
+
+    #[test]
+    fn a_reindent_with_one_real_edit_shows_that_edit_with_normal_context() {
+        let mut files = parse_patch(&reindent_patch(20, "", "    ", Some(10)));
+        ignore_whitespace_changes(&mut files);
+        let file = &files[0];
+        assert_eq!((file.additions, file.deletions), (1, 1));
+        assert_eq!(file.hunks.len(), 1);
+        let hunk = &file.hunks[0];
+        assert_eq!(hunk.header, "@@ -7,7 +7,7 @@", "not the hunk's first line");
+        let kinds: Vec<_> = hunk.lines.iter().map(|line| line.kind).collect();
+        use LineKind::{Add, Context, Del};
+        assert_eq!(
+            kinds,
+            [
+                Context, Context, Context, Del, Add, Context, Context, Context
+            ]
+        );
+        // Context shows the new text, numbered on both sides.
+        assert_eq!(hunk.lines[0].text, "    line 7");
+        assert_eq!(
+            (hunk.lines[0].old_no, hunk.lines[0].new_no),
+            (Some(7), Some(7))
+        );
+        assert_eq!(hunk.lines[3].text, "line 10");
+        assert_eq!(hunk.lines[4].text, "    edited 10");
+    }
+
+    #[test]
+    fn edits_far_apart_become_separate_hunks_and_the_first_keeps_its_heading() {
+        let mut patch = String::from("diff --git a/a.rs b/a.rs\n@@ -1,12 +1,12 @@ fn top()\n");
+        for line in 1..=12 {
+            patch.push_str(&format!("-line {line}\n"));
+        }
+        for line in 1..=12 {
+            let edited = matches!(line, 1 | 12);
+            patch.push_str(&format!(
+                "+  {} {line}\n",
+                if edited { "edit" } else { "line" }
+            ));
+        }
+        let mut files = parse_patch(&patch);
+        ignore_whitespace_changes(&mut files);
+        let headers: Vec<_> = files[0].hunks.iter().map(|h| h.header.as_str()).collect();
+        assert_eq!(headers, ["@@ -1,4 +1,4 @@ fn top()", "@@ -9,4 +9,4 @@"]);
+    }
+
+    #[test]
+    fn real_changes_stay_exactly_as_they_were() {
+        const REAL: &str = "diff --git a/a.rs b/a.rs\n\
+            @@ -1,3 +1,4 @@ fn top()\n ctx\n-old line\n+new line\n+\n ctx 2\n\
+            diff --git a/new.rs b/new.rs\nnew file mode 100644\n@@ -0,0 +1,2 @@\n+  a\n+  b\n";
+        let parsed = parse_patch(REAL);
+        let mut files = parsed.clone();
+        ignore_whitespace_changes(&mut files);
+        assert_eq!(
+            files, parsed,
+            "an added blank line still counts, as in git -w"
+        );
+    }
+
+    #[test]
+    fn a_line_only_matches_within_its_own_change_block_and_in_order() {
+        // `a` and `b` swapped: only one of them can be the same line.
+        let mut files = parse_patch("diff --git a/x b/x\n@@ -1,2 +1,2 @@\n-a\n-b\n+ b\n+ a\n");
+        ignore_whitespace_changes(&mut files);
+        assert_eq!((files[0].additions, files[0].deletions), (1, 1));
+    }
+
+    #[test]
+    fn a_whole_file_reformat_is_matched_without_filling_a_table() {
+        // 40,000 lines would need 1.6 billion cells if it reached the matcher.
+        let mut files = parse_patch(&reindent_patch(40_000, "", "  ", None));
+        ignore_whitespace_changes(&mut files);
+        assert!(files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn a_rewrite_too_big_to_match_stays_shown_as_changed() {
+        let mut patch = String::from("diff --git a/x b/x\n@@ -1,3000 +1,3000 @@\n");
+        for line in 0..3000 {
+            patch.push_str(&format!("-old {line}\n"));
+        }
+        for line in 0..3000 {
+            patch.push_str(&format!("+new {line}\n"));
+        }
+        let parsed = parse_patch(&patch);
+        let mut files = parsed.clone();
+        ignore_whitespace_changes(&mut files);
+        assert_eq!(files, parsed);
+    }
+
+    #[gpui::test]
+    fn the_toggle_hides_whitespace_keeps_folds_and_is_remembered(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.chats = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "chat", "deviceId": "d", "cwd": "/fixtures/a",
+                        "archived": false, "createdAt": Utc::now(),
+                    }))
+                    .unwrap(),
+                ];
+                state.selected_chat = Some("chat".into());
+                state.local_device_id = Some("d".into());
+                state
+            });
+            Changes::new(state, cx)
+        });
+        let patch = format!(
+            "{}{}",
+            reindent_patch(3, "", "  ", None),
+            "diff --git a/b.rs b/b.rs\n@@ -1 +1 @@\n-before\n+after\n"
+        );
+        let diff: CheckoutDiff = serde_json::from_value(serde_json::json!({
+            "checkoutId": "c", "deviceId": "d", "cwd": "/fixtures/a", "patch": patch, "checksum": "sum",
+            "additions": 4, "deletions": 4, "truncated": false, "files": [],
+            "updatedAt": Utc::now(),
+        }))
+        .unwrap();
+        window
+            .update(cx, |changes, _, cx| {
+                changes.scope = DiffScope::WorkingTree;
+                changes.fixture_review_diff(diff, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let totals = |cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |changes, _, _| {
+                    let parsed = changes.parsed.as_ref().unwrap();
+                    (parsed.additions, parsed.deletions, parsed.files.len())
+                })
+                .unwrap()
+        };
+        assert_eq!(totals(cx), (4, 4, 2));
+        window
+            .update(cx, |changes, _, cx| {
+                changes.toggle_collapse_all(cx);
+                assert!(changes.folds["b.rs"].collapsed);
+                changes.toggle_ignore_whitespace(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(totals(cx), (1, 1, 2), "both files stay, with real totals");
+        window
+            .update(cx, |changes, _, cx| {
+                assert!(changes.folds["b.rs"].collapsed, "folds survive the toggle");
+                let saved = crate::settings::current(cx);
+                assert!(saved.diff_ignore_whitespace);
+                changes.toggle_ignore_whitespace(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(totals(cx), (4, 4, 2));
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(
