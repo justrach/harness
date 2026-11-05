@@ -87,12 +87,14 @@ fn validate_menu_surface(
 ) -> anyhow::Result<()> {
     let baseline = image::open(directory.join("browser-blur-baseline-dark.png"))?.to_rgb8();
     let scale = baseline.width() as f64 / window_width as f64;
-    let (x, y, w, h) = region;
-    // Empty lower-right menu area: no labels, icons, border, or rounded corner.
+    let (x, y, w, _) = region;
+    // The empty right end of the fourth row: no labels, icons, border, or
+    // rounded corner. A panel's menu is taller than the page's 140px
+    // checkerboard, so its lower corner would sample plain page instead.
     let x0 = ((x + w - 45.) * scale) as u32;
     let x1 = ((x + w - 16.) * scale) as u32;
-    let y0 = ((y + h - 33.) * scale) as u32;
-    let y1 = ((y + h - 15.) * scale) as u32;
+    let y0 = ((y + 100.) * scale) as u32;
+    let y1 = ((y + 118.) * scale) as u32;
     anyhow::ensure!(
         x0 < x1 && y0 < y1 && x1 + 1 < baseline.width() && y1 + 1 < baseline.height(),
         "menu sample lies outside the captured window"
@@ -380,19 +382,21 @@ fn main() -> anyhow::Result<()> {
                 pause(cx, 700).await;
                 #[cfg(target_os = "macos")]
                 {
+                    // Right of the menu: a panel's menu is tall and opens at the
+                    // panel's left edge, so a click nearer would land on a row.
                     let (left, top) = first.read_with(cx, |b,_| b.fixture_origin());
                     anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_native_visible()), "menu froze or hid the live page");
-                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_at((left+100.) as f64,(top+150.) as f64)), "menu failed to intercept outside clicks above the browser");
+                    anyhow::ensure!(first.read_with(cx, |b,_| b.fixture_overlay_at((left+300.) as f64,(top+150.) as f64)), "menu failed to intercept outside clicks above the browser");
                     std::fs::write(output.join("backdrop-layers.txt"),first.read_with(cx,|b,_|b.fixture_backdrop_layers()))?;
                     capture(&output, "browser-menu-dark")?;
                     first.read_with(cx, |b,_| b.fixture_eval("document.addEventListener('click', () => { document.title = 'Unexpected page click'; })"));
                     pause(cx, 100).await;
-                    first.read_with(cx, |b,_| b.fixture_click((left+100.) as f64,(top+150.) as f64));
+                    first.read_with(cx, |b,_| b.fixture_click((left+300.) as f64,(top+150.) as f64));
                     pause(cx, 600).await;
-                    anyhow::ensure!(first.read_with(cx, |b,_| !b.fixture_overlay_at((left+100.) as f64,(top+150.) as f64) && b.page.title != "Unexpected page click"), "outside click did not dismiss the menu cleanly, or leaked into the page");
+                    anyhow::ensure!(first.read_with(cx, |b,_| !b.fixture_overlay_at((left+300.) as f64,(top+150.) as f64) && b.page.title != "Unexpected page click"), "outside click did not dismiss the menu cleanly, or leaked into the page");
                     // The next native click must reach the page now that the
                     // interactive overlay is gone.
-                    first.read_with(cx, |b,_| b.fixture_click((left+100.) as f64,(top+150.) as f64));
+                    first.read_with(cx, |b,_| b.fixture_click((left+300.) as f64,(top+150.) as f64));
                     let deadline = std::time::Instant::now() + Duration::from_secs(5);
                     while !first.read_with(cx, |b,_| b.page.title == "Unexpected page click") {
                         anyhow::ensure!(std::time::Instant::now() < deadline, "page mouse input was not restored after menu dismissal"); pause(cx,50).await;
