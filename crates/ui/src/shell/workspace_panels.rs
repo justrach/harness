@@ -2985,15 +2985,18 @@ impl Shell {
             .menu
             .as_ref()
             .is_some_and(|m| m.panel == id);
-        let controls_focused = header_focus.contains_focused(window, cx)
-            || ["placement", "add-tab", "expand", "close"]
-                .iter()
-                .any(|name| {
-                    self.workspace_panels
-                        .controls
-                        .get(&format!("panel-{name}-{id}"))
-                        .is_some_and(|focus| focus.is_focused(window))
-                });
+        // Focus reveals them for keyboard use only: a click leaves focus behind,
+        // which must not keep them up once the pointer has gone.
+        let controls_focused = window.last_input_was_keyboard()
+            && (header_focus.contains_focused(window, cx)
+                || ["placement", "add-tab", "expand", "close"]
+                    .iter()
+                    .any(|name| {
+                        self.workspace_panels
+                            .controls
+                            .get(&format!("panel-{name}-{id}"))
+                            .is_some_and(|focus| focus.is_focused(window))
+                    }));
         let header = self
             .workspace_panels
             .headers
@@ -3785,6 +3788,18 @@ impl Shell {
             .id(("workspace-panel-header", id))
             .debug_selector(move || format!("workspace-panel-header-{id}"))
             .track_focus(&header_focus)
+            // Only the header brings up its controls, not the panel's content.
+            // This is chrome the shell draws, so it redraws the shell alone:
+            // crossing panels must not rebuild their contents.
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                let workspace = this.workspace_layout_key(cx);
+                this.workspace_panels
+                    .headers
+                    .entry((workspace, id))
+                    .or_default()
+                    .hovered = *hovered;
+                window.redraw_root();
+            }))
             .relative()
             .h(px(height))
             .pl(px(leading_inset))
@@ -4796,17 +4811,6 @@ impl Shell {
                 .id(("workspace-panel", panel_id))
                 .debug_selector(move || format!("workspace-panel-{panel_id}"))
                 .group(format!("workspace-panel-{panel_id}"))
-                // Header hover is chrome this render draws, so it redraws the
-                // shell alone: crossing panels must not rebuild their contents.
-                .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                    let workspace = this.workspace_layout_key(cx);
-                    this.workspace_panels
-                        .headers
-                        .entry((workspace, panel_id))
-                        .or_default()
-                        .hovered = *hovered;
-                    window.redraw_root();
-                }))
                 .absolute()
                 .left(px(frame.x))
                 .top(px(frame.y))
@@ -5920,9 +5924,9 @@ mod interaction_tests {
         // The same hover state hides the button; a hidden element still records
         // its own bounds, but children of the hidden controls record none.
         assert!(cx.debug_bounds("panel-placement-0").is_none());
-        let body = cx.debug_bounds("workspace-panel-body-0").unwrap();
         let last = cx.debug_bounds("panel-tab-0-1").unwrap();
-        cx.simulate_mouse_move(body.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-0").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         let add = cx.debug_bounds("panel-add-tab-0").unwrap();
         let placement = cx.debug_bounds("panel-placement-0").unwrap();
@@ -6494,7 +6498,12 @@ mod interaction_tests {
         assert_eq!(idle_width, body.size.width - px(4.0));
         assert!(cx.debug_bounds("panel-placement-0").is_none());
 
+        // The panel's content doesn't bring them up; only its header does.
         cx.simulate_mouse_move(body.center(), None, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("panel-placement-0").is_none());
+        let header = cx.debug_bounds("workspace-panel-header-0").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("panel-placement-0").is_some());
         assert_eq!(scroll.bounds().size.width, idle_width);
@@ -6525,22 +6534,21 @@ mod interaction_tests {
             assert!(cx.debug_bounds("panel-placement-0").is_some());
         }
 
+        // Moving down into the content puts them away.
         cx.simulate_mouse_move(body.center(), None, Default::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("panel-placement-0").is_some());
-
-        cx.simulate_mouse_move(point(px(10.0), px(100.0)), None, Default::default());
         cx.run_until_parked();
         assert_eq!(scroll.bounds().size.width, idle_width);
         assert_eq!(scroll.offset(), manual_offset);
         assert!(cx.debug_bounds("panel-placement-0").is_none());
+        // Focus left behind by a click doesn't keep them up.
         shell.update_in(cx, |s, window, cx| {
             let focus = s.workspace_panels.controls["panel-header-0"].clone();
             window.focus(&focus, cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("panel-placement-0").is_some());
+        assert!(cx.debug_bounds("panel-placement-0").is_none());
         assert_eq!(scroll.offset(), manual_offset);
+        // Reaching them from the keyboard does.
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         assert!(cx.debug_bounds("panel-placement-0").is_some());
@@ -6677,7 +6685,8 @@ mod interaction_tests {
         });
         cx.run_until_parked();
         let body = cx.debug_bounds("workspace-panel-body-1").unwrap();
-        cx.simulate_mouse_move(body.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-1").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         let close = cx.debug_bounds("panel-close-1").unwrap();
         cx.simulate_mouse_move(close.center(), None, Default::default());
         cx.run_until_parked();
@@ -6710,8 +6719,8 @@ mod interaction_tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("workspace-add-panel").is_none());
-        let body = cx.debug_bounds("workspace-panel-body-0").unwrap();
-        cx.simulate_mouse_move(body.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-0").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         let placement = cx.debug_bounds("panel-placement-0").unwrap();
         cx.simulate_mouse_down(placement.center(), MouseButton::Left, Default::default());
@@ -6887,7 +6896,8 @@ mod interaction_tests {
         cx.run_until_parked();
         let left = cx.debug_bounds("workspace-panel-body-0").unwrap();
         let right = cx.debug_bounds("workspace-panel-body-1").unwrap();
-        cx.simulate_mouse_move(right.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-1").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         let expand = cx.debug_bounds("panel-expand-1").unwrap();
         cx.simulate_mouse_move(expand.center(), None, Default::default());
