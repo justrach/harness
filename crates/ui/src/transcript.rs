@@ -200,6 +200,10 @@ const ACTIVITY_TEXT_GAP: f32 = 8.0;
 /// A tree row's text sits this far inside its running pill or result wash.
 const ACTIVITY_ROW_INSET: f32 = 6.0;
 /// Space between the rows and each thing under them.
+/// The column at a tree row's right end that holds its chevron. Rows with
+/// nothing to expand keep it empty, so results line up down the group.
+const ACTIVITY_CHEVRON_SLOT: f32 = 18.0;
+const TOOL_ROW_GAP: f32 = 8.0;
 const TOOL_GROUP_FOOTER_GAP: f32 = 6.0;
 const TOOL_GROUP_FOOTER_HEIGHT: f32 = 24.0;
 const ACTIVITY_TRUNK_X: f32 = 12.5;
@@ -11056,6 +11060,13 @@ fn chip_header_row(
     // Text resolves its color during layout, so group-hover text needs stable
     // child IDs under the keyed, expandable header to retain hover state.
     let hover_text = activity && trail.is_some() && !failed;
+    let chevron_open = match trail {
+        Some(ChipTrail::Chevron { open }) if activity => Some(open),
+        _ => None,
+    };
+    // A row in the tree ends in its result and chevron columns. A saved view's
+    // link keeps its own trailing arrow.
+    let tree_row = status.is_some() || chevron_open.is_some();
     // A row with a result already says it failed, in its verb, icon and pill.
     let red_detail = failed && status.is_none();
     // A running row's path churns; the ends stay readable.
@@ -11083,7 +11094,7 @@ fn chip_header_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(TOOL_ROW_GAP))
         .px(px(if activity { 0.0 } else { 8.0 }))
         .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE))
         .line_height(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
@@ -11307,7 +11318,7 @@ fn chip_header_row(
                 cx,
             )))
         })
-        .when_some(trail, |row, trail| {
+        .when_some(trail.filter(|_| !tree_row), |row, trail| {
             // Trailing tile matching the group header's: a chevron for the
             // output/diff accordion, or the open-arrow for spawn chips.
             let tile = div()
@@ -11346,27 +11357,63 @@ fn chip_header_row(
                 ),
             })
         })
-        .when_some(
-            status.and_then(|status| crate::tool_call_rows::status_trail(&status.result, theme)),
-            |row, result| {
-                let washed = status.is_some_and(|status| {
-                    matches!(
-                        status.result,
-                        RowResult::Failed { .. } | RowResult::Passed { .. }
-                    )
-                });
-                row.child(div().flex_1().min_w_0()).child(
+        .when(tree_row, |row| {
+            let washed = status.is_some_and(|status| {
+                matches!(
+                    status.result,
+                    RowResult::Failed { .. } | RowResult::Passed { .. }
+                )
+            });
+            let result = status
+                .and_then(|status| crate::tool_call_rows::status_trail(&status.result, theme));
+            row.child(div().flex_1().min_w_0())
+                .children(result.map(|result| {
                     div()
                         .flex_none()
                         .flex()
                         .justify_end()
                         .when(washed, |end| {
-                            end.min_w(px(crate::tool_call_rows::WASH_WIDTH))
+                            // The wash is measured from the row's edge; the
+                            // chevron column and inset already cover part of it.
+                            end.min_w(px(crate::tool_call_rows::WASH_WIDTH
+                                - ACTIVITY_CHEVRON_SLOT
+                                - TOOL_ROW_GAP
+                                - ACTIVITY_ROW_INSET))
                         })
-                        .child(result),
+                        .child(result)
+                }))
+                .child(
+                    div()
+                        .debug_selector(|| "tool-row-end".into())
+                        .size(px(ACTIVITY_CHEVRON_SLOT))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when_some(chevron_open, |slot, open| {
+                            slot.child(
+                                crate::icons::icon(if open {
+                                    crate::icons::ALT_ARROW_DOWN
+                                } else {
+                                    crate::icons::ALT_ARROW_RIGHT
+                                })
+                                .debug_selector(|| "tool-row-chevron".into())
+                                .size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .group_hover(
+                                    "tool-header",
+                                    |style| {
+                                        style.text_color(if failed {
+                                            theme.danger
+                                        } else {
+                                            theme.text
+                                        })
+                                    },
+                                ),
+                            )
+                        }),
                 )
-            },
-        )
+        })
 }
 
 /// Opens a tool chip's file in the files panel through the transcript's
@@ -19839,6 +19886,54 @@ mod tests {
                 "rows sit one tree row apart, so the connector never breaks"
             );
         }
+    }
+
+    #[gpui::test]
+    fn rows_that_expand_show_a_chevron_and_results_share_a_column(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        let mut expandable = group_tool("expandable", "cargo build", true, false);
+        expandable.detail = Some(Arc::new(ToolDetail::Output {
+            lines: vec!["ok".into()].into(),
+            truncated_by: 0,
+        }));
+        let (_view, window) = cx.add_window_view(|_, _| OpenGroupFixture {
+            transcript: transcript.clone(),
+            tools: Arc::new(vec![expandable]),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+        let end_with_chevron = window.debug_bounds("tool-row-end").expect("end column");
+        let chevron = window
+            .debug_bounds("tool-row-chevron")
+            .expect("a row that expands shows its chevron without a hover");
+        assert!(end_with_chevron.contains(&chevron.center()));
+        let row = window.debug_bounds("tool-group-row-0").unwrap();
+        assert_eq!(
+            row.right() - end_with_chevron.right(),
+            px(ACTIVITY_ROW_INSET),
+            "the chevron ends the row"
+        );
+
+        let (_view, window) = cx.add_window_view(|_, _| OpenGroupFixture {
+            transcript,
+            tools: Arc::new(vec![group_tool("bare", "shell", true, false)]),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            window.debug_bounds("tool-row-chevron").is_none(),
+            "nothing to expand, no chevron"
+        );
+        assert_eq!(
+            window.debug_bounds("tool-row-end").expect("end column"),
+            end_with_chevron,
+            "a row with no chevron keeps the column, so results line up"
+        );
     }
 
     #[gpui::test]

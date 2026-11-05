@@ -535,8 +535,15 @@ pub fn status_trail(result: &RowResult, theme: &Theme) -> Option<AnyElement> {
     }
 }
 
-/// One compact animated row.
-pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> AnyElement {
+/// One compact animated row, for fixtures. `disclosure` is `Some(open)` when the
+/// row expands, which ends it in a chevron.
+pub fn row(
+    row: &CallRow,
+    theme: &Theme,
+    phase: f32,
+    reduce_motion: bool,
+    disclosure: Option<bool>,
+) -> AnyElement {
     let active = matches!(row.result, RowResult::Running { .. });
     let detail = if active && !reduce_motion {
         SharedString::from(scramble_middle(row.detail.as_ref(), phase))
@@ -599,7 +606,19 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
                 })
                 .child(detail),
         )
-        .children(trail);
+        .children(trail)
+        .when_some(disclosure, |el, open| {
+            el.child(
+                icons::icon(if open {
+                    icons::ALT_ARROW_DOWN
+                } else {
+                    icons::ALT_ARROW_RIGHT
+                })
+                .size(px(12.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+            )
+        });
 
     // Failed rows stay more opaque (already set); pass/fail icons replace verb icon when settled tests.
     match &row.result {
@@ -746,10 +765,15 @@ pub fn group(
         .gap(px(2.0))
         .child(header(group, open, theme, phase, reduce_motion))
         .when(open, |col| {
-            col.children(group.rows.iter().map(|r| row(r, theme, phase, reduce_motion)))
-                .when(!group.file_diffs.is_empty() && !group.live, |col| {
-                    col.child(file_diff_summary(&group.file_diffs, theme))
-                })
+            col.children(
+                group
+                    .rows
+                    .iter()
+                    .map(|r| row(r, theme, phase, reduce_motion, None)),
+            )
+            .when(!group.file_diffs.is_empty() && !group.live, |col| {
+                col.child(file_diff_summary(&group.file_diffs, theme))
+            })
         })
         .into_any_element()
 }
