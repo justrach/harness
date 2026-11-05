@@ -10408,6 +10408,25 @@ impl Shell {
         let mut overlays: Vec<AnyElement> = Vec::new();
         #[cfg(feature = "appshots-fixture")]
         overlays.extend(self.render_reconciliation_design(window, cx));
+        if crate::quit_hold::hint_visible(cx) {
+            overlays.push(
+                div()
+                    .absolute()
+                    .top(px(Theme::TITLEBAR_HEIGHT + 12.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        popover::popover_card(&theme)
+                            .debug_selector(|| "quit-hold-hint".into())
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .child("A chat is running. Hold ⌘Q to quit."),
+                    )
+                    .into_any_element(),
+            );
+        }
 
         // First, so menus and dialogs layer above it: with the sidebar collapsed, a running
         // cloud sandbox (billed until turned off) still shows under the sidebar toggle.

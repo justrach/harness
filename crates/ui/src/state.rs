@@ -2399,6 +2399,12 @@ impl AppState {
         display_status(chat, self.session_for(&chat.id), now)
     }
 
+    /// Whether any chat is working right now, as its sidebar row would show.
+    pub(crate) fn any_chat_running(&self, now: DateTime<Utc>) -> bool {
+        self.visible_chats()
+            .any(|chat| self.display_status_for(chat, now) == ChatIndicator::Working)
+    }
+
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
     /// on any device — idle included — in pure recency order (status drives
     /// the dot, never the position; see [`sort_active`]).
@@ -3963,6 +3969,25 @@ mod tests {
         }
         // Nothing to compare: say nothing rather than cry wolf.
         assert_eq!(older_engine_notice("0.2.170", Some("custom")), None);
+    }
+
+    #[test]
+    fn only_a_working_chat_counts_as_running() {
+        let now = Utc::now();
+        let mut s = AppState::new();
+        s.chats = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "c", "deviceId": "dev", "archived": false, "createdAt": now,
+            }))
+            .unwrap(),
+        ];
+        assert!(!s.any_chat_running(now));
+        s.apply_sessions_at(vec![session("c", SessionStatus::Idle, 0, now)], now);
+        assert!(!s.any_chat_running(now));
+        s.apply_sessions_at(vec![session("c", SessionStatus::Working, 0, now)], now);
+        assert!(s.any_chat_running(now));
+        s.chats[0].archived = true;
+        assert!(!s.any_chat_running(now));
     }
 
     #[gpui::test]
