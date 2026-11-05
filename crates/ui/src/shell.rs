@@ -124,6 +124,8 @@ mod typing_tests;
 #[cfg(test)]
 mod view_cache_tests;
 #[cfg(test)]
+mod wheel_tests;
+#[cfg(test)]
 mod work_pane_tests;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -168,6 +170,13 @@ actions!(
         ResizeChatPaneDown,
         EqualizeChatPanes,
         ToggleChatPaneZoom,
+        FocusPanelSlot1,
+        FocusPanelSlot2,
+        FocusPanelSlot3,
+        FocusPanelSlot4,
+        FocusPanelSlot5,
+        FocusPanelSlot6,
+        FocusNextAttention,
         FocusComposer,
         // Chat tabs, each holding its own split (`shell/chat_tabs.rs`).
         NewChatTab,
@@ -2984,6 +2993,9 @@ impl Shell {
             self.open_chat_preserving_tabs(chat_id, cx);
         }
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
+            self.sidebar_notice = Some(notice.into());
+        }
+        if let Some(notice) = state.update(cx, |state, _| state.take_engine_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
         self.drive_pending_folder_open(cx);
@@ -10452,6 +10464,25 @@ impl Shell {
         let mut overlays: Vec<AnyElement> = Vec::new();
         #[cfg(feature = "appshots-fixture")]
         overlays.extend(self.render_reconciliation_design(window, cx));
+        if crate::quit_hold::hint_visible(cx) {
+            overlays.push(
+                div()
+                    .absolute()
+                    .top(px(Theme::TITLEBAR_HEIGHT + 12.0))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        popover::popover_card(&theme)
+                            .debug_selector(|| "quit-hold-hint".into())
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .child("A chat is running. Hold ⌘Q to quit."),
+                    )
+                    .into_any_element(),
+            );
+        }
 
         // First, so menus and dialogs layer above it: with the sidebar collapsed, a running
         // cloud sandbox (billed until turned off) still shows under the sidebar toggle.
@@ -13738,6 +13769,27 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| this.toggle_chat_pane_zoom(cx)),
             )
+            .on_action(cx.listener(|this, _: &FocusPanelSlot1, window, cx| {
+                this.focus_strip_position(0, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot2, window, cx| {
+                this.focus_strip_position(1, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot3, window, cx| {
+                this.focus_strip_position(2, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot4, window, cx| {
+                this.focus_strip_position(3, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot5, window, cx| {
+                this.focus_strip_position(4, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot6, window, cx| {
+                this.focus_strip_position(5, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusNextAttention, window, cx| {
+                this.focus_next_attention(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.workspace_new_tab(cx);
                 this.focus_workspace_new_tab(window, cx);

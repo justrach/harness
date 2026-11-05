@@ -67,6 +67,7 @@ pub mod perf_stats;
 pub(crate) static NATIVE_PLATFORM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub mod pickers;
 pub mod popover;
+mod quit_hold;
 pub mod project_actions;
 pub mod queue;
 pub mod reauth_recovery;

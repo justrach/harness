@@ -13,6 +13,47 @@ struct SessionMenu {
     focus: FocusHandle,
 }
 
+/// Enough for several windows on different sessions not to evict each other.
+const MEASURED_TITLES_KEPT: usize = 8;
+
+thread_local! {
+    /// Widths already shaped: (title, font family, size in bits, width). These
+    /// are asked for on every redraw while the sidebar is closed.
+    static MEASURED_TITLES: std::cell::RefCell<std::collections::VecDeque<(SharedString, SharedString, u32, f32)>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a session title was actually shaped on this thread.
+    static TITLE_SHAPES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn measured_title_width(
+    title: &SharedString,
+    family: &SharedString,
+    size: Pixels,
+    shape: impl FnOnce() -> f32,
+) -> f32 {
+    let bits = f32::from(size).to_bits();
+    let known = MEASURED_TITLES.with_borrow(|titles| {
+        titles
+            .iter()
+            .find(|entry| entry.2 == bits && entry.0 == *title && entry.1 == *family)
+            .map(|entry| entry.3)
+    });
+    known.unwrap_or_else(|| {
+        let width = shape();
+        MEASURED_TITLES.with_borrow_mut(|titles| {
+            if titles.len() == MEASURED_TITLES_KEPT {
+                titles.pop_front();
+            }
+            titles.push_back((title.clone(), family.clone(), bits, width));
+        });
+        width
+    })
+}
+
 impl SessionQuickSwitcher {
     pub(super) fn is_open(&self) -> bool {
         self.popup.is_open()
@@ -26,10 +67,9 @@ impl SessionQuickSwitcher {
 impl Shell {
     pub(super) fn workspace_session_quick_width(&self, cx: &App) -> f32 {
         let title = self
-            .workspace_session_sidebar_rows(cx)
-            .into_iter()
-            .find(|row| row.active)
-            .map(|row| row.title)
+            .chat_tabs
+            .get(self.chat_tab)
+            .map(|tab| self.workspace_session_title(tab, cx))
             .unwrap_or_else(|| "Sessions".into());
         Self::workspace_session_quick_width_for(
             &title,
@@ -52,24 +92,30 @@ impl Shell {
     ) -> f32 {
         let title: SharedString = title.replace(['\n', '\r'], " ").into();
         let theme = Theme::of(cx);
-        let text = gpui::WindowTextSystem::new(cx.text_system().clone()).shape_line(
-            title.clone(),
-            px(12.0 * crate::typography::font_size(cx).pixels() / 16.0),
-            &[gpui::TextRun {
-                len: title.len(),
-                font: gpui::font(theme.font_sans.clone()),
-                color: theme.text,
-                ..Default::default()
-            }],
-            None,
-        );
+        let size = px(12.0 * crate::typography::font_size(cx).pixels() / 16.0);
+        let width = measured_title_width(&title, &theme.font_sans, size, || {
+            #[cfg(test)]
+            TITLE_SHAPES.with(|shapes| shapes.set(shapes.get() + 1));
+            let text = gpui::WindowTextSystem::new(cx.text_system().clone()).shape_line(
+                title.clone(),
+                size,
+                &[gpui::TextRun {
+                    len: title.len(),
+                    font: gpui::font(theme.font_sans.clone()),
+                    color: theme.text,
+                    ..Default::default()
+                }],
+                None,
+            );
+            f32::from(text.width())
+        });
         // Leave a readable tab and the panel actions beside long session names.
         let max = if shared_header {
             (viewport_width - buttons_end - right_pad - 224.0).clamp(64.0, 200.0)
         } else {
             200.0
         };
-        (f32::from(text.width()).ceil() + 51.0).clamp(64.0, max)
+        (width.ceil() + 51.0).clamp(64.0, max)
     }
 
     pub(super) fn render_workspace_titlebar_identity(&self, cx: &App) -> Option<AnyElement> {
@@ -77,6 +123,7 @@ impl Shell {
             || !self.settings.sidebar_collapsed
             || self.workspace_uses_shared_header(cx)
             || self.workspace_header_transition_active(cx)
+            || self.workspace_uses_strip(cx)
         {
             return None;
         }
@@ -446,6 +493,34 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This width is asked for on every redraw while the sidebar is closed, and
+    /// shaping was a quarter of the shell's redraw when sampled.
+    #[gpui::test]
+    fn redrawing_does_not_shape_the_session_title_again(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let shapes = || TITLE_SHAPES.with(|shapes| shapes.get());
+        let before = shapes();
+        let width = |title: &str, cx: &gpui::App| {
+            Shell::workspace_session_quick_width_for(title, 1200.0, 100.0, 0.0, false, cx)
+        };
+        let widths: Vec<f32> = cx.update(|cx| {
+            (0..20)
+                .map(|_| width("A session only this test uses", cx))
+                .collect()
+        });
+        assert_eq!(shapes() - before, 1, "twenty redraws, one shaping");
+        assert!(widths.iter().all(|value| *value == widths[0]));
+        // A different title, or the same one again afterwards.
+        cx.update(|cx| {
+            width("Another session only this test uses", cx);
+            width("A session only this test uses", cx);
+        });
+        assert_eq!(shapes() - before, 2);
+    }
 
     #[gpui::test]
     fn workspace_session_quick_switcher_activates_across_project_filters_and_parks_draft(

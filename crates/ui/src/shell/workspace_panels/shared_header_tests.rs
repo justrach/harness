@@ -412,6 +412,8 @@ fn workspace_shared_header_long_session_keeps_narrow_window_controls_reachable(
     let controls = bounds(&mut visual, "workspace-titlebar-controls");
     let strip = bounds(&mut visual, "workspace-panel-tab-strip-0");
     let first = bounds(&mut visual, "panel-tab-0-0");
+    visual.simulate_mouse_move(strip.center(), None, Default::default());
+    settle(&mut visual);
     let add = bounds(&mut visual, "panel-add-tab-0");
     assert!(session.size.width <= px(200.0));
     assert!(history.right() <= session.left());

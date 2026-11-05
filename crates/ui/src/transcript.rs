@@ -33,10 +33,10 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
-    ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathBuilder, Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
-    TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px, quad, size,
+    AnyElement, BorderStyle, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
+    ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
+    Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun, Window,
+    canvas, div, img, list, point, prelude::*, px, quad, size,
 };
 
 use harness_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -213,7 +213,6 @@ const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_
 /// continuous log rather than a stack of discrete pop-ins.
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
 const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
-const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
 const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
 /// The connector draws briskly, then eases into the branch tip so its arrival
 /// remains visible without feeling mechanically linear.
@@ -2744,96 +2743,35 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
 }
 
 fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
+    // Always one line. The title's box is one line tall and clipped, so a
+    // wrapped word would land on a hidden second line and simply vanish.
+    let title = div().min_w_0().truncate();
     let Some(shimmer_phase) = shimmer_phase else {
         // Keep the ordinary inherited hover color when the group is settled
         // (and when reduced motion turns the active shimmer off).
-        return text.into_any_element();
+        return title.child(text).into_any_element();
     };
-    // Keep the title as ONE normal text run. Splitting it per character copies
-    // the gradient stops, but also splits shaping/kerning and makes the sweep
-    // visibly hop one glyph at a time. The overlay repaints the intact shaped
-    // line through narrow moving clips, which is the native equivalent of
-    // CSS `background-clip: text` without duplicating accessible text.
-    let overlay_text = text.clone();
-    let overlay_font = gpui::font(theme.font_sans_fixed.clone());
+    // One shaped line with a color per character. Color runs share the line's
+    // shaping, so kerning survives, and truncation applies to the sweep and
+    // the text alike because they are the same text. The band's color is fixed
+    // against the muted base, so hover doesn't darken the title under it.
     let base = theme.text_muted;
     let peak = theme.text;
-    let overlay = canvas(
-        move |bounds, window, _| {
-            let probe = window.text_system().shape_line(
-                overlay_text.clone(),
-                crate::typography::ui_rems(TOOL_LABEL_SIZE).to_pixels(window.rem_size()),
-                &[TextRun {
-                    len: overlay_text.len(),
-                    font: overlay_font.clone(),
-                    color: peak,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
-            let text_width = f32::from(probe.width()).min(f32::from(bounds.size.width));
-            let strip_count = (text_width / TOOL_GROUP_SHIMMER_STRIP_WIDTH).ceil() as usize;
-            let mut strips = Vec::with_capacity(strip_count);
-            for ix in 0..strip_count {
-                let left = ix as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH;
-                let right = ((ix + 1) as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH).min(text_width);
-                let x = (left + right) * 0.5 / text_width.max(1.0);
-                let amount = tool_title_shimmer_amount(x, shimmer_phase);
-                if amount <= 0.001 {
-                    continue;
-                }
-                let line = window.text_system().shape_line(
-                    overlay_text.clone(),
-                    crate::typography::ui_rems(TOOL_LABEL_SIZE).to_pixels(window.rem_size()),
-                    &[TextRun {
-                        len: overlay_text.len(),
-                        font: overlay_font.clone(),
-                        color: motion::mix(base, peak, amount),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                );
-                strips.push((left, right, line));
-            }
-            strips
-        },
-        move |bounds, strips, window, cx| {
-            for (left, right, line) in strips {
-                let mask = ContentMask {
-                    bounds: Bounds {
-                        origin: point(bounds.origin.x + px(left), bounds.origin.y),
-                        size: size(px(right - left), bounds.size.height),
-                    },
-                };
-                window.with_content_mask(Some(mask), |window| {
-                    let line_height = crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT)
-                        .to_pixels(window.rem_size());
-                    let _ = line.paint(
-                        bounds.origin,
-                        line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
-                });
-            }
-        },
-    )
-    .absolute()
-    .inset_0();
-    div()
-        .relative()
-        .h_full()
-        .min_w_0()
-        .flex_1()
-        .overflow_hidden()
-        .child(text)
-        .child(overlay)
+    let highlights = tool_title_shimmer_spans(&text, shimmer_phase)
+        .into_iter()
+        .map(|(range, amount)| {
+            (
+                range,
+                gpui::HighlightStyle {
+                    color: Some(motion::mix(base, peak, amount)),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    title
+        .text_color(base)
+        .child(StyledText::new(text).with_highlights(highlights))
         .into_any_element()
 }
 
@@ -3624,13 +3562,28 @@ fn compact_fold_geometry(
 /// BoardUI's measured recipe: a 300%-wide repeating gradient moves from 200%
 /// to -100%. Its 38→50→62% highlight maps to a 36%-of-title shoulder around
 /// each peak; adjacent copies sit three title-widths apart. Sampling this by
-/// x-coordinate lets the paint clips reproduce the continuous pattern.
+/// x-coordinate lets the color runs reproduce the continuous pattern.
 fn tool_title_shimmer_amount(x: f32, phase: f32) -> f32 {
     let primary_center = -2.5 + phase.clamp(0.0, 1.0) * 6.0;
     (-2..=2)
         .map(|copy| primary_center + copy as f32 * 3.0)
         .map(|center| (1.0 - (x - center).abs() / TOOL_GROUP_SHIMMER_HALF_WIDTH).clamp(0.0, 1.0))
         .fold(0.0, f32::max)
+}
+
+/// The characters the sweep currently lights, with how strongly. Position is
+/// by character count, not measured width: the band is far wider than any
+/// glyph, so the difference doesn't show, and no shaping is needed to know it.
+fn tool_title_shimmer_spans(title: &str, phase: f32) -> Vec<(std::ops::Range<usize>, f32)> {
+    let count = title.chars().count().max(1) as f32;
+    title
+        .char_indices()
+        .enumerate()
+        .filter_map(|(ix, (start, ch))| {
+            let amount = tool_title_shimmer_amount((ix as f32 + 0.5) / count, phase);
+            (amount > 0.001).then(|| (start..start + ch.len_utf8(), amount))
+        })
+        .collect()
 }
 
 fn tool_title_shimmer_phase(start: Instant, now: Instant) -> f32 {
@@ -20020,6 +19973,71 @@ mod tests {
                     .all(|p| p[1].x >= p[0].x && p[1].y >= p[0].y)
             );
         }
+    }
+
+    /// In a narrow panel the title used to wrap: its box is one line tall, so
+    /// the last word landed on a hidden second line, and the sweep painted
+    /// that word back only where it passed.
+    #[gpui::test]
+    fn a_long_tool_title_stays_on_one_line_in_a_narrow_panel(cx: &mut gpui::TestAppContext) {
+        struct Titles;
+        impl Render for Titles {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let title = |selector: &'static str, phase: Option<f32>| {
+                    div()
+                        .debug_selector(move || selector.into())
+                        .w(px(60.0))
+                        .line_height(px(18.0))
+                        .flex()
+                        .overflow_hidden()
+                        .child(tool_group_title(
+                            "Thought 5 times · Ran 7 commands".into(),
+                            phase,
+                            &theme,
+                        ))
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(title("settled-title", None))
+                    .child(title("active-title", Some(0.5)))
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Titles);
+        for selector in ["settled-title", "active-title"] {
+            let height = cx.debug_bounds(selector).unwrap().size.height;
+            assert_eq!(height, px(18.0), "{selector} wrapped");
+        }
+    }
+
+    #[test]
+    fn tool_title_shimmer_lights_whole_characters_around_the_band() {
+        // The separator is several bytes long, and the band sits right on it.
+        let title = "Thought 5 times · Ran 7 commands";
+        let spans = tool_title_shimmer_spans(title, 0.5);
+        let brightest = spans
+            .iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("the band is on the title");
+        for (range, amount) in &spans {
+            assert_eq!(title[range.clone()].chars().count(), 1);
+            assert!(*amount > 0.0 && *amount <= 1.0);
+        }
+        assert!(
+            spans
+                .windows(2)
+                .all(|pair| pair[0].0.end <= pair[1].0.start)
+        );
+        let middle = title.len() / 2;
+        assert!(brightest.0.start.abs_diff(middle) <= 3);
+
+        // Between sweeps the title is just its base color.
+        assert!(tool_title_shimmer_spans(title, 0.25).is_empty());
     }
 
     #[test]

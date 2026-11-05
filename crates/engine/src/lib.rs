@@ -819,6 +819,7 @@ impl Engine {
             workspace_scope,
             cursor_sdk_version: Some(harness_adapters::CursorHarness::sdk_version().into()),
             capabilities: harness_proto::capabilities::current(),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
         })
     }
 

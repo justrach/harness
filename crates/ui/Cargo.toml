@@ -10,6 +10,8 @@ publish.workspace = true
 # HARNESS_MODEL_PICKER_PREVIEW=0 switches back to the previous one.
 default = ["model-picker-preview"]
 model-picker-preview = []
+# Dev only: one tab strip for the window (workspace_panels/instrument_strip.rs).
+dev-tab-layout = []
 project-palette-fixture = []
 
 browser-fixture = []

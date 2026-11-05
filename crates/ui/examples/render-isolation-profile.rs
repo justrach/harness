@@ -16,7 +16,9 @@
 //!
 //! `HARNESS_FRAME_STATS=1` turns on the render counters.
 //! `HARNESS_PROFILE_CHATS=300` adds sessions to the sidebar, and
-//! `HARNESS_PROFILE_SPLIT_PANES=3` restores a split. With either set, the run
+//! `HARNESS_PROFILE_SPLIT_PANES=3` restores a split, and
+//! `HARNESS_PROFILE_SIDEBAR_CLOSED=1` closes the sidebar. With either of the
+//! first two set, the run
 //! also moves the pointer across the window and measures frames left idle
 //! while an agent works. `HARNESS_PROFILE_STEPS=400` lengthens each phase, for
 //! sampling it with `sample`.
@@ -328,6 +330,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    if env_count("HARNESS_PROFILE_SIDEBAR_CLOSED") > 0 {
+        app.update(|cx| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_action(Box::new(shell::ToggleSidebar), cx)
+            })
+            .unwrap()
+        });
+        settle(&app, Duration::from_secs(1));
+    }
+
     // Focus the composer the way a person does (the Jump to the message box
     // command).
     app.update(|cx| {
@@ -394,6 +406,30 @@ fn main() -> anyhow::Result<()> {
         });
     };
 
+    // A wheel over the transcript, up through the history and back. The first
+    // pass brings rows on screen for the first time; later ones reuse them.
+    let wheel = |app: &gpui::ApplicationHandle, i: usize| {
+        let direction = if (i / 40) % 2 == 0 { 1.0 } else { -1.0 };
+        app.update(|cx| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                        position: gpui::point(px(700.), px(400.)),
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(
+                            px(0.),
+                            px(direction * 120.0),
+                        )),
+                        modifiers: gpui::Modifiers::default(),
+                        touch_phase: gpui::TouchPhase::Moved,
+                    }),
+                    cx,
+                );
+            })
+            .unwrap()
+        });
+    };
+
+    let scroll = run("scroll", &mut |i, app| wheel(app, i));
     let typing = run("typing", &mut |i, app| type_keys(app, i));
 
     // The last reply goes live: the agent is working and text streams in.
@@ -450,10 +486,13 @@ fn main() -> anyhow::Result<()> {
     });
     // Typing the next message while the reply is still live.
     let typing_live = run("typing-live", &mut |i, app| type_keys(app, i));
+    let scroll_live = run("scroll-live", &mut |i, app| wheel(app, i));
 
+    scroll.print();
     typing.print();
     streaming.print();
     typing_live.print();
+    scroll_live.print();
     if env_count("HARNESS_PROFILE_CHATS") + env_count("HARNESS_PROFILE_SPLIT_PANES") > 0 {
         // A pointer crossing the window: the transcript, then a pane boundary,
         // then the sidebar's rows.

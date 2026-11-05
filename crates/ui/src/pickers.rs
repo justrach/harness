@@ -2999,7 +2999,7 @@ impl Pickers {
     /// Re-home the canvas onto another project. The state observer does the
     /// heavy lifting: branch draft, ref cache, and the per-device
     /// harness/model catalogs all invalidate on the project change.
-    fn pick_space(&mut self, space_id: String, cx: &mut Context<Self>) {
+    pub(crate) fn pick_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.state.update(cx, |s, cx| {
             s.auto_selected = true;
             s.select_space(Some(space_id), cx);

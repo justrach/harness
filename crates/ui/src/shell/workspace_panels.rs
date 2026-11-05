@@ -4,8 +4,12 @@ use super::*;
 use gpui::point;
 #[cfg(feature = "browser-fixture")]
 use gpui_base::ElementExt as _;
+use instrument_strip::INSTRUMENT_STRIP;
 use std::collections::{HashMap, HashSet};
 mod device_picker;
+mod instrument_strip;
+#[cfg(all(test, feature = "dev-tab-layout"))]
+mod instrument_strip_tests;
 mod recovery;
 mod sidebar_chat_drop;
 mod tab_metadata;
@@ -263,6 +267,13 @@ impl Default for WorkspaceLayout {
     }
 }
 impl WorkspaceLayout {
+    /// One panel keeps its own tab row. Once split, the panels share the strip.
+    /// An expanded panel is still part of a split: the strip is how you reach
+    /// the others.
+    fn uses_strip(&self) -> bool {
+        INSTRUMENT_STRIP && self.panels.len() > 1
+    }
+
     /// Expansion changes the visible header arrangement, never stored panels.
     fn header_panel_count(&self) -> usize {
         if self.expanded.is_some_and(|id| self.panel(id).is_some()) {
@@ -361,7 +372,11 @@ impl WorkspaceLayout {
                         y: 0.0,
                         width: span,
                         height,
-                        header_height: PANEL_HEADER_HEIGHT,
+                        header_height: if self.uses_strip() {
+                            0.0
+                        } else {
+                            PANEL_HEADER_HEIGHT
+                        },
                     }
                 } else {
                     PanelFrame {
@@ -369,7 +384,9 @@ impl WorkspaceLayout {
                         y: cursor,
                         width,
                         height: span,
-                        header_height: if cursor < 1.0 {
+                        header_height: if self.uses_strip() {
+                            0.0
+                        } else if cursor < 1.0 {
                             PANEL_HEADER_HEIGHT
                         } else {
                             STACKED_HEADER_HEIGHT
@@ -416,7 +433,7 @@ impl WorkspaceLayout {
             _ => None,
         }
     }
-    fn add_panel(&mut self, after: u64) -> u64 {
+    pub(super) fn add_panel(&mut self, after: u64) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let at = self
@@ -530,7 +547,9 @@ impl WorkspaceLayout {
             .filter_map(|panel| bounds.get(&panel.id).map(|rect| (panel.id, *rect)))
             .collect();
         let header_height = |rect: gpui::Bounds<Pixels>| {
-            if self.axis == SplitAxis::Vertical
+            if self.uses_strip() {
+                0.0
+            } else if self.axis == SplitAxis::Vertical
                 && self.expanded.is_none()
                 && panels
                     .first()
@@ -873,6 +892,12 @@ enum MenuAction {
     MovePanel(bool),
     AddPanel(SplitAxis),
     CloseTab,
+    SelectTab(usize),
+    NewTab,
+    ToggleExpand,
+    ClosePanel,
+    SetFolder(Option<String>),
+    NewFolder,
 }
 #[derive(Clone)]
 pub(super) struct PanelMenu {
@@ -880,13 +905,16 @@ pub(super) struct PanelMenu {
     tab: Option<PanelTab>,
     placement: bool,
     position: Point<Pixels>,
-    rows: Vec<(&'static str, &'static str, MenuAction)>,
+    rows: Vec<(SharedString, &'static str, MenuAction)>,
     selected: usize,
     focus: FocusHandle,
+    /// Where Escape puts the keyboard, when that isn't the panel's own control.
+    return_focus: Option<FocusHandle>,
 }
 
 #[derive(Default)]
 pub(super) struct PanelWorkspaces {
+    menu_scroll: gpui::ScrollHandle,
     pub(super) needs_persist: bool,
     pub layouts: HashMap<String, WorkspaceLayout>,
     pub(super) menu: Option<PanelMenu>,
@@ -1979,6 +2007,11 @@ impl Shell {
 
     /// Multiple panels keep their own headers beneath the session controls.
     fn workspace_native_titlebar_lane(&self, panel_count: usize) -> f32 {
+        if INSTRUMENT_STRIP {
+            // The same height as the tab row it replaces, so a panel's content
+            // stays exactly where it was when the window splits.
+            return if panel_count > 1 { PANEL_HEADER_HEIGHT } else { 0.0 };
+        }
         if panel_count == 1 {
             return 0.0;
         }
@@ -2288,6 +2321,14 @@ impl Shell {
         {
             frames.insert(new_panel, *ghost);
         }
+        // Splitting one panel: its tab row becomes the strip's lane above the
+        // frame, so the frame starts that much shorter and its bottom stays put.
+        if INSTRUMENT_STRIP {
+            for frame in frames.values_mut() {
+                frame.height -= frame.header_height;
+                frame.header_height = 0.0;
+            }
+        }
         self.workspace_panels.layout_transition = Some(PanelLayoutTransition {
             workspace,
             started: std::time::Instant::now(),
@@ -2318,7 +2359,10 @@ impl Shell {
         if let Some((panel, edge)) = target {
             self.split_workspace_tab(drag, panel, edge, window, cx);
         } else {
-            let before = if self.workspace_panels.window_drag.is_some() {
+            let strip = self
+                .panel_layout(cx)
+                .is_some_and(WorkspaceLayout::uses_strip);
+            let before = if self.workspace_panels.window_drag.is_some() && !strip {
                 // The release must use the same measured slot as its cue,
                 // including the right half of a tab and clipped strip bounds.
                 let Some(hover) = self.panel_tab_drop_at(window.mouse_position(), window, cx)
@@ -2647,7 +2691,7 @@ impl Shell {
                     .and_then(|browser| browser.read(cx).external_action_label())
             {
                 rows.push((
-                    label,
+                    label.into(),
                     icons::ARROW_UP_RIGHT,
                     MenuAction::OpenBrowserExternal(*id),
                 ));
@@ -2655,11 +2699,11 @@ impl Shell {
             let layout = self.panel_layout_mut(cx);
             for after in [false, true] {
                 if let Some(to) = layout.neighbor(panel, after) {
-                    rows.push((neighbor_label(after), arrow(after), MenuAction::Move(to)));
+                    rows.push((neighbor_label(after).into(), arrow(after), MenuAction::Move(to)));
                 }
             }
-            rows.push(("Move to new window", icons::ARROW_UP_RIGHT, MenuAction::MoveToWindow));
-            rows.push(("Close tab", icons::CLOSE, MenuAction::CloseTab));
+            rows.push(("Move to new window".into(), icons::ARROW_UP_RIGHT, MenuAction::MoveToWindow));
+            rows.push(("Close tab".into(), icons::CLOSE, MenuAction::CloseTab));
         } else if placement {
             let layout = self.panel_layout_mut(cx);
             for after in [false, true] {
@@ -2670,16 +2714,16 @@ impl Shell {
                         (true, false) => "Move up",
                         (true, true) => "Move down",
                     };
-                    rows.push((label, arrow(after), MenuAction::MovePanel(after)));
+                    rows.push((label.into(), arrow(after), MenuAction::MovePanel(after)));
                 }
             }
             rows.push((
-                "Add panel right",
+                "Add panel right".into(),
                 icons::ALT_ARROW_RIGHT,
                 MenuAction::AddPanel(SplitAxis::Horizontal),
             ));
             rows.push((
-                "Add panel below",
+                "Add panel below".into(),
                 icons::ALT_ARROW_DOWN,
                 MenuAction::AddPanel(SplitAxis::Vertical),
             ));
@@ -2696,6 +2740,7 @@ impl Shell {
             rows,
             selected: 0,
             focus,
+            return_focus: None,
         });
         cx.notify();
     }
@@ -2762,18 +2807,48 @@ impl Shell {
                 let id = self.panel_layout_mut(cx).add_panel(menu.panel);
                 self.set_workspace_panel_device(id, device, cx);
                 self.start_panel_insertion(id, menu.panel, cx);
-                self.composer.update(cx, |c, _| c.focus_pending = false);
-                let focus = self
-                    .workspace_panels
-                    .controls
-                    .entry(format!("panel-header-{id}"))
-                    .or_insert_with(|| cx.focus_handle().tab_stop(true));
-                window.focus(focus, cx);
+                self.composer.update(cx, |c, _| c.focus_pending = INSTRUMENT_STRIP);
+                if !INSTRUMENT_STRIP {
+                    let focus = self
+                        .workspace_panels
+                        .controls
+                        .entry(format!("panel-header-{id}"))
+                        .or_insert_with(|| cx.focus_handle().tab_stop(true));
+                    window.focus(focus, cx);
+                }
             }
             MenuAction::CloseTab => {
                 if let Some(tab) = menu.tab {
                     self.close_workspace_tab_by_button(menu.panel, tab, window, cx);
                 }
+            }
+            MenuAction::SelectTab(index) => {
+                let tab = self
+                    .panel_layout(cx)
+                    .and_then(|layout| layout.panel(menu.panel))
+                    .and_then(|panel| panel.tabs.get(index).cloned());
+                if let Some(tab) = tab {
+                    self.focus_workspace_tab(menu.panel, tab, window, cx);
+                }
+            }
+            MenuAction::NewTab => {
+                self.workspace_panels.target = Some(menu.panel);
+                self.workspace_new_tab(cx);
+                self.focus_workspace_new_tab(window, cx);
+            }
+            MenuAction::ToggleExpand => {
+                let layout = self.panel_layout_mut(cx);
+                layout.expanded = if layout.expanded == Some(menu.panel) {
+                    None
+                } else {
+                    Some(menu.panel)
+                };
+            }
+            MenuAction::ClosePanel => self.close_workspace_panel(menu.panel, window, cx),
+            MenuAction::SetFolder(space) => self.set_panel_folder(menu.panel, space, window, cx),
+            MenuAction::NewFolder => {
+                self.focus_strip_slot(menu.panel, window, cx);
+                self.open_add_space(cx);
             }
         }
         self.workspace_panels.target = None;
@@ -2790,7 +2865,11 @@ impl Shell {
             .min(self.viewport_height - (menu.rows.len() as f32 * 32.0 + 16.0))
             .max(8.0);
         let mut card = popover::popover_card(&theme)
+            .id("workspace-panel-menu-card")
             .w(px(234.0))
+            .max_h(px((self.viewport_height - 16.0).max(32.0)))
+            .overflow_y_scroll()
+            .track_scroll(&self.workspace_panels.menu_scroll)
             .track_focus(&menu.focus)
             .flex()
             .flex_col()
@@ -2824,6 +2903,8 @@ impl Shell {
                                 break;
                             }
                         }
+                        let selected = menu.selected;
+                        this.workspace_panels.menu_scroll.scroll_to_item(selected);
                     }
                     "enter" | "space" => {
                         let ix = menu.selected;
@@ -2839,7 +2920,9 @@ impl Shell {
                             },
                             menu.panel
                         );
-                        if menu.tab.is_none() {
+                        if let Some(focus) = menu.return_focus.clone() {
+                            window.focus(&focus, cx);
+                        } else if menu.tab.is_none() {
                             if let Some(focus) = this.workspace_panels.controls.get(&control) {
                                 window.focus(focus, cx);
                             }
@@ -2866,7 +2949,7 @@ impl Shell {
                 .id(("workspace-menu-row", ix))
                 .role(gpui::Role::Button)
                 .aria_label(if enabled {
-                    (*title).to_string()
+                    title.to_string()
                 } else {
                     format!("{title}, unavailable at this window height")
                 })
@@ -2883,8 +2966,13 @@ impl Shell {
                         .into()
                     })
                 })
-                .child(icon(glyph).size(px(15.0)).text_color(theme.text_muted))
-                .child(div().flex_1().child(*title)),
+                .child(
+                    icon(glyph)
+                        .size(px(15.0))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(title.clone())),
             );
         }
         #[cfg(feature = "browser-fixture")]
@@ -2989,15 +3077,18 @@ impl Shell {
             .menu
             .as_ref()
             .is_some_and(|m| m.panel == id);
-        let controls_focused = header_focus.contains_focused(window, cx)
-            || ["placement", "add-tab", "expand", "close"]
-                .iter()
-                .any(|name| {
-                    self.workspace_panels
-                        .controls
-                        .get(&format!("panel-{name}-{id}"))
-                        .is_some_and(|focus| focus.is_focused(window))
-                });
+        // Focus reveals them for keyboard use only: a click leaves focus behind,
+        // which must not keep them up once the pointer has gone.
+        let controls_focused = window.last_input_was_keyboard()
+            && (header_focus.contains_focused(window, cx)
+                || ["placement", "add-tab", "expand", "close"]
+                    .iter()
+                    .any(|name| {
+                        self.workspace_panels
+                            .controls
+                            .get(&format!("panel-{name}-{id}"))
+                            .is_some_and(|focus| focus.is_focused(window))
+                    }));
         let header = self
             .workspace_panels
             .headers
@@ -3015,7 +3106,15 @@ impl Shell {
         }
         let controls_t = motion::hover_t(&fade_key);
         let can_close = self.panel_layout(cx).is_some_and(|l| l.panels.len() > 1);
-        let tab_width = panel_tab_width(width - leading_inset - (trailing_inset - 4.0), panel.tabs.len());
+        let device_room = if INSTRUMENT_STRIP {
+            instrument_strip::PANEL_DEVICE_ROOM
+        } else {
+            0.0
+        };
+        let tab_width = panel_tab_width(
+            width - leading_inset - (trailing_inset - 4.0) - device_room,
+            panel.tabs.len(),
+        );
         // New tab sits right after the last tab, where the next one will open.
         // Where the hover controls would cover it, it stays with them instead.
         let other_controls: f32 = if can_close { 3.0 } else { 2.0 };
@@ -3027,7 +3126,7 @@ impl Shell {
             + (other_controls - 1.0) * 2.0
             + 8.0
             + 3.0
-            <= width - leading_inset - trailing_inset;
+            <= width - leading_inset - trailing_inset - device_room;
         let control_count = match (can_close, add_after_tabs) {
             (true, false) => 4.0,
             (true, true) | (false, false) => 3.0,
@@ -3058,7 +3157,7 @@ impl Shell {
                     .map(|attention| (index, attention))
             })
             .collect();
-        let strip_width = width - leading_inset - trailing_inset;
+        let strip_width = width - leading_inset - trailing_inset - device_room;
         let tabs_overflow = panel.tabs.len() as f32 * 112.0
             + panel.tabs.len().saturating_sub(1) as f32 * 3.0
             + TAB_SHOULDER
@@ -3789,6 +3888,18 @@ impl Shell {
             .id(("workspace-panel-header", id))
             .debug_selector(move || format!("workspace-panel-header-{id}"))
             .track_focus(&header_focus)
+            // Only the header brings up its controls, not the panel's content.
+            // This is chrome the shell draws, so it redraws the shell alone:
+            // crossing panels must not rebuild their contents.
+            .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+                let workspace = this.workspace_layout_key(cx);
+                this.workspace_panels
+                    .headers
+                    .entry((workspace, id))
+                    .or_default()
+                    .hovered = *hovered;
+                window.redraw_root();
+            }))
             .relative()
             .h(px(height))
             .pl(px(leading_inset))
@@ -3809,6 +3920,18 @@ impl Shell {
                     tab_bounds.borrow_mut().insert(tab_bounds_key.clone(), bounds);
                 }, |_, _, _, _| {}).absolute().inset_0()),
             )
+            .children(INSTRUMENT_STRIP.then(|| {
+                instrument_strip::device_label(
+                    format!("workspace-panel-device-{id}"),
+                    self.panel_device_label(id, cx),
+                    &theme,
+                )
+                .flex_none()
+                .max_w(px(instrument_strip::PANEL_DEVICE_ROOM))
+                .h(px(PANEL_TAB_HEIGHT))
+                .mt(px(tab_top))
+                .pl(px(8.0))
+            }))
             .child(crate::frost::frosted(8.0, 12.0 * controls_t, controls))
             .children(attention_jump)
             .into_any_element()
@@ -4543,7 +4666,15 @@ impl Shell {
             window.request_animation_frame();
         }
         let full_titlebar_lane = self.workspace_native_titlebar_lane(2);
-        let native_titlebar_lane = full_titlebar_lane * PanelHeaderMode::lane_fraction(header_mode);
+        let native_titlebar_lane = if INSTRUMENT_STRIP {
+            if layout.uses_strip() {
+                full_titlebar_lane
+            } else {
+                0.0
+            }
+        } else {
+            full_titlebar_lane * PanelHeaderMode::lane_fraction(header_mode)
+        };
         let header_clearance = PanelHeaderMode::clearance_fraction(header_mode);
         let height = (self.viewport_height - GUTTER - native_titlebar_lane).max(1.0);
         let originals = layout.frames(width, height);
@@ -4596,6 +4727,20 @@ impl Shell {
                     .insert((key.clone(), *beside, *edge), ghost);
                 ghosts.push((*beside, *edge, ghost, t));
             }
+        }
+        // The strip and the tab row swap outright, in the same height: nothing
+        // slides between them, however the panels' own frames are moving.
+        if INSTRUMENT_STRIP {
+            let header = if layout.uses_strip() {
+                0.0
+            } else {
+                PANEL_HEADER_HEIGHT
+            };
+            frames
+                .values_mut()
+                .chain(self.workspace_panels.rendered_ghosts.values_mut())
+                .chain(ghosts.iter_mut().map(|(_, _, frame, _)| frame))
+                .for_each(|frame| frame.header_height = header);
         }
         // Project remaining selections while their real content reflows. Stored
         // tabs, drafts, axis and proportions change only when the drop commits.
@@ -4701,16 +4846,25 @@ impl Shell {
             let caption_left = self.viewport_width - self.titlebar_right_pad(0.0);
             let trailing_inset =
                 4.0 + (panel_left + frame.width - caption_left).max(0.0) * clearance;
-            let header = self.render_workspace_header(
-                panel,
-                layout.expanded == Some(panel.id),
-                frame.width,
-                frame.header_height,
-                self.workspace_header_controls_inset(panel_left, cx) * clearance,
-                trailing_inset,
-                window,
-                cx,
-            );
+            let header = if layout.uses_strip() {
+                // The tab this panel's fill was shaped around has gone.
+                self.workspace_panels
+                    .active_tab_bounds
+                    .borrow_mut()
+                    .remove(&(workspace.clone(), panel.id));
+                div().into_any_element()
+            } else {
+                self.render_workspace_header(
+                    panel,
+                    layout.expanded == Some(panel.id),
+                    frame.width,
+                    frame.header_height,
+                    self.workspace_header_controls_inset(panel_left, cx) * clearance,
+                    trailing_inset,
+                    window,
+                    cx,
+                )
+            };
             let content_height = (frame.height - frame.header_height - 2.0).max(0.0);
             let content =
                 self.render_workspace_content(panel, content_width, content_height, window, cx);
@@ -4805,17 +4959,6 @@ impl Shell {
                 .id(("workspace-panel", panel_id))
                 .debug_selector(move || format!("workspace-panel-{panel_id}"))
                 .group(format!("workspace-panel-{panel_id}"))
-                // Header hover is chrome this render draws, so it redraws the
-                // shell alone: crossing panels must not rebuild their contents.
-                .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
-                    let workspace = this.workspace_layout_key(cx);
-                    this.workspace_panels
-                        .headers
-                        .entry((workspace, panel_id))
-                        .or_default()
-                        .hovered = *hovered;
-                    window.redraw_root();
-                }))
                 .absolute()
                 .left(px(frame.x))
                 .top(px(frame.y))
@@ -4845,6 +4988,20 @@ impl Shell {
                     &theme,
                 ))
                 .children(chat_drop_zones)
+                .when(
+                    layout.uses_strip() && visible.len() > 1 && layout.focused == panel_id,
+                    |column| {
+                        column.child(
+                            div()
+                                .debug_selector(move || format!("instrument-focus-{panel_id}"))
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(10.0))
+                                .border(px(1.5))
+                                .border_color(theme.accent.opacity(0.7)),
+                        )
+                    },
+                )
                 .child(
                     gpui::canvas(
                         move |rect, _, _| {
@@ -5031,6 +5188,25 @@ impl Shell {
             },
             cx,
         );
+        let instrument_strip = layout.uses_strip().then(|| {
+            let left = self.workspace_header_controls_inset(sidebar_now, cx).max(leading);
+            let right = GUTTER.max(self.titlebar_right_pad(0.0));
+            let in_a_row = layout.axis == SplitAxis::Horizontal
+                && layout.expanded.is_none()
+                && canvas_width <= width + 0.5
+                && right <= GUTTER;
+            let columns = in_a_row
+                .then(|| {
+                    let widths: Vec<_> = layout
+                        .panels
+                        .iter()
+                        .map(|panel| frames.get(&panel.id).map_or(0.0, |frame| frame.width))
+                        .collect();
+                    Self::strip_columns(&widths, leading, left)
+                })
+                .flatten();
+            self.render_instrument_strip(&layout, left, right, columns, window, cx)
+        });
         let row = div()
             .flex_1()
             .min_w_0()
@@ -5039,7 +5215,8 @@ impl Shell {
             .pt(px(native_titlebar_lane))
             .flex()
             .child(shadows)
-            .child(row);
+            .child(row)
+            .children(instrument_strip);
         let overlays = self.render_overlays(window.viewport_size(), window, cx);
         let menu = self.render_panel_menu(cx);
         if self
@@ -5929,9 +6106,9 @@ mod interaction_tests {
         // The same hover state hides the button; a hidden element still records
         // its own bounds, but children of the hidden controls record none.
         assert!(cx.debug_bounds("panel-placement-0").is_none());
-        let body = cx.debug_bounds("workspace-panel-body-0").unwrap();
         let last = cx.debug_bounds("panel-tab-0-1").unwrap();
-        cx.simulate_mouse_move(body.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-0").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         let add = cx.debug_bounds("panel-add-tab-0").unwrap();
         let placement = cx.debug_bounds("panel-placement-0").unwrap();
@@ -6503,7 +6680,12 @@ mod interaction_tests {
         assert_eq!(idle_width, body.size.width - px(4.0));
         assert!(cx.debug_bounds("panel-placement-0").is_none());
 
+        // The panel's content doesn't bring them up; only its header does.
         cx.simulate_mouse_move(body.center(), None, Default::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("panel-placement-0").is_none());
+        let header = cx.debug_bounds("workspace-panel-header-0").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("panel-placement-0").is_some());
         assert_eq!(scroll.bounds().size.width, idle_width);
@@ -6534,22 +6716,21 @@ mod interaction_tests {
             assert!(cx.debug_bounds("panel-placement-0").is_some());
         }
 
+        // Moving down into the content puts them away.
         cx.simulate_mouse_move(body.center(), None, Default::default());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("panel-placement-0").is_some());
-
-        cx.simulate_mouse_move(point(px(10.0), px(100.0)), None, Default::default());
         cx.run_until_parked();
         assert_eq!(scroll.bounds().size.width, idle_width);
         assert_eq!(scroll.offset(), manual_offset);
         assert!(cx.debug_bounds("panel-placement-0").is_none());
+        // Focus left behind by a click doesn't keep them up.
         shell.update_in(cx, |s, window, cx| {
             let focus = s.workspace_panels.controls["panel-header-0"].clone();
             window.focus(&focus, cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("panel-placement-0").is_some());
+        assert!(cx.debug_bounds("panel-placement-0").is_none());
         assert_eq!(scroll.offset(), manual_offset);
+        // Reaching them from the keyboard does.
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         assert!(cx.debug_bounds("panel-placement-0").is_some());
@@ -6686,7 +6867,8 @@ mod interaction_tests {
         });
         cx.run_until_parked();
         let body = cx.debug_bounds("workspace-panel-body-1").unwrap();
-        cx.simulate_mouse_move(body.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-1").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         let close = cx.debug_bounds("panel-close-1").unwrap();
         cx.simulate_mouse_move(close.center(), None, Default::default());
         cx.run_until_parked();
@@ -6719,8 +6901,8 @@ mod interaction_tests {
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("workspace-add-panel").is_none());
-        let body = cx.debug_bounds("workspace-panel-body-0").unwrap();
-        cx.simulate_mouse_move(body.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-0").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         let placement = cx.debug_bounds("panel-placement-0").unwrap();
         cx.simulate_mouse_down(placement.center(), MouseButton::Left, Default::default());
@@ -6729,7 +6911,7 @@ mod interaction_tests {
             let menu = s.workspace_panels.menu.as_ref().unwrap();
             assert_eq!(menu.position, placement.bottom_left());
             assert_eq!(
-                menu.rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                menu.rows.iter().map(|r| &*r.0).collect::<Vec<_>>(),
                 ["Move right", "Add panel right", "Add panel below"]
             );
         });
@@ -6749,7 +6931,7 @@ mod interaction_tests {
         shell.read_with(cx, |s, _| {
             let menu = s.workspace_panels.menu.as_ref().unwrap();
             assert_eq!(
-                menu.rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                menu.rows.iter().map(|r| &*r.0).collect::<Vec<_>>(),
                 ["Move left", "Add panel right", "Add panel below"]
             );
         });
@@ -6794,7 +6976,7 @@ mod interaction_tests {
             s.open_panel_menu(0, None, point(px(300.0), px(38.0)), true, window, cx);
             let menu = s.workspace_panels.menu.as_ref().unwrap();
             assert_eq!(
-                menu.rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                menu.rows.iter().map(|r| &*r.0).collect::<Vec<_>>(),
                 ["Add panel right", "Add panel below"]
             );
         });
@@ -6896,7 +7078,8 @@ mod interaction_tests {
         cx.run_until_parked();
         let left = cx.debug_bounds("workspace-panel-body-0").unwrap();
         let right = cx.debug_bounds("workspace-panel-body-1").unwrap();
-        cx.simulate_mouse_move(right.center(), None, Default::default());
+        let header = cx.debug_bounds("workspace-panel-header-1").unwrap();
+        cx.simulate_mouse_move(header.center(), None, Default::default());
         cx.run_until_parked();
         let expand = cx.debug_bounds("panel-expand-1").unwrap();
         cx.simulate_mouse_move(expand.center(), None, Default::default());
