@@ -8,7 +8,6 @@
 // triggers kept as a floor (attachments, newline, >26 chars) — content-size
 // measurement oscillates at the boundary, so it is never measured.
 
-import PhotosUI
 import SwiftUI
 
 /// Shared glass shell + input + action row. `chips` render in the expanded
@@ -338,7 +337,7 @@ struct ComposerView: View {
         get { attachmentDraft.items }
         nonmutating set { attachmentDraft.items = newValue }
     }
-    @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var pickerItems: [PickedPhoto] = []
     @State private var showPicker = false
     @State private var uploading = false
     @State private var uploadProgress: Double?
@@ -767,7 +766,7 @@ struct ComposerView: View {
 
     /// Load picked photos into staged attachments (HEIC transcodes to JPEG;
     /// unsupported/oversized picks surface as an error line).
-    private func stage(_ items: [PhotosPickerItem]) {
+    private func stage(_ items: [PickedPhoto]) {
         Task { @MainActor in
             uploadError = nil
             await attachmentDraft.stagePhotos(items)

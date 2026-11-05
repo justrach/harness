@@ -3,7 +3,6 @@
 // keeps it), styles markdown as it is typed without hiding any of it, and
 // sends through the composer's own send path.
 
-import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -324,7 +323,7 @@ struct WriteSheet<Chips: View>: View {
     var busy = false
     var onSend: () -> Void
     var onPasteImages: (([Data]) -> Void)?
-    @Binding var pickerItems: [PhotosPickerItem]
+    @Binding var pickerItems: [PickedPhoto]
     @ViewBuilder var chips: Chips
 
     @Environment(\.dismiss) private var dismiss

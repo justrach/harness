@@ -12,7 +12,6 @@
 
 import ImageIO
 import Photos
-import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
