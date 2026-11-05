@@ -1,6 +1,7 @@
-//! Dev tab layout: one strip for the window instead of a tab row on every
-//! panel. Each panel gets one slot, showing its active tab; its other tabs and
-//! its actions live in the slot's menu. Built only with `dev-tab-layout`.
+//! Dev tab layout: one panel keeps its folder tabs. Once the window splits, one
+//! strip replaces every panel's tab row. Each panel gets one slot, showing its
+//! active tab, with a + for another tab inside it; its other tabs and its
+//! actions live in the slot's menu. Built only with `dev-tab-layout`.
 use super::*;
 
 pub(super) const INSTRUMENT_STRIP: bool = cfg!(feature = "dev-tab-layout");
@@ -173,6 +174,35 @@ impl Shell {
                 .text_color(theme.text_muted)
                 .into_any_element(),
         };
+        let add_button = div()
+            .id(("instrument-slot-add", id))
+            .debug_selector(move || format!("instrument-slot-add-{id}"))
+            .flex_none()
+            .size(px(18.0))
+            .rounded(px(4.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .role(gpui::Role::Button)
+            .aria_label("New tab in this panel")
+            .opacity(0.0)
+            .group_hover(group.clone(), |style| style.opacity(1.0))
+            .hover(|style| style.bg(theme.ink(0.10)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    this.workspace_panels.target = Some(id);
+                    this.workspace_new_tab(cx);
+                    this.focus_workspace_new_tab(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                icon(icons::PLUS)
+                    .size(px(11.0))
+                    .text_color(theme.text_muted),
+            );
         let menu_button = div()
             .id(("instrument-slot-menu", id))
             .debug_selector(move || format!("instrument-slot-menu-{id}"))
@@ -295,6 +325,7 @@ impl Shell {
             })
             .child(leading)
             .child(div().flex_1().min_w_0().truncate().child(title))
+            .child(add_button)
             .child(menu_button)
             .into_any_element()
     }
@@ -464,6 +495,26 @@ impl Shell {
             focus,
         });
         cx.notify();
+    }
+
+    /// One panel holding two tabs: nothing has split, so no strip.
+    #[cfg(feature = "appshots-fixture")]
+    pub(in crate::shell) fn fixture_single_panel_tabs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let layout = self.panel_layout_mut(cx);
+        layout.axis = SplitAxis::Horizontal;
+        layout.expanded = None;
+        layout.panels.truncate(1);
+        layout.panels[0].tabs = vec![
+            PanelTab::Chat("launch-0".into()),
+            PanelTab::Chat("launch-1".into()),
+        ];
+        layout.panels[0].active = 0;
+        layout.equalize();
+        self.focus_workspace_tab(0, PanelTab::Chat("launch-0".into()), window, cx);
     }
 
     #[cfg(feature = "appshots-fixture")]

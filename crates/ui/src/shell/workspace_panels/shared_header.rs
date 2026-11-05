@@ -3,12 +3,11 @@ use super::*;
 
 impl Shell {
     pub(in crate::shell) fn workspace_uses_shared_header(&self, cx: &App) -> bool {
-        !INSTRUMENT_STRIP
-            && matches!(self.route, Route::Chat)
+        matches!(self.route, Route::Chat)
             && !self.session_overview
             && self
                 .panel_layout(cx)
-                .is_some_and(|layout| layout.header_panel_count() == 1)
+                .is_some_and(|layout| layout.header_panel_count() == 1 && !layout.uses_strip())
     }
 
     pub(in crate::shell) fn workspace_titlebar_buttons_end(&self, cx: &App) -> f32 {

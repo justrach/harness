@@ -267,6 +267,13 @@ impl Default for WorkspaceLayout {
     }
 }
 impl WorkspaceLayout {
+    /// One panel keeps its own tab row. Once split, the panels share the strip.
+    /// An expanded panel is still part of a split: the strip is how you reach
+    /// the others.
+    fn uses_strip(&self) -> bool {
+        INSTRUMENT_STRIP && self.panels.len() > 1
+    }
+
     /// Expansion changes the visible header arrangement, never stored panels.
     fn header_panel_count(&self) -> usize {
         if self.expanded.is_some_and(|id| self.panel(id).is_some()) {
@@ -365,7 +372,11 @@ impl WorkspaceLayout {
                         y: 0.0,
                         width: span,
                         height,
-                        header_height: if INSTRUMENT_STRIP { 0.0 } else { PANEL_HEADER_HEIGHT },
+                        header_height: if self.uses_strip() {
+                            0.0
+                        } else {
+                            PANEL_HEADER_HEIGHT
+                        },
                     }
                 } else {
                     PanelFrame {
@@ -373,7 +384,7 @@ impl WorkspaceLayout {
                         y: cursor,
                         width,
                         height: span,
-                        header_height: if INSTRUMENT_STRIP {
+                        header_height: if self.uses_strip() {
                             0.0
                         } else if cursor < 1.0 {
                             PANEL_HEADER_HEIGHT
@@ -422,7 +433,7 @@ impl WorkspaceLayout {
             _ => None,
         }
     }
-    fn add_panel(&mut self, after: u64) -> u64 {
+    pub(super) fn add_panel(&mut self, after: u64) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let at = self
@@ -536,7 +547,7 @@ impl WorkspaceLayout {
             .filter_map(|panel| bounds.get(&panel.id).map(|rect| (panel.id, *rect)))
             .collect();
         let header_height = |rect: gpui::Bounds<Pixels>| {
-            if INSTRUMENT_STRIP {
+            if self.uses_strip() {
                 0.0
             } else if self.axis == SplitAxis::Vertical
                 && self.expanded.is_none()
@@ -1992,7 +2003,9 @@ impl Shell {
     /// Multiple panels keep their own headers beneath the session controls.
     fn workspace_native_titlebar_lane(&self, panel_count: usize) -> f32 {
         if INSTRUMENT_STRIP {
-            return Theme::TITLEBAR_HEIGHT;
+            // The same height as the tab row it replaces, so a panel's content
+            // stays exactly where it was when the window splits.
+            return if panel_count > 1 { PANEL_HEADER_HEIGHT } else { 0.0 };
         }
         if panel_count == 1 {
             return 0.0;
@@ -2302,6 +2315,14 @@ impl Shell {
         {
             frames.insert(new_panel, *ghost);
         }
+        // Splitting one panel: its tab row becomes the strip's lane above the
+        // frame, so the frame starts that much shorter and its bottom stays put.
+        if INSTRUMENT_STRIP {
+            for frame in frames.values_mut() {
+                frame.height -= frame.header_height;
+                frame.header_height = 0.0;
+            }
+        }
         self.workspace_panels.layout_transition = Some(PanelLayoutTransition {
             workspace,
             started: std::time::Instant::now(),
@@ -2332,7 +2353,10 @@ impl Shell {
         if let Some((panel, edge)) = target {
             self.split_workspace_tab(drag, panel, edge, window, cx);
         } else {
-            let before = if self.workspace_panels.window_drag.is_some() && !INSTRUMENT_STRIP {
+            let strip = self
+                .panel_layout(cx)
+                .is_some_and(WorkspaceLayout::uses_strip);
+            let before = if self.workspace_panels.window_drag.is_some() && !strip {
                 // The release must use the same measured slot as its cue,
                 // including the right half of a tab and clipped strip bounds.
                 let Some(hover) = self.panel_tab_drop_at(window.mouse_position(), window, cx)
@@ -4590,7 +4614,11 @@ impl Shell {
         }
         let full_titlebar_lane = self.workspace_native_titlebar_lane(2);
         let native_titlebar_lane = if INSTRUMENT_STRIP {
-            full_titlebar_lane
+            if layout.uses_strip() {
+                full_titlebar_lane
+            } else {
+                0.0
+            }
         } else {
             full_titlebar_lane * PanelHeaderMode::lane_fraction(header_mode)
         };
@@ -4646,6 +4674,20 @@ impl Shell {
                     .insert((key.clone(), *beside, *edge), ghost);
                 ghosts.push((*beside, *edge, ghost, t));
             }
+        }
+        // The strip and the tab row swap outright, in the same height: nothing
+        // slides between them, however the panels' own frames are moving.
+        if INSTRUMENT_STRIP {
+            let header = if layout.uses_strip() {
+                0.0
+            } else {
+                PANEL_HEADER_HEIGHT
+            };
+            frames
+                .values_mut()
+                .chain(self.workspace_panels.rendered_ghosts.values_mut())
+                .chain(ghosts.iter_mut().map(|(_, _, frame, _)| frame))
+                .for_each(|frame| frame.header_height = header);
         }
         // Project remaining selections while their real content reflows. Stored
         // tabs, drafts, axis and proportions change only when the drop commits.
@@ -4751,7 +4793,7 @@ impl Shell {
             let caption_left = self.viewport_width - self.titlebar_right_pad(0.0);
             let trailing_inset =
                 4.0 + (panel_left + frame.width - caption_left).max(0.0) * clearance;
-            let header = if INSTRUMENT_STRIP {
+            let header = if layout.uses_strip() {
                 div().into_any_element()
             } else {
                 self.render_workspace_header(
@@ -4889,7 +4931,7 @@ impl Shell {
                 ))
                 .children(chat_drop_zones)
                 .when(
-                    INSTRUMENT_STRIP && visible.len() > 1 && layout.focused == panel_id,
+                    layout.uses_strip() && visible.len() > 1 && layout.focused == panel_id,
                     |column| {
                         column.child(
                             div()
@@ -5088,7 +5130,7 @@ impl Shell {
             },
             cx,
         );
-        let instrument_strip = INSTRUMENT_STRIP.then(|| {
+        let instrument_strip = layout.uses_strip().then(|| {
             let left = self.workspace_header_controls_inset(sidebar_now, cx).max(leading);
             let right = GUTTER.max(self.titlebar_right_pad(0.0));
             let in_a_row = layout.axis == SplitAxis::Horizontal

@@ -37,6 +37,104 @@ fn three_panels(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> (u64
     ids
 }
 
+/// The split the user asked for: folder tabs on their own, the strip once
+/// split, and back again when the split closes.
+#[gpui::test]
+fn one_panel_keeps_its_tab_row_until_the_window_splits(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let first = shell.update_in(cx, |shell, window, cx| {
+        let layout = shell.panel_layout_mut(cx);
+        layout.panels.truncate(1);
+        let first = layout.panels[0].id;
+        layout.panels[0].tabs = vec![
+            PanelTab::Chat("chat-1".into()),
+            PanelTab::Chat("chat-2".into()),
+        ];
+        layout.panels[0].active = 0;
+        shell.focus_workspace_tab(first, PanelTab::Chat("chat-1".into()), window, cx);
+        first
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("instrument-strip").is_none());
+    assert!(at(cx, format!("panel-tab-{first}-0")).is_some());
+    assert!(at(cx, format!("panel-tab-{first}-1")).is_some());
+    let single = at(cx, format!("workspace-panel-body-{first}")).unwrap();
+
+    let second = shell.update(cx, |shell, cx| {
+        let layout = shell.panel_layout_mut(cx);
+        let second = layout.add_panel(first);
+        layout.equalize();
+        cx.notify();
+        second
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("instrument-strip").is_some());
+    assert!(at(cx, format!("panel-tab-{first}-0")).is_none());
+    assert!(at(cx, format!("instrument-slot-{second}")).is_some());
+    let split = at(cx, format!("workspace-panel-body-{first}")).unwrap();
+    assert_eq!(split.top(), single.top(), "the content does not jump");
+    assert_eq!(split.bottom(), single.bottom(), "nor does its bottom edge");
+
+    // A tab row comes back with both tabs intact.
+    shell.update_in(cx, |shell, window, cx| {
+        shell.close_workspace_panel(second, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("instrument-strip").is_none());
+    assert!(at(cx, format!("panel-tab-{first}-1")).is_some());
+    let back = at(cx, format!("workspace-panel-body-{first}")).unwrap();
+    assert_eq!(back.top(), single.top());
+    assert_eq!(back.bottom(), single.bottom());
+}
+
+/// An expanded panel is still part of a split: the slots are how you get to
+/// the others, so they stay.
+#[gpui::test]
+fn an_expanded_panel_keeps_the_strip(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (first, second, _) = three_panels(&shell, cx);
+    shell.update(cx, |shell, cx| {
+        shell.panel_layout_mut(cx).expanded = Some(first);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(at(cx, format!("instrument-slot-{second}")).is_some());
+    assert!(at(cx, format!("panel-tab-{first}-0")).is_none());
+    shell.read_with(cx, |shell, cx| {
+        assert!(!shell.workspace_uses_shared_header(cx));
+    });
+}
+
+#[gpui::test]
+fn a_slots_plus_adds_a_tab_inside_that_panel(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (first, second, _) = three_panels(&shell, cx);
+    let tabs = |shell: &Entity<Shell>, id: u64, cx: &mut gpui::VisualTestContext| {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .panel_layout(cx)
+                .unwrap()
+                .panel(id)
+                .unwrap()
+                .tabs
+                .len()
+        })
+    };
+    assert_eq!(tabs(&shell, second, cx), 1);
+    // Not the focused panel: the + belongs to the slot it sits in.
+    let add = at(cx, format!("instrument-slot-add-{second}")).unwrap();
+    cx.simulate_click(add.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(tabs(&shell, second, cx), 2);
+    assert_eq!(tabs(&shell, first, cx), 2, "the focused panel is untouched");
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.panel_layout(cx).unwrap().focused, second);
+    });
+}
+
 #[gpui::test]
 fn each_panel_gets_one_slot_and_no_tab_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

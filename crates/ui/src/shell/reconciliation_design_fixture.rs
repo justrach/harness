@@ -97,6 +97,11 @@ impl Shell {
             let layout = self.panel_layout_mut(cx);
             layout.axis = SplitAxis::Horizontal;
             layout.panels.truncate(2);
+            // A previous proposal may have left one panel.
+            if layout.panels.len() < 2 {
+                let first = layout.panels[0].id;
+                layout.add_panel(first);
+            }
             layout.panels[0].tabs = vec![
                 workspace_panels::PanelTab::Chat("launch-0".into()),
                 workspace_panels::PanelTab::Chat("launch-1".into()),
@@ -130,6 +135,9 @@ impl Shell {
         }
         if variant == "attention-strip" {
             self.fixture_instrument_strip(window, cx);
+        }
+        if variant == "attention-single" {
+            self.fixture_single_panel_tabs(window, cx);
         }
         cx.set_global(DesignPreview(variant.into()));
         cx.notify();
@@ -192,7 +200,7 @@ impl Shell {
                     bounds.origin + gpui::point(px(2.), px(2.)),
                     gpui::size(bounds.size.width - px(4.), px(30.)),
                 );
-                if mode != "attention-a" && mode != "attention-strip" {
+                if mode != "attention-a" && mode != "attention-strip" && mode != "attention-single" {
                     result.push(
                         frame(rect)
                             .rounded(px(7.))
