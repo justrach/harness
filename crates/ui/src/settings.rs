@@ -1414,7 +1414,7 @@ impl ShortcutId {
             ShortcutId::SaveFile => "Save file",
             ShortcutId::BrowserReload => "Reload browser page",
             ShortcutId::ToggleSidebar => "Toggle left sidebar",
-            ShortcutId::ToggleChanges => "Toggle right sidebar",
+            ShortcutId::ToggleChanges => "Show or hide changes",
             ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::SplitTerminal => "Split terminal right",

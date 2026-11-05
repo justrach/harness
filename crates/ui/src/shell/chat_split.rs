@@ -388,6 +388,10 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
         KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
     ];
+    // A shell needs its Ctrl+letter keys. On a Mac these are ⌘ combos anyway.
+    if !mac {
+        bindings.push(KeyBinding::new("ctrl-o", gpui::NoAction, Some("Terminal")));
+    }
     // ⌃1–⌃9 pick a tab on macOS, where ⌘1–⌘9 jump to sidebar sessions;
     // elsewhere Ctrl+digit is that jump, so tabs take Alt+digit.
     bindings.extend((0..=chat_tabs::LAST_TAB_SLOT).map(|slot| {
@@ -1715,6 +1719,22 @@ mod chat_split_tests {
         assert_eq!(split.projects.len(), 1);
         assert!(!split.zoomed);
         assert_eq!(split.close_focused(), None);
+    }
+
+    #[test]
+    fn ctrl_o_stays_with_a_focused_terminal_off_macos() {
+        let keymap = gpui::Keymap::new(chat_split_bindings(false));
+        let resolve = |contexts: &[&str]| {
+            let stack: Vec<gpui::KeyContext> = contexts
+                .iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap())
+                .collect();
+            let (matched, _) =
+                keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-o").unwrap()], &stack);
+            matched.first().map(|b| b.action().name())
+        };
+        assert_eq!(resolve(&["Shell", "Terminal"]), None);
+        assert_eq!(resolve(&["Shell"]), Some(NewChatTab.name()));
     }
 
     #[test]

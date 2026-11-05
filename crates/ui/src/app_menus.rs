@@ -305,6 +305,10 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
         KeyBinding::new(&format!("{primary}--"), DecreaseFontSize, None),
         KeyBinding::new(&format!("{primary}-0"), ResetFontSize, None),
     ]);
+    // A shell needs Ctrl+N. On a Mac this is ⌘N, which never reaches one.
+    if !macos {
+        bindings.push(KeyBinding::new("ctrl-n", gpui::NoAction, Some("Terminal")));
+    }
     if macos {
         bindings.extend([
             KeyBinding::new("cmd-q", Quit, None),
@@ -393,7 +397,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Zoom", Zoom),
             MenuItem::separator(),
             MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Reopen Closed Tab or Session", shell::ReopenClosedChatTab),
+            MenuItem::action("Reopen Closed Tab", shell::ReopenClosedChatTab),
             MenuItem::action("Close Window", CloseWindow),
         ]));
     }
@@ -704,5 +708,21 @@ mod native_quit {
                 "GPUI termination delegate contract changed"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_n_stays_with_a_focused_terminal_off_macos() {
+        let keymap = gpui::Keymap::new(app_key_bindings(false));
+        let resolve = |contexts: &[&str]| {
+            let stack: Vec<gpui::KeyContext> = contexts
+                .iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap())
+                .collect();
+            let (matched, _) =
+                keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-n").unwrap()], &stack);
+            matched.first().map(|b| b.action().name())
+        };
+        assert_eq!(resolve(&["Shell", "Terminal"]), None);
+        assert_eq!(resolve(&["Shell"]), Some(gpui::Action::name(&NewWindow)));
     }
 }

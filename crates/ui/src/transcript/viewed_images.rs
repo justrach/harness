@@ -62,6 +62,13 @@ pub(super) struct ViewedImageDisclosure {
     thumbnail_focus: gpui::FocusHandle,
 }
 
+#[cfg(test)]
+impl ViewedImageDisclosure {
+    pub(super) fn path(&self) -> &str {
+        &self.source.image.path
+    }
+}
+
 pub(super) struct ViewedImagePreview {
     row: SharedString,
     source: ViewedImageSource,

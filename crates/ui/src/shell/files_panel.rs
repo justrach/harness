@@ -278,7 +278,7 @@ impl Shell {
     /// The explorer's own toggle. Opening docks the explorer into the right
     /// pane — opening the pane with just that portion when it was closed.
     pub(super) fn toggle_files_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.toggle_workspace_tool(false, window, cx) {
+        if self.toggle_workspace_tool(workspace_panels::WorkspaceTool::Files, window, cx) {
             return;
         }
         if !self.files_panel_open(cx) {

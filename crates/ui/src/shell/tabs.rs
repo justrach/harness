@@ -387,7 +387,13 @@ impl Shell {
                                 "toggle-changes",
                                 icons::SIDEBAR_MINIMALISTIC,
                                 &theme,
-                                cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_workspace_tool(
+                                        workspace_panels::WorkspaceTool::Changes,
+                                        window,
+                                        cx,
+                                    );
+                                }),
                             )),
                     )
                     .into_any_element(),

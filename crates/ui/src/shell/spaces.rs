@@ -242,6 +242,43 @@ mod pinned_session_tests {
     }
 
     #[gpui::test]
+    fn archived_stays_in_the_menu_with_compact_on(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let window = pin_test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, window, cx| {
+                let down = gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("down").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                let space = gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("space").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                assert!(shell.settings.sidebar_compact);
+                let before = shell.settings.sidebar_show_archived;
+                shell.open_sidebar_view_menu(window, cx);
+                let _ = shell.render_sidebar_view_menu(&Theme::default(), cx);
+                for _ in 0..4 {
+                    shell.sidebar_view_menu_key(&down, cx);
+                }
+                assert_eq!(shell.sidebar_view_menu.get().unwrap().active, Some(3));
+                shell.sidebar_view_menu_key(&space, cx);
+                assert_eq!(shell.settings.sidebar_show_archived, !before);
+                assert_eq!(
+                    shell.sidebar_view_menu.get().unwrap().active,
+                    Some(3),
+                    "the cursor stays on the row it just toggled"
+                );
+                let _ = shell.render_sidebar_view_menu(&Theme::default(), cx);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn sidebar_display_menu_toggles_details_and_keeps_choices_with_keyboard(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -267,7 +304,7 @@ mod pinned_session_tests {
                 shell.open_sidebar_view_menu(window, cx);
                 let _ = shell.render_sidebar_view_menu(&Theme::default(), cx);
                 assert_eq!(SIDEBAR_VIEW_GROUPS.len(), 2);
-                assert_eq!(SidebarViewMenuLayout::new(true).item_count(), 3);
+                assert_eq!(SidebarViewMenuLayout::new(true).item_count(), 4);
                 for _ in 0..3 {
                     shell.sidebar_view_menu_key(&key("down"), cx);
                 }
@@ -301,7 +338,9 @@ mod pinned_session_tests {
                 held.is_held = true;
                 shell.sidebar_view_menu_key(&held, cx);
                 assert!(shell.settings.sidebar_compact);
-                // Hidden fields are skipped; compact navigation wraps after Compact.
+                // Row details are skipped; compact navigation wraps after Archived.
+                shell.sidebar_view_menu_key(&key("down"), cx);
+                assert_eq!(shell.sidebar_view_menu.get().unwrap().active, Some(3));
                 shell.sidebar_view_menu_key(&key("down"), cx);
                 assert_eq!(shell.sidebar_view_menu.get().unwrap().active, Some(0));
                 // Existing Organize and Sort flyouts still work.
@@ -2243,18 +2282,23 @@ const SIDEBAR_DISPLAY_ROWS: [SidebarViewRow; 6] = [
 /// Keyboard positions follow the controls actually present in the dropdown.
 struct SidebarViewMenuLayout {
     fields: std::ops::Range<usize>,
+    rows: &'static [SidebarViewRow],
 }
 
 impl SidebarViewMenuLayout {
     fn new(compact: bool) -> Self {
         let start = SIDEBAR_VIEW_COMPACT_INDEX + 1;
-        let end = start
-            + if compact {
-                0
-            } else {
-                SIDEBAR_DISPLAY_ROWS.len()
-            };
-        Self { fields: start..end }
+        // Compact hides each row's details. Archived decides which rows are
+        // listed at all, so it stays either way.
+        let rows = if compact {
+            &SIDEBAR_DISPLAY_ROWS[SIDEBAR_DISPLAY_ROWS.len() - 1..]
+        } else {
+            &SIDEBAR_DISPLAY_ROWS[..]
+        };
+        Self {
+            fields: start..start + rows.len(),
+            rows,
+        }
     }
 
     fn item_count(&self) -> usize {
@@ -3581,7 +3625,10 @@ impl Shell {
         }
         if let Some(menu) = self.sidebar_view_menu.open_mut() {
             menu.active = menu.active.map(|index| {
-                if self.settings.sidebar_compact && previous_layout.fields.contains(&index) {
+                if matches!(row, SidebarViewRow::Compact)
+                    && self.settings.sidebar_compact
+                    && previous_layout.fields.contains(&index)
+                {
                     SIDEBAR_VIEW_COMPACT_INDEX
                 } else {
                     index
@@ -3718,7 +3765,7 @@ impl Shell {
                     } else if layout.fields.contains(&group) {
                         if key != "right" && !event.is_held {
                             self.activate_sidebar_view_row(
-                                SIDEBAR_DISPLAY_ROWS[group - layout.fields.start],
+                                layout.rows[group - layout.fields.start],
                                 cx,
                             );
                         }
@@ -4002,7 +4049,7 @@ impl Shell {
                 )
                 .into_any_element(),
         );
-        if !self.settings.sidebar_compact {
+        {
             let fields = [
                 (
                     "Branch",
@@ -4027,8 +4074,9 @@ impl Shell {
                 ),
                 ("Archived", icons::ARCHIVE_MINIMALISTIC, self.settings.sidebar_show_archived),
             ];
-            for (field, (label, glyph, checked)) in fields.into_iter().enumerate() {
-                let index = layout.fields.start + field;
+            let hidden = SIDEBAR_DISPLAY_ROWS.len() - layout.rows.len();
+            for (field, (label, glyph, checked)) in fields.into_iter().enumerate().skip(hidden) {
+                let index = layout.fields.start + field - hidden;
                 let row = SIDEBAR_DISPLAY_ROWS[field];
                 groups.push(
                     div()

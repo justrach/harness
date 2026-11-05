@@ -192,7 +192,7 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
         row("Split the chat to the right", Box::new(SplitChatRight)),
         row("Split the chat down", Box::new(SplitChatDown)),
         row(
-            "Close the pane (back to one column)",
+            "Close the focused tab",
             Box::new(crate::app_menus::CloseTab),
         ),
         row("Next pane", Box::new(FocusNextChatPane)),
@@ -212,7 +212,7 @@ fn fixed_shortcuts() -> Vec<crate::settings::shortcuts::FixedShortcut> {
         row("Zoom the pane (and back)", Box::new(ToggleChatPaneZoom)),
         row("New window", Box::new(crate::app_menus::NewWindow)),
         row("Open workspace", Box::new(NewChatTab)),
-        row("Reopen closed chat or workspace", Box::new(ReopenClosedChatTab)),
+        row("Reopen closed tab", Box::new(ReopenClosedChatTab)),
         row("Next workspace", Box::new(NextChatTab)),
         row("Previous workspace", Box::new(PrevChatTab)),
         row(
@@ -5092,7 +5092,7 @@ impl Shell {
     /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
     /// The flag is per chat (harness `sessionPanels`).
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.toggle_workspace_tool(true, window, cx) {
+        if self.toggle_workspace_tool(workspace_panels::WorkspaceTool::Terminal, window, cx) {
             return;
         }
         let from = self.terminal_target(cx);
@@ -5132,16 +5132,23 @@ impl Shell {
         cx.notify();
     }
 
-    fn split_terminal(
-        &mut self,
-        axis: SplitAxis,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.terminal_open(cx) {
-            self.toggle_terminal(window, cx);
-        }
-        let panel = self.terminal_panel(cx);
+    /// The terminal holding the keyboard: a panel's own, or the docked one.
+    fn focused_terminal(&self, window: &Window, cx: &App) -> Option<Entity<TerminalPanel>> {
+        self.workspace_panels
+            .terminals
+            .values()
+            .chain(&self.right_terminal)
+            .chain(&self.terminal)
+            .find(|terminal| terminal.read(cx).focus_handle().is_focused(window))
+            .cloned()
+    }
+
+    /// ⌘D and ⌘⇧D only fire with a terminal focused, and that's the one to
+    /// split. There's no dock to open first when it lives in a panel.
+    fn split_terminal(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = self.focused_terminal(window, cx) else {
+            return;
+        };
         panel.update(cx, |panel, cx| {
             panel.split_active(axis, cx);
             panel.request_focus(cx);
@@ -5151,10 +5158,9 @@ impl Shell {
     }
 
     fn close_terminal_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.terminal_open(cx) {
+        let Some(panel) = self.focused_terminal(window, cx) else {
             return;
-        }
-        let panel = self.terminal_panel(cx);
+        };
         panel.update(cx, |panel, cx| panel.close_focused_split(window, cx));
         cx.notify();
     }
@@ -13659,7 +13665,9 @@ impl Render for Shell {
                 cx.listener(|this, _: &EqualizeChatPanes, _, cx| this.equalize_chat_panes(cx)),
             )
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
-                if matches!(this.route, Route::Chat) {
+                if matches!(this.route, Route::Chat)
+                    && this.focus_workspace_composer_panel(window, cx)
+                {
                     window.focus(&this.composer.focus_handle(cx), cx);
                 }
             }))
@@ -13703,11 +13711,10 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
-                if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
-                    let file = match this.resolved_right_active(cx) {
-                        RightSurface::File(id) => this.file_surfaces.get(&id).cloned(),
-                        _ => None,
-                    };
+                if matches!(this.route, Route::Chat) {
+                    let file = this
+                        .workspace_file_to_save(cx)
+                        .and_then(|id| this.file_surfaces.get(&id).cloned());
                     if let Some(file) = file {
                         file.update(cx, |file, cx| file.save_active_document(cx));
                     }
@@ -13732,14 +13739,7 @@ impl Render for Shell {
                 this.cycle_tab_or_session(false, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
-                if matches!(this.route, Route::Chat) {
-                    this.toggle_right_pane(cx);
-                    if !this.right_pane_open(cx) {
-                        // The hidden editor can retain a focus handle after unmounting.
-                        // Restore a mounted target so the next shortcut can reopen it.
-                        window.focus(&this.composer.focus_handle(cx), cx);
-                    }
-                }
+                this.toggle_workspace_tool(workspace_panels::WorkspaceTool::Changes, window, cx);
             }))
             // The explorer's own toggle (the titlebar tree button): docks or
             // undocks the explorer portion without touching the surface host.
@@ -13776,7 +13776,10 @@ impl Render for Shell {
                 this.toggle_command_palette(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenModelPicker, window, cx| {
-                if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard(cx) {
+                if matches!(this.route, Route::Chat)
+                    && !this.overlay_owns_keyboard(cx)
+                    && this.focus_workspace_composer_panel(window, cx)
+                {
                     let pickers = this.composer.read(cx).pickers().clone();
                     pickers.update(cx, |pickers, cx| pickers.open_model_menu(window, cx));
                 }
@@ -16220,7 +16223,11 @@ mod exit_regressions {
                     if embedded {
                         shell.add_terminal_surface(cx);
                     } else {
-                        assert!(shell.toggle_workspace_tool(true, window, cx));
+                        assert!(shell.toggle_workspace_tool(
+                            workspace_panels::WorkspaceTool::Terminal,
+                            window,
+                            cx
+                        ));
                     }
                     let layout = shell.panel_layout(cx).unwrap();
                     let tab = layout
@@ -16275,7 +16282,11 @@ mod exit_regressions {
             if !embedded {
                 window
                     .update(cx, |shell, window, cx| {
-                        assert!(shell.toggle_workspace_tool(true, window, cx));
+                        assert!(shell.toggle_workspace_tool(
+                            workspace_panels::WorkspaceTool::Terminal,
+                            window,
+                            cx
+                        ));
                         assert!(shell.composer.focus_handle(cx).is_focused(window));
                     })
                     .unwrap();

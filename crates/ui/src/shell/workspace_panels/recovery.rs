@@ -217,7 +217,17 @@ impl Shell {
             composer.purge_chat(chat_id, cx);
         });
         if self.state.read(cx).selected_chat.as_deref() == Some(chat_id) {
-            self.state.update(cx, |state, cx| state.select_chat(None, cx));
+            // Another chat in the same panel takes over, as when closing a tab.
+            let next = self.panel_layout(cx).and_then(|layout| {
+                match layout.panel(layout.focused)?.selected()? {
+                    PanelTab::Chat(id) => Some(id.clone()),
+                    _ => None,
+                }
+            });
+            if next.is_some() {
+                self.panel_layout_mut(cx).last_selected = Some(next.clone());
+            }
+            self.state.update(cx, |state, cx| state.select_chat(next, cx));
             self.chat_split_on_state_changed(cx);
         }
         self.workspace_panels.needs_persist = true;
@@ -277,7 +287,7 @@ impl Shell {
         retained
     }
 
-    fn open_chat_placement(&self, chat: &str) -> Option<(String, u64)> {
+    pub(in crate::shell) fn open_chat_placement(&self, chat: &str) -> Option<(String, u64)> {
         let tab = PanelTab::Chat(chat.to_owned());
         self.chat_tabs.iter().find_map(|session| {
             let key = if session.id.is_empty() {
@@ -301,15 +311,57 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.show_open_chat(chat, session, panel, window, cx);
+        self.unarchive_recovered_chat(chat, cx);
+        self.persist_chat_tabs(cx);
+    }
+
+    fn show_open_chat(
+        &mut self,
+        chat: &str,
+        session: &str,
+        panel: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !matches!(self.route, Route::Chat) {
             self.close_settings(cx);
         }
         self.activate_workspace_session(session, cx);
         self.panel_layout_mut(cx).expanded = None;
         self.focus_workspace_tab(panel, PanelTab::Chat(chat.into()), window, cx);
-        self.unarchive_recovered_chat(chat, cx);
         self.persist_chat_tabs(cx);
         window.activate_window();
+    }
+
+    /// A chat already open in another window, and not this one, is shown there
+    /// instead of opening a second copy. True when it was.
+    pub(crate) fn reveal_chat_in_other_window(
+        &mut self,
+        chat: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.open_chat_placement(chat).is_some() {
+            return false;
+        }
+        let current = window.window_handle().window_id();
+        let other = cx.windows().into_iter().find_map(|candidate| {
+            if candidate.window_id() == current {
+                return None;
+            }
+            let handle = candidate.downcast::<Shell>()?;
+            let (session, panel) = handle.read(cx).ok()?.open_chat_placement(chat)?;
+            Some((handle, session, panel))
+        });
+        let Some((handle, session, panel)) = other else {
+            return false;
+        };
+        handle
+            .update(cx, |shell, window, cx| {
+                shell.show_open_chat(chat, &session, panel, window, cx);
+            })
+            .is_ok()
     }
 
     fn unarchive_recovered_chat(&mut self, chat: &str, cx: &mut Context<Self>) {

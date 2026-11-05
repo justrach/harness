@@ -24,6 +24,8 @@ mod tab_insertion_fixture;
 #[cfg(test)]
 mod panel_render_cost_tests;
 #[cfg(test)]
+mod shortcut_parity_tests;
+#[cfg(test)]
 mod sidebar_chat_drop_tests;
 #[cfg(test)]
 mod window_transfer_tests;
@@ -218,6 +220,14 @@ impl WorkspacePanel {
             );
         projected
     }
+}
+
+/// What a shortcut shows or hides without closing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkspaceTool {
+    Terminal,
+    Files,
+    Changes,
 }
 
 #[derive(Clone, Debug)]
@@ -1374,7 +1384,7 @@ impl Shell {
     /// Hide tools without closing their underlying terminal or explorer.
     pub(super) fn toggle_workspace_tool(
         &mut self,
-        terminal: bool,
+        tool: WorkspaceTool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1383,20 +1393,24 @@ impl Shell {
         }
         self.park_workspace_draft(cx);
         self.sync_panel_workspace(cx);
-        let matches_tool = |tab: &PanelTab| {
-            if terminal {
-                matches!(
-                    tab,
-                    PanelTab::Terminal(_)
-                        | PanelTab::TerminalDock(_)
-                        | PanelTab::Surface {
-                            surface: RightSurface::Terminal(_),
-                            ..
-                        }
-                )
-            } else {
-                matches!(tab, PanelTab::FileTree(_) | PanelTab::Files(_))
-            }
+        let matches_tool = |tab: &PanelTab| match tool {
+            WorkspaceTool::Terminal => matches!(
+                tab,
+                PanelTab::Terminal(_)
+                    | PanelTab::TerminalDock(_)
+                    | PanelTab::Surface {
+                        surface: RightSurface::Terminal(_),
+                        ..
+                    }
+            ),
+            WorkspaceTool::Files => matches!(tab, PanelTab::FileTree(_) | PanelTab::Files(_)),
+            WorkspaceTool::Changes => matches!(
+                tab,
+                PanelTab::Surface {
+                    surface: RightSurface::Diff(_),
+                    ..
+                }
+            ),
         };
         let layout = self.panel_layout_mut(cx);
         let visible = layout
@@ -1469,10 +1483,21 @@ impl Shell {
             layout.expanded = None;
             self.focus_workspace_tab(id, tab, window, cx);
         } else {
-            if terminal {
-                self.open_workspace_terminal(cx);
-            } else {
-                self.open_workspace_files(window, cx);
+            match tool {
+                WorkspaceTool::Terminal => self.open_workspace_terminal(cx),
+                WorkspaceTool::Files => self.open_workspace_files(window, cx),
+                // Changes open beside the chat, which keeps the keyboard.
+                WorkspaceTool::Changes => {
+                    if self.active_chat.is_empty() {
+                        return false;
+                    }
+                    let focused = self.panel_layout_mut(cx).focused;
+                    self.add_diff_surface(cx);
+                    self.sync_panel_workspace(cx);
+                    self.panel_layout_mut(cx).focused = focused;
+                    cx.notify();
+                    return true;
+                }
             }
             let layout = self.panel_layout_mut(cx);
             let id = layout.focused;
@@ -1857,6 +1882,68 @@ impl Shell {
             self.panel_layout_mut(cx).focused = id;
             cx.notify();
         }
+    }
+
+    /// The composer lives in the panel showing the selected chat or draft. A
+    /// shortcut meant for it, pressed from a terminal or file beside it, moves
+    /// there first. False when no panel on screen has a composer to go to.
+    pub(super) fn focus_workspace_composer_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(layout) = self.panel_layout(cx) else {
+            return true;
+        };
+        let has_composer =
+            |tab: Option<&PanelTab>| matches!(tab, Some(PanelTab::Chat(_) | PanelTab::Draft(_)));
+        if layout
+            .panel(layout.focused)
+            .is_some_and(|panel| has_composer(panel.selected()))
+        {
+            return true;
+        }
+        let selected = self
+            .state
+            .read(cx)
+            .selected_chat
+            .clone()
+            .map(PanelTab::Chat);
+        let visible = || {
+            layout
+                .panels
+                .iter()
+                .filter(|panel| layout.expanded.is_none_or(|id| id == panel.id))
+        };
+        let target = visible()
+            .find(|panel| selected.is_some() && panel.selected() == selected.as_ref())
+            .or_else(|| visible().find(|panel| has_composer(panel.selected())))
+            .map(|panel| (panel.id, panel.selected().cloned()));
+        let Some((panel, Some(tab))) = target else {
+            return false;
+        };
+        self.focus_workspace_tab(panel, tab, window, cx);
+        true
+    }
+
+    /// The file ⌘S saves: the one in the focused panel, else the first file on
+    /// screen, so a save from the composer beside an editor still lands.
+    pub(super) fn workspace_file_to_save(&self, cx: &App) -> Option<u64> {
+        let layout = self.panel_layout(cx)?;
+        let file_in = |panel: &WorkspacePanel| match panel.selected() {
+            Some(PanelTab::Surface {
+                surface: RightSurface::File(id),
+                ..
+            }) => Some(*id),
+            _ => None,
+        };
+        layout.panel(layout.focused).and_then(file_in).or_else(|| {
+            layout
+                .panels
+                .iter()
+                .filter(|panel| layout.expanded.is_none_or(|id| id == panel.id))
+                .find_map(file_in)
+        })
     }
 
     pub(super) fn workspace_zoom(&mut self, cx: &mut Context<Self>) {
@@ -2381,7 +2468,11 @@ impl Shell {
                 self.workspace_panels.terminals.remove(&id),
                 self.workspace_panels.terminal_keys.remove(&id),
             ) {
-                t.update(cx, |t, cx| t.close_tab_by_key(key, window, cx));
+                t.update(cx, |t, cx| {
+                    t.close_tab_by_key(key, window, cx);
+                    // ⌘D adds a second terminal to this tab, which goes with it.
+                    t.close_all_tabs(window, cx);
+                });
             }
         }
         if let PanelTab::FileTree(id) = &tab {

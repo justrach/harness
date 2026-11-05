@@ -2379,6 +2379,18 @@ fn reply_places_images(rows: &[Row]) -> bool {
     })
 }
 
+/// Paths of the files attached to the person's messages in `rows`.
+fn sent_attachment_paths(rows: &[Row]) -> HashSet<String> {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::User { attachments, .. } => Some(attachments.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|att| att.path.clone())
+        .collect()
+}
+
 /// Images the agent opened with a read tool, shown under its reply so the
 /// person sees what it looked at (a screenshot it is checking, say), unless
 /// the reply places images itself ([`reply_places_images`]). Only a
@@ -4159,6 +4171,10 @@ pub struct Transcript {
     gallery_thumbnails: gallery_thumbnails::GalleryThumbnails,
     #[cfg(target_os = "macos")]
     viewed_images: HashMap<SharedString, viewed_images::ViewedImageDisclosure>,
+    /// Paths of the files the person attached to their messages. An agent
+    /// reading one of them is looking at what the person sent, which already
+    /// shows on their message, so it isn't repeated under the reply.
+    sent_attachment_paths: HashSet<String>,
     #[cfg(target_os = "macos")]
     pending_viewed_image: Option<viewed_images::ViewedImagePreview>,
     #[cfg(target_os = "macos")]
@@ -4547,6 +4563,7 @@ impl Transcript {
             gallery_thumbnails: Default::default(),
             #[cfg(target_os = "macos")]
             viewed_images: HashMap::new(),
+            sent_attachment_paths: HashSet::new(),
             #[cfg(target_os = "macos")]
             pending_viewed_image: None,
             #[cfg(target_os = "macos")]
@@ -6218,6 +6235,7 @@ impl Transcript {
         match diff {
             None => {
                 self.rows = new_rows;
+                self.refresh_sent_attachment_paths();
                 self.refresh_protected_attachments(cx);
                 self.reconcile_own_turn_prompt();
                 // Replay readiness is independent of row content: an empty
@@ -6688,6 +6706,10 @@ impl Transcript {
     /// rebuilt on every row sync so a chat switch swaps the set. Without it,
     /// budget pressure evicted thumbnails still on screen (the list caches
     /// rendered rows, so a visible image's LRU tick goes stale).
+    fn refresh_sent_attachment_paths(&mut self) {
+        self.sent_attachment_paths = sent_attachment_paths(&self.rows);
+    }
+
     fn refresh_protected_attachments(&self, cx: &Context<Self>) {
         // The protected set is GLOBAL and replaced wholesale — an override
         // instance writing it would clobber the primary transcript's keys.
@@ -7705,6 +7727,9 @@ impl Transcript {
         viewed: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if viewed && self.sent_attachment_paths.contains(path) {
+            return div().into_any_element();
+        }
         #[cfg(target_os = "macos")]
         if viewed {
             return self.render_viewed_image(row_id, owner, path, name, mime_type, cx);
@@ -16591,6 +16616,81 @@ mod tests {
             let ids: HashSet<_> = rows.iter().map(|row| row.id.clone()).collect();
             assert_eq!(ids.len(), rows.len(), "row ids stay unique");
         }
+    }
+
+    #[gpui::test]
+    fn images_the_person_sent_are_not_repeated_under_the_reply(cx: &mut gpui::TestAppContext) {
+        let root = if cfg!(windows) { "C:/work" } else { "/work" };
+        let sent = format!("{root}/uploads/ab12-sent-by-person.png");
+        let shot = format!("{root}/shots/checked-by-agent.png");
+        let mut user = assistant("u1", MessageStatus::Complete, vec![]);
+        user.role = MessageRole::User;
+        user.status = None;
+        user.parts = vec![text_part(
+            "t0",
+            &crate::attachments::with_attachments("what is this?", std::slice::from_ref(&sent)),
+        )];
+        let reply = assistant(
+            "a1",
+            MessageStatus::Complete,
+            vec![
+                read_part("r1", &sent, false, true),
+                read_part("r2", &shot, false, true),
+                text_part("t1", "It's a dialog."),
+            ],
+        );
+        let rows: Vec<Row> = [user, reply]
+            .iter()
+            .flat_map(|entry| rows_for_entry(entry, false, false, &mut parse))
+            .collect();
+        assert_eq!(sent_attachment_paths(&rows), HashSet::from([sent.clone()]));
+
+        let dir = tempfile::tempdir().unwrap();
+        struct Rendered(Vec<(String, gpui::AnyElement)>);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.update(|cx| cx.new(|_| AppState::new()));
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |this, cx| {
+            this.rows = rows;
+            this.refresh_sent_attachment_paths();
+            let mut rendered = Rendered(Vec::new());
+            for row in this.rows.clone() {
+                if let RowKind::GeneratedImage {
+                    owner,
+                    path,
+                    name,
+                    mime_type,
+                    viewed,
+                } = &row.kind
+                {
+                    rendered.0.push((
+                        path.clone(),
+                        this.render_generated_image(
+                            &row.id, owner, path, name, mime_type, *viewed, cx,
+                        ),
+                    ));
+                }
+            }
+            // The agent's own screenshot is new to the person, so it stays.
+            assert_eq!(rendered.0.len(), 2);
+            assert!(this.sent_attachment_paths.contains(&sent));
+            assert!(!this.sent_attachment_paths.contains(&shot));
+            // Only the person's image is skipped: a viewed row registers its
+            // disclosure as it renders, and the skipped one never does.
+            #[cfg(target_os = "macos")]
+            {
+                let opened: Vec<_> = this
+                    .viewed_images
+                    .values()
+                    .map(|disclosure| disclosure.path().to_owned())
+                    .collect();
+                assert_eq!(opened, [shot.clone()]);
+            }
+        });
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";

@@ -1831,6 +1831,10 @@ mod tests {
                     }
                 })
                 .unwrap();
+            // Left open, the next round would find the chat in this window.
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
         }
     }
 

@@ -132,6 +132,17 @@ impl Shell {
         let mut active_id = None;
         let mut layouts = Vec::new();
         for (ix, saved) in self.settings.chat_tabs.iter().enumerate() {
+            // #342: ⌘T pressed during a freeze saved `{}` tabs, which must not
+            // come back as sessions nobody opened. A session the person made
+            // has an id, however empty it is.
+            if saved.id.is_empty()
+                && saved.project.is_none()
+                && saved.selected.is_none()
+                && saved.layout.is_none()
+                && saved.panel_layout.is_none()
+            {
+                continue;
+            }
             let project = saved.project.clone().or_else(|| saved.selected.as_deref()
                 .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
                 .and_then(|chat| chat.space_id.clone()));
@@ -164,7 +175,8 @@ impl Shell {
                 split,
                 draft: None,
             };
-            if ix == active {
+            // A dropped active tab hands over to the nearest kept one before it.
+            if ix <= active {
                 active_id = Some(tab.id.clone());
             }
             // Each saved workspace is its own view, even for the same project.
@@ -172,7 +184,7 @@ impl Shell {
             let mut tab = tab;
             if tabs.iter().any(|existing| existing.id == tab.id) {
                 tab.id = uuid::Uuid::new_v4().to_string();
-                if ix == active { active_id = Some(tab.id.clone()); }
+                if ix <= active { active_id = Some(tab.id.clone()); }
             }
             let panel_layout = saved.panel_layout.clone().or_else(|| {
                 tab.split.as_ref().map(|split| {

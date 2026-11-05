@@ -700,7 +700,7 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::BrowserReload => "Reload the focused browser tab.",
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
-        ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
+        ShortcutId::ToggleChanges => "Show or hide the changes panel for the current session.",
         ShortcutId::ToggleFiles => "Show or hide the files panel for the current session.",
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
         ShortcutId::SplitTerminal => {
@@ -724,7 +724,7 @@ fn description(id: ShortcutId) -> &'static str {
             "Close the focused pane or tab without archiving, regardless of the archive-on-close setting."
         }
         ShortcutId::ReopenClosedTab => {
-            "Reopen the most recently closed project tab where it was; press again for earlier projects."
+            "Reopen the most recently closed tab where it was; press again for earliers."
         }
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.

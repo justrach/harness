@@ -399,6 +399,9 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
     match frontmost_workspace_window(cx) {
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
+                if shell.reveal_chat_in_other_window(&chat_id, window, cx) {
+                    return;
+                }
                 window.activate_window();
                 shell.open_chat_preserving_tabs(chat_id, cx);
             });

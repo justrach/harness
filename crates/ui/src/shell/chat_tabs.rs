@@ -829,6 +829,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.reveal_chat_in_other_window(&chat_id, window, cx) {
+            return;
+        }
         let already_selected = self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str());
         self.park_workspace_draft(cx);
         self.open_chat_preserving_tabs(chat_id, cx);

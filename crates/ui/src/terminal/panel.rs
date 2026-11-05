@@ -841,6 +841,27 @@ impl TerminalPanel {
     }
 
     /// Close the selected chat's tab `key` (surface-tab ✕).
+    /// Close every terminal this panel holds for its chat.
+    pub fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chat = self.selected_chat(cx);
+        let keys: Vec<u64> = self
+            .chats
+            .get(&chat)
+            .map(|tabs| tabs.tabs.iter().map(|tab| tab.key).collect())
+            .unwrap_or_default();
+        for key in keys {
+            self.close_tab(&chat, key, window, cx);
+        }
+    }
+
+    /// Whether this panel's chat is showing two terminals side by side.
+    #[cfg(test)]
+    pub(crate) fn is_split(&self, cx: &App) -> bool {
+        self.chats
+            .get(&self.selected_chat(cx))
+            .is_some_and(|tabs| tabs.split.is_some())
+    }
+
     pub fn close_tab_by_key(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
         let chat = self.selected_chat(cx);
         self.close_tab(&chat, key, window, cx);
