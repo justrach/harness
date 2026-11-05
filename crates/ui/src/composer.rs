@@ -8654,19 +8654,44 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let has_project = self.state.read(cx).selected_space_row().is_some();
+        let name = self
+            .state
+            .read(cx)
+            .auth_user()
+            .and_then(|user| user.name.clone());
         div()
             .id("new-conversation-suggestions")
             .debug_selector(|| "new-conversation-suggestions".into())
             .flex()
-            .flex_row()
-            .flex_wrap()
-            .justify_center()
-            .gap(px(6.0))
-            .children(crate::starters::available(has_project).map(|starter| {
-                crate::starters::chip(starter, theme)
-                    .debug_selector(move || format!("starter-{}", starter.id))
-                    .on_click(cx.listener(move |this, _, _, cx| this.apply_starter(starter, cx)))
-            }))
+            .flex_col()
+            .items_center()
+            .gap(px(14.0))
+            .child(
+                div()
+                    .debug_selector(|| "new-conversation-greeting".into())
+                    .max_w_full()
+                    .text_size(crate::typography::ui_rems(22.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(SharedString::from(crate::starters::greeting(
+                        name.as_deref(),
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .justify_center()
+                    .gap(px(6.0))
+                    .children(crate::starters::available(has_project).map(|starter| {
+                        crate::starters::chip(starter, theme)
+                            .debug_selector(move || format!("starter-{}", starter.id))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.apply_starter(starter, cx)),
+                            )
+                    })),
+            )
             .into_any_element()
     }
 

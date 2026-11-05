@@ -9065,6 +9065,7 @@ impl Shell {
             .when_some(self.render_cloud_sandbox_strip(theme, cx), |el, strip| {
                 el.child(strip)
             })
+            .when_some(self.render_sidebar_update_row(theme, cx), |el, row| el.child(row))
             .child(self.render_session_sidebar_footer(user_menu, theme, cx))
             .when_some(session_menu, |el, menu| el.child(menu))
             .into_any_element()

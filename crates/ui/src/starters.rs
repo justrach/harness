@@ -151,9 +151,34 @@ pub(crate) fn card(
         )
 }
 
+/// The home greeting above the composer: "Hi Rach. What should Graff do?",
+/// or without a name just the question.
+pub(crate) fn greeting(name: Option<&str>) -> String {
+    let first = name
+        .map(str::trim)
+        .and_then(|name| name.split_whitespace().next())
+        .filter(|first| !first.contains('@'));
+    match first {
+        Some(first) => format!("Hi {first}. What should Graff do?"),
+        None => "What should Graff do?".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn greeting_uses_the_first_name_only() {
+        assert_eq!(
+            greeting(Some("Rach Pradhan")),
+            "Hi Rach. What should Graff do?"
+        );
+        assert_eq!(greeting(Some("  Ada ")), "Hi Ada. What should Graff do?");
+        assert_eq!(greeting(Some("a@b.com")), "What should Graff do?");
+        assert_eq!(greeting(Some("   ")), "What should Graff do?");
+        assert_eq!(greeting(None), "What should Graff do?");
+    }
 
     #[test]
     fn project_starters_hide_without_a_project() {

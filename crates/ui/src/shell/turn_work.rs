@@ -5,14 +5,50 @@ use super::*;
 use harness_doc::{MessagePart, MessageRole, SessionMessageEntry};
 use harness_proto::ToolCall;
 
-fn recorded_edit_paths(entries: &[SessionMessageEntry]) -> Vec<String> {
+/// What the latest turn reports editing. A cue, as above: it says nothing of
+/// edits made outside the agent's tools.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RecordedEdits {
+    /// Edited paths in first-touch order, each once.
+    paths: Vec<String>,
+    additions: u64,
+    deletions: u64,
+}
+
+impl RecordedEdits {
+    /// "1 file changed" / "3 files changed".
+    fn title(&self) -> String {
+        match self.paths.len() {
+            1 => "1 file changed".to_string(),
+            count => format!("{count} files changed"),
+        }
+    }
+
+    /// Up to three file names (not full paths), then "+N more".
+    fn names(&self) -> String {
+        let mut names: Vec<&str> = self
+            .paths
+            .iter()
+            .take(3)
+            .map(|path| path.rsplit('/').next().unwrap_or(path))
+            .collect();
+        let more = self.paths.len().saturating_sub(3);
+        let more_label = format!("+{more} more");
+        if more > 0 {
+            names.push(&more_label);
+        }
+        names.join(", ")
+    }
+}
+
+fn recorded_edits(entries: &[SessionMessageEntry]) -> RecordedEdits {
+    let mut edits = RecordedEdits::default();
     let Some(start) = entries
         .iter()
         .rposition(|entry| entry.role == MessageRole::User)
     else {
-        return Vec::new();
+        return edits;
     };
-    let mut paths = Vec::new();
     for part in entries[start + 1..].iter().flat_map(|entry| &entry.parts) {
         let MessagePart::Tool {
             call,
@@ -32,25 +68,31 @@ fn recorded_edit_paths(entries: &[SessionMessageEntry]) -> Vec<String> {
             ToolCall::ApplyPatch { path } => path.clone(),
             _ => continue,
         };
-        let mut recorded: Vec<String> = diff_stats
-            .as_ref()
-            .map(|stats| stats.iter().map(|stat| stat.path.clone()).collect())
-            .unwrap_or_default();
-        if recorded.is_empty() {
-            if let Some(diff) = diff {
-                recorded.push(harness_doc::diff_stat(diff).path);
-            }
+        let mut stats = diff_stats.clone().unwrap_or_default();
+        if stats.is_empty()
+            && let Some(diff) = diff
+        {
+            stats.push(harness_doc::diff_stat(diff));
         }
+        let mut recorded: Vec<String> = stats.iter().map(|stat| stat.path.clone()).collect();
         if recorded.is_empty() {
             recorded.extend(path);
         }
+        for stat in &stats {
+            edits.additions = edits.additions.saturating_add(stat.additions);
+            edits.deletions = edits.deletions.saturating_add(stat.deletions);
+        }
         for path in recorded {
-            if !path.is_empty() && !paths.contains(&path) {
-                paths.push(path);
+            if !path.is_empty() && !edits.paths.contains(&path) {
+                edits.paths.push(path);
             }
         }
     }
-    paths
+    edits
+}
+
+fn recorded_edit_paths(entries: &[SessionMessageEntry]) -> Vec<String> {
+    recorded_edits(entries).paths
 }
 
 impl Shell {
@@ -65,16 +107,11 @@ impl Shell {
         {
             return None;
         }
-        let count = recorded_edit_paths(&state.transcript).len();
-        if count == 0 {
+        let edits = recorded_edits(&state.transcript);
+        if edits.paths.is_empty() {
             return None;
         }
         let theme = Theme::of(cx);
-        let detail = if count == 1 {
-            "Edits reported in 1 file · Opens all uncommitted changes".to_string()
-        } else {
-            format!("Edits reported in {count} files · Opens all uncommitted changes")
-        };
         Some(
             div()
                 .id("turn-changes-review")
@@ -111,18 +148,41 @@ impl Shell {
                         .gap(px(2.0))
                         .child(
                             div()
+                                .debug_selector(|| "turn-changes-title".to_owned())
                                 .text_size(px(13.0))
                                 .text_color(theme.text)
-                                .child("Review changes"),
+                                .child(edits.title()),
                         )
                         .child(
                             div()
+                                .debug_selector(|| "turn-changes-names".to_owned())
                                 .truncate()
                                 .text_size(px(11.0))
                                 .text_color(theme.text_muted)
-                                .child(detail),
+                                .child(edits.names()),
                         ),
                 )
+                .when(edits.additions > 0 || edits.deletions > 0, |card| {
+                    card.child(
+                        div()
+                            .debug_selector(|| "turn-changes-counts".to_owned())
+                            .flex_none()
+                            .flex()
+                            .gap(px(6.0))
+                            .font_family(theme.font_mono.clone())
+                            .text_size(px(12.0))
+                            .child(
+                                div()
+                                    .text_color(theme.success)
+                                    .child(format!("+{}", edits.additions)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme.danger)
+                                    .child(format!("-{}", edits.deletions)),
+                            ),
+                    )
+                })
                 .child(
                     icon(icons::ALT_ARROW_RIGHT)
                         .size(px(16.0))
@@ -593,5 +653,38 @@ mod tests {
                 assert!(!state.chats[0].archived);
             })
             .unwrap();
+    }
+
+    #[test]
+    fn the_card_names_three_files_then_counts_the_rest() {
+        let edits = |paths: &[&str]| RecordedEdits {
+            paths: paths.iter().map(|path| (*path).to_string()).collect(),
+            ..Default::default()
+        };
+        assert_eq!(edits(&["src/a.rs"]).title(), "1 file changed");
+        assert_eq!(edits(&["src/a.rs"]).names(), "a.rs");
+        let many = edits(&["src/a.rs", "b.rs", "x/y/c.rs", "d.rs", "e.rs"]);
+        assert_eq!(many.title(), "5 files changed");
+        assert_eq!(many.names(), "a.rs, b.rs, c.rs, +2 more");
+    }
+
+    #[test]
+    fn the_card_adds_up_line_counts_without_overflowing() {
+        let counted = |additions: u64, deletions: u64| {
+            let mut part = tool("a.rs", true, false);
+            if let MessagePart::Tool { diff_stats, .. } = &mut part {
+                *diff_stats = Some(vec![harness_doc::ToolDiffStat {
+                    path: "a.rs".into(),
+                    additions,
+                    deletions,
+                }]);
+            }
+            part
+        };
+        let user = entry("user", vec![]);
+        let reply = entry("assistant", vec![counted(u64::MAX, 2), counted(5, 3)]);
+        let edits = recorded_edits(&[user, reply]);
+        assert_eq!(edits.paths, ["a.rs"]);
+        assert_eq!((edits.additions, edits.deletions), (u64::MAX, 5));
     }
 }

@@ -1337,8 +1337,8 @@ impl Shell {
             .child(self.render_session_switcher(theme, cx))
             .when_some(search_controls, |sidebar, controls| sidebar.child(controls))
             .child(div().flex_1().min_h_0().child(scroll))
-            .when(cfg!(target_os = "macos"), |el| {
-                el.when_some(self.render_cloud_sandbox_strip(theme, cx), |el, card| el.child(card))
+            .when_some(self.render_cloud_sandbox_strip(theme, cx), |el, card| {
+                el.child(card)
             })
             .when_some(self.render_connection_pill(theme, cx), |el, pill| {
                 el.child(pill)

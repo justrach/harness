@@ -131,6 +131,40 @@ pub(super) fn update_control_label(control: &UpdateControl, version: &str) -> St
     }
 }
 
+/// Where "Restart to update" shows for a staged update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RestartPlace {
+    /// A row in the sidebar's footer, above the account.
+    SidebarRow,
+    /// The titlebar control, while the sidebar is collapsed.
+    Titlebar,
+}
+
+/// A staged update always offers a way to restart into it, even when it's set to restart on its
+/// own: that restart waits for a quiet moment (no agent working, nothing unsent), which may not
+/// come while agents run all day. It's a line in the sidebar's footer, or the titlebar control
+/// while the sidebar is collapsed. Dismissed, it stays hidden for that version, which still
+/// installs when Harness next restarts. Pure.
+pub(super) fn restart_place(
+    flow: &UpdateFlow,
+    desktop_update: bool,
+    sidebar_open: bool,
+    dismissed: Option<&str>,
+) -> Option<(RestartPlace, String)> {
+    let UpdateFlow::Ready(staged) = flow else {
+        return None;
+    };
+    if !desktop_update || dismissed == Some(staged.version.as_str()) {
+        return None;
+    }
+    let place = if sidebar_open {
+        RestartPlace::SidebarRow
+    } else {
+        RestartPlace::Titlebar
+    };
+    Some((place, staged.version.clone()))
+}
+
 // ---------------------------------------------------------------------------
 // The automatic restart
 // ---------------------------------------------------------------------------
@@ -301,6 +335,8 @@ impl gpui::Global for SharedAppUpdate {}
 
 /// The shell's app-update UI state beyond the download flow itself.
 pub(super) struct AppUpdateUi {
+    /// The version whose "Restart to update" row was dismissed with its ×.
+    pub restart_dismissed: Option<String>,
     entity_id: Option<gpui::EntityId>,
     /// Render an inert ready-update button for manual layout testing in a
     /// debug build. This never stages an update or starts a restart watcher.
@@ -324,6 +360,7 @@ pub(super) struct AppUpdateUi {
 impl AppUpdateUi {
     pub(super) fn new() -> Self {
         Self {
+            restart_dismissed: None,
             entity_id: None,
             dev_preview: cfg!(debug_assertions)
                 && std::env::var("HARNESS_DEV_APP_UPDATE").as_deref() == Ok("1"),
@@ -450,6 +487,129 @@ impl Shell {
         }
     }
 
+    /// The sidebar with a footer to hold the row. Settings' sidebar is its own
+    /// menu, and the task view has no room beside its session list.
+    fn restart_row_fits(&self) -> bool {
+        !self.settings.sidebar_collapsed
+            && !self.settings.sidebar_task_view
+            && matches!(self.route, Route::Chat)
+    }
+
+    pub(super) fn restart_place_now(&self) -> Option<(RestartPlace, String)> {
+        // While the heads-up counts down, its card is the control.
+        if self.app_update.countdown_started.is_some() {
+            return None;
+        }
+        restart_place(
+            &self.update_flow,
+            self.install.supports_desktop_update(),
+            self.restart_row_fits(),
+            self.app_update.restart_dismissed.as_deref(),
+        )
+    }
+
+    /// "Restart to update" in the sidebar's footer, while an update is staged and the sidebar is
+    /// open. Clicking it restarts into the update; the × hides it for this version.
+    pub(super) fn render_sidebar_update_row(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (RestartPlace::SidebarRow, version) = self.restart_place_now()? else {
+            return None;
+        };
+        let label: SharedString =
+            format!("Harness v{version} is ready. Click to restart into it.").into();
+        let dismiss_version = version.clone();
+        let fade_key = "sidebar-update-row";
+        Some(
+            div()
+                .id("sidebar-update-row")
+                .debug_selector(|| "sidebar-update-row".into())
+                .mx(px(Theme::SPACE_SM))
+                .mt(px(4.0))
+                .pl(px(Theme::SPACE_SM))
+                .pr(px(4.0))
+                .py(px(4.0))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .bg(motion::hover_blend(
+                    fade_key,
+                    theme.accent_wash,
+                    theme.accent.opacity(0.18),
+                ))
+                .on_hover(motion::hover_listener(fade_key))
+                .border_1()
+                .border_color(theme.accent.opacity(0.3))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .text_size(crate::typography::ui_rems(11.0))
+                .child(
+                    div()
+                        .id("sidebar-update-restart")
+                        .debug_selector(|| "sidebar-update-restart".into())
+                        .role(gpui::Role::Button)
+                        .aria_label(label.clone())
+                        .tooltip(crate::settings::widgets::text_tooltip(label))
+                        .tooltip_show_delay(std::time::Duration::from_millis(350))
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.on_update_control_click(cx);
+                        }))
+                        .child(
+                            icon(icons::REFRESH)
+                                .size(px(13.0))
+                                .flex_none()
+                                .text_color(theme.accent),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child("Restart to update"),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("sidebar-update-dismiss")
+                        .debug_selector(|| "sidebar-update-dismiss".into())
+                        .role(gpui::Role::Button)
+                        .aria_label("Not now: it installs the next time Harness restarts")
+                        .tooltip(crate::settings::widgets::text_tooltip(
+                            "Not now: it installs the next time Harness restarts",
+                        ))
+                        .size(px(18.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.app_update.restart_dismissed = Some(dismiss_version.clone());
+                            cx.notify();
+                        }))
+                        .child(
+                            icon(icons::CLOSE)
+                                .size(px(10.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn update_control_now(&self, cx: &App) -> Option<(UpdateControl, String)> {
         if self.app_update.dev_preview {
             return Some((UpdateControl::Ready { on_quit: false }, "preview".into()));
@@ -478,6 +638,16 @@ impl Shell {
             && self.install.supports_desktop_update()
         {
             if self.app_update.countdown_started.is_some() {
+                return None;
+            }
+            // The sidebar row offers it, or it was dismissed for this version.
+            let place = restart_place(
+                flow,
+                true,
+                self.restart_row_fits(),
+                self.app_update.restart_dismissed.as_deref(),
+            );
+            if !matches!(place, Some((RestartPlace::Titlebar, _))) {
                 return None;
             }
             return Some(control.unwrap_or_else(|| {
@@ -1738,5 +1908,27 @@ mod tests {
         // The swap failed and the old version came back: say nothing.
         assert_eq!(updated_confirmation(Some(&marker), "0.2.134"), None);
         assert_eq!(updated_confirmation(None, "0.2.135"), None);
+    }
+
+    #[test]
+    fn restart_to_update_shows_only_for_a_staged_update_not_dismissed() {
+        for flow in [
+            UpdateFlow::Idle,
+            UpdateFlow::Downloading,
+            UpdateFlow::Failed("offline".into()),
+        ] {
+            assert_eq!(restart_place(&flow, true, true, None), None);
+        }
+        // No in-app updates for this install (a package manager owns it).
+        assert_eq!(restart_place(&ready("0.2.135"), false, true, None), None);
+        // Dismissed for this version; the next version shows again.
+        assert_eq!(
+            restart_place(&ready("0.2.135"), true, true, Some("0.2.135")),
+            None
+        );
+        assert_eq!(
+            restart_place(&ready("0.2.136"), true, true, Some("0.2.135")),
+            Some((RestartPlace::SidebarRow, "0.2.136".into()))
+        );
     }
 }

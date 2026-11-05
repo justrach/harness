@@ -293,15 +293,24 @@ pub fn claude_agent_twin<'a>(id: &str, models: &'a [Model]) -> Option<&'a Model>
         .find(|model| model.id.strip_prefix("claude-agent/") == Some(name))
 }
 
-/// Start a new graff chat on the remembered provider/model identity. A newly
-/// available twin on another account must not silently change the billed route.
+/// The model a NEW graff chat starts on, from the remembered pick (or, with
+/// none, the list's default): an `anthropic/<name>` pick moves to
+/// `claude-agent/<name>` when the list offers it, unless Anthropic was picked
+/// while Claude Agent was already listed. Other harnesses and ids keep theirs.
 pub fn new_chat_graff_model<'a>(
     remembered: Option<&'a RememberedModel>,
     models: &'a [Model],
 ) -> Option<&'a str> {
-    remembered
-        .map(|pick| pick.id.as_str())
-        .or_else(|| default_model(models).map(|m| m.id.as_str()))
+    let base = match remembered {
+        Some(pick) if pick.chose_over_claude_agent => return Some(pick.id.as_str()),
+        Some(pick) => pick.id.as_str(),
+        None => default_model(models)?.id.as_str(),
+    };
+    Some(
+        claude_agent_twin(base, models)
+            .map(|twin| twin.id.as_str())
+            .unwrap_or(base),
+    )
 }
 
 /// Normalize only deliberate route changes. Older mobile clients interpret
@@ -7380,7 +7389,7 @@ mod tests {
     }
 
     #[test]
-    fn new_graff_chat_preserves_remembered_provider_when_a_twin_appears() {
+    fn a_new_graff_chat_moves_an_old_anthropic_pick_to_claude_agent() {
         let anthropic_only = vec![
             bare_model("anthropic/claude-opus-5-5", "claude-opus-5-5"),
             bare_model("openai/gpt-6-sol", "gpt-6-sol"),
@@ -7410,10 +7419,10 @@ mod tests {
             new_chat_graff_model(Some(&old), &anthropic_only),
             Some("anthropic/claude-opus-5-5")
         );
-        // A newly listed route never changes an existing remembered pick.
+        // Listed: a pick from before moves over.
         assert_eq!(
             new_chat_graff_model(Some(&old), &both),
-            Some("anthropic/claude-opus-5-5")
+            Some("claude-agent/claude-opus-5-5")
         );
         // Anthropic chosen while Claude Agent was listed: kept.
         assert_eq!(
@@ -7425,18 +7434,16 @@ mod tests {
             new_chat_graff_model(Some(&pick("openai/gpt-6-sol", false)), &both),
             Some("openai/gpt-6-sol")
         );
-        // Nothing remembered: honor the catalog default exactly.
+        // Nothing remembered: graff's default row, moved the same way.
         assert_eq!(
             new_chat_graff_model(None, &both),
-            Some("anthropic/claude-opus-5-5")
+            Some("claude-agent/claude-opus-5-5")
         );
         assert_eq!(new_chat_graff_model(None, &[]), None);
     }
 
     #[gpui::test]
-    fn refreshed_provider_catalog_preserves_new_and_existing_chat_routes(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn claude_agent_swap_is_for_new_graff_chats_only(cx: &mut gpui::TestAppContext) {
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.chats.push(
@@ -7467,14 +7474,14 @@ mod tests {
                 pickers.resolved(cx).model.as_deref(),
                 Some("anthropic/claude-opus-5-5")
             );
-            // A newly available Claude Agent route leaves the remembered route intact.
+            // graff's list now offers Claude Agent: a new chat takes it.
             pickers.models.insert(
                 HarnessId::Graff,
                 Loadable::Ready(vec![anthropic(), agent()]),
             );
             assert_eq!(
                 pickers.resolved(cx).model.as_deref(),
-                Some("anthropic/claude-opus-5-5")
+                Some("claude-agent/claude-opus-5-5")
             );
             // An explicit Anthropic pick is honored and remembered as chosen.
             pickers.pick_model("anthropic/claude-opus-5-5".into(), cx);

@@ -1302,7 +1302,13 @@ pub(crate) fn lightbox_with_size(
                         }
                     })
                     .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                    .child(div().w(max_w).h(max_h).child(content))
+                    .child(
+                        div()
+                            .debug_selector(|| "attachment-lightbox-frame".into())
+                            .w(max_w)
+                            .h(max_h)
+                            .child(content),
+                    )
                     .child(
                         div()
                             .max_w(max_w)
