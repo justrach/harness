@@ -110,6 +110,26 @@ pub const INPUT_LINE_HEIGHT: f32 = 22.75;
 pub const INPUT_TEXT_SIZE: f32 = 14.0;
 /// A compact ramp; the glyph-ascent inset keeps the clip edge invisible.
 const INPUT_FADE_BAND: f32 = 12.0;
+/// What to add to `draft` to quote `selection` as Markdown, with a blank line
+/// on each side so the reply that follows is its own paragraph.
+fn quoted_reply(draft: &str, selection: &str) -> String {
+    let separator = match draft {
+        "" => "",
+        _ if draft.ends_with("\n\n") => "",
+        _ if draft.ends_with('\n') => "\n",
+        _ => "\n\n",
+    };
+    let quote: Vec<String> = selection
+        .trim_matches('\n')
+        .lines()
+        .map(|line| match line.trim_end() {
+            "" => ">".to_owned(),
+            line => format!("> {line}"),
+        })
+        .collect();
+    format!("{separator}{}\n\n", quote.join("\n"))
+}
+
 /// Single-select questions auto-advance after this long.
 pub const AUTO_ADVANCE_MS: u64 = 220;
 /// Drag-selection autoscroll runs at the display-friendly 60fps cadence.
@@ -8569,6 +8589,25 @@ impl Composer {
         cx.notify();
     }
 
+    /// Quote text selected in the transcript at the end of the draft, keeping
+    /// what's already typed, and put the caret after it. Nothing is sent.
+    pub(crate) fn reply_with_quote(&mut self, selection: &str, cx: &mut Context<Self>) {
+        // The box belongs to the question's answer until that's dealt with.
+        if self.wizard_active() {
+            self.failure = Some("Answer the question first, then reply to the selection.".into());
+            cx.notify();
+            return;
+        }
+        self.input.update(cx, |input, cx| {
+            let end = input.content.len();
+            let quote = quoted_reply(&input.content, selection);
+            input.replace_range(end..end, &quote, cx);
+        });
+        self.on_input_edited(cx);
+        self.focus_pending = true;
+        cx.notify();
+    }
+
     /// A failed turn's Edit & retry: its prompt returns to the box as an
     /// unedited recall of the latest prompt (nothing is sent), so Down brings
     /// back whatever draft it displaced.
@@ -12945,6 +12984,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_quoted_reply_keeps_the_draft_and_quotes_every_line() {
+        // See `a_reply_waits_for_an_open_question` for the composer around it.
+        assert_eq!(quoted_reply("", "one line"), "> one line\n\n");
+        assert_eq!(quoted_reply("hi", "a\nb"), "\n\n> a\n> b\n\n");
+        assert_eq!(quoted_reply("hi\n", "a"), "\n> a\n\n");
+        assert_eq!(quoted_reply("hi\n\n", "a"), "> a\n\n");
+        // A blank line stays inside the quote, and edges don't add empty ones.
+        assert_eq!(quoted_reply("", "\na  \n\nb\n"), "> a\n>\n> b\n\n");
+    }
+
+    #[test]
     fn agent_questions_render_their_markdown_not_its_markup() {
         use crate::markdown::{Block, InlineRun};
         let tree = question_markdown(
@@ -15972,6 +16022,31 @@ mod tests {
                 case["name"]
             );
         }
+    }
+
+    #[gpui::test]
+    fn a_reply_waits_for_an_open_question(cx: &mut gpui::TestAppContext) {
+        let (_dir, handle) = composer_focus_window(cx);
+        handle
+            .update(cx, |composer, _, cx| {
+                let questions = vec![question("custom", &["Yes", "No"], false)];
+                switch_question_draft_chat(composer, "c", Some(("ask", questions)), cx);
+                assert!(composer.wizard_active());
+                composer.reply_with_quote("selected", cx);
+                assert!(
+                    composer.input.read(cx).is_empty(),
+                    "not typed as the answer"
+                );
+                assert!(composer.failure.is_some(), "and it says why");
+
+                switch_question_draft_chat(composer, "d", None, cx);
+                composer.failure = None;
+                assert!(!composer.wizard_active());
+                composer.reply_with_quote("selected", cx);
+                assert_eq!(composer.input.read(cx).text(), "> selected\n\n");
+                assert!(composer.focus_pending, "ready to type the reply");
+            })
+            .unwrap();
     }
 
     /// #149: Stop takes the answered question panel's place on a live run, so

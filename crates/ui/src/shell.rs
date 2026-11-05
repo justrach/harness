@@ -4397,6 +4397,13 @@ impl Shell {
                 self.composer
                     .update(cx, |composer, cx| composer.prefill(prompt, cx));
             }
+            TranscriptEvent::ReplyToSelection { chat_id, text } => {
+                // As with a retried prompt: only the chat that owns the composer.
+                if self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str()) {
+                    self.composer
+                        .update(cx, |composer, cx| composer.reply_with_quote(text, cx));
+                }
+            }
             TranscriptEvent::RetryPrompt { chat_id, entry_id } => {
                 // Only the chat that owns the composer takes its prompt back;
                 // a click that raced a chat switch restores nothing.

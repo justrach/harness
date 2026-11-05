@@ -169,6 +169,46 @@ fn pane_cycle_shortcuts_move_between_panels_and_wrap(cx: &mut gpui::TestAppConte
         .unwrap();
 }
 
+#[gpui::test]
+fn a_reply_to_a_selection_joins_the_open_chats_draft_and_sends_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_dir, window) = navigation_tests::fixture(cx, false, None);
+    window
+        .update(cx, |shell, _, cx| {
+            shell
+                .composer
+                .update(cx, |composer, cx| composer.prefill("half-typed".into(), cx));
+            let transcript = shell.transcript.clone();
+            shell.on_transcript_event(
+                transcript.clone(),
+                &TranscriptEvent::ReplyToSelection {
+                    chat_id: "peer".into(),
+                    text: "from another chat".into(),
+                },
+                cx,
+            );
+            assert_eq!(shell.composer.read(cx).input.read(cx).text(), "half-typed");
+            shell.on_transcript_event(
+                transcript,
+                &TranscriptEvent::ReplyToSelection {
+                    chat_id: "current".into(),
+                    text: "two\nlines".into(),
+                },
+                cx,
+            );
+            assert_eq!(
+                shell.composer.read(cx).input.read(cx).text(),
+                "half-typed\n\n> two\n> lines\n\n"
+            );
+            assert!(
+                shell.state.read(cx).transcript.is_empty(),
+                "nothing was sent"
+            );
+        })
+        .unwrap();
+}
+
 /// Two sessions in project A and one in project B, each showing one chat.
 fn seed_sessions(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.boot_restored = true;

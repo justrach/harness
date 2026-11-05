@@ -4065,6 +4065,8 @@ pub struct Transcript {
     compact_fold_settle: Option<Task<()>>,
     highlights: HighlightStore,
     show_jump_button: bool,
+    /// The Reply button offered where a selection ended.
+    selection_reply: Option<SelectionReply>,
     /// Distance from the bottom at the last observation (wheel event or spring
     /// tick) — restick and escape are direction-aware
     /// (see [`Transcript::should_restick`]).
@@ -4203,6 +4205,8 @@ enum BlobFetch {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    /// The Reply button on selected text: quote it in the composer, unsent.
+    ReplyToSelection { chat_id: String, text: String },
     /// Done in a transcript image's annotate mode (crate::annotate): stage
     /// the flattened copy, with its notes, in the composer.
     StageAnnotated(crate::annotate::Annotated),
@@ -4245,6 +4249,12 @@ pub enum TranscriptEvent {
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
+
+/// Selected text and where its drag ended, for the Reply button.
+struct SelectionReply {
+    position: Point<Pixels>,
+    text: String,
+}
 
 /// Opens a saved tool view for the chat whose transcript shows the chip.
 pub(crate) type ViewOpener =
@@ -4494,6 +4504,7 @@ impl Transcript {
             compact_fold_settle: None,
             highlights: HighlightStore::default(),
             show_jump_button: false,
+            selection_reply: None,
             last_scroll_distance: 0.0,
             pinned,
             own_turn: None,
@@ -4753,6 +4764,8 @@ impl Transcript {
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
+        // The button sits where the selection ended, which is moving away.
+        self.dismiss_selection_reply(cx);
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
@@ -4882,22 +4895,128 @@ impl Transcript {
 
     fn on_selection_mouse_up(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let was_selecting = self.selection_drag_position.is_some();
         self.stop_selection_scroll();
-        if let Some(_text) = crate::markdown::selection::end_active_drag() {
-            // X11 middle-click paste parity, including the case where the
-            // anchor row has virtualized away and cannot receive mouse-up.
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            cx.write_to_primary(ClipboardItem::new_string(_text));
+        let ended = crate::markdown::selection::end_active_drag();
+        // X11 middle-click paste parity, including the case where the
+        // anchor row has virtualized away and cannot receive mouse-up.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(text) = &ended {
+            cx.write_to_primary(ClipboardItem::new_string(text.clone()));
+        }
+        // A press in another panel focuses it and swaps this view in, and the
+        // text's own listener may already have ended the drag, so being under
+        // the pointer has to count too.
+        if ended.is_some() || was_selecting || self.list.viewport_bounds().contains(&event.position)
+        {
+            self.offer_selection_reply(event.position, cx);
         }
         if was_selecting {
             self.refresh_jump_button(self.distance_from_bottom());
             cx.notify();
         }
+    }
+
+    /// The chat a reply from this transcript would go to: the one that owns
+    /// the composer. A subagent's doc or another panel's chat has no composer
+    /// of its own to quote into.
+    fn selection_reply_chat(&self, cx: &gpui::App) -> Option<String> {
+        let state = self.state.read(cx);
+        let selected = state.selected_chat.as_deref()?;
+        (self
+            .doc_override
+            .as_deref()
+            .is_none_or(|doc| doc == selected)
+            && state.chats.iter().any(|chat| chat.id == selected))
+        .then(|| selected.to_owned())
+    }
+
+    fn offer_selection_reply(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.selection_reply_chat(cx).is_none() {
+            return;
+        }
+        let Some(text) =
+            crate::markdown::selection::selected_text().filter(|text| !text.trim().is_empty())
+        else {
+            return;
+        };
+        self.selection_reply = Some(SelectionReply { position, text });
+        cx.notify();
+    }
+
+    fn dismiss_selection_reply(&mut self, cx: &mut Context<Self>) {
+        if self.selection_reply.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn send_selection_reply(&mut self, cx: &mut Context<Self>) {
+        let Some(reply) = self.selection_reply.take() else {
+            return;
+        };
+        if let Some(chat_id) = self.selection_reply_chat(cx) {
+            cx.emit(TranscriptEvent::ReplyToSelection {
+                chat_id,
+                text: reply.text,
+            });
+        }
+        // The quote is in the composer now, so the highlight has done its job.
+        if let Some(key) = crate::markdown::selection::anchor_key() {
+            crate::markdown::selection::clear_if_owner(&key);
+        }
+        cx.notify();
+    }
+
+    fn render_selection_reply(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let reply = self.selection_reply.as_ref()?;
+        // Anything that replaced or cleared the selection retires the button.
+        if crate::markdown::selection::selected_text().as_deref() != Some(reply.text.as_str()) {
+            return None;
+        }
+        let theme = Theme::of(cx).clone();
+        let button = div()
+            .id("transcript-reply-selection")
+            .debug_selector(|| "transcript-reply-selection".into())
+            .occlude()
+            .h(px(26.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .bg(theme.composer_bg())
+            .shadow(theme.composer_shadows())
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .hover(|el| el.bg(theme.element_hover))
+            .role(gpui::Role::Button)
+            .aria_label("Reply to the selected text")
+            // Keep the selection and the keyboard until the click lands.
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_selection_reply(cx)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.send_selection_reply(cx);
+            }))
+            .child("Reply");
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::BottomLeft)
+                    .position(reply.position - gpui::point(px(0.0), px(8.0)))
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(button),
+            )
+            .into_any_element(),
+        )
     }
 
     fn stop_selection_scroll(&mut self) {
@@ -11848,6 +11967,7 @@ impl Render for Transcript {
         } else {
             list_el.into_any_element()
         };
+        let selection_reply = self.render_selection_reply(cx);
         let root = div()
             .relative()
             .size_full()
@@ -11904,6 +12024,7 @@ impl Render for Transcript {
                 .absolute()
                 .size_0()
             })
+            .children(selection_reply)
             // LAST child: text painted after this is no longer this transcript's.
             .child(crate::markdown::render::selection_owner_end());
         #[cfg(target_os = "macos")]
