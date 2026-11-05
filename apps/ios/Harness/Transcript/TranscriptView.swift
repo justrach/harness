@@ -513,6 +513,7 @@ struct MarkdownRowView: View {
 
     private var textLength: Int {
         switch block {
+        case .response(let blocks): return MarkdownResponseText.attributed(blocks).string.count
         case .paragraph(let runs), .heading(_, let runs): return runs.reduce(0) { $0 + $1.text.count }
         default: return 0
         }
@@ -546,7 +547,7 @@ struct MarkdownRowView: View {
 
     private var isVeilable: Bool {
         switch block {
-        case .paragraph, .heading: return true
+        case .response, .paragraph, .heading: return true
         default: return false
         }
     }
