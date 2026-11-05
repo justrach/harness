@@ -9,6 +9,9 @@ mod saved_views;
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[cfg(target_os = "macos")]
+#[path = "browser-fixture/navigation_gestures.rs"]
+mod navigation_gestures;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -204,6 +207,12 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                #[cfg(target_os = "macos")]
+                if std::env::var_os("HARNESS_BROWSER_GESTURES_FIXTURE_ONLY").is_some() {
+                    navigation_gestures::exercise(window, &_origin, cx).await?;
+                    std::fs::write(output.join("result.txt"), "PASS: native browser swipe-navigation setting; empty/end history boundaries, reload, SPA push/replace and multi-step traversal, fragment history/document retention, forward-branch replacement, tab isolation/restore/close/reopen, and isolated document/saved-view exclusions verified. Physical trackpad gesture not synthesized.\n")?;
+                    return Ok(());
+                }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if std::env::var_os("HARNESS_HTML_PREVIEW_FIXTURE_ONLY").is_some() {
                     html_preview::exercise(window, cx).await?;
@@ -520,12 +529,18 @@ fn main() -> anyhow::Result<()> {
                 std::fs::write(output.join("result.txt"), "PASS: real shell browser fixture; address rejection, tab switching/close, overlays, resizing, takeover and appearance. On macOS and Linux: live DOM navigation, history, same-document state, native visibility, rapid hover/tooltip focus and hit testing, overlay outside-click isolation/restoration, live resize/CSS reflow/native drag hit testing, interrupted sidebar clipping, frosted/light/opaque backdrop cleanup, and load failure.\n")?;
                 Ok(())
             }.await;
+            let failed = run.is_err();
             if let Err(error) = run { eprintln!("Browser fixture failed: {error:#}"); *result.lock().unwrap() = Some(error.to_string()); }
             let _ = window.update(cx, |shell, window, cx| shell.fixture_blur_browser(window, cx));
             pause(cx, 200).await;
             drop(state);
             let _ = window.update(cx, |_, window, _| window.remove_window());
             pause(cx, 100).await;
+            // AppKit termination exits before Application::run returns. Do not
+            // let it turn a failed fixture into a successful process exit.
+            if failed {
+                std::process::exit(1);
+            }
             cx.update(|cx| cx.quit());
         }).detach();
     });
