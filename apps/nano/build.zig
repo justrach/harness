@@ -15,13 +15,21 @@ pub fn build(b: *std.Build) void {
         \\//! Geist and Geist Mono, as the GPUI app bundles them.
         \\pub const all = [_][]const u8{
         \\    @embedFile("fonts/Geist.ttf"),
+        \\    @embedFile("fonts/Geist-Italic.ttf"),
         \\    @embedFile("fonts/Geist-Medium.ttf"),
+        \\    @embedFile("fonts/Geist-MediumItalic.ttf"),
         \\    @embedFile("fonts/Geist-SemiBold.ttf"),
+        \\    @embedFile("fonts/Geist-SemiBoldItalic.ttf"),
         \\    @embedFile("fonts/Geist-Bold.ttf"),
+        \\    @embedFile("fonts/Geist-BoldItalic.ttf"),
         \\    @embedFile("fonts/GeistMono.ttf"),
+        \\    @embedFile("fonts/GeistMono-Italic.ttf"),
         \\    @embedFile("fonts/GeistMono-Medium.ttf"),
+        \\    @embedFile("fonts/GeistMono-MediumItalic.ttf"),
         \\    @embedFile("fonts/GeistMono-SemiBold.ttf"),
+        \\    @embedFile("fonts/GeistMono-SemiBoldItalic.ttf"),
         \\    @embedFile("fonts/GeistMono-Bold.ttf"),
+        \\    @embedFile("fonts/GeistMono-BoldItalic.ttf"),
         \\};
         \\
     );
