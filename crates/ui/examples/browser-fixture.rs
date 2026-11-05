@@ -210,7 +210,7 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(target_os = "macos")]
                 if std::env::var_os("HARNESS_BROWSER_GESTURES_FIXTURE_ONLY").is_some() {
                     navigation_gestures::exercise(window, &_origin, cx).await?;
-                    std::fs::write(output.join("result.txt"), "PASS: native browser swipe-navigation setting; empty/end history boundaries, reload, SPA entries, forward-branch replacement, tab isolation/restore/close, and isolated document/saved-view exclusions verified. Physical trackpad gesture not synthesized.\n")?;
+                    std::fs::write(output.join("result.txt"), "PASS: native browser swipe-navigation setting; empty/end history boundaries, reload, SPA push/replace and multi-step traversal, fragment history/document retention, forward-branch replacement, tab isolation/restore/close/reopen, and isolated document/saved-view exclusions verified. Physical trackpad gesture not synthesized.\n")?;
                     return Ok(());
                 }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]

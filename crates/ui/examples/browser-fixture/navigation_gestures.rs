@@ -102,6 +102,28 @@ pub async fn exercise(
     page.update(cx, |page, _| page.fixture_history(true));
     wait_for_page(&page, "#first", true, true, cx).await?;
 
+    // Replacing an entry is not a push: Back skips the replacement, while
+    // the existing forward entry survives. A multi-step traversal must land
+    // on the same entries as individual Back/Forward operations.
+    page.read_with(cx, |page, _| {
+        page.fixture_eval(
+            "history.replaceState({}, '', '#replacement'); document.title = '#replacement';",
+        );
+    });
+    wait_for_page(&page, "#replacement", true, true, cx).await?;
+    page.update(cx, |page, _| page.fixture_history(false));
+    wait_for_page(&page, "Details", true, true, cx).await?;
+    page.update(cx, |page, _| page.fixture_history(true));
+    wait_for_page(&page, "#replacement", true, true, cx).await?;
+    page.update(cx, |page, _| page.fixture_history(true));
+    wait_for_page(&page, "#second", true, false, cx).await?;
+    page.read_with(cx, |page, _| page.fixture_eval("history.go(-2)"));
+    wait_for_page(&page, "Details", true, true, cx).await?;
+    page.read_with(cx, |page, _| page.fixture_eval("history.go(2)"));
+    wait_for_page(&page, "#second", true, false, cx).await?;
+    page.update(cx, |page, _| page.fixture_history(false));
+    wait_for_page(&page, "#replacement", true, true, cx).await?;
+
     // A fresh navigation after Back must discard the old forward branch.
     window.update(cx, |_, window, cx| {
         page.update(cx, |page, cx| {
@@ -140,7 +162,7 @@ pub async fn exercise(
         "closed tab retained native content"
     );
     page.update(cx, |page, _| page.fixture_history(false));
-    wait_for_page(&page, "#first", true, true, cx).await?;
+    wait_for_page(&page, "#replacement", true, true, cx).await?;
 
     // Construct the real saved-view hosts without loading any saved file or
     // consulting a person's views. Both kinds must leave gestures disabled.
@@ -173,6 +195,42 @@ pub async fn exercise(
     anyhow::ensure!(
         !page.read_with(cx, |page, _| page.fixture_native_visible()),
         "closed document retained native content"
+    );
+
+    // Closing the last isolated host and opening a regular browser must not
+    // leak its disabled-gesture policy or empty history into the next host.
+    let (fresh_id, fresh) = window.update(cx, |shell, window, cx| {
+        shell.fixture_open_browser(Some(origin.into()), window, cx)
+    })?;
+    wait_for_page(&fresh, "Fieldnotes", false, false, cx).await?;
+    anyhow::ensure!(
+        fresh.read_with(cx, |page, _| page.fixture_navigation_gestures_enabled()),
+        "regular browser inherited the closed document's gesture policy"
+    );
+    // A fragment link uses same-document history without pushState. The JS
+    // sentinel in each title proves Back/Forward retained the live document.
+    fresh.read_with(cx, |page, _| {
+        page.fixture_eval(
+            "globalThis.fixtureSentinel = 'kept'; \
+             addEventListener('hashchange', () => \
+                 document.title = (location.hash || 'Fieldnotes') + ':' + fixtureSentinel); \
+             const link = document.createElement('a'); link.href = '#fragment'; \
+             document.body.append(link); link.click();",
+        );
+    });
+    wait_for_page(&fresh, "#fragment:kept", true, false, cx).await?;
+    fresh.update(cx, |page, _| page.fixture_history(false));
+    wait_for_page(&fresh, "Fieldnotes:kept", false, true, cx).await?;
+    history_boundary_is_inert(&fresh, false, cx).await?;
+    fresh.update(cx, |page, _| page.fixture_history(true));
+    wait_for_page(&fresh, "#fragment:kept", true, false, cx).await?;
+    history_boundary_is_inert(&fresh, true, cx).await?;
+    window.update(cx, |shell, window, cx| {
+        shell.fixture_close_browser(fresh_id, window, cx);
+    })?;
+    anyhow::ensure!(
+        !fresh.read_with(cx, |page, _| page.fixture_native_visible()),
+        "reopened browser retained native content after close"
     );
     Ok(())
 }
