@@ -7,6 +7,9 @@ use super::*;
 const SLOT_MAX_WIDTH: f32 = 260.0;
 const SLOT_HEIGHT: f32 = 32.0;
 const SLOT_MIN_WIDTH: f32 = 72.0;
+/// Below this a slot can't hold its + and still name its computer, so the +
+/// goes. The strip's own new-tab button stays, and focusing the slot aims it.
+pub(super) const SLOT_ROOM_FOR_ADD: f32 = 112.0;
 const NEW_TAB_ROOM: f32 = 24.0 + GUTTER;
 /// What a single panel's tab row sets aside for the name of its computer.
 pub(super) const PANEL_DEVICE_ROOM: f32 = 120.0;
@@ -191,6 +194,7 @@ impl Shell {
         left_inset: f32,
         right_inset: f32,
         columns: Option<Vec<f32>>,
+        strip_width: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -208,14 +212,19 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(if columns.is_some() { GUTTER } else { 2.0 }));
+        let shared_room =
+            Self::strip_slot_room(strip_width, left_inset, right_inset, layout.panels.len());
         for (ix, panel) in layout.panels.iter().enumerate() {
             let focused = layout.focused == panel.id;
             let width = columns
                 .as_ref()
                 .and_then(|columns| columns.get(ix))
                 .copied();
-            strip = strip
-                .child(self.render_strip_slot(panel, ix, focused, width, &workspace, window, cx));
+            let shows_add = width.unwrap_or(shared_room) >= SLOT_ROOM_FOR_ADD;
+            strip =
+                strip.child(self.render_strip_slot(
+                    panel, ix, focused, width, shows_add, &workspace, window, cx,
+                ));
         }
         strip
             .child(
@@ -247,16 +256,31 @@ impl Shell {
         panel_widths: &[f32],
         left_of_first_panel: f32,
         left_inset: f32,
+        right_inset: f32,
     ) -> Option<Vec<f32>> {
         let mut columns = panel_widths.to_vec();
         // The first slot starts after whatever sits at the window's corner,
-        // and the last one leaves room for the new-tab button.
+        // and the last one leaves room for the new-tab button and for any
+        // window buttons drawn in that corner.
         *columns.first_mut()? -= left_inset - left_of_first_panel;
-        *columns.last_mut()? -= NEW_TAB_ROOM;
+        *columns.last_mut()? -= NEW_TAB_ROOM + (right_inset - GUTTER).max(0.0);
         columns
             .iter()
             .all(|width| *width >= SLOT_MIN_WIDTH)
             .then_some(columns)
+    }
+
+    /// What each slot gets when slots share the strip rather than following
+    /// the panels' columns: the strip less its insets, the new-tab button and
+    /// the 2px gap after each slot.
+    pub(super) fn strip_slot_room(
+        strip_width: f32,
+        left_inset: f32,
+        right_inset: f32,
+        slots: usize,
+    ) -> f32 {
+        let slots = slots.max(1) as f32;
+        (strip_width - left_inset - right_inset - 24.0 - slots * 2.0) / slots
     }
 
     /// The most urgent thing any of this panel's tabs is asking for. Streaming
@@ -295,6 +319,7 @@ impl Shell {
         ix: usize,
         focused: bool,
         width: Option<f32>,
+        shows_add: bool,
         workspace: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -561,7 +586,7 @@ impl Shell {
                 .absolute()
                 .inset_0(),
             );
-        div()
+        let slot = div()
             .id(("instrument-slot", id))
             .debug_selector(move || format!("instrument-slot-{id}"))
             .group(group)
@@ -687,9 +712,18 @@ impl Shell {
                             .children(folder),
                     ),
             )
-            .child(add_button)
-            .child(menu_button)
-            .into_any_element()
+            .when(shows_add, |slot| slot.child(add_button))
+            .child(menu_button);
+        #[cfg(feature = "browser-fixture")]
+        let slot = {
+            use gpui_base::ElementExt as _;
+            let measured = self.workspace_panels.fixture_slot_bounds.clone();
+            let key = (workspace.to_owned(), id);
+            slot.on_prepaint(move |bounds, _, _| {
+                measured.borrow_mut().insert(key.clone(), bounds);
+            })
+        };
+        slot.into_any_element()
     }
 
     /// Focus a panel from its slot. While one panel is expanded, the slot

@@ -915,6 +915,9 @@ pub(super) struct PanelWorkspaces {
     pub(super) menu: Option<PanelMenu>,
     #[cfg(feature = "browser-fixture")]
     fixture_menu_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    #[cfg(feature = "browser-fixture")]
+    fixture_slot_bounds:
+        std::rc::Rc<std::cell::RefCell<HashMap<(String, u64), gpui::Bounds<Pixels>>>>,
     pub(super) device_menu: Option<device_picker::PanelDeviceMenu>,
     device_choices: HashMap<(String, u64), device_picker::PanelDeviceContext>,
     pub(super) pending_tools: HashMap<String, Vec<(u64, usize, crate::settings::SavedPanelTab)>>,
@@ -5164,8 +5167,7 @@ impl Shell {
             let right = GUTTER.max(self.titlebar_right_pad(0.0));
             let in_a_row = layout.axis == SplitAxis::Horizontal
                 && layout.expanded.is_none()
-                && canvas_width <= width + 0.5
-                && right <= GUTTER;
+                && canvas_width <= width + 0.5;
             let columns = in_a_row
                 .then(|| {
                     let widths: Vec<_> = layout
@@ -5173,10 +5175,11 @@ impl Shell {
                         .iter()
                         .map(|panel| frames.get(&panel.id).map_or(0.0, |frame| frame.width))
                         .collect();
-                    Self::strip_columns(&widths, leading, left)
+                    Self::strip_columns(&widths, leading, left, right)
                 })
                 .flatten();
-            self.render_instrument_strip(&layout, left, right, columns, window, cx)
+            let strip_width = width + leading + GUTTER;
+            self.render_instrument_strip(&layout, left, right, columns, strip_width, window, cx)
         });
         let row = div()
             .flex_1()
@@ -5332,6 +5335,21 @@ impl Shell {
         if open {
             if let Some((panel, tab)) = self.fixture_active_browser_panel(cx) {
                 let workspace = self.workspace_layout_key(cx);
+                if self
+                    .panel_layout(cx)
+                    .is_some_and(WorkspaceLayout::uses_strip)
+                {
+                    let slot = self
+                        .workspace_panels
+                        .fixture_slot_bounds
+                        .borrow()
+                        .get(&(workspace, panel))
+                        .copied();
+                    if let Some(bounds) = slot {
+                        self.open_strip_menu(panel, bounds.bottom_left(), window, cx);
+                    }
+                    return;
+                }
                 let tab_bounds = self
                     .workspace_panels
                     .active_tab_bounds
@@ -5443,11 +5461,20 @@ impl Shell {
         let key = (workspace.clone(), panel.id);
         let bounds = *self.workspace_panels.panel_bounds.borrow().get(&key)?;
         let frame = self.workspace_panels.rendered_frames.get(&key)?;
-        let tab = *self
-            .workspace_panels
-            .window_tab_bounds
-            .borrow()
-            .get(&(workspace, panel.id, tab_index))?;
+        // A split has no tab row: the panel's slot in the strip stands for it.
+        let tab = if layout.uses_strip() {
+            *self
+                .workspace_panels
+                .fixture_slot_bounds
+                .borrow()
+                .get(&key)?
+        } else {
+            *self
+                .workspace_panels
+                .window_tab_bounds
+                .borrow()
+                .get(&(workspace, panel.id, tab_index))?
+        };
         let divider = gpui::Bounds::new(
             point(
                 bounds.left() - px(6.0),
@@ -6695,7 +6722,11 @@ mod interaction_tests {
         assert_eq!(scroll.bounds().size.width, idle_width);
         assert_eq!(scroll.offset(), manual_offset);
         let controls = cx.debug_bounds("panel-controls-0").unwrap();
-        assert!((f32::from(body.right() - controls.right()) - 4.0).abs() < 1.0);
+        // Off the Mac the window's own buttons hold the corner, and the
+        // controls stop short of them.
+        let usable_right = f32::from(body.right())
+            .min(shell.read_with(cx, |s, _| s.viewport_width - s.titlebar_right_pad(0.0)));
+        assert!((usable_right - f32::from(controls.right()) - 4.0).abs() < 1.0);
         assert_eq!(cx.debug_bounds("panel-tab-0-0").unwrap(), first);
         assert_eq!(cx.debug_bounds("panel-tab-0-1").unwrap(), second);
 
@@ -7090,16 +7121,48 @@ mod interaction_tests {
         let (shell, cx) = setup_one(cx);
         cx.simulate_resize(gpui::size(px(1200.0), px(900.0)));
         shell.update_in(cx, |s, _, cx| {
+            // A short computer name, so the tab row runs under the controls on
+            // every platform. "This device" alone would fill the space.
+            s.state.update(cx, |state, _| {
+                state.devices.push(harness_proto::Device {
+                    id: "m".into(),
+                    name: "M".into(),
+                    platform: "macos".into(),
+                    last_seen_at: None,
+                    created_at: None,
+                    version: None,
+                    cursor_sdk_version: None,
+                    capabilities: vec![],
+                });
+                state.chats.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": "on-m", "title": "On M", "deviceId": "m",
+                        "archived": false, "createdAt": "2026-09-20T00:00:00Z"
+                    }))
+                    .unwrap(),
+                );
+            });
             let layout = s.panel_layout_mut(cx);
             let panel = layout.panel_mut(0).unwrap();
-            panel.tabs = (2..12).map(PanelTab::Terminal).collect();
+            panel.tabs = std::iter::once(PanelTab::Chat("on-m".into()))
+                .chain((3..12).map(PanelTab::Terminal))
+                .collect();
             panel.active = 0;
             cx.notify();
         });
         cx.simulate_mouse_move(point(px(10.0), px(100.0)), None, Default::default());
         cx.run_until_parked();
         let controls = cx.debug_bounds("panel-controls-0").unwrap();
-        let position = point(controls.left() + px(12.0), controls.center().y);
+        // Aim at the part of the hidden controls that is over the tab row.
+        let row = cx.debug_bounds("workspace-panel-tab-strip-0").unwrap();
+        assert!(
+            controls.left() < row.right(),
+            "the hidden controls overlap the tab row: {controls:?} {row:?}"
+        );
+        let position = point(
+            controls.left() + (row.right() - controls.left()) / 2.0,
+            controls.center().y,
+        );
         let target = [
             "panel-tab-0-0",
             "panel-tab-0-1",

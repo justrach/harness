@@ -513,19 +513,47 @@ fn each_slot_sits_directly_above_its_panel(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Windows draws its buttons over the last panel's corner. Only the last slot
+/// gives way, so the others still sit directly above their panels.
+#[test]
+fn window_buttons_only_narrow_the_last_slot() {
+    assert_eq!(
+        Shell::strip_columns(&[400.0, 400.0], 0.0, 0.0, GUTTER + 100.0),
+        Some(vec![400.0, 400.0 - NEW_TAB_ROOM_FOR_TEST - 100.0])
+    );
+    assert_eq!(
+        Shell::strip_columns(&[400.0, 200.0], 0.0, 0.0, GUTTER + 138.0),
+        None,
+        "the last slot would be too narrow to line up"
+    );
+}
+
+/// A slot with no room for both gives up its + before its computer's name.
+#[test]
+fn a_shared_slots_room_decides_whether_it_keeps_its_plus() {
+    let room = |slots| Shell::strip_slot_room(1200.0, 100.0, 76.0, slots);
+    assert_eq!(room(2), (1200.0 - 100.0 - 76.0 - 24.0 - 4.0) / 2.0);
+    assert!(room(2) >= instrument_strip::SLOT_ROOM_FOR_ADD);
+    assert!(room(9) < instrument_strip::SLOT_ROOM_FOR_ADD);
+    assert!(Shell::strip_slot_room(0.0, 0.0, 0.0, 0).is_finite());
+}
+
 #[test]
 fn slots_stop_following_columns_when_one_would_be_too_narrow() {
     assert_eq!(
-        Shell::strip_columns(&[400.0, 400.0], 0.0, 0.0),
+        Shell::strip_columns(&[400.0, 400.0], 0.0, 0.0, GUTTER),
         Some(vec![400.0, 400.0 - NEW_TAB_ROOM_FOR_TEST])
     );
     // A window-corner button pushes the first slot in by its width.
     assert_eq!(
-        Shell::strip_columns(&[400.0, 400.0], 10.0, 110.0),
+        Shell::strip_columns(&[400.0, 400.0], 10.0, 110.0, GUTTER),
         Some(vec![300.0, 400.0 - NEW_TAB_ROOM_FOR_TEST])
     );
-    assert_eq!(Shell::strip_columns(&[100.0, 400.0], 0.0, 60.0), None);
-    assert_eq!(Shell::strip_columns(&[], 0.0, 0.0), None);
+    assert_eq!(
+        Shell::strip_columns(&[100.0, 400.0], 0.0, 60.0, GUTTER),
+        None
+    );
+    assert_eq!(Shell::strip_columns(&[], 0.0, 0.0, GUTTER), None);
 }
 
 #[gpui::test]
