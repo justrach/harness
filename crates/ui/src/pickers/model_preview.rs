@@ -358,6 +358,7 @@ impl Pickers {
             locked: self.harness_locked(cx),
             catalog_rev: self.catalog_rev,
             selected: self.effective_model_id(cx).map(str::to_owned),
+            chat_mode: self.chat_mode(cx),
         };
         if let Some((old, rows)) = self.model_rows_cache.borrow().as_ref()
             && *old == key
@@ -527,11 +528,6 @@ impl Pickers {
                 config.model_options = p.options;
             });
         } else {
-            self.config.chat_mode = legacy_mode_after_explicit_route_change(
-                self.config.chat_mode,
-                (self.effective_harness(cx), self.effective_model_id(cx)),
-                (Some(p.harness), Some(p.model.id.as_str())),
-            );
             self.config.harness = Some(p.harness);
             self.config.model = Some(p.model.id.clone());
             self.config.reasoning = p.reasoning;

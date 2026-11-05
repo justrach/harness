@@ -8673,9 +8673,11 @@ impl Composer {
                     .text_size(crate::typography::ui_rems(22.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.text)
-                    .child(SharedString::from(crate::starters::greeting(
-                        name.as_deref(),
-                    ))),
+                    .child(SharedString::from(if self.pickers.read(cx).chat_mode(cx) {
+                        crate::chat_mode::HEADING_TITLE.to_string()
+                    } else {
+                        crate::starters::greeting(name.as_deref())
+                    })),
             )
             .child(
                 div()
@@ -9467,8 +9469,9 @@ impl Composer {
         // no-agents check only fires once the catalog is loaded — offline
         // and still-loading states must not block (the harness resolves from
         // the remembered default and the engine reports real failures).
+        // A chat-mode draft also waits for an auto tier to run on.
         let pickers = self.pickers.read(cx);
-        pickers.no_agents_available()
+        pickers.no_agents_available() || pickers.chat_mode_send_blocked(cx)
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
@@ -12613,6 +12616,11 @@ impl Render for Composer {
         // Steps and subagents of the running turn (crate::agent_work).
         let agent_work = (session_chrome_opacity > 0.0)
             .then(|| self.agent_work_control.clone());
+        // Chat mode: say so while the selected model may bill API rates.
+        let chat_note = (session_chrome_opacity > 0.0)
+            .then(|| self.pickers.read(cx).chat_mode_note(cx))
+            .flatten()
+            .map(|note| crate::chat_mode::note_chip(note, &theme));
         // OpenAI's guidelines: say so while requests run on the plan.
         let plan = (session_chrome_opacity > 0.0 && self.pickers.read(cx).uses_chatgpt_plan(cx))
             .then(|| crate::chatgpt_plan::using_plan_chip(&theme));
@@ -12662,6 +12670,13 @@ impl Render for Composer {
                         }),
                 )
                 .children(plan.map(|chip| {
+                    div()
+                        .flex_shrink(1.0)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(chip)
+                }))
+                .children(chat_note.map(|chip| {
                     div()
                         .flex_shrink(1.0)
                         .min_w_0()
@@ -14731,6 +14746,67 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[gpui::test]
+    fn a_new_session_switches_between_chat_and_code_from_the_footer(cx: &mut gpui::TestAppContext) {
+        let draw = |visual: &mut gpui::VisualTestContext| {
+            visual.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        };
+        for git in [None, Some(false), Some(true)] {
+            let (_dir, handle) = composer_focus_window(cx);
+            handle
+                .update(cx, |composer, window, cx| {
+                    composer.state.update(cx, |state, _| {
+                        if let Some(git) = git {
+                            state.spaces.push(
+                                serde_json::from_value(serde_json::json!({
+                                    "id": "project", "deviceId": "local", "path": "/project",
+                                    "gitDetected": git, "createdAt": "2026-01-01T00:00:00Z"
+                                }))
+                                .unwrap(),
+                            );
+                            state.selected_space = Some("project".into());
+                        }
+                    });
+                    composer.on_state_changed(cx);
+                    window.resize(size(px(840.0), px(600.0)));
+                    composer.set_available_width(840.0, cx);
+                    // A draft in a panel is docked, which shows the footer.
+                    composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
+                })
+                .unwrap();
+            let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+            let chat_mode = |visual: &gpui::VisualTestContext| {
+                handle
+                    .read_with(visual, |composer, cx| {
+                        composer.pickers.read(cx).chat_mode(cx)
+                    })
+                    .unwrap()
+            };
+            for expected in [true, false] {
+                draw(&mut visual);
+                let switch = visual
+                    .debug_bounds("picker-chat-mode")
+                    .unwrap_or_else(|| panic!("no switch on screen, project git: {git:?}"));
+                visual.simulate_click(switch.center(), gpui::Modifiers::none());
+                assert_eq!(chat_mode(&visual), expected, "project git: {git:?}");
+            }
+            // A chat that exists stays what it is.
+            handle
+                .update(&mut visual, |composer, _, cx| {
+                    composer
+                        .state
+                        .update(cx, |state, _| state.selected_chat = Some("chat".into()));
+                    composer.on_state_changed(cx);
+                })
+                .unwrap();
+            draw(&mut visual);
+            assert!(visual.debug_bounds("picker-chat-mode").is_none());
         }
     }
 
