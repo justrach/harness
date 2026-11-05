@@ -5,7 +5,6 @@
 // carries the agent/model chip, and sending mints the chat, queues the first
 // run, and swaps straight into the live session.
 
-import PhotosUI
 import SwiftUI
 
 struct NewSessionView: View {
@@ -31,7 +30,7 @@ struct NewSessionView: View {
     @State private var refFailure: RefCheckoutFailure?
     @State private var showCheckoutPicker = false
     @State private var attachments: [StagedAttachment] = []
-    @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var pickerItems: [PickedPhoto] = []
     @State private var showPhotoPicker = false
     @State private var attachError: String?
     /// Only agents actually discovered on this device are offered.
@@ -471,7 +470,7 @@ struct NewSessionView: View {
 
     /// Load picked photos into staged attachments (ComposerView.stage's twin —
     /// the upload happens on send, once the chat and its store exist).
-    private func stage(_ items: [PhotosPickerItem]) {
+    private func stage(_ items: [PickedPhoto]) {
         Task { @MainActor in
             var failed = 0
             for item in items {

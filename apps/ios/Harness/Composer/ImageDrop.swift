@@ -1,4 +1,3 @@
-import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -43,7 +42,7 @@ final class AttachmentDraft {
         return true
     }
 
-    func stagePhotos(_ photos: [PhotosPickerItem]) async {
+    func stagePhotos(_ photos: [PickedPhoto]) async {
         guard canImport else { return }
         loading = true
         error = nil
@@ -69,18 +68,9 @@ final class AttachmentDraft {
     }
 
     private static func load(_ provider: NSItemProvider) async -> StagedAttachment? {
-        // Prefer original bytes (including animated GIFs) over a UIImage
-        // conversion. Files, Photos, and screenshot thumbnails vend image UTIs.
-        // A source can advertise several formats but fail to vend one of them.
-        // Try the remaining representations before falling back to UIImage.
-        for type in provider.registeredTypeIdentifiers where UTType(type)?.conforms(to: .image) == true {
-            let data: Data? = await withCheckedContinuation { continuation in
-                provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in
-                    continuation.resume(returning: data)
-                }
-            }
-            if let data { return StagedAttachment.stage(data: data) }
-        }
+        // Prefer original bytes over a UIImage conversion. Files, Photos, and
+        // screenshot thumbnails vend image UTIs.
+        if let data = await provider.imageBytes() { return StagedAttachment.stage(data: data) }
         // Some drag sources only provide an in-memory UIImage.
         guard provider.canLoadObject(ofClass: UIImage.self) else { return nil }
         let image: UIImage? = await withCheckedContinuation { continuation in
