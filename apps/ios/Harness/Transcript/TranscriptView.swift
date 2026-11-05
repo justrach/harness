@@ -440,8 +440,7 @@ struct UserBubble: View {
             if !parsed.text.isEmpty {
                 let collapsible = Self.needsCollapse(parsed.text) || fullHeight > collapsedHeight + 0.5
                 VStack(alignment: .leading, spacing: 0) {
-                    prompt(parsed.text)
-                        .lineLimit(expanded ? nil : 5)
+                    SelectablePromptText(text: parsed.text, expanded: expanded)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                             if !expanded { collapsedHeight = height }
                         }
@@ -483,13 +482,6 @@ struct UserBubble: View {
                     .padding(.vertical, 10)
                     .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
                     .frame(maxWidth: TranscriptView.maxContentWidth * 0.8, alignment: .trailing)
-                    .contextMenu {
-                        Button {
-                            UIPasteboard.general.string = parsed.text
-                        } label: {
-                            Label("Copy", systemImage: "doc.on.doc")
-                        }
-                    }
             }
         }
         .opacity(pending ? 0.65 : 1)
