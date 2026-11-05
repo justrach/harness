@@ -13,7 +13,10 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 
 use harness_adapters::{Harness, HarnessError, RunControls};
-use harness_doc::{MessagePart, MessageRole, SessionCommandPayload, SessionCommandStatus};
+use harness_doc::{
+    MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SessionCommandStatus,
+    SessionMessageEntry,
+};
 use harness_engine::{EngineCore, HarnessRegistry};
 use harness_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
@@ -21,6 +24,7 @@ use harness_proto::{
 };
 
 const CHAT: &str = "chat-branch-drift";
+const PEER: &str = "chat-branch-drift-peer";
 
 struct FakeAgent {
     prompts: Arc<Mutex<Vec<String>>>,
@@ -236,121 +240,45 @@ fn context_branch(core: &EngineCore) -> String {
     chat.source_context.expect("source context").branch
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_drifted_checkout_asks_before_the_chat_continues() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    git(&repo, &["init", "-b", "alpha"]);
-    git(&repo, &["commit", "--allow-empty", "-m", "initial"]);
-    let cwd = repo.to_string_lossy().into_owned();
-    let data = root.join("data");
+/// The context is recorded once dispatch returns, which can be after the agent
+/// saw the prompt.
+async fn wait_context(core: &EngineCore, branch: &str) {
+    wait_for(|| context_branch(core) == branch, "the recorded checkout").await;
+}
 
-    let (core, prompts) = engine(&data);
+/// Another chat in the same folder: the one case that still asks.
+fn share_checkout(core: &EngineCore, cwd: &str) {
     core.workspace
-        .create_chat(CHAT, None, Some(&core.device_id), None, Some(cwd.clone()))
+        .create_chat(PEER, None, Some(&core.device_id), None, Some(cwd.into()))
         .unwrap();
-    core.workspace.rename_chat(CHAT, "Pre-titled").unwrap();
-    let turns = |n: usize| {
-        let prompts = prompts.clone();
-        move || prompts.lock().unwrap().len() == n
-    };
+}
 
-    send(&core, "m1", "first", &cwd);
-    wait_for(turns(1), "first turn").await;
-    assert_eq!(context_branch(&core), "alpha");
-
-    // A commit on the same branch is the task progressing, not drift.
-    git(&repo, &["commit", "--allow-empty", "-m", "progress"]);
-    send(&core, "m2", "second", &cwd);
-    wait_for(turns(2), "second turn").await;
-    assert!(open_question(&core).is_none());
-
-    // Another branch: the send waits behind a question.
-    git(&repo, &["switch", "-c", "beta"]);
-    send(&core, "m3", "third", &cwd);
-    let (request_id, question) = wait_question(&core).await;
-    assert_eq!(
-        question.options,
-        ["Continue on beta", "Switch back to alpha", "Don't send"]
-    );
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(prompts.lock().unwrap().len(), 2, "nothing ran on beta yet");
-    assert_eq!(
-        context_branch(&core),
-        "alpha",
-        "the accepted context is kept"
-    );
-
-    // Continue: the agent runs on beta and is told the branch moved.
-    answer(&core, &request_id, "Continue on beta");
-    wait_for(turns(3), "the continued turn").await;
-    let continued = prompts.lock().unwrap()[2].clone();
-    assert!(continued.ends_with("third"), "{continued}");
+/// A turn on a new branch went straight out, and the agent was told.
+async fn assert_agent_told(
+    core: &EngineCore,
+    prompts: &Arc<Mutex<Vec<String>>>,
+    turn: usize,
+    from: &str,
+    to: &str,
+    label: &str,
+) {
+    wait_for(
+        || prompts.lock().unwrap().len() >= turn || open_question(core).is_some(),
+        "the turn on the new branch",
+    )
+    .await;
+    assert!(open_question(core).is_none(), "asked: {label}");
+    wait_turn(core, prompts, turn).await;
+    let prompt = prompts.lock().unwrap()[turn - 1].clone();
     assert!(
-        continued.contains("now on `beta`") && continued.contains("ran on `alpha`"),
-        "{continued}"
+        prompt.contains(&format!("now on `{to}`")) && prompt.contains(&format!("ran on `{from}`")),
+        "{label}: {prompt}"
     );
-    assert_eq!(context_branch(&core), "beta");
-    assert!(open_question(&core).is_none());
+    wait_context(core, to).await;
+}
 
-    // Switch back: the checkout returns to beta and the turn runs there.
-    git(&repo, &["switch", "-c", "gamma"]);
-    send(&core, "m4", "fourth", &cwd);
-    let (request_id, _) = wait_question(&core).await;
-    answer(&core, &request_id, "Switch back to beta");
-    wait_for(turns(4), "the turn after switching back").await;
-    assert_eq!(git(&repo, &["branch", "--show-current"]), "beta");
-    assert_eq!(prompts.lock().unwrap()[3], "fourth");
-
-    // Uncommitted work: switching back is not offered, and dismissing sends
-    // nothing.
-    std::fs::write(repo.join("scratch.txt"), "wip").unwrap();
-    git(&repo, &["switch", "-c", "delta"]);
-    send(&core, "m5", "fifth", &cwd);
-    let (request_id, question) = wait_question(&core).await;
-    assert_eq!(question.options, ["Continue on delta", "Don't send"]);
-    core.doc_host
-        .queue_command(
-            CHAT,
-            SessionCommandPayload::DismissInput {
-                request_id: request_id.clone(),
-            },
-        )
-        .unwrap();
-    wait_for(|| open_question(&core).is_none(), "dismissal").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(
-        prompts.lock().unwrap().len(),
-        4,
-        "a dismissed send never runs"
-    );
-    assert_eq!(context_branch(&core), "beta");
-
-    // Switched back outside Harness: the next send takes the held one with
-    // it and the question closes.
-    send(&core, "m6", "sixth", &cwd);
-    wait_question(&core).await;
-    git(&repo, &["switch", "beta"]);
-    send(&core, "m7", "seventh", &cwd);
-    wait_for(turns(5), "the turn after an outside switch back").await;
-    assert_eq!(prompts.lock().unwrap()[4], "sixth\n\nseventh");
-    assert!(open_question(&core).is_none());
-
-    // Typed text instead of a choice continues on the branch the question
-    // showed, sending the text too. It used to ask again, so typing "go on"
-    // looped on the same question.
-    git(&repo, &["switch", "-c", "epsilon"]);
-    send(&core, "m8", "eighth", &cwd);
-    let (first, _) = wait_question(&core).await;
-    answer(&core, &first, "go on");
-    wait_for(turns(6), "the turn after a typed answer").await;
-    let both = prompts.lock().unwrap()[5].clone();
-    assert!(both.ends_with("eighth\n\ngo on"), "{both}");
-    assert!(both.contains("now on `epsilon`"), "{both}");
-    assert!(open_question(&core).is_none(), "not asked again");
-    assert_eq!(context_branch(&core), "epsilon");
+/// The last message the person sent, as the transcript shows it.
+fn last_user_text(core: &EngineCore) -> String {
     let entries = core
         .doc_host
         .open(CHAT)
@@ -358,39 +286,157 @@ async fn a_drifted_checkout_asks_before_the_chat_continues() {
         .doc()
         .read_entries()
         .unwrap();
-    let typed = entries
+    let entry = entries
         .iter()
-        .filter(|entry| entry.role == MessageRole::User)
-        .next_back()
-        .expect("the typed answer is in the transcript");
+        .rfind(|entry| entry.role == MessageRole::User)
+        .expect("a user message");
+    match &entry.parts[..] {
+        [MessagePart::Text { text, .. }] => text.clone(),
+        parts => panic!("{parts:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_branch_goes_ahead_without_asking_and_tells_the_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cwd) = test_repo(tmp.path());
+    let (core, prompts) = engine(&tmp.path().join("data"));
+    create_chat(&core, &cwd);
+
+    send(&core, "m1", "first", &cwd);
+    wait_turn(&core, &prompts, 1).await;
+    assert_eq!(context_branch(&core), "alpha");
+
+    // A commit on the same branch is the task progressing, not drift.
+    git(&repo, &["commit", "--allow-empty", "-m", "progress"]);
+    send(&core, "m2", "second", &cwd);
+    wait_turn(&core, &prompts, 2).await;
+    assert_eq!(prompts.lock().unwrap()[1], "second");
+
+    // Another branch: the turn runs there, with a note only the agent sees.
+    git(&repo, &["switch", "-c", "beta"]);
+    send(&core, "m3", "third", &cwd);
+    assert_agent_told(&core, &prompts, 3, "alpha", "beta", "new branch").await;
+    assert!(prompts.lock().unwrap()[2].ends_with("third"));
+    assert_eq!(last_user_text(&core), "third");
+
+    // Told once: the next turn on the same branch has no note.
+    send(&core, "m4", "fourth", &cwd);
+    wait_turn(&core, &prompts, 4).await;
+    assert_eq!(prompts.lock().unwrap()[3], "fourth");
+
+    // Uncommitted work doesn't change that, and nothing touches the checkout.
+    std::fs::write(repo.join("scratch.txt"), "wip").unwrap();
+    git(&repo, &["switch", "-c", "delta"]);
+    send(&core, "m5", "fifth", &cwd);
+    assert_agent_told(&core, &prompts, 5, "beta", "delta", "uncommitted work").await;
+    assert_eq!(git(&repo, &["branch", "--show-current"]), "delta");
+    assert!(repo.join("scratch.txt").exists());
+
+    // A command has to start the prompt to run, so it goes as typed.
+    git(&repo, &["switch", "-c", "epsilon"]);
+    send(&core, "m6", "/compact", &cwd);
+    wait_turn(&core, &prompts, 6).await;
+    assert!(open_question(&core).is_none());
+    assert_eq!(prompts.lock().unwrap()[5], "/compact");
+    core.shutdown().await;
+}
+
+/// Writes the question earlier versions asked on any branch change, over a
+/// message waiting behind it.
+fn seed_old_question(core: &EngineCore, held: &str, options: &[&str]) -> String {
+    let handle = core.doc_host.open(CHAT).unwrap();
+    handle
+        .write_user_message(&format!("message-{held}"), held, 1)
+        .unwrap();
+    let request_id = format!("branch-drift-saved-{held}");
+    handle
+        .doc()
+        .push_message(&SessionMessageEntry {
+            id: format!("question-{held}"),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Input {
+                id: request_id.clone(),
+                request_id: request_id.clone(),
+                questions: vec![UserInputQuestion {
+                    id: "branch".into(),
+                    header: "Branch changed".into(),
+                    question: "This chat's checkout moved. How should it continue?".into(),
+                    options: options.iter().map(|option| option.to_string()).collect(),
+                    multi_select: false,
+                    prefill: None,
+                    multiline: false,
+                }],
+                resolved: false,
+            }],
+            created_at: 2,
+            device_id: core.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        })
+        .unwrap();
+    request_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_saved_by_an_older_version_closes_and_still_sends_its_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cwd) = test_repo(tmp.path());
+    let (core, prompts) = engine(&tmp.path().join("data"));
+    create_chat(&core, &cwd);
+    send(&core, "m1", "first", &cwd);
+    wait_turn(&core, &prompts, 1).await;
+    git(&repo, &["switch", "-c", "beta"]);
+    seed_old_question(&core, "held", &["Continue on beta", "Don't send"]);
+    assert!(open_question(&core).is_some());
+
+    // The next send closes it and takes the waiting message along.
+    send(&core, "m2", "next", &cwd);
+    wait_turn(&core, &prompts, 2).await;
+    assert_agent_told(&core, &prompts, 2, "alpha", "beta", "old question").await;
     assert!(
-        matches!(&typed.parts[..], [MessagePart::Text { text, .. }] if text == "go on"),
-        "{typed:?}"
+        prompts.lock().unwrap()[1].ends_with("held\n\nnext"),
+        "{}",
+        prompts.lock().unwrap()[1]
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn answering_a_saved_question_still_works_even_if_the_branch_moved_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, cwd) = test_repo(tmp.path());
+    let (core, prompts) = engine(&tmp.path().join("data"));
+    create_chat(&core, &cwd);
+    send(&core, "m1", "first", &cwd);
+    wait_turn(&core, &prompts, 1).await;
+    git(&repo, &["switch", "-c", "beta"]);
+    let request_id = seed_old_question(
+        &core,
+        "held",
+        &["Continue on beta", "Switch back to alpha", "Don't send"],
     );
 
-    // A question left open across a restart still sends its message.
-    git(&repo, &["switch", "-c", "zeta"]);
-    send(&core, "m9", "ninth", &cwd);
-    let (request_id, _) = wait_question(&core).await;
-    // Sent while the question waits: held with it, after it in the transcript.
-    send(&core, "m10", "tenth", &cwd);
-    // The optimistic transcript entry precedes the async checkout check;
-    // wait until this command is actually held before restarting the engine.
-    wait_send_applied(&core, "m10").await;
-    core.shutdown().await;
-    drop(core);
+    // It showed beta and the folder is on gamma now: it isn't asked again.
+    git(&repo, &["switch", "-c", "gamma"]);
+    answer(&core, &request_id, "Continue on beta");
+    wait_turn(&core, &prompts, 2).await;
+    assert_agent_told(&core, &prompts, 2, "alpha", "gamma", "moved again").await;
+    assert!(prompts.lock().unwrap()[1].ends_with("held"));
 
-    let (core, prompts) = engine(&data);
-    answer(&core, &request_id, "Continue on zeta");
-    wait_for(
-        || prompts.lock().unwrap().len() == 1,
-        "the turn after restart",
-    )
-    .await;
-    let resumed = prompts.lock().unwrap()[0].clone();
-    assert!(resumed.ends_with("ninth\n\ntenth"), "{resumed}");
-    assert!(!resumed.contains("eighth"), "{resumed}");
-    assert_eq!(context_branch(&core), "zeta");
+    // Switch back is still honored where a saved question offers it.
+    git(&repo, &["switch", "-c", "delta"]);
+    let request_id = seed_old_question(
+        &core,
+        "held again",
+        &["Continue on delta", "Switch back to gamma", "Don't send"],
+    );
+    answer(&core, &request_id, "Switch back to gamma");
+    wait_turn(&core, &prompts, 3).await;
+    assert_eq!(git(&repo, &["branch", "--show-current"]), "gamma");
+    assert_eq!(prompts.lock().unwrap()[2], "held again");
+    assert!(open_question(&core).is_none());
     core.shutdown().await;
 }
 
@@ -423,13 +469,18 @@ async fn the_chats_own_branch_rename_does_not_ask() {
     let chat = core.workspace.chat(CHAT).unwrap().unwrap();
     assert_eq!(chat.branch.as_deref(), Some("feature/renamed"));
 
-    // A rename the chat did not run, from outside Harness, still asks.
+    // A rename the chat did not run, from outside Harness, gets the note.
     git(&repo, &["branch", "-m", "outside"]);
     send(&core, "m4", "fourth", &cwd);
-    let (request_id, question) = wait_question(&core).await;
-    assert_eq!(question.options[0], "Continue on outside");
-    answer(&core, &request_id, "Continue on outside");
-    wait_turn(&core, &prompts, 4).await;
+    assert_agent_told(
+        &core,
+        &prompts,
+        4,
+        "feature/renamed",
+        "outside",
+        "outside rename",
+    )
+    .await;
 
     // A rename followed by a real switch is a switch.
     send(
@@ -440,9 +491,7 @@ async fn the_chats_own_branch_rename_does_not_ask() {
     );
     wait_turn(&core, &prompts, 5).await;
     send(&core, "m6", "sixth", &cwd);
-    let (_, question) = wait_question(&core).await;
-    assert_eq!(question.options[0], "Continue on side");
-    assert_eq!(prompts.lock().unwrap().len(), 5, "held behind the question");
+    assert_agent_told(&core, &prompts, 6, "outside", "side", "rename then switch").await;
     core.shutdown().await;
 }
 
@@ -528,7 +577,7 @@ async fn owned_branch_creation_from_an_explicit_base_survives_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn branch_creation_does_not_approve_unrelated_or_unproven_switches() {
+async fn unrelated_or_unproven_branch_creation_still_gets_the_note() {
     for (command, outside_creation) in [
         ("echo git switch -c feature/example", true),
         ("git switch -c feature/example missing-base", true),
@@ -551,13 +600,7 @@ async fn branch_creation_does_not_approve_unrelated_or_unproven_switches() {
             git(&repo, &["switch", "-c", "feature/example"]);
         }
         send(&core, "m3", "follow-up", &cwd);
-        let (_, question) = wait_question(&core).await;
-        assert_eq!(
-            question.options[0], "Continue on feature/example",
-            "{command}"
-        );
-        assert_eq!(prompts.lock().unwrap().len(), 2, "{command}");
-        assert_eq!(context_branch(&core), "alpha", "context is not accepted");
+        assert_agent_told(&core, &prompts, 3, "alpha", "feature/example", command).await;
         core.shutdown().await;
     }
 }
@@ -595,23 +638,13 @@ async fn skipped_or_failed_creation_cannot_claim_an_external_switch() {
             git(&repo, &["switch", "-c", "feature/example"]);
         }
         send(&core, "m3", "follow-up", &cwd);
-        wait_for(
-            || prompts.lock().unwrap().len() == 3 || open_question(&core).is_some(),
-            "the external switch to dispatch or ask",
-        )
-        .await;
-        assert!(
-            open_question(&core).is_some(),
-            "unproven command: {command}"
-        );
-        assert_eq!(prompts.lock().unwrap().len(), 2, "the send must be held");
-        assert_eq!(context_branch(&core), "alpha");
+        assert_agent_told(&core, &prompts, 3, "alpha", "feature/example", command).await;
         core.shutdown().await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn owned_creation_still_asks_when_git_evidence_is_missing_or_mismatched() {
+async fn owned_creation_gets_the_note_when_git_evidence_is_missing_or_mismatched() {
     for evidence in ["branch", "head", "start-point"] {
         let tmp = tempfile::tempdir().unwrap();
         let (repo, cwd) = test_repo(tmp.path());
@@ -639,14 +672,7 @@ async fn owned_creation_still_asks_when_git_evidence_is_missing_or_mismatched() 
             }
         }
         send(&core, "m3", "follow-up", &cwd);
-        wait_for(
-            || prompts.lock().unwrap().len() == 3 || open_question(&core).is_some(),
-            "the missing-evidence follow-up to dispatch or ask",
-        )
-        .await;
-        assert!(open_question(&core).is_some(), "evidence: {evidence}");
-        assert_eq!(prompts.lock().unwrap().len(), 2);
-        assert_eq!(context_branch(&core), "alpha");
+        assert_agent_told(&core, &prompts, 3, "alpha", "feature/example", evidence).await;
         core.shutdown().await;
     }
 }
@@ -702,6 +728,7 @@ async fn held_attachments_survive_restart_without_relying_on_prompt_trailers() {
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
 
+    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
     let first = attachment(&core, "first.png");
     let second = attachment(&core, "second.png");
@@ -735,6 +762,7 @@ async fn stale_continue_requires_new_consent_and_preserves_the_held_request() {
     create_chat(&core, &cwd);
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
+    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
     let image = attachment(&core, "held.png");
     send_with_attachments(
@@ -763,7 +791,7 @@ async fn stale_continue_requires_new_consent_and_preserves_the_held_request() {
     )
     .await;
     let (new_id, question) = new_question.unwrap();
-    assert_eq!(question.options[0], "Continue on gamma");
+    assert_eq!(question.options[1], "Continue on gamma");
     assert!(
         prompts.lock().unwrap().is_empty(),
         "stale consent must not dispatch"
@@ -798,6 +826,7 @@ async fn a_typed_answer_only_consents_to_the_branch_it_was_shown() {
     create_chat(&core, &cwd);
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
+    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
     send(&core, "held", "keep this request", &cwd);
     let (old_id, _) = wait_question(&core).await;
@@ -815,7 +844,7 @@ async fn a_typed_answer_only_consents_to_the_branch_it_was_shown() {
     )
     .await;
     let (new_id, question) = new_question.unwrap();
-    assert_eq!(question.options[0], "Continue on gamma");
+    assert_eq!(question.options[1], "Continue on gamma");
     assert_eq!(prompts.lock().unwrap().len(), 1, "nothing ran on gamma");
     assert_eq!(context_branch(&core), "alpha");
 
@@ -840,6 +869,7 @@ async fn many_held_sends_cannot_hide_the_question_even_after_restart() {
     create_chat(&core, &cwd);
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
+    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
     send(&core, "held-first", "held first", &cwd);
     let (request_id, _) = wait_question(&core).await;
@@ -898,6 +928,10 @@ async fn many_held_sends_cannot_hide_the_question_even_after_restart() {
     assert_eq!(open_question(&core).unwrap().0, request_id);
     assert!(prompts.lock().unwrap().is_empty());
 
+    // No longer shared, and back on its branch: the question has no reason left.
+    core.workspace
+        .set_chat_cwd(PEER, &tmp.path().to_string_lossy())
+        .unwrap();
     git(&repo, &["switch", "alpha"]);
     send(&core, "release", "release", &cwd);
     wait_turn(&core, &prompts, 1).await;
@@ -976,8 +1010,13 @@ async fn only_an_accepted_run_records_its_checkout() {
     core.workspace.set_chat_cwd(CHAT, &plain).unwrap();
     send(&core, "m3", "third", &plain);
     wait_for(turns(2), "the turn outside a repository").await;
+    // Recorded once dispatch returns, which can be after the agent saw the prompt.
+    wait_for(
+        || chat(&core).source_context_unavailable_at.is_some(),
+        "the checkout marked unavailable",
+    )
+    .await;
     let outside = chat(&core);
-    assert!(outside.source_context_unavailable_at.is_some());
     assert_eq!(
         outside.source_context.as_ref().unwrap().cwd,
         cwd,
@@ -988,8 +1027,12 @@ async fn only_an_accepted_run_records_its_checkout() {
     core.workspace.set_chat_cwd(CHAT, &cwd).unwrap();
     send(&core, "m4", "fourth", &cwd);
     wait_for(turns(3), "the turn back in the repository").await;
+    wait_for(
+        || chat(&core).source_context_unavailable_at.is_none(),
+        "the checkout observed again",
+    )
+    .await;
     let back = chat(&core);
-    assert_eq!(back.source_context_unavailable_at, None);
     assert_eq!(
         back.source_context.unwrap().head_sha.as_deref(),
         Some(git(&repo, &["rev-parse", "HEAD"]).as_str())
@@ -1020,11 +1063,12 @@ async fn a_command_continued_after_a_branch_change_still_starts_the_prompt() {
 
     // `/compact` held behind the question, then continued: the branch note
     // went in front of it, so the agent read the command as plain text.
+    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
     send(&core, "m2", "/compact", &cwd);
     let (request_id, _) = wait_question(&core).await;
     answer(&core, &request_id, "Continue on beta");
     wait_for(turns(2), "the continued command").await;
     assert_eq!(prompts.lock().unwrap()[1], "/compact");
-    assert_eq!(context_branch(&core), "beta");
+    wait_context(&core, "beta").await;
 }

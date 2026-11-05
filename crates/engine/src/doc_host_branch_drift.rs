@@ -1,16 +1,20 @@
 //! Branch drift (#354). A chat's checkout can change branch under it: another
 //! draft's branch picker switches the shared folder, or someone runs `git
-//! switch` outside Harness. Continuing the earlier conversation there would
-//! carry the old branch's assumptions onto the new one, so every fresh
-//! dispatch (a send, a queued send, an answer to a dead run's question, crash
-//! recovery) compares the checkout with the chat's last accepted context, and
-//! on drift holds the turn and asks how to go on.
+//! switch` outside Harness. Every fresh dispatch (a send, a queued send, an
+//! answer to a dead run's question, crash recovery) compares the checkout with
+//! the chat's last accepted context. On drift the turn goes ahead, and the
+//! agent is told the branch moved so it doesn't assume its earlier work is
+//! there. Stopping to ask got in the way far more often than it helped.
 //!
-//! The question is an ordinary input part on an engine-written assistant
-//! entry, so every client already renders and answers it. Its request id
-//! carries [`REQUEST_PREFIX`], which routes the answer here instead of to an
-//! agent. Nothing is checked out, reset or discarded unless the user picks
-//! "Switch back", and that is only offered on a clean tree.
+//! A checkout other chats also use still asks, because there the person has a
+//! real choice: continue in an independent worktree. The question is an
+//! ordinary input part on an engine-written assistant entry, so every client
+//! already renders and answers it. Its request id carries [`REQUEST_PREFIX`],
+//! which routes the answer here instead of to an agent.
+//!
+//! Chats saved by earlier versions can still hold an open "Branch changed"
+//! question, with its "Switch back" choice on a clean tree. Those stay
+//! answerable, and the next send closes them.
 
 use super::*;
 
@@ -102,8 +106,8 @@ fn renamed_through(reflog: &[(i64, String)], since: i64, from: &str, to: &str) -
     renamed && branch == to
 }
 
-/// A literal fresh-branch checkout and its start point. Unsupported shell
-/// syntax stays behind the drift question; a mention inside `echo`, a command
+/// A literal fresh-branch checkout and its start point. Anything unsupported
+/// counts as drift, so the agent gets told; a mention inside `echo`, a command
 /// in another directory, or a forced branch reset is not ownership evidence.
 fn branch_creation(command: &str) -> Option<(&str, &str)> {
     // Split simple shell lists without treating quoted commit messages (or
@@ -287,8 +291,8 @@ fn branch_label(branch: &str) -> String {
     }
 }
 
-/// The note the agent gets once the user accepts the new branch, so it does
-/// not assume its earlier work is checked out.
+/// The note the agent gets on a new branch, so it does not assume its earlier
+/// work is checked out.
 /// The continued prompt, told that the branch moved. A prompt that starts
 /// with a command (`/compact`) goes as typed: agents only run a command at
 /// the very start of a message, and after the command the note would become
@@ -318,7 +322,9 @@ fn continue_note(drift: &Drift) -> String {
     }
 }
 
-fn question(drift: &Drift, can_switch_back: bool, shared: bool) -> UserInputQuestion {
+/// What a chat on a shared checkout is asked. A shared checkout never offers
+/// to switch back: that would move the other chats too.
+fn question(drift: &Drift) -> UserInputQuestion {
     let (from, to) = (
         branch_label(&drift.from_branch),
         branch_label(&drift.to_branch),
@@ -328,37 +334,22 @@ fn question(drift: &Drift, can_switch_back: bool, shared: bool) -> UserInputQues
             "This chat's folder now holds a different checkout, on {to}. \
              Its earlier turns ran in the previous checkout, on {from}."
         )
-    } else if shared && drift.from_branch == drift.to_branch {
+    } else if drift.from_branch == drift.to_branch {
         format!("This chat is using the checkout on {to}.")
     } else {
         format!("This chat was working on {from}, but its checkout is now on {to}.")
     };
-    let situation = if shared {
-        format!(
-            "{situation} This checkout is shared with other chats. Independent continuation creates a new worktree from this chat's recorded committed snapshot; uncommitted files stay in the shared checkout."
-        )
-    } else {
-        situation
-    };
-    let mut options = Vec::new();
-    if shared {
-        options.push(INDEPENDENT.to_string());
-    }
-    options.push(format!("{CONTINUE}{}", drift.to_branch));
-    if can_switch_back {
-        options.push(format!("{SWITCH_BACK}{}", drift.from_branch));
-    }
-    options.push(DONT_SEND.to_string());
     UserInputQuestion {
         id: "branch".into(),
-        header: if shared {
-            "Shared checkout"
-        } else {
-            "Branch changed"
-        }
-        .into(),
-        question: format!("{situation} How should it continue?"),
-        options,
+        header: "Shared checkout".into(),
+        question: format!(
+            "{situation} This checkout is shared with other chats. Independent continuation creates a new worktree from this chat's recorded committed snapshot; uncommitted files stay in the shared checkout. How should it continue?"
+        ),
+        options: vec![
+            INDEPENDENT.to_string(),
+            format!("{CONTINUE}{}", drift.to_branch),
+            DONT_SEND.to_string(),
+        ],
         multi_select: false,
         prefill: None,
         multiline: false,
@@ -486,8 +477,9 @@ impl DocHost {
     }
 
     /// Reconcile a proven rename (#453) or fresh-branch checkout (#732)
-    /// performed by this chat. Tool-call ownership and Git continuity must
-    /// agree; a successful shell command alone never approves arbitrary drift.
+    /// performed by this chat, which needs no note: the agent did it. Tool-call
+    /// ownership and Git continuity must agree; a successful shell command
+    /// alone never covers arbitrary drift.
     async fn own_turn_changed_branch(
         &self,
         chat_id: &str,
@@ -604,6 +596,25 @@ impl DocHost {
         Ok((request, message_id))
     }
 
+    /// Tell the agent the branch moved. The note is for the agent alone, so the
+    /// person's message goes in the transcript first, as they sent it (a
+    /// message that's already there keeps its id). Returns that message's id.
+    pub(super) fn note_branch_change(
+        &self,
+        chat_id: &str,
+        drift: &Drift,
+        request: &mut harness_proto::RunRequest,
+        message_id: Option<String>,
+    ) -> Result<String, EngineError> {
+        let id = message_id.unwrap_or_else(new_id);
+        self.open(chat_id)?
+            .write_user_message(&id, &request.prompt, now_ms())?;
+        request.prompt = with_continue_note(drift, &request.prompt);
+        tracing::info!(chat = %chat_id, from = %drift.from_branch, to = %drift.to_branch,
+            replaced = drift.checkout_replaced, "continuing on a changed checkout");
+        Ok(id)
+    }
+
     /// Hold `request` and ask how to continue. The user's message lands in
     /// the transcript now, so it is not lost while the question waits.
     pub(super) async fn hold_for_branch_drift(
@@ -618,7 +629,6 @@ impl DocHost {
         if let Some(id) = &message_id {
             handle.write_user_message(id, &request.prompt, now_ms())?;
         }
-        let cwd = request.cwd.clone();
         let open = open_question_in_tail(&handle);
         // A question left open across a restart still owns the messages it
         // was asked about.
@@ -663,15 +673,13 @@ impl DocHost {
             handle.doc.doc().commit();
         }
         if open.is_none() {
-            let shared = self.checkout_is_shared(chat_id, &cwd);
-            let can_switch_back = self.can_switch_back(chat_id, &cwd, drift).await;
             handle.doc.push_message(&SessionMessageEntry {
                 id: new_id(),
                 role: MessageRole::Assistant,
                 parts: vec![MessagePart::Input {
                     id: request_id.clone(),
                     request_id,
-                    questions: vec![question(drift, can_switch_back, shared)],
+                    questions: vec![question(drift)],
                     resolved: false,
                 }],
                 created_at: now_ms(),
@@ -686,21 +694,6 @@ impl DocHost {
         tracing::info!(chat = %chat_id, from = %drift.from_branch, to = %drift.to_branch,
             replaced = drift.checkout_replaced, "dispatch held: checkout drifted");
         Ok(())
-    }
-
-    /// Offered only when switching cannot touch anyone's work: the same
-    /// checkout, a named branch to return to, and nothing uncommitted.
-    async fn can_switch_back(&self, chat_id: &str, cwd: &str, drift: &Drift) -> bool {
-        if drift.checkout_replaced
-            || drift.from_branch == "HEAD"
-            || self.checkout_is_shared(chat_id, cwd)
-        {
-            return false;
-        }
-        let Some(repos) = self.inner.repos.get() else {
-            return false;
-        };
-        repos.is_clean(Path::new(cwd)).await.unwrap_or(false)
     }
 
     /// Answer (or dismissal, `answers: None`) to a drift question.
@@ -844,26 +837,13 @@ impl DocHost {
                 || current.branch != accepted_branch
             {
                 // Consent applies only to the displayed branch, never to a
-                // newer observation. Re-prompt without advancing context.
-                let previous = self
-                    .workspace()
-                    .and_then(|ws| ws.chat(chat_id).ok().flatten())
-                    .and_then(|chat| chat.source_context);
-                let drift = Drift {
-                    from_branch: previous
-                        .as_ref()
-                        .map(|p| p.branch.clone())
-                        .unwrap_or_else(|| accepted_branch.to_string()),
-                    to_branch: current.branch,
-                    checkout_replaced: previous
-                        .as_ref()
-                        .is_some_and(|p| p.checkout_id != current.checkout_id),
-                };
+                // newer observation. Dispatch without advancing context: a
+                // shared checkout asks again, and any other tells the agent.
                 handle.doc.resolve_input(request_id)?;
                 self.clear_branch_drift_held(handle, request_id)?;
-                self.hold_for_branch_drift(
+                self.dispatch_with_source_context(
+                    sessions,
                     chat_id,
-                    &drift,
                     held.harness,
                     held.request,
                     held.message_id,
@@ -871,7 +851,7 @@ impl DocHost {
                 .await?;
                 return Ok((
                     SessionCommandStatus::Applied,
-                    Some("branch changed again; confirmation required".into()),
+                    Some("the branch changed again".into()),
                 ));
             }
             Some(current)
@@ -1245,19 +1225,17 @@ mod tests {
     }
 
     #[test]
-    fn switch_back_is_offered_only_when_allowed() {
+    fn the_shared_checkout_question_never_offers_to_switch_back() {
         let drift = Drift {
             from_branch: "alpha".into(),
             to_branch: "beta".into(),
             checkout_replaced: false,
         };
+        let asked = question(&drift);
+        assert_eq!(asked.header, "Shared checkout");
         assert_eq!(
-            question(&drift, true, false).options,
-            ["Continue on beta", "Switch back to alpha", "Don't send"]
-        );
-        assert_eq!(
-            question(&drift, false, false).options,
-            ["Continue on beta", "Don't send"]
+            asked.options,
+            ["Continue independently", "Continue on beta", "Don't send"]
         );
     }
 }

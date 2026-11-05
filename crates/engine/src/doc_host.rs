@@ -6070,14 +6070,22 @@ impl DocHost {
         let mut request = request;
         self.retarget_independent_request(chat_id, &mut request)?;
         let context = self.capture_source_context(&request.cwd).await;
+        let mut branch_change = None;
         if let Some(context) = &context
             && let Some(drift) = self.drift_since_last_turn(sessions, chat_id, context).await
         {
-            self.hold_for_branch_drift(chat_id, &drift, harness, request, message_id)
-                .await?;
-            return Ok(None);
+            // Only a checkout other chats also use still asks: it has a real
+            // choice to offer, an independent worktree. Otherwise carry on and
+            // tell the agent.
+            if self.checkout_is_shared(chat_id, &request.cwd) {
+                self.hold_for_branch_drift(chat_id, &drift, harness, request, message_id)
+                    .await?;
+                return Ok(None);
+            }
+            branch_change = Some(drift);
         }
-        let (request, message_id) = self.release_branch_drift(chat_id, request, message_id)?;
+        let (mut request, mut message_id) =
+            self.release_branch_drift(chat_id, request, message_id)?;
         // Source capture and checkout questions can await. Recheck at the
         // actual handoff, including cold fallbacks and orphan redelivery.
         if self.refuses_prompt_origin(chat_id, &request.prompt, request.turn_origin) {
@@ -6104,6 +6112,9 @@ impl DocHost {
             })?;
             handle.publish_queue();
             return Ok(None);
+        }
+        if let Some(drift) = &branch_change {
+            message_id = Some(self.note_branch_change(chat_id, drift, &mut request, message_id)?);
         }
         let run_id = sessions
             .dispatch(chat_id, harness, request, message_id)
