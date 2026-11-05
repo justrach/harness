@@ -2144,6 +2144,7 @@ impl Shell {
                         .unwrap_or_else(|| "Thread".into()),
                     icons::CHAT_ROUND_LINE,
                 ),
+                RightSurface::ToolAccess(_) => ("Tool access".into(), icons::WIDGET),
                 _ => ("New tab".into(), icons::PLUS),
             },
             PanelTab::New(_) | PanelTab::Empty => ("New tab".into(), icons::PLUS),
@@ -2451,6 +2452,9 @@ impl Shell {
                         self.state
                             .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
                     }
+                }
+                RightSurface::ToolAccess(id) => {
+                    self.tool_access_panels.remove(id);
                 }
                 RightSurface::Terminal(key) => {
                     let p = self.right_terminal_panel(cx);
@@ -4233,6 +4237,11 @@ impl Shell {
                 .subagent_tabs
                 .get(&id)
                 .map(|t| t.transcript.clone().into_any_element())
+                .unwrap_or_else(|| Empty.into_any_element()),
+            RightSurface::ToolAccess(id) => self
+                .tool_access_panels
+                .get(&id)
+                .map(|p| p.clone().into_any_element())
                 .unwrap_or_else(|| Empty.into_any_element()),
             RightSurface::Picker => {
                 let id = self.panel_layout_mut(cx).focused;

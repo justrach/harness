@@ -850,6 +850,9 @@ pub enum RightSurface {
     /// A subagent's transcript, read-only (per-subagent viz) — the handle
     /// keys [`Shell::subagent_tabs`].
     Subagent(u64),
+    /// Per-agent Tool Access Map for a chat — the handle keys
+    /// [`Shell::tool_access_panels`].
+    ToolAccess(u64),
 }
 
 /// What a new browser tab starts on.
@@ -2058,6 +2061,8 @@ pub struct Shell {
     /// Subagent transcript surfaces by id — each tab a read-only
     /// [`Transcript`] pinned to its subagent doc.
     subagent_tabs: std::collections::HashMap<u64, SubagentTab>,
+    tool_access_panels: std::collections::HashMap<u64, Entity<crate::tool_access::ToolAccessPanel>>,
+    tool_access_seq: u64,
     subagent_seq: u64,
     /// Split chat panes (`shell/chat_split.rs`); `None` = one column.
     chat_split: Option<chat_split::ChatSplit>,
@@ -2682,6 +2687,8 @@ impl Shell {
             diff_subs: std::collections::HashMap::new(),
             diff_seq: 0,
             subagent_tabs: std::collections::HashMap::new(),
+            tool_access_panels: std::collections::HashMap::new(),
+            tool_access_seq: 0,
             subagent_seq: 0,
             chat_split: None,
             workspace_panels: Default::default(),
@@ -3546,6 +3553,14 @@ impl Shell {
                         browser.page.url.clone().map(Into::into),
                     )
                 }),
+                RightSurface::ToolAccess(id) => self.tool_access_panels.get(id).map(|_| {
+                    (
+                        *surface,
+                        SharedString::from("Tool access"),
+                        false,
+                        None,
+                    )
+                }),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -3562,7 +3577,8 @@ impl Shell {
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
             | RightSurface::Subagent(_)
-            | RightSurface::Browser(_) => {
+            | RightSurface::Browser(_)
+            | RightSurface::ToolAccess(_) => {
                 return None;
             }
         };
@@ -3772,7 +3788,7 @@ impl Shell {
             }
             // The tab's feed (watch or snapshot) runs from open to close —
             // activation needs no revalidation.
-            RightSurface::Subagent(_) | RightSurface::Browser(_) => {}
+            RightSurface::Subagent(_) | RightSurface::Browser(_) | RightSurface::ToolAccess(_) => {}
             RightSurface::Picker => {}
         }
         self.sync_explorer_selection(cx);
@@ -4375,6 +4391,9 @@ impl Shell {
                     cx,
                 );
             }
+            TranscriptEvent::OpenToolAccess { chat_id } => {
+                self.add_tool_access_surface(chat_id.clone(), cx);
+            }
             TranscriptEvent::Reauthenticate {
                 chat_id,
                 row_id,
@@ -4639,6 +4658,40 @@ impl Shell {
         self.set_right_active(RightSurface::Subagent(id), cx);
     }
 
+
+    fn add_tool_access_surface(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        // Reuse an open Tool Access tab for this chat.
+        if let Some((&id, _)) = self
+            .tool_access_panels
+            .iter()
+            .find(|(_, panel)| panel.read(cx).chat_id == chat_id)
+        {
+            self.set_surfaces_open(true, cx);
+            let key = self.panel_key(cx);
+            let surface = RightSurface::ToolAccess(id);
+            let tabs = self.right_tabs.entry(key).or_default();
+            if !tabs.contains(&surface) {
+                tabs.push(surface);
+            }
+            self.set_right_active(surface, cx);
+            return;
+        }
+        self.set_surfaces_open(true, cx);
+        self.tool_access_seq += 1;
+        let id = self.tool_access_seq;
+        let state = self.state.clone();
+        let panel = cx.new(|cx| {
+            crate::tool_access::ToolAccessPanel::new(chat_id.clone(), state, cx)
+        });
+        self.tool_access_panels.insert(id, panel);
+        let key = self.panel_key(cx);
+        self.right_tabs
+            .entry(key)
+            .or_default()
+            .push(RightSurface::ToolAccess(id));
+        self.set_right_active(RightSurface::ToolAccess(id), cx);
+    }
+
     /// Fetch a finished subagent's frozen transcript blob
     /// (`{chat_id}/{doc_id}`); on ANY failure fall back to watching the doc
     /// — the blob upload is best-effort engine-side.
@@ -4863,6 +4916,9 @@ impl Shell {
                 panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
             }
             RightSurface::Subagent(_) => unreachable!("subagent surfaces are released above"),
+            RightSurface::ToolAccess(id) => {
+                self.tool_access_panels.remove(&id);
+            }
             RightSurface::Picker => {}
         }
         self.panels.update(&key, |p| {
@@ -11872,6 +11928,13 @@ impl Shell {
                     });
                     panel.into_any_element()
                 }
+                RightSurface::ToolAccess(id) if self.tool_access_panels.contains_key(&id) => {
+                    self.tool_access_panels
+                        .get(&id)
+                        .expect("checked")
+                        .clone()
+                        .into_any_element()
+                }
                 RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
                     let transcript = self
                         .subagent_tabs
@@ -12214,6 +12277,7 @@ impl Shell {
                     })
                     .unwrap_or(icons::LIST),
                 RightSurface::Subagent(_) => subagent_icon.map_or(icons::BOT, |(path, _)| path),
+                RightSurface::ToolAccess(_) => icons::WIDGET,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::Picker => icons::PLUS,
