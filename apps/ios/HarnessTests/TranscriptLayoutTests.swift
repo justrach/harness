@@ -170,6 +170,33 @@ final class TranscriptLayoutTests: XCTestCase {
         }
     }
 
+    /// Each row a scroll reveals used to build its own UITextView, the largest
+    /// single cost of a row, which made every new row miss its frame.
+    func testScrollingHistoryReusesTextViews() async {
+        await mount(turns: 600)
+        func findScroll(_ view: UIView) -> UIScrollView? {
+            if let scroll = view as? UIScrollView { return scroll }
+            return view.subviews.lazy.compactMap { findScroll($0) }.first
+        }
+        let table = findScroll(window) as! UITableView
+        harness.scroll.interactionEpoch &+= 1
+        harness.scroll.userScrolling = true
+        harness.scroll.userDragging = true
+        harness.scroll.pinned = false
+        let builtBefore = TextViewPool.built
+        var seen = Set<String>()
+        for _ in 0..<60 {
+            table.setContentOffset(CGPoint(x: 0, y: table.contentOffset.y - 300), animated: false)
+            table.layoutIfNeeded()
+            await Task.yield()
+            for cell in table.visibleCells { if let id = cell.accessibilityIdentifier { seen.insert(id) } }
+        }
+        let built = TextViewPool.built - builtBefore
+        print("scrolling history: \(built) text views built for \(seen.count) rows")
+        XCTAssertGreaterThan(seen.count, 80, "the scroll must reveal many rows for this to mean anything")
+        XCTAssertLessThan(built * 2, seen.count, "rows built their own text views instead of reusing them")
+    }
+
     func testToolGroupsRevealAndCollapseThroughIntermediateHeights() async {
         await mount(turns: 3)
         let rows = harness.store.transcriptCache.rows(revision: harness.store.revision,

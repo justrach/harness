@@ -1660,6 +1660,7 @@ final class AppModel {
     }
 
     private func evictForMemoryWarning() {
+        TextViewPool.drain()
         let newest = storeLastUsed.max { $0.value < $1.value }?.key
         let before = sessionStores.count
         let order = Self.evictionOrder(lastUsed: storeLastUsed) { [weak self] id in

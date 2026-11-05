@@ -10,22 +10,14 @@ struct SelectableText: UIViewRepresentable {
     @Environment(\.openURL) private var openURL
 
     func makeUIView(context: Context) -> UITextView {
-        let storage = NSTextStorage()
-        let layout = InlineCodeLayoutManager()
-        layout.extraLineHeight = lineHeight
-        let container = NSTextContainer(size: .zero)
-        storage.addLayoutManager(layout)
-        layout.addTextContainer(container)
-        let view = OutputTextView(frame: .zero, textContainer: container)
-        view.isEditable = false
-        view.isSelectable = true
-        view.isScrollEnabled = false
-        view.backgroundColor = .clear
-        view.textContainerInset = .zero
-        view.textContainer.lineFragmentPadding = 0
-        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let view = TextViewPool.take()
+        (view.layoutManager as? InlineCodeLayoutManager)?.extraLineHeight = lineHeight
         view.delegate = context.coordinator
         return view
+    }
+
+    static func dismantleUIView(_ view: UITextView, coordinator: Coordinator) {
+        TextViewPool.give(view)
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
@@ -120,6 +112,53 @@ struct SelectableText: UIViewRepresentable {
             return UIAction { [weak self] _ in self?.openURL(url) }
         }
     }
+}
+
+/// Text views for the rows a scroll is about to show. Scrolling builds a new
+/// SwiftUI graph for each cell it reuses, and a UITextView was about a quarter of
+/// what that cost: of the main thread's 1,088 ms laying out rows over ten seconds
+/// of scrolling, 254 ms was in its initializer. Each pass ran about 40 ms against
+/// a 16 ms frame. A row scrolled off gives its view back for the next one.
+@MainActor
+enum TextViewPool {
+    /// More than a screen of rows can give back at once, and little to hold.
+    static let capacity = 16
+    private static var free: [UITextView] = []
+    /// How many views have been built; tests read it.
+    private(set) static var built = 0
+    static var waiting: Int { free.count }
+
+    static func take() -> UITextView {
+        if let view = free.popLast() { return view }
+        built += 1
+        let storage = NSTextStorage()
+        let layout = InlineCodeLayoutManager()
+        let container = NSTextContainer(size: .zero)
+        storage.addLayoutManager(layout)
+        layout.addTextContainer(container)
+        let view = OutputTextView(frame: .zero, textContainer: container)
+        view.isEditable = false
+        view.isSelectable = true
+        view.isScrollEnabled = false
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }
+
+    /// Nothing of the row it showed goes with it: no text, selection or focus.
+    static func give(_ view: UITextView) {
+        if view.isFirstResponder { view.resignFirstResponder() }
+        view.delegate = nil
+        view.attributedText = nil
+        view.removeFromSuperview()
+        guard free.count < capacity else { return }
+        view.frame = .zero
+        free.append(view)
+    }
+
+    static func drain() { free.removeAll() }
 }
 
 private final class OutputTextView: UITextView {
