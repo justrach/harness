@@ -582,7 +582,7 @@ async fn install_release(
             // The computer-use app graff ships beside itself. It has its own
             // uses, so failing to place it doesn't undo graff's update.
             if let (Some(home), Some(dir)) = (crate::executable::home_dir(), binary.parent()) {
-                if let Err(error) = install_nanocua(dir, &home.join("Applications")) {
+                if let Err(error) = crate::nanocua_bundle::install(dir, &home.join("Applications")) {
                     tracing::warn!(%error, "could not install nanocua");
                 }
             }
@@ -605,42 +605,6 @@ async fn install_release(
         crate::codedb_bundle::maybe_check_soon();
     }
     Ok(outcome)
-}
-
-/// Puts the `nanocua.app` beside graff in an unpacked tarball into `applications`.
-/// A tarball without one (a build CI didn't sign) leaves any installed app alone.
-/// `ditto` keeps the signature, which macOS's permissions are tied to.
-fn install_nanocua(unpacked: &Path, applications: &Path) -> anyhow::Result<bool> {
-    if !cfg!(target_os = "macos") {
-        return Ok(false);
-    }
-    let source = unpacked.join("nanocua.app");
-    if !source.is_dir() {
-        return Ok(false);
-    }
-    std::fs::create_dir_all(applications)?;
-    let target = applications.join("nanocua.app");
-    let staged = applications.join(".nanocua.app.new");
-    let aside = applications.join(".nanocua.app.old");
-    let _ = std::fs::remove_dir_all(&staged);
-    let status = std::process::Command::new("ditto")
-        .arg(&source)
-        .arg(&staged)
-        .status()?;
-    anyhow::ensure!(status.success(), "couldn't copy nanocua.app");
-    let _ = std::fs::remove_dir_all(&aside);
-    let had_one = target.exists();
-    if had_one {
-        std::fs::rename(&target, &aside)?;
-    }
-    if let Err(error) = std::fs::rename(&staged, &target) {
-        if had_one {
-            let _ = std::fs::rename(&aside, &target);
-        }
-        return Err(error.into());
-    }
-    let _ = std::fs::remove_dir_all(&aside);
-    Ok(true)
 }
 
 fn expected_sha(sums: &str, asset: &str) -> Option<String> {
@@ -793,37 +757,6 @@ mod tests {
             &stable,
             None
         ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn nanocua_in_a_tarball_replaces_the_installed_one_and_no_app_changes_nothing() {
-        let unpacked = tempfile::tempdir().unwrap();
-        let apps = tempfile::tempdir().unwrap();
-        let installed = apps
-            .path()
-            .join("Apps")
-            .join("nanocua.app/Contents/version");
-
-        assert!(!install_nanocua(unpacked.path(), &apps.path().join("Apps")).unwrap());
-        assert!(!installed.exists());
-
-        let inside = unpacked.path().join("nanocua.app/Contents");
-        std::fs::create_dir_all(&inside).unwrap();
-        std::fs::write(inside.join("version"), "1").unwrap();
-        assert!(install_nanocua(unpacked.path(), &apps.path().join("Apps")).unwrap());
-        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "1");
-
-        std::fs::write(inside.join("version"), "2").unwrap();
-        assert!(install_nanocua(unpacked.path(), &apps.path().join("Apps")).unwrap());
-        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "2");
-        assert!(!apps.path().join("Apps/.nanocua.app.new").exists());
-        assert!(!apps.path().join("Apps/.nanocua.app.old").exists());
-
-        // A later tarball with no app leaves the signed one in place.
-        std::fs::remove_dir_all(unpacked.path().join("nanocua.app")).unwrap();
-        assert!(!install_nanocua(unpacked.path(), &apps.path().join("Apps")).unwrap());
-        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "2");
     }
 
     #[test]

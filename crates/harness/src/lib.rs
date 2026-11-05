@@ -250,6 +250,7 @@ pub mod mock;
 mod model_context;
 pub mod opencode;
 pub mod pi;
+pub mod nanocua_bundle;
 pub mod process;
 mod run_environment;
 pub(crate) use run_environment::apply_run_environment;
