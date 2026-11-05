@@ -7,6 +7,9 @@ struct SelectableText: UIViewRepresentable {
     let text: NSAttributedString
     var wraps = true
     var lineHeight: CGFloat = MD.lineHeight
+    var maximumNumberOfLines = 0
+    var fitsContentWidth = false
+    var copyAllText: String? = nil
     @Environment(\.openURL) private var openURL
 
     func makeUIView(context: Context) -> UITextView {
@@ -33,7 +36,9 @@ struct SelectableText: UIViewRepresentable {
         view.tintColor = UIColor(Theme.accent)
         // Links keep their explicit monochrome foreground and underline.
         view.linkTextAttributes = [:]
-        context.coordinator.update(text, lineHeight: lineHeight, in: view)
+        context.coordinator.copyAllText = copyAllText
+        context.coordinator.update(text, lineHeight: lineHeight,
+                                   maximumNumberOfLines: maximumNumberOfLines, in: view)
     }
 
     /// Paint-only veil/highlight updates and streamed appends must not clear a
@@ -63,19 +68,41 @@ struct SelectableText: UIViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
-        context.coordinator.sizeThatFits(proposal, text: text, wraps: wraps, view: uiView)
+        context.coordinator.sizeThatFits(proposal, text: text, wraps: wraps,
+                                         fitsContentWidth: fitsContentWidth, view: uiView)
+    }
+
+    /// Collapsed prompts may keep their full source for expansion/Copy prompt,
+    /// but a dragged range must stop before the truncated continuation.
+    static func visibleSelection(_ selection: NSRange, in text: String, limit: Int) -> NSRange {
+        let capped = min(max(0, limit), text.utf16.count)
+        let boundary: Int
+        if capped == text.utf16.count {
+            boundary = capped
+        } else {
+            boundary = text.indices.lazy.map { $0.utf16Offset(in: text) }.prefix { $0 <= capped }.last ?? 0
+        }
+        let safe = retainedSelection(selection, from: text, to: text)
+        let start = min(safe.location, boundary)
+        return NSRange(location: start, length: min(safe.length, boundary - start))
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(openURL: openURL) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var openURL: OpenURLAction
+        var copyAllText: String?
         private var naturalWidth: CGFloat?
         private var measurements: [CGFloat: CGSize] = [:]
         init(openURL: OpenURLAction) { self.openURL = openURL }
 
-        func update(_ text: NSAttributedString, lineHeight: CGFloat, in view: UITextView) {
-            var metricsChanged = false
+        func update(_ text: NSAttributedString, lineHeight: CGFloat,
+                    maximumNumberOfLines: Int = 0, in view: UITextView) {
+            var metricsChanged = view.textContainer.maximumNumberOfLines != maximumNumberOfLines
+            if metricsChanged {
+                view.textContainer.maximumNumberOfLines = maximumNumberOfLines
+                view.textContainer.lineBreakMode = maximumNumberOfLines > 0 ? .byTruncatingTail : .byWordWrapping
+            }
             if let layout = view.layoutManager as? InlineCodeLayoutManager, layout.extraLineHeight != lineHeight {
                 layout.extraLineHeight = lineHeight
                 layout.invalidateLayout(forCharacterRange: NSRange(location: 0, length: view.textStorage.length),
@@ -89,9 +116,9 @@ struct SelectableText: UIViewRepresentable {
         }
 
         func sizeThatFits(_ proposal: ProposedViewSize, text: NSAttributedString,
-                          wraps: Bool, view: UITextView) -> CGSize {
+                          wraps: Bool, fitsContentWidth: Bool = false, view: UITextView) -> CGSize {
             let proposedWidth: CGFloat
-            if wraps, let width = proposal.width {
+            if wraps, !fitsContentWidth, let width = proposal.width {
                 proposedWidth = width
             } else {
                 if naturalWidth == nil {
@@ -99,7 +126,7 @@ struct SelectableText: UIViewRepresentable {
                         with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
                         options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).width)
                 }
-                proposedWidth = naturalWidth!
+                proposedWidth = wraps ? min(proposal.width ?? naturalWidth!, naturalWidth!) : naturalWidth!
             }
             let width = max(1, proposedWidth)
             if let size = measurements[width] { return size }
@@ -114,8 +141,33 @@ struct SelectableText: UIViewRepresentable {
             return size
         }
 
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            guard textView.textContainer.maximumNumberOfLines > 0 else { return }
+            let layout = textView.layoutManager
+            layout.ensureLayout(for: textView.textContainer)
+            let glyphs = layout.glyphRange(for: textView.textContainer)
+            var end = NSMaxRange(glyphs)
+            layout.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, line, _ in
+                let truncated = layout.truncatedGlyphRange(inLineFragmentForGlyphAt: line.location)
+                if truncated.location != NSNotFound { end = min(end, truncated.location) }
+            }
+            let limit = end < layout.numberOfGlyphs ? layout.characterIndexForGlyph(at: end) : textView.textStorage.length
+            let selection = SelectableText.visibleSelection(textView.selectedRange, in: textView.text ?? "", limit: limit)
+            if selection != textView.selectedRange { textView.selectedRange = selection }
+        }
+
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
                       suggestedActions: [UIMenuElement]) -> UIMenu? {
+            if let text = copyAllText {
+                let copyPrompt = UIAction(title: "Copy prompt", image: UIImage(systemName: "doc.on.doc")) { _ in
+                    UIPasteboard.general.string = text
+                }
+                // Keep whole-prompt copy beside the standard Copy group,
+                // before lookup/translation can push it into menu overflow.
+                var actions = suggestedActions
+                actions.insert(copyPrompt, at: min(1, actions.count))
+                return UIMenu(children: actions)
+            }
             guard range.location < textView.textStorage.length else { return nil }
             var codeRange = NSRange()
             guard let code = textView.textStorage.attribute(.responseCodeBlock, at: range.location,
