@@ -1,11 +1,12 @@
 //! Animated one-line tool-call rows for the chat transcript.
 //!
-//! Compact rows under a "N tool calls" header: an active row sits in a gray
-//! pill with a scramble on the middle of its path and a ticking timer; a
-//! finished row fades the pill away, settles the path, and shows a short
-//! result (`12 matches`, `+8 −3`, `48 passed`); a failed or passed test run
-//! paints a dither wash from the right into a status pill. Aggregate file
-//! diffs land under the list once the turn settles.
+//! What a row in a tool group adds to the task tree: an active row sits in a
+//! gray pill with a scramble on the middle of its path and a ticking timer; a
+//! finished row settles the path and shows a short result (`12 matches`,
+//! `+8 −3`, `48 passed`); a failed or passed run paints a dither wash from the
+//! right into a status pill. Aggregate file diffs land under the list once the
+//! turn settles. The transcript draws these inside its own tree rows
+//! ([`status_trail`], [`status_wash`]), so every row in a group has one layout.
 //!
 //! Everything shown comes from real [`ToolItem`] values (the same model the
 //! transcript already builds from tool events). Fixtures feed synthetic
@@ -31,7 +32,7 @@ pub const ROW_HEIGHT: f32 = 28.0;
 /// Active pill radius.
 pub const PILL_RADIUS: f32 = 8.0;
 /// Status pill (pass / fail) radius.
-pub const STATUS_RADIUS: f32 = 6.0;
+pub const STATUS_RADIUS: f32 = 5.0;
 
 fn fg_on(bg: Hsla) -> Hsla {
     if crate::theme::contrast_ratio(gpui::white(), bg)
@@ -44,14 +45,25 @@ fn fg_on(bg: Hsla) -> Hsla {
 }
 /// Header chevron + title line.
 pub const HEADER_HEIGHT: f32 = 24.0;
+/// Width of the pass/fail wash at a row's right end. The row keeps its text
+/// out of this space, so the dither never runs under a long command.
+pub const WASH_WIDTH: f32 = 112.0;
+/// The aggregate file-diff line under a group's rows.
+pub const DIFF_SUMMARY_HEIGHT: f32 = 22.0;
+/// More files than this and the line gives their total instead of naming them.
+const DIFF_SUMMARY_MAX_NAMED: usize = 3;
 
 const SCRAMBLE_TICK: MotionSpec = MotionSpec::new(80, CubicBezier::new(0.0, 0.0, 1.0, 1.0));
 
 /// How a row presents its trailing result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowResult {
-    /// Still running: show elapsed seconds.
-    Running { elapsed_ms: u64 },
+    /// Still running: elapsed seconds, when this view saw the tool start.
+    /// A tool replayed from history has no honest start time, so no timer.
+    Running { elapsed_ms: Option<u64> },
+    /// Finished with nothing worth saying. The row has simply stopped moving;
+    /// a "done" on every line is noise.
+    Settled,
     /// Settled success text (`12 matches`, `3 files`, `+8 −3`).
     Summary(SharedString),
     /// Diff counts on the right.
@@ -108,7 +120,7 @@ pub fn from_tools(tools: &[ToolItem], elapsed_ms: Option<u64>) -> CallGroup {
         if tool.call.is_subagent_spawn() {
             continue;
         }
-        let row = call_row(tool, elapsed_ms.unwrap_or(0));
+        let row = call_row(tool, elapsed_ms);
         if row.is_error {
             failed += 1;
         }
@@ -159,7 +171,7 @@ fn merge_stat(out: &mut Vec<ToolDiffStat>, stat: ToolDiffStat) {
     }
 }
 
-fn call_row(tool: &ToolItem, elapsed_ms: u64) -> CallRow {
+fn call_row(tool: &ToolItem, elapsed_ms: Option<u64>) -> CallRow {
     let (verb, detail) = harness_proto::view::tool_chip_content(&tool.call);
     let result = row_result(tool, elapsed_ms);
     CallRow {
@@ -173,7 +185,7 @@ fn call_row(tool: &ToolItem, elapsed_ms: u64) -> CallRow {
     }
 }
 
-fn row_result(tool: &ToolItem, elapsed_ms: u64) -> RowResult {
+pub fn row_result(tool: &ToolItem, elapsed_ms: Option<u64>) -> RowResult {
     if !tool.resolved {
         return RowResult::Running { elapsed_ms };
     }
@@ -194,11 +206,18 @@ fn row_result(tool: &ToolItem, elapsed_ms: u64) -> RowResult {
                     deletions: file.deletions as u64,
                 };
             }
-            ToolDetail::Output { lines, .. } => {
-                if let Some(parsed) = parse_test_outcome(lines) {
+            ToolDetail::Output {
+                lines,
+                truncated_by,
+            } => {
+                // Only a command's output is a test report. A file or a search
+                // that merely contains "3 failed" did not fail anything.
+                if matches!(tool.call, ToolCall::Exec { .. })
+                    && let Some(parsed) = parse_test_outcome(lines, tool.is_error)
+                {
                     return parsed;
                 }
-                if let Some(summary) = search_summary(tool, lines) {
+                if let Some(summary) = search_summary(tool, lines, *truncated_by) {
                     return RowResult::Summary(summary);
                 }
             }
@@ -207,42 +226,35 @@ fn row_result(tool: &ToolItem, elapsed_ms: u64) -> RowResult {
     }
     if tool.is_error {
         return RowResult::Failed {
-            label: SharedString::from("1 failed"),
+            label: SharedString::from("failed"),
         };
     }
-    match &tool.call {
-        ToolCall::Search { .. } | ToolCall::Glob { .. } => {
-            RowResult::Summary(SharedString::from("matches"))
-        }
-        ToolCall::ReadFile { .. } => RowResult::Summary(SharedString::from("1 file")),
-        ToolCall::EditFile { .. } | ToolCall::WriteFile { .. } | ToolCall::ApplyPatch { .. } => {
-            RowResult::Summary(SharedString::from("edited"))
-        }
-        ToolCall::Exec { .. } => RowResult::Summary(SharedString::from("done")),
-        _ => RowResult::Summary(SharedString::from("done")),
-    }
+    RowResult::Settled
 }
 
-fn parse_test_outcome(lines: &[SharedString]) -> Option<RowResult> {
+/// A pass or fail the output reports, when it agrees with how the command
+/// exited. A successful `cat` of a log saying "2 failed" isn't a failure, and a
+/// failed command that printed "48 passed" isn't a pass.
+fn parse_test_outcome(lines: &[SharedString], is_error: bool) -> Option<RowResult> {
     let text = lines
         .iter()
         .map(|l| l.as_ref())
         .collect::<Vec<_>>()
         .join("\n");
     let lower = text.to_ascii_lowercase();
-    if let Some(n) = capture_count(&lower, "failed") {
-        if n > 0 {
-            return Some(RowResult::Failed {
-                label: SharedString::from(format!("{n} failed")),
-            });
-        }
-    }
-    if let Some(n) = capture_count(&lower, "passed") {
-        return Some(RowResult::Passed {
-            label: SharedString::from(format!("{n} passed")),
+    if let Some(n) = capture_count(&lower, "failed")
+        && n > 0
+    {
+        return is_error.then(|| RowResult::Failed {
+            label: SharedString::from(format!("{n} failed")),
         });
     }
-    None
+    if is_error {
+        return None;
+    }
+    capture_count(&lower, "passed").map(|n| RowResult::Passed {
+        label: SharedString::from(format!("{n} passed")),
+    })
 }
 
 fn capture_count(text: &str, word: &str) -> Option<u64> {
@@ -280,27 +292,48 @@ fn capture_count(text: &str, word: &str) -> Option<u64> {
     None
 }
 
-fn search_summary(tool: &ToolItem, lines: &[SharedString]) -> Option<SharedString> {
-    if !matches!(tool.call, ToolCall::Search { .. } | ToolCall::Glob { .. }) {
+/// A count, only when the output can really be counted. Large outputs reach the
+/// doc as their first line and a `…`, and "No matches found" is one line too;
+/// counting either would print "1 match".
+fn search_summary(
+    tool: &ToolItem,
+    lines: &[SharedString],
+    truncated_by: usize,
+) -> Option<SharedString> {
+    let rows = || lines.iter().filter(|line| !line.trim().is_empty());
+    if rows().any(|line| line.ends_with('…')) {
         return None;
     }
-    let n = lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .count()
-        .max(1);
+    let n = rows().count() + truncated_by;
+    if n == 0 {
+        return None;
+    }
+    let (one, many) = match tool.call {
+        ToolCall::Search { .. } if rows().all(|line| is_match_line(line)) => ("match", "matches"),
+        ToolCall::Glob { .. } if rows().all(|line| !line.contains(' ')) => ("file", "files"),
+        _ => return None,
+    };
     Some(SharedString::from(format!(
         "{n} {}",
-        if n == 1 { "match" } else { "matches" }
+        if n == 1 { one } else { many }
     )))
+}
+
+/// `path:line` or `path:line:text`, what a search prints per match.
+fn is_match_line(line: &str) -> bool {
+    line.split(':')
+        .nth(1)
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
 }
 
 // ---------------------------------------------------------------------------
 // Scramble
 // ---------------------------------------------------------------------------
 
+/// Letter-weight glyphs: block characters read as dark bars against the rows
+/// around them, where these read as the path itself churning.
 const SCRAMBLE_GLYPHS: &[char] = &[
-    '░', '▒', '▓', '·', '•', '◦', '▪', '▫', '×', '+', '›', '‹',
+    'a', 'c', 'e', 'k', 'm', 'n', 'o', 'r', 's', 'u', 'v', 'x', 'z', '·', '-', '_', '=', '+',
 ];
 
 /// Scramble the middle of `text` while a tool is active. Ends stay readable
@@ -333,48 +366,73 @@ pub fn scramble_middle(text: &str, phase: f32) -> String {
 // Dither wash (pass / fail)
 // ---------------------------------------------------------------------------
 
-/// Right-origin dither wash into `color`. Density falls off toward the left.
-fn dither_wash(color: Hsla, strength: f32) -> AnyElement {
-    let strength = strength.clamp(0.0, 1.0);
-    canvas(
+const DITHER_CELL: f32 = 2.0;
+const DITHER_ALPHA: f32 = 0.3;
+/// The soft tint under the dots, so they dissolve into something.
+const WASH_TINT_ALPHA: f32 = 0.12;
+const DITHER_MAX_DENSITY: f32 = 0.6;
+const BAYER_4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// Whether one dither cell is painted. Ordered rather than random, so the fade
+/// reads as a pattern instead of static. It builds toward the right and thins
+/// toward the top and bottom, so the wash has no hard edge against the page.
+fn wash_cell_on(col: u32, row: u32, cols: u32, rows: u32) -> bool {
+    let across = (col as f32 + 0.5) / cols.max(1) as f32;
+    let edge = row.min(rows.saturating_sub(row + 1)) as f32;
+    let taper = (edge / (rows as f32 * 0.25).max(1.0)).min(1.0);
+    let density = across * across * DITHER_MAX_DENSITY * taper;
+    let threshold = (BAYER_4[(row % 4) as usize][(col % 4) as usize] as f32 + 0.5) / 16.0;
+    threshold < density
+}
+
+/// Right-origin dither wash into `color`.
+fn dither_wash(color: Hsla) -> AnyElement {
+    let dots = canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let w = f32::from(bounds.size.width).max(1.0);
-            let h = f32::from(bounds.size.height).max(1.0);
-            let cell = 2.0_f32;
-            let cols = (w / cell).ceil() as i32;
-            let rows = (h / cell).ceil() as i32;
+            let cols = (f32::from(bounds.size.width) / DITHER_CELL).ceil() as u32;
+            let rows = (f32::from(bounds.size.height) / DITHER_CELL).ceil() as u32;
+            let mut path = PathBuilder::fill();
             for row in 0..rows {
                 for col in 0..cols {
-                    let x = col as f32 * cell;
-                    let y = row as f32 * cell;
-                    // Right-heavy: density rises toward the right edge.
-                    let t = (x / w).clamp(0.0, 1.0);
-                    let density = (t * t * strength * 0.85).clamp(0.0, 1.0);
-                    let hash = ((col.wrapping_mul(374761393))
-                        .wrapping_add(row.wrapping_mul(668265263)))
-                        as u32;
-                    let bit = ((hash >> 16) ^ hash) & 0xff;
-                    if (bit as f32 / 255.0) > density {
+                    if !wash_cell_on(col, row, cols, rows) {
                         continue;
                     }
-                    let mut path = PathBuilder::fill();
-                    let origin = point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+                    let origin = point(
+                        bounds.origin.x + px(col as f32 * DITHER_CELL),
+                        bounds.origin.y + px(row as f32 * DITHER_CELL),
+                    );
                     path.move_to(origin);
-                    path.line_to(point(origin.x + px(cell), origin.y));
-                    path.line_to(point(origin.x + px(cell), origin.y + px(cell)));
-                    path.line_to(point(origin.x, origin.y + px(cell)));
+                    path.line_to(point(origin.x + px(DITHER_CELL), origin.y));
+                    path.line_to(point(
+                        origin.x + px(DITHER_CELL),
+                        origin.y + px(DITHER_CELL),
+                    ));
+                    path.line_to(point(origin.x, origin.y + px(DITHER_CELL)));
                     path.close();
-                    if let Ok(built) = path.build() {
-                        window.paint_path(built, color.opacity(0.55 + 0.35 * t));
-                    }
                 }
+            }
+            if let Ok(built) = path.build() {
+                window.paint_path(built, color.opacity(DITHER_ALPHA));
             }
         },
     )
     .absolute()
-    .inset_0()
-    .into_any_element()
+    .inset_0();
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right_0()
+        .w(px(WASH_WIDTH))
+        .rounded(px(PILL_RADIUS))
+        .bg(gpui::linear_gradient(
+            90.0,
+            gpui::linear_color_stop(color.opacity(0.0), 0.0),
+            gpui::linear_color_stop(color.opacity(WASH_TINT_ALPHA), 1.0),
+        ))
+        .child(dots)
+        .into_any_element()
 }
 
 // ---------------------------------------------------------------------------
@@ -438,27 +496,20 @@ pub fn header(
         .into_any_element()
 }
 
-/// One compact animated row.
-pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> AnyElement {
-    let active = matches!(row.result, RowResult::Running { .. });
-    let detail = if active && !reduce_motion {
-        SharedString::from(scramble_middle(row.detail.as_ref(), phase))
-    } else {
-        row.detail.clone()
-    };
-    let (wash, status) = match &row.result {
-        RowResult::Failed { label } => (
-            Some((theme.danger, 1.0)),
-            Some(status_pill(label.clone(), theme.danger, fg_on(theme.danger))),
-        ),
-        RowResult::Passed { label } => (
-            Some((theme.success, 1.0)),
-            Some(status_pill(label.clone(), theme.success, fg_on(theme.success))),
-        ),
-        _ => (None, None),
-    };
-    let trail = match &row.result {
-        RowResult::Running { elapsed_ms } => Some(timer_label(*elapsed_ms, theme)),
+/// The dither wash behind a settled pass or fail, if the row has one.
+pub fn status_wash(result: &RowResult, theme: &Theme) -> Option<AnyElement> {
+    match result {
+        RowResult::Failed { .. } => Some(dither_wash(theme.danger)),
+        RowResult::Passed { .. } => Some(dither_wash(theme.success)),
+        _ => None,
+    }
+}
+
+/// The right-hand end of a row: timer, summary, diff counts or status pill.
+pub fn status_trail(result: &RowResult, theme: &Theme) -> Option<AnyElement> {
+    match result {
+        RowResult::Running { elapsed_ms } => elapsed_ms.map(|ms| timer_label(ms, theme)),
+        RowResult::Settled => None,
         RowResult::Summary(text) => Some(
             div()
                 .flex_none()
@@ -471,8 +522,29 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
             additions,
             deletions,
         } => Some(diff_trail(*additions, *deletions, theme)),
-        RowResult::Failed { .. } | RowResult::Passed { .. } => status,
+        RowResult::Failed { label } => Some(status_pill(
+            label.clone(),
+            theme.danger,
+            fg_on(theme.danger),
+        )),
+        RowResult::Passed { label } => Some(status_pill(
+            label.clone(),
+            theme.success,
+            fg_on(theme.success),
+        )),
+    }
+}
+
+/// One compact animated row.
+pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> AnyElement {
+    let active = matches!(row.result, RowResult::Running { .. });
+    let detail = if active && !reduce_motion {
+        SharedString::from(scramble_middle(row.detail.as_ref(), phase))
+    } else {
+        row.detail.clone()
     };
+    let wash = status_wash(&row.result, theme);
+    let trail = status_trail(&row.result, theme);
 
     let body = div()
         .relative()
@@ -487,9 +559,7 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
         .rounded(px(PILL_RADIUS))
         .when(active, |el| el.bg(theme.ink(0.06)))
         .when(!active, |el| el.opacity(if row.is_error { 0.95 } else { 0.72 }))
-        .when_some(wash, |el, (color, strength)| {
-            el.child(dither_wash(color, strength))
-        })
+        .children(wash)
         .child(
             icons::icon(row.icon)
                 .size(px(12.0))
@@ -546,8 +616,8 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
 fn status_pill(label: SharedString, bg: Hsla, fg: Hsla) -> AnyElement {
     div()
         .flex_none()
-        .h(px(20.0))
-        .px(px(8.0))
+        .h(px(18.0))
+        .px(px(6.0))
         .rounded(px(STATUS_RADIUS))
         .bg(bg)
         .text_color(fg)
@@ -575,6 +645,7 @@ fn timer_label(elapsed_ms: u64, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// `+8 −3`. A side with nothing to report isn't shown, so `+10 −0` reads `+10`.
 fn diff_trail(additions: u64, deletions: u64, theme: &Theme) -> AnyElement {
     div()
         .flex_none()
@@ -582,59 +653,80 @@ fn diff_trail(additions: u64, deletions: u64, theme: &Theme) -> AnyElement {
         .gap(px(6.0))
         .text_size(px(TEXT_CAPTION))
         .tabular_nums()
-        .child(
-            div()
-                .text_color(theme.success)
-                .child(SharedString::from(format!("+{additions}"))),
-        )
-        .child(
-            div()
-                .text_color(theme.danger)
-                .child(SharedString::from(format!("−{deletions}"))),
-        )
+        .when(additions > 0, |trail| {
+            trail.child(
+                div()
+                    .text_color(theme.success)
+                    .child(SharedString::from(format!("+{additions}"))),
+            )
+        })
+        .when(deletions > 0, |trail| {
+            trail.child(
+                div()
+                    .text_color(theme.danger)
+                    .child(SharedString::from(format!("−{deletions}"))),
+            )
+        })
         .into_any_element()
 }
 
-/// Aggregate file diffs under the rows (`session.ts +10 −4`).
+/// One entry of the line under a group's rows: the files named, or their total.
+fn diff_summary_entries(stats: &[ToolDiffStat]) -> Vec<(String, u64, u64)> {
+    if stats.len() <= DIFF_SUMMARY_MAX_NAMED {
+        return stats
+            .iter()
+            .map(|stat| {
+                let name = stat
+                    .path
+                    .rsplit(['/', '\\'])
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(stat.path.as_str());
+                (name.to_owned(), stat.additions, stat.deletions)
+            })
+            .collect();
+    }
+    let (additions, deletions) = stats.iter().fold((0u64, 0u64), |(a, d), stat| {
+        (
+            a.saturating_add(stat.additions),
+            d.saturating_add(stat.deletions),
+        )
+    });
+    vec![(format!("{} files", stats.len()), additions, deletions)]
+}
+
+/// Aggregate file diffs under the rows (`session.ts +10 −4`). One clipped line:
+/// the group folds on an analytic height, so this can't wrap to an unknown one.
 pub fn file_diff_summary(stats: &[ToolDiffStat], theme: &Theme) -> AnyElement {
     div()
         .w_full()
         .min_w_0()
-        .pt(px(4.0))
+        .h(px(DIFF_SUMMARY_HEIGHT))
+        .overflow_hidden()
         .flex()
         .flex_row()
-        .flex_wrap()
-        .gap(px(10.0))
+        .items_center()
+        .gap(px(12.0))
         .text_size(px(TEXT_CAPTION))
-        .font_family(theme.font_mono.clone())
-        .children(stats.iter().map(|stat| {
-            let name = stat
-                .path
-                .rsplit(['/', '\\'])
-                .find(|c| !c.is_empty())
-                .unwrap_or(stat.path.as_str());
-            div()
-                .flex()
-                .gap(px(6.0))
-                .items_center()
-                .child(
+        .children(
+            diff_summary_entries(stats)
+                .into_iter()
+                .map(|(name, additions, deletions)| {
                     div()
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(name.to_owned())),
-                )
-                .child(
-                    div()
-                        .text_color(theme.success)
-                        .tabular_nums()
-                        .child(SharedString::from(format!("+{}", stat.additions))),
-                )
-                .child(
-                    div()
-                        .text_color(theme.danger)
-                        .tabular_nums()
-                        .child(SharedString::from(format!("−{}", stat.deletions))),
-                )
-        }))
+                        .min_w_0()
+                        .flex()
+                        .gap(px(6.0))
+                        .items_center()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(theme.font_mono.clone())
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(name)),
+                        )
+                        .child(diff_trail(additions, deletions, theme))
+                }),
+        )
         .into_any_element()
 }
 
@@ -665,7 +757,7 @@ pub fn group(
 /// Pulse phase for scramble / spinner. Callers that already hold a phase
 /// (agent work) can pass it through; fixtures use this helper.
 pub fn pulse_phase(view: EntityId, cx: &mut App) -> f32 {
-    motion::pulse_delta(&SCRAMBLE_TICK, view, cx)
+    motion::pulse_delta_slow(&SCRAMBLE_TICK, view, cx)
 }
 
 #[cfg(test)]
@@ -679,6 +771,14 @@ mod tests {
         assert!(s.contains('/'));
         assert!(s.ends_with("42") || s.ends_with("s:42") || s.contains("42"));
         assert_ne!(s, "src/auth/session.ts:42");
+    }
+
+    #[test]
+    fn scramble_uses_no_block_glyphs() {
+        for phase in [0.0, 0.2, 0.5, 0.9] {
+            let s = scramble_middle("zig build bench --filter parser", phase);
+            assert!(!s.contains(['░', '▒', '▓', '▪', '▫']), "{s}");
+        }
     }
 
     #[test]
@@ -713,18 +813,158 @@ mod tests {
         assert_eq!(g.header_label(), "2 tool calls, 1 failed");
     }
 
+    fn exec_tool(lines: &[&str], is_error: bool) -> ToolItem {
+        ToolItem {
+            part_id: "t".into(),
+            call: ToolCall::Exec {
+                command: "pnpm test".into(),
+            },
+            is_error,
+            resolved: true,
+            detail: Some(std::sync::Arc::new(ToolDetail::Output {
+                lines: lines.iter().map(|l| SharedString::from(*l)).collect(),
+                truncated_by: 0,
+            })),
+            invocation: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            view: None,
+            kind: ToolItemKind::Call,
+        }
+    }
+
+    #[test]
+    fn a_plain_failure_does_not_claim_a_count() {
+        assert_eq!(
+            row_result(&exec_tool(&["permission denied"], true), None),
+            RowResult::Failed {
+                label: "failed".into()
+            }
+        );
+        assert_eq!(
+            row_result(&exec_tool(&["tests: 2 failed"], true), None),
+            RowResult::Failed {
+                label: "2 failed".into()
+            }
+        );
+    }
+
+    #[test]
+    fn only_a_command_output_counts_as_a_test_report() {
+        let mut read = exec_tool(&["last night: 3 failed"], false);
+        read.call = ToolCall::ReadFile {
+            path: "notes.md".into(),
+        };
+        assert_eq!(row_result(&read, None), RowResult::Settled);
+    }
+
+    #[test]
+    fn a_command_with_nothing_to_report_says_nothing() {
+        let row = row_result(&exec_tool(&["Build finished"], false), None);
+        assert_eq!(row, RowResult::Settled);
+        assert!(status_trail(&row, &Theme::dark()).is_none());
+    }
+
+    #[test]
+    fn the_pill_agrees_with_how_the_command_exited() {
+        assert_eq!(
+            row_result(&exec_tool(&["2 failed, 46 passed"], false), None),
+            RowResult::Settled,
+            "a successful cat of a test log isn't a failure, or a pass"
+        );
+        assert_eq!(
+            row_result(&exec_tool(&["48 passed"], true), None),
+            RowResult::Failed {
+                label: "failed".into()
+            },
+            "a command that failed isn't green"
+        );
+    }
+
+    fn search_tool(lines: &[&str]) -> ToolItem {
+        let mut tool = exec_tool(lines, false);
+        tool.call = ToolCall::Search {
+            pattern: "needle".into(),
+            path: None,
+        };
+        tool
+    }
+
+    #[test]
+    fn a_search_counts_only_output_it_can_really_count() {
+        assert_eq!(
+            row_result(&search_tool(&["a.rs:1:x", "b.rs:20:y"]), None),
+            RowResult::Summary("2 matches".into())
+        );
+        assert_eq!(
+            row_result(&search_tool(&["a.rs:1"]), None),
+            RowResult::Summary("1 match".into())
+        );
+        for lines in [["No matches found"], ["a.rs:1:the first of many…"]] {
+            assert_eq!(row_result(&search_tool(&lines), None), RowResult::Settled);
+        }
+    }
+
+    #[test]
+    fn the_wash_builds_to_the_right_and_has_no_hard_edge() {
+        let (cols, rows) = (80, 15);
+        let lit = |col_range: std::ops::Range<u32>, row_range: std::ops::Range<u32>| {
+            col_range
+                .flat_map(|col| row_range.clone().map(move |row| (col, row)))
+                .filter(|(col, row)| wash_cell_on(*col, *row, cols, rows))
+                .count()
+        };
+        assert_eq!(lit(0..16, 0..rows), 0, "the left end fades to nothing");
+        assert!(lit(60..80, 0..rows) > lit(40..60, 0..rows));
+        assert_eq!(lit(0..cols, 0..1), 0, "the top row is clear");
+        assert_eq!(lit(0..cols, rows - 1..rows), 0, "the bottom row is clear");
+    }
+
+    #[test]
+    fn many_changed_files_are_totalled_rather_than_listed() {
+        let stat = |path: &str, additions, deletions| ToolDiffStat {
+            path: path.into(),
+            additions,
+            deletions,
+        };
+        let three = [
+            stat("src/a.rs", 1, 2),
+            stat("b.rs", 3, 0),
+            stat("c.rs", 0, 4),
+        ];
+        assert_eq!(
+            diff_summary_entries(&three)[0],
+            ("a.rs".to_owned(), 1, 2),
+            "up to three are named"
+        );
+        let four = [
+            stat("src/a.rs", 1, 2),
+            stat("b.rs", 3, 0),
+            stat("c.rs", 0, 4),
+            stat("d.rs", 5, 5),
+        ];
+        assert_eq!(
+            diff_summary_entries(&four),
+            vec![("4 files".to_owned(), 9, 11)]
+        );
+    }
+
     #[test]
     fn parse_passed_and_failed_counts() {
         let lines = vec![SharedString::from("48 passed, 0 failed")];
         assert_eq!(
-            parse_test_outcome(&lines),
+            parse_test_outcome(&lines, false),
             Some(RowResult::Passed {
                 label: "48 passed".into()
             })
         );
         let lines = vec![SharedString::from("tests: 1 failed")];
         assert_eq!(
-            parse_test_outcome(&lines),
+            parse_test_outcome(&lines, true),
             Some(RowResult::Failed {
                 label: "1 failed".into()
             })

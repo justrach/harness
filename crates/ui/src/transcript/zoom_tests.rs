@@ -40,6 +40,7 @@ fn thinking_text_matches_output_at_every_zoom_size(cx: &mut gpui::TestAppContext
                         &tool,
                         None,
                         None,
+                        None,
                         PreviewPathAnchors::default(),
                         &theme,
                         cx.entity_id(),

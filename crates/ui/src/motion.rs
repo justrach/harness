@@ -143,6 +143,12 @@ pub fn pulse_lease(view: EntityId, cx: &mut App) {
     pulse_lease_every(view, 1, cx);
 }
 
+/// Whether `view` is holding the shared clock awake right now.
+#[cfg(test)]
+pub(crate) fn has_pulse_lease(view: EntityId, cx: &mut App) -> bool {
+    cx.default_global::<PulseClock>().leases.contains_key(&view)
+}
+
 /// [`pulse_lease`] at 15Hz, for soft, slow cosmetic motion (the running tool
 /// title shimmer) that holds frames for as long as an agent works.
 pub fn pulse_lease_slow(view: EntityId, cx: &mut App) {
