@@ -190,6 +190,10 @@ The Zui native overlay renderer adapts Apache-2.0 GPUI code from
 [`egoist/zed` at `57bd4fe`](https://github.com/egoist/zed/tree/57bd4fe181639797d395978d5de17bc9e10a6219/crates/gpui_macos).
 Attribution is retained in the pinned Zui dependency’s `NOTICE`.
 
+The font cache in GPUI's `text_system.rs` adapts Apache-2.0 code from
+[`longbridge/gpui-fast` at `8c06a36`](https://github.com/longbridge/gpui-fast/commit/8c06a36),
+itself from [`zed-industries/zed` at `3389d87`](https://github.com/zed-industries/zed/commit/3389d87577312c126faa3bcbf79951babd6161d7).
+
 ## Simulator streaming helper
 
 Settings → Simulators streams a Mac's iOS Simulators to the phone through
