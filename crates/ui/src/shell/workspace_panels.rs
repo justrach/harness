@@ -3078,7 +3078,15 @@ impl Shell {
         }
         let controls_t = motion::hover_t(&fade_key);
         let can_close = self.panel_layout(cx).is_some_and(|l| l.panels.len() > 1);
-        let tab_width = panel_tab_width(width - leading_inset - (trailing_inset - 4.0), panel.tabs.len());
+        let device_room = if INSTRUMENT_STRIP {
+            instrument_strip::PANEL_DEVICE_ROOM
+        } else {
+            0.0
+        };
+        let tab_width = panel_tab_width(
+            width - leading_inset - (trailing_inset - 4.0) - device_room,
+            panel.tabs.len(),
+        );
         // New tab sits right after the last tab, where the next one will open.
         // Where the hover controls would cover it, it stays with them instead.
         let other_controls: f32 = if can_close { 3.0 } else { 2.0 };
@@ -3090,7 +3098,7 @@ impl Shell {
             + (other_controls - 1.0) * 2.0
             + 8.0
             + 3.0
-            <= width - leading_inset - trailing_inset;
+            <= width - leading_inset - trailing_inset - device_room;
         let control_count = match (can_close, add_after_tabs) {
             (true, false) => 4.0,
             (true, true) | (false, false) => 3.0,
@@ -3121,7 +3129,7 @@ impl Shell {
                     .map(|attention| (index, attention))
             })
             .collect();
-        let strip_width = width - leading_inset - trailing_inset;
+        let strip_width = width - leading_inset - trailing_inset - device_room;
         let tabs_overflow = panel.tabs.len() as f32 * 112.0
             + panel.tabs.len().saturating_sub(1) as f32 * 3.0
             + TAB_SHOULDER
@@ -3884,6 +3892,18 @@ impl Shell {
                     tab_bounds.borrow_mut().insert(tab_bounds_key.clone(), bounds);
                 }, |_, _, _, _| {}).absolute().inset_0()),
             )
+            .children(INSTRUMENT_STRIP.then(|| {
+                instrument_strip::device_label(
+                    format!("workspace-panel-device-{id}"),
+                    self.panel_device_label(id, cx),
+                    &theme,
+                )
+                .flex_none()
+                .max_w(px(instrument_strip::PANEL_DEVICE_ROOM))
+                .h(px(PANEL_TAB_HEIGHT))
+                .mt(px(tab_top))
+                .pl(px(8.0))
+            }))
             .child(crate::frost::frosted(8.0, 12.0 * controls_t, controls))
             .children(attention_jump)
             .into_any_element()
@@ -4794,6 +4814,11 @@ impl Shell {
             let trailing_inset =
                 4.0 + (panel_left + frame.width - caption_left).max(0.0) * clearance;
             let header = if layout.uses_strip() {
+                // The tab this panel's fill was shaped around has gone.
+                self.workspace_panels
+                    .active_tab_bounds
+                    .borrow_mut()
+                    .remove(&(workspace.clone(), panel.id));
                 div().into_any_element()
             } else {
                 self.render_workspace_header(

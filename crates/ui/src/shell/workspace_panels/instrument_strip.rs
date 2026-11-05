@@ -7,16 +7,30 @@ use super::*;
 pub(super) const INSTRUMENT_STRIP: bool = cfg!(feature = "dev-tab-layout");
 
 const SLOT_MAX_WIDTH: f32 = 260.0;
-const SLOT_HEIGHT: f32 = 26.0;
+const SLOT_HEIGHT: f32 = 32.0;
 const SLOT_MIN_WIDTH: f32 = 72.0;
 const NEW_TAB_ROOM: f32 = 24.0 + GUTTER;
-/// Below this a slot keeps its room for the title; the tooltip still names the
-/// device.
-const SLOT_MIN_WIDTH_FOR_DEVICE: f32 = 220.0;
+/// What a single panel's tab row sets aside for the name of its computer.
+pub(super) const PANEL_DEVICE_ROOM: f32 = 120.0;
 
-/// A slot's width is only known while the slots line up with their panels.
-pub(super) fn strip_shows_device(width: Option<f32>) -> bool {
-    width.is_some_and(|width| width >= SLOT_MIN_WIDTH_FOR_DEVICE)
+/// The computer's name, the same wherever it appears.
+pub(super) fn device_label(selector: String, device: SharedString, theme: &Theme) -> gpui::Div {
+    div()
+        .debug_selector(move || selector)
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .text_size(crate::typography::ui_rems(10.0))
+        .line_height(px(12.0))
+        .text_color(theme.text_muted)
+        .child(
+            icon(icons::MONITOR)
+                .size(px(10.0))
+                .flex_none()
+                .text_color(theme.text_muted),
+        )
+        .child(div().min_w_0().truncate().child(device))
 }
 
 impl Shell {
@@ -353,27 +367,27 @@ impl Shell {
                 popover::shortcut_tooltip(tooltip_title.clone(), shortcut.clone(), cx)
             })
             .child(leading)
-            .child(div().flex_1().min_w_0().truncate().child(title))
-            .when(strip_shows_device(width), |slot| {
-                slot.child(
-                    div()
-                        .debug_selector(move || format!("instrument-slot-device-{id}"))
-                        .flex_none()
-                        .max_w(px(110.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(3.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(
-                            icon(icons::MONITOR)
-                                .size(px(11.0))
-                                .flex_none()
-                                .text_color(theme.text_muted),
-                        )
-                        .child(div().min_w_0().truncate().child(device)),
-                )
-            })
+            // Its own line, so a slot never has to choose between the title and
+            // the computer however narrow it gets.
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .line_height(px(14.0))
+                            .child(title),
+                    )
+                    .child(device_label(
+                        format!("instrument-slot-device-{id}"),
+                        device,
+                        &theme,
+                    )),
+            )
             .child(add_button)
             .child(menu_button)
             .into_any_element()

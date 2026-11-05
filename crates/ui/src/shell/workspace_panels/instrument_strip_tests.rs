@@ -75,6 +75,11 @@ fn one_panel_keeps_its_tab_row_until_the_window_splits(cx: &mut gpui::TestAppCon
     let split = at(cx, format!("workspace-panel-body-{first}")).unwrap();
     assert_eq!(split.top(), single.top(), "the content does not jump");
     assert_eq!(split.bottom(), single.bottom(), "nor does its bottom edge");
+    // The panel's fill is shaped around its selected tab. With the tab row gone
+    // that shape must go too, or a white tab stays above the panel.
+    shell.read_with(cx, |shell, _| {
+        assert!(shell.workspace_panels.active_tab_bounds.borrow().is_empty());
+    });
 
     // A tab row comes back with both tabs intact.
     shell.update_in(cx, |shell, window, cx| {
@@ -243,11 +248,55 @@ fn a_slot_names_the_device_its_panel_is_on(cx: &mut gpui::TestAppContext) {
     assert!(at(cx, format!("instrument-slot-device-{second}")).is_some());
 }
 
-#[test]
-fn a_narrow_slot_gives_its_room_to_the_title() {
-    assert!(instrument_strip::strip_shows_device(Some(300.0)));
-    assert!(!instrument_strip::strip_shows_device(Some(150.0)));
-    assert!(!instrument_strip::strip_shows_device(None));
+/// More panels than fit means no column to line up with and very little room,
+/// which is when telling computers apart matters most.
+#[gpui::test]
+fn the_device_shows_however_narrow_the_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let ids = shell.update(cx, |shell, cx| {
+        let layout = shell.panel_layout_mut(cx);
+        layout.axis = SplitAxis::Horizontal;
+        while layout.panels.len() < 9 {
+            let last = layout.panels.last().unwrap().id;
+            layout.add_panel(last);
+        }
+        layout.equalize();
+        cx.notify();
+        layout_ids(shell.panel_layout(cx).unwrap())
+    });
+    settle(cx);
+    for id in ids {
+        let slot = at(cx, format!("instrument-slot-{id}")).unwrap();
+        let device = at(cx, format!("instrument-slot-device-{id}")).expect("device shown");
+        assert!(device.size.width > px(0.0), "{id} has room for it");
+        assert!(device.left() >= slot.left() && device.right() <= slot.right());
+    }
+}
+
+/// With one panel there is no strip, but the folder tabs can be from another
+/// computer just the same.
+#[gpui::test]
+fn one_panel_names_its_device_beside_its_tabs(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let first = shell.update_in(cx, |shell, window, cx| {
+        let layout = shell.panel_layout_mut(cx);
+        layout.panels.truncate(1);
+        let first = layout.panels[0].id;
+        layout.panels[0].tabs = vec![
+            PanelTab::Chat("chat-1".into()),
+            PanelTab::Chat("chat-2".into()),
+        ];
+        layout.panels[0].active = 0;
+        shell.focus_workspace_tab(first, PanelTab::Chat("chat-1".into()), window, cx);
+        first
+    });
+    settle(cx);
+    let device = at(cx, format!("workspace-panel-device-{first}")).expect("device shown");
+    let tabs = at(cx, format!("workspace-panel-tab-strip-{first}")).unwrap();
+    assert!(device.size.width > px(0.0));
+    assert!(tabs.right() <= device.left(), "{tabs:?} {device:?}");
 }
 
 #[gpui::test]
