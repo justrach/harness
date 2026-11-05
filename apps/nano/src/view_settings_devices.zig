@@ -13,6 +13,7 @@ const account = @import("app_account.zig");
 const workspace = @import("workspace.zig");
 const rpc = @import("rpc.zig");
 const dialogs = @import("view_chat_menu.zig");
+const updates_panel = @import("view_settings_devices_updates.zig");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
 
@@ -32,8 +33,11 @@ pub const Page = struct {
     confirm_remove: std.ArrayList(u8) = .empty,
     /// The strip under the version; a click clears it.
     failure: std.ArrayList(u8) = .empty,
+    /// The expanded host's update controls.
+    updates: updates_panel.State = .{},
 
     pub fn deinit(p: *Page, gpa: Allocator) void {
+        p.updates.deinit(gpa);
         p.rename.deinit(gpa);
         p.copied.deinit(gpa);
         p.confirm_remove.deinit(gpa);
@@ -176,6 +180,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.key(c, d.id);
         const local = if (a.device_id) |me| std.mem.eql(u8, me, d.id) else false;
         const on = online(d.last_seen_ms, now);
+        defer updates_panel.panel(c, a, k, d, local, on);
         const r = set.row(c, k, ix == 0, false);
         defer r.end();
         presenceTile(c, k, platformIcon(d.platform), on);
@@ -204,7 +209,8 @@ fn presenceTile(c: *ui.Context, k: theme.Colors, icon: icons.Name, on: bool) voi
     const t = ui.div(c).row().size(36, 36).center().rounded(10).border(k.border).borderW(1).bg(k.ink(0.03));
     defer t.end();
     icons.icon(c, icon, 16, k.muted, 0);
-    var dot = ui.div(c).absolute().offset(36 - 9 + 3, 36 - 9 + 3).size(9, 9).roundedFull().border(k.shell).borderW(2);
+    // GPUI's bottom and right -3 count from inside the tile's border.
+    var dot = ui.div(c).absolute().offset(36 - 1 - 9 + 3, 36 - 1 - 9 + 3).size(9, 9).roundedFull().border(k.shell).borderW(2);
     dot = if (on) dot.bg(k.success).shadow(.{ .color = k.success.alpha(0.55), .blur = 6 }) else dot.bg(k.ink(0.22));
     dot.end();
 }

@@ -68,6 +68,9 @@ pub fn openView(a: *App) void {
 }
 
 pub fn close(a: *App) void {
+    // The search's focus goes with the projects menu, and the composer takes
+    // the keys back; the view menu's stays, to no one.
+    if (a.view.filter_menu) a.view.focus_composer = true;
     a.view.menus.ctx_at = null;
     a.view.filter_menu = false;
     a.view.more_menu = false;

@@ -4,6 +4,10 @@
 //! the window, a 62-segment bar split by what fills it, its legend, a
 //! status line, graff's savings meter and the exact numbers. Nothing at all
 //! for an agent that reports no window.
+//!
+//! The card is a gpui tooltip, so a window of its own laying its text out in
+//! the system's font, not the theme's, with digits of one width where
+//! `tabular_nums` asks.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const theme = @import("theme.zig");
@@ -55,7 +59,7 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (c.rects.get(c.node(pill.index).id)) |r| s.anchor = r;
     ring(c, f, color, k.faint.alpha(0.25));
     const pct = if (f) |v| c.print("{d:.0}%", .{v * 100}) else "—";
-    ui.text(c, pct, .{ .size = 12, .line_height = 12 * 1.618, .color = color });
+    ui.text(c, pct, .{ .tabular = true, .size = 12, .line_height = 12 * 1.618, .color = color });
     // Open after a rest; the card keeps itself open while the pointer is
     // over it (`hoverable`), so its meter's parts can be hovered.
     const over_card = if (s.card) |r| inside(c.input.mouse, r) else false;
@@ -158,7 +162,7 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     var lines = std.mem.splitScalar(u8, cw.details(c.alloc(), a.transcript.tokens, a.transcript.window), '\n');
     const d = ui.div(c).column();
     defer d.end();
-    while (lines.next()) |l| ui.text(c, l, .{ .size = body, .line_height = 19, .color = k.muted });
+    while (lines.next()) |l| ui.text(c, l, .{ .system_font = true, .tabular = true, .size = body, .line_height = 19, .color = k.muted });
 }
 
 /// `ContextWindowCard`, settled (no transition in flight).
@@ -168,15 +172,16 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors, b: cw.Breakdown) void {
     {
         const head = ui.div(c).row().wFull().itemsCenter();
         defer head.end();
-        ui.text(c, "Context", .{ .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
+        ui.text(c, "Context", .{ .system_font = true, .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
         _ = c.leaf(.{ .width = .{ .px = 4 } }, .none, null);
-        ui.text(c, if (b.compacting) "compacting" else "reading", .{ .size = title, .line_height = title * phi, .color = k.muted });
+        ui.text(c, if (b.compacting) "compacting" else "reading", .{ .system_font = true, .size = title, .line_height = title * phi, .color = k.muted });
         ui.spacer(c);
         var x: [16]u8 = undefined;
         var y: [16]u8 = undefined;
-        ui.text(c, c.print("{s}", .{cw.compactCount(&x, b.tokens)}), .{ .size = title, .line_height = title * phi, .color = k.text });
+        // The rolling counter (`WEIGHT_STRONG`, `tabular_nums`), settled.
+        ui.text(c, c.print("{s}", .{cw.compactCount(&x, b.tokens)}), .{ .system_font = true, .tabular = true, .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
         _ = c.leaf(.{ .width = .{ .px = 3 } }, .none, null);
-        ui.text(c, c.print("of {s}", .{cw.compactCount(&y, b.window)}), .{ .size = title, .line_height = title * phi, .color = k.faint });
+        ui.text(c, c.print("of {s}", .{cw.compactCount(&y, b.window)}), .{ .system_font = true, .tabular = true, .size = title, .line_height = title * phi, .color = k.faint });
     }
     {
         // Each slot's segments, then the empty track.
@@ -191,9 +196,9 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors, b: cw.Breakdown) void {
         while (drawn < cw.segments) : (drawn += 1) segment(c, k.faint.alpha(0.22), cw.segment_h);
     }
     legend(c, k, b);
-    ui.text(c, cw.statusLine(c.alloc(), b), .{ .size = body, .line_height = body * phi, .color = k.faint });
+    ui.text(c, cw.statusLine(c.alloc(), b), .{ .system_font = true, .tabular = true, .size = body, .line_height = body * phi, .color = k.faint });
     if (a.transcript.savings) |sv| savingsMeter(c, a, k, sv, b);
-    ui.text(c, if (b.history == .sealed) "Compacted context is sealed by the provider: size only." else "Split estimated from this chat; total reported by the agent.", .{ .size = caption, .line_height = caption * phi, .color = k.faint });
+    ui.text(c, if (b.history == .sealed) "Compacted context is sealed by the provider: size only." else "Split estimated from this chat; total reported by the agent.", .{ .system_font = true, .size = caption, .line_height = caption * phi, .color = k.faint });
 }
 
 fn segment(c: *ui.Context, color: ui.Color, h: f32) void {
@@ -220,9 +225,9 @@ fn legend(c: *ui.Context, k: theme.Colors, b: cw.Breakdown) void {
         marker(c, if (slot == .history) b.history else .chat, slotColor(k, slot, b.history));
         const words = ui.div(c).row().gap(4).itemsCenter();
         defer words.end();
-        ui.text(c, slot.label(b.history), .{ .size = body, .line_height = body * phi, .color = k.text });
+        ui.text(c, slot.label(b.history), .{ .system_font = true, .tabular = true, .size = body, .line_height = body * phi, .color = k.text });
         var buf: [16]u8 = undefined;
-        ui.text(c, c.print("{s}", .{cw.compactCount(&buf, tokens)}), .{ .size = body, .line_height = body * phi, .color = k.faint });
+        ui.text(c, c.print("{s}", .{cw.compactCount(&buf, tokens)}), .{ .system_font = true, .tabular = true, .size = body, .line_height = body * phi, .color = k.faint });
     }
     if (row) |r| r.end();
 }
@@ -261,8 +266,8 @@ fn savingsMeter(c: *ui.Context, a: *App, k: theme.Colors, sv: @import("transcrip
         const head = ui.div(c).row().gap(4).itemsEnd();
         defer head.end();
         var buf: [16]u8 = undefined;
-        ui.text(c, c.print("{s}", .{cw.compactCount(&buf, kept)}), .{ .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
-        ui.text(c, "saved by graff", .{ .size = body, .line_height = title * phi, .color = k.muted });
+        ui.text(c, c.print("{s}", .{cw.compactCount(&buf, kept)}), .{ .system_font = true, .tabular = true, .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
+        ui.text(c, "saved by graff", .{ .system_font = true, .tabular = true, .size = body, .line_height = title * phi, .color = k.muted });
     }
     var hovered: ?cw.SavedPart = null;
     {
@@ -289,14 +294,14 @@ fn savingsMeter(c: *ui.Context, a: *App, k: theme.Colors, sv: @import("transcrip
         if (p.part == h) break p;
     } else null else null;
     if (found) |p| {
-        ui.text(c, p.part.detail(c.alloc(), p.tokens), .{ .size = caption, .color = k.muted });
+        ui.text(c, p.part.detail(c.alloc(), p.tokens), .{ .system_font = true, .tabular = true, .size = caption, .color = k.muted });
         return;
     }
     for (parts.slice()) |p| {
         const e = ui.div(c).row().gap(5).itemsCenter();
         defer e.end();
         _ = c.leaf(.{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .radius = 1.5, .background = partColor(k, p.part, b.history) }, .none, null);
-        ui.text(c, p.part.label(), .{ .size = caption, .color = k.faint });
+        ui.text(c, p.part.label(), .{ .system_font = true, .tabular = true, .size = caption, .color = k.faint });
     }
 }
 

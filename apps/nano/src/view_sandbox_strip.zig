@@ -71,13 +71,17 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, pb: f32) void {
     const pad = ui.div(c).column().wFull().px(8).pt(4).pb(pb);
     defer pad.end();
     ui.key(c, "cloud-sandbox-strip");
-    const s = ui.div(c).row().w(w).px(9).py(7).gap(8).itemsCenter().rounded(6)
+    // GPUI's px 8, py 4 and a 1-point border, which nanoui draws inside.
+    const s = ui.div(c).row().w(w).px(9).py(5).gap(8).itemsCenter().rounded(6)
         .bg(if (sum.warning) k.warning.alpha(0.12) else k.accent_wash).border(tone.alpha(0.3)).borderW(1);
     defer s.end();
     const button_w: f32 = if (sum.running_ids.len > 0) 8 + turnOffWidth(c, turnOffLabel(a, sum.running_ids.len)) else 0;
     const text_w = w - 2 * 9 - button_w;
     {
-        const open = ui.div(c).column().w(text_w).gap(1);
+        const open = tip.on(ui.div(c).column().grow().w(0).gap(1), k, .{
+            .text = sandboxes.compactTooltip(c.alloc(), sum) catch "",
+            .delay = tip.quick,
+        });
         defer open.end();
         {
             const top = ui.div(c).row().gap(6).itemsCenter();
@@ -85,10 +89,12 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, pb: f32) void {
             kit.dot(c, 6, tone);
             kit.ellipsisText(c, sum.label, st(c, 11, .{ .weight = .medium, .color = k.text }), text_w - 12);
         }
-        {
+        // One line at rest (the detail is in the tooltip); a problem gets
+        // its own line.
+        if (sum.warning) {
             const d = ui.div(c).row().pl(12);
             defer d.end();
-            kit.ellipsisText(c, sum.detail, st(c, 10.5, .{ .color = if (sum.warning) k.warning else k.muted }), text_w - 12);
+            kit.ellipsisText(c, sum.detail, st(c, 10.5, .{ .color = k.warning }), text_w - 12);
         }
         if (open.clicked()) openCard(a);
     }

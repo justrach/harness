@@ -68,6 +68,19 @@ pub fn fetchToolBlob(blob_ref: []const u8) Request(struct { blobRef: []const u8 
     return .{ .method = "FetchToolBlob", .params = .{ .blobRef = blob_ref } };
 }
 
+/// A host's update status, as a stream (settings/devices/updates.rs).
+pub fn updateStatus(target: []const u8) Request(struct { targetDeviceId: []const u8 }) {
+    return .{ .method = "UpdateStatus", .params = .{ .targetDeviceId = target } };
+}
+
+pub fn checkForUpdates(target: []const u8) Request(struct { targetDeviceId: []const u8 }) {
+    return .{ .method = "CheckForUpdates", .params = .{ .targetDeviceId = target } };
+}
+
+pub fn queueUpdate(target: []const u8) Request(struct { targetDeviceId: []const u8 }) {
+    return .{ .method = "QueueUpdate", .params = .{ .targetDeviceId = target } };
+}
+
 pub fn listModels(harness: []const u8) Request(struct { harness: []const u8 }) {
     return .{ .method = "ListModels", .params = .{ .harness = harness } };
 }

@@ -95,6 +95,11 @@ pub const View = struct {
     /// opens with the composer focused, as GPUI's does.
     focus_composer: bool = true,
     composer_id: u64 = 0,
+    /// The frame the composer's field was last drawn in.
+    composer_frame: u64 = 0,
+    /// The press under way began with the keys in the session search or a
+    /// menu that keeps them.
+    press_kept_keys: bool = false,
     /// The Write page has the pane (view_write.zig); its field takes the
     /// keys when next drawn.
     write_open: bool = false,

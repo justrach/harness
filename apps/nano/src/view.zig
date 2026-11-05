@@ -80,12 +80,14 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("app_subagents.zig").settleFrame(a);
     @import("app_browser.zig").settleFrame(a);
     @import("view_settings_theme_import.zig").settleFrame(a);
+    @import("view_settings_devices_updates.zig").settleFrame(a);
     // Capture once, before drawing the search can blur it on a pointer
     // press. An open but unfocused search must not steal another field.
     if (c.input.pressed and a.view.sidebar_press_frame != c.frame) {
         a.view.sidebar_press_frame = c.frame;
         const focused_sidebar = if (c.rects.get(c.focus)) |r| r.x < a.view.sidebar_width else false;
         a.view.sidebar_press_focus = @import("view_sidebar_search.zig").hasFocus(a) or focused_sidebar;
+        a.view.press_kept_keys = a.view.sidebar_press_focus;
     }
     keys(c, a);
     a.syncPeers();
@@ -162,6 +164,37 @@ pub fn view(a: *App, c: *ui.Context) void {
     // First-run setup, over the whole window.
     @import("view_setup.zig").overlay(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
+    // After the overlays: a press that closes a menu has closed it, and a
+    // click that opens one has opened it.
+    if (c.input.pressed and menuKeepsKeys(a)) a.view.press_kept_keys = true;
+    if (handsKeysBack(.{
+        .released = c.input.released,
+        .composer_drawn = a.view.composer_frame == c.frame,
+        .nothing_focused = c.focus == 0,
+        .kept = a.view.press_kept_keys or menuKeepsKeys(a),
+    })) {
+        // In the next frame, not this one again: what a release leaves for
+        // the next frame's start (a drop's split) must not run under this one.
+        a.view.focus_composer = true;
+        c.frameIn(0);
+    }
+}
+
+/// A menu that takes the keys for itself (`window.focus` as it opens): the
+/// composer's border and caret go quiet while it's up. The account menu has
+/// no focus of its own, so it isn't one.
+fn menuKeepsKeys(a: *const App) bool {
+    const v = &a.view;
+    return v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.chat_menu.open or
+        v.menus.ctx_at != null or v.palette.open or a.picker != .none;
+}
+
+/// A press lands on the window's root unless something nearer takes focus,
+/// and the root passes the keys to the composer on the next frame
+/// (`restore_mounted_focus`). Escape's blur isn't a press, so it stays. The
+/// keys go at the release, once the click has opened whatever it opens.
+pub fn handsKeysBack(s: struct { released: bool, composer_drawn: bool, nothing_focused: bool, kept: bool }) bool {
+    return s.released and s.composer_drawn and s.nothing_focused and !s.kept;
 }
 
 /// The column's corners where it meets the open sidebar (`SEAM_RADIUS`).

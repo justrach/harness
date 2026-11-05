@@ -331,8 +331,10 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     defer panel.end();
     if (p.stage != null) return page(c, a, k, w - 2, open);
     tabs(c, a, k, w - 2);
+    // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
     search(c, a, k);
-    modelList(c, a, k, w - 2, h - 2 - 39 - 36, open, exit);
+    modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35, open, exit);
 }
 
 /// The models: a 34-point row each, in sections by route while browsing
@@ -427,7 +429,7 @@ fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, 
     const p = &a.view.model_picker;
     if (r.header) |title| {
         // A section's heading: the route's mark, its name.
-        const head = ui.div(c).row().wFull().h(34).px(10).gap(7).itemsCenter();
+        const head = ui.div(c).row().wFull().h(34).px(10).pt(1).gap(7).itemsCenter();
         defer head.end();
         icons.icon(c, models.providerInfo(models.route(r.model)).icon, 14, k.text, 14);
         kit.ellipsisText(c, title, .{ .size = 11, .weight = .semibold, .color = k.muted }, inner - 41);
@@ -447,7 +449,7 @@ fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, 
     {
         const t = ui.div(c).row().grow().w(0).clip();
         defer t.end();
-        kit.ellipsisText(c, r.model.label, .{ .size = 13, .line_height = 13 * 1.618, .color = if (hot or selected) k.text else k.text.alpha(0.9) }, room);
+        kit.ellipsisText(c, r.model.label, .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.text }, room);
     }
     if (selected) icons.icon(c, .check, 12, k.muted, 12);
     const starred = p.favorite(r.harness, r.model.id);
@@ -483,7 +485,7 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
     defer card.end();
     if (c.rects.get(c.node(card.index).id)) |rect| p.detail_rect = rect;
     const inner = detail_width - 34;
-    const st: ui.TextStyle = .{ .size = 11, .line_height = 11 * 1.618, .color = k.text };
+    const st: ui.TextStyle = .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.text };
     {
         const head = ui.div(c).row().gap(8).itemsCenter();
         defer head.end();
@@ -727,7 +729,7 @@ fn tab(c: *ui.Context, k: theme.Colors, icon: icons.Name, tint: ?ui.Color, label
 
 fn search(c: *ui.Context, a: *App, k: theme.Colors) void {
     const p = &a.view.model_picker;
-    const row = ui.div(c).row().wFull().h(36).px(12).gap(8).itemsCenter();
+    const row = ui.div(c).row().wFull().h(35).px(12).pt(1).gap(8).itemsCenter();
     defer row.end();
     icons.icon(c, .magnifer, 14, k.muted, 14);
     const f = ui.div(c).row().grow().w(0).itemsCenter();
@@ -740,7 +742,7 @@ fn search(c: *ui.Context, a: *App, k: theme.Colors) void {
         return;
     }
     const at = c.nodes.items.len;
-    const r = ui.textField(c, &p.query, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .weight = .medium, .line_height = 22.75 });
+    const r = ui.textField(c, &p.query, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .weight = .medium, .line_height = 22.75, .caret = @import("view_composer.zig").message_caret, .caret_color = k.accent });
     const id = c.node(@intCast(at)).id;
     if (p.focus or c.focus != id) {
         c.focus = id;

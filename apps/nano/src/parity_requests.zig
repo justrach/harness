@@ -70,6 +70,10 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         try case(gpa, "run a project action", r.runAction(space, chat, "test", null), false),
         try case(gpa, "add a project action", r.upsertAction(space, null, .{ .name = "Test", .command = "echo hi", .icon = "test", .runOnWorktreeCreate = false }, null), false),
         try case(gpa, "change a project action", r.upsertAction(space, "test", .{ .name = "Test", .command = "echo hello", .icon = "play", .runOnWorktreeCreate = true }, null), false),
+        // A host that isn't there: the engine refuses them, understood.
+        try case(gpa, "watch a host's updates", r.updateStatus("host-parity"), true),
+        try case(gpa, "check a host for updates", r.checkForUpdates("host-parity"), false),
+        try case(gpa, "ask a host to update when idle", r.queueUpdate("host-parity"), false),
         try case(gpa, "watch a terminal", r.subscribeTerminal("terminal-parity", null), true),
         try case(gpa, "close a terminal", r.closeTerminal("terminal-parity", null), false),
         try case(gpa, "delete a project action", r.deleteAction(space, "test", null), false),

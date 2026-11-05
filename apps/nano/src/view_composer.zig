@@ -304,6 +304,7 @@ fn recall(c: *ui.Context, a: *App, id: u64) void {
 /// gives the field another id.
 fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
     const moved = a.view.composer_id != 0 and id != a.view.composer_id and c.focus == a.view.composer_id;
+    a.view.composer_frame = c.frame;
     if (a.view.focus_composer or moved) {
         c.focus = id;
         // Built again at once, focused: the next key finds it.

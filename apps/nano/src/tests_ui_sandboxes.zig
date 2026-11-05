@@ -90,8 +90,8 @@ test "the strip shows while a sandbox runs, above the account badge, and opens i
 
     try h.answer(one("running"));
     try testing.expect(h.t.hasText(label));
-    // "Billed per second until you turn it off", cut to the strip's width.
-    try testing.expect(h.t.containsText("Billed per"));
+    // One line at rest: "Billed per second" is the label's tooltip.
+    try testing.expect(!h.t.containsText("Billed per"));
     // In the sidebar's foot, above the badge; the open sidebar has no chip.
     const at = h.t.findText(label).?;
     try testing.expect(at.x < sidebar.width and at.y > 780 - 100);
