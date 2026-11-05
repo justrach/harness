@@ -1,8 +1,8 @@
-//! A chat whose checkout changed branch since its last turn does not silently
-//! continue there (#354): the send is held behind a question, and each answer
-//! (continue on the new branch, switch back, don't send) does what it says,
-//! including after an engine restart. And the recorded checkout is the one an
-//! accepted run actually used (#356).
+//! A chat whose checkout changed branch since its last turn never stops to ask
+//! (#354): the turn goes ahead there and the agent is told. Questions earlier
+//! versions saved still answer, and the next send closes them, including after
+//! an engine restart. And the recorded checkout is the one an accepted run
+//! actually used (#356).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,6 @@ use harness_proto::{
 };
 
 const CHAT: &str = "chat-branch-drift";
-const PEER: &str = "chat-branch-drift-peer";
 
 struct FakeAgent {
     prompts: Arc<Mutex<Vec<String>>>,
@@ -148,16 +147,6 @@ fn send_with(core: &EngineCore, id: &str, text: &str, cwd: &str, harness: Harnes
     send_full(core, id, text, cwd, harness, Vec::new())
 }
 
-fn send_with_attachments(
-    core: &EngineCore,
-    id: &str,
-    text: &str,
-    cwd: &str,
-    attachments: Vec<String>,
-) -> String {
-    send_full(core, id, text, cwd, HarnessId::Graff, attachments)
-}
-
 fn send_full(
     core: &EngineCore,
     id: &str,
@@ -222,19 +211,6 @@ fn open_question(core: &EngineCore) -> Option<(String, UserInputQuestion)> {
     })
 }
 
-async fn wait_question(core: &EngineCore) -> (String, UserInputQuestion) {
-    let mut found = None;
-    wait_for(
-        || {
-            found = open_question(core);
-            found.is_some()
-        },
-        "the branch drift question",
-    )
-    .await;
-    found.unwrap()
-}
-
 fn context_branch(core: &EngineCore) -> String {
     let chat = core.workspace.chat(CHAT).unwrap().expect("chat row");
     chat.source_context.expect("source context").branch
@@ -246,13 +222,6 @@ async fn wait_context(core: &EngineCore, branch: &str) {
     wait_for(|| context_branch(core) == branch, "the recorded checkout").await;
 }
 
-/// Another chat in the same folder: the one case that still asks.
-fn share_checkout(core: &EngineCore, cwd: &str) {
-    core.workspace
-        .create_chat(PEER, None, Some(&core.device_id), None, Some(cwd.into()))
-        .unwrap();
-}
-
 /// A turn on a new branch went straight out, and the agent was told.
 async fn assert_agent_told(
     core: &EngineCore,
@@ -262,13 +231,8 @@ async fn assert_agent_told(
     to: &str,
     label: &str,
 ) {
-    wait_for(
-        || prompts.lock().unwrap().len() >= turn || open_question(core).is_some(),
-        "the turn on the new branch",
-    )
-    .await;
-    assert!(open_question(core).is_none(), "asked: {label}");
     wait_turn(core, prompts, turn).await;
+    assert!(open_question(core).is_none(), "asked: {label}");
     let prompt = prompts.lock().unwrap()[turn - 1].clone();
     assert!(
         prompt.contains(&format!("now on `{to}`")) && prompt.contains(&format!("ran on `{from}`")),
@@ -376,6 +340,49 @@ fn seed_old_question(core: &EngineCore, held: &str, options: &[&str]) -> String 
             duration_ms: None,
         })
         .unwrap();
+    request_id
+}
+
+/// The same question with its waiting sends recorded, the way it stored them
+/// so that attachments survive a restart. `held` is (text, files).
+fn seed_held_question(
+    core: &EngineCore,
+    cwd: &str,
+    held: &[(&str, Vec<String>)],
+    options: &[&str],
+) -> String {
+    let request_id = seed_old_question(core, held[0].0, options);
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let dispatches: Vec<_> = held
+        .iter()
+        .map(|(text, attachments)| {
+            let id = format!("message-{text}");
+            handle.write_user_message(&id, text, 3).unwrap();
+            serde_json::json!({
+                "harness": HarnessId::Graff,
+                "request": RunRequest {
+                    turn_origin: Default::default(),
+                    prompt: (*text).into(),
+                    harness: Some(HarnessId::Graff),
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    cwd: cwd.into(),
+                    sandbox: SandboxLevel::WorkspaceWrite,
+                    auto_approve: true,
+                    attachments: attachments.clone(),
+                    resume: None,
+                    worktree: None,
+                },
+                "message_id": id,
+            })
+        })
+        .collect();
+    let loro = handle.doc().doc();
+    loro.get_map("branch_drift_held")
+        .insert(&request_id, serde_json::to_string(&dispatches).unwrap())
+        .unwrap();
+    loro.commit();
     request_id
 }
 
@@ -701,16 +708,6 @@ async fn wait_turn(core: &EngineCore, prompts: &Arc<Mutex<Vec<String>>>, count: 
     .await;
 }
 
-async fn wait_send_applied(core: &EngineCore, id: &str) {
-    wait_for(
-        || core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().iter().any(|command| {
-            matches!(&command.payload, SessionCommandPayload::Run { message_id, .. } if message_id == id)
-                && command.status == SessionCommandStatus::Applied
-        }),
-        "the held send to finish persisting",
-    ).await;
-}
-
 fn attachment(core: &EngineCore, name: &str) -> String {
     std::fs::create_dir_all(core.uploads.dir()).unwrap();
     let path = core.uploads.dir().join(name);
@@ -728,14 +725,18 @@ async fn held_attachments_survive_restart_without_relying_on_prompt_trailers() {
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
 
-    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
     let first = attachment(&core, "first.png");
     let second = attachment(&core, "second.png");
-    send_with_attachments(&core, "image-1", "first image", &cwd, vec![first.clone()]);
-    let (request_id, _) = wait_question(&core).await;
-    send_with_attachments(&core, "image-2", "second image", &cwd, vec![second.clone()]);
-    wait_send_applied(&core, "image-2").await;
+    let request_id = seed_held_question(
+        &core,
+        &cwd,
+        &[
+            ("first image", vec![first.clone()]),
+            ("second image", vec![second.clone()]),
+        ],
+        &["Continue on beta", "Don't send"],
+    );
     core.shutdown().await;
     drop(core);
 
@@ -754,7 +755,7 @@ async fn held_attachments_survive_restart_without_relying_on_prompt_trailers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stale_continue_requires_new_consent_and_preserves_the_held_request() {
+async fn a_stale_saved_answer_goes_to_the_current_branch_with_the_held_request() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, cwd) = test_repo(tmp.path());
     let data = tmp.path().join("data");
@@ -762,63 +763,30 @@ async fn stale_continue_requires_new_consent_and_preserves_the_held_request() {
     create_chat(&core, &cwd);
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
-    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
     let image = attachment(&core, "held.png");
-    send_with_attachments(
+    let old_id = seed_held_question(
         &core,
-        "held",
-        "keep this request",
         &cwd,
-        vec![image.clone()],
+        &[("keep this request", vec![image.clone()])],
+        &["Continue on beta", "Don't send"],
     );
-    let (old_id, _) = wait_question(&core).await;
-    wait_send_applied(&core, "held").await;
     core.shutdown().await;
     drop(core);
 
-    // The displayed beta question survives restart, but the folder changed again.
+    // The beta question survives restart, but the folder changed again.
     git(&repo, &["switch", "-c", "gamma"]);
     let (core, prompts) = engine(&data);
     answer(&core, &old_id, "Continue on beta");
-    let mut new_question = None;
-    wait_for(
-        || {
-            new_question = open_question(&core).filter(|(id, _)| id != &old_id);
-            new_question.is_some()
-        },
-        "fresh consent for gamma",
-    )
-    .await;
-    let (new_id, question) = new_question.unwrap();
-    assert_eq!(question.options[1], "Continue on gamma");
-    assert!(
-        prompts.lock().unwrap().is_empty(),
-        "stale consent must not dispatch"
-    );
-    assert_eq!(
-        context_branch(&core),
-        "alpha",
-        "stale consent must not advance context"
-    );
-    core.shutdown().await;
-    drop(core);
-
-    // Re-prompting must not lose the original request on a second restart.
-    let (core, prompts) = engine(&data);
-    answer(&core, &new_id, "Continue on gamma");
-    wait_turn(&core, &prompts, 1).await;
+    assert_agent_told(&core, &prompts, 1, "alpha", "gamma", "stale answer").await;
     let request = core.sessions.last_request(CHAT).unwrap();
     assert_eq!(request.attachments, [image]);
     assert!(request.prompt.ends_with("keep this request"));
-    assert!(request.prompt.contains("now on `gamma`"));
-    assert!(request.prompt.contains("ran on `alpha`"));
-    assert_eq!(context_branch(&core), "gamma");
     core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_typed_answer_only_consents_to_the_branch_it_was_shown() {
+async fn a_typed_answer_to_a_saved_question_goes_ahead_on_the_current_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, cwd) = test_repo(tmp.path());
     let data = tmp.path().join("data");
@@ -826,42 +794,30 @@ async fn a_typed_answer_only_consents_to_the_branch_it_was_shown() {
     create_chat(&core, &cwd);
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
-    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
-    send(&core, "held", "keep this request", &cwd);
-    let (old_id, _) = wait_question(&core).await;
+    let old_id = seed_held_question(
+        &core,
+        &cwd,
+        &[("keep this request", Vec::new())],
+        &["Continue on beta", "Don't send"],
+    );
 
     // The folder moved again after the beta question was shown.
     git(&repo, &["switch", "-c", "gamma"]);
     answer(&core, &old_id, "go on");
-    let mut new_question = None;
-    wait_for(
-        || {
-            new_question = open_question(&core).filter(|(id, _)| id != &old_id);
-            new_question.is_some()
-        },
-        "fresh consent for gamma",
-    )
-    .await;
-    let (new_id, question) = new_question.unwrap();
-    assert_eq!(question.options[1], "Continue on gamma");
-    assert_eq!(prompts.lock().unwrap().len(), 1, "nothing ran on gamma");
-    assert_eq!(context_branch(&core), "alpha");
-
-    answer(&core, &new_id, "Continue on gamma");
-    wait_turn(&core, &prompts, 2).await;
+    assert_agent_told(&core, &prompts, 2, "alpha", "gamma", "typed answer").await;
     let request = core.sessions.last_request(CHAT).unwrap();
     assert!(
         request.prompt.ends_with("keep this request\n\ngo on"),
         "{}",
         request.prompt
     );
-    assert_eq!(context_branch(&core), "gamma");
+    assert_eq!(last_user_text(&core), "go on");
     core.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn many_held_sends_cannot_hide_the_question_even_after_restart() {
+async fn many_held_sends_cannot_hide_a_saved_question_even_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, cwd) = test_repo(tmp.path());
     let data = tmp.path().join("data");
@@ -869,21 +825,13 @@ async fn many_held_sends_cannot_hide_the_question_even_after_restart() {
     create_chat(&core, &cwd);
     send(&core, "first", "establish alpha", &cwd);
     wait_turn(&core, &prompts, 1).await;
-    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
-    send(&core, "held-first", "held first", &cwd);
-    let (request_id, _) = wait_question(&core).await;
-    for index in 0..70 {
-        let id = format!("held-{index}");
-        send(&core, &id, &format!("held {index}"), &cwd);
-        wait_send_applied(&core, &id).await;
-    }
-    wait_send_applied(&core, "held-69").await;
-    assert_eq!(
-        open_question(&core).unwrap().0,
-        request_id,
-        "do not create another question"
-    );
+    let texts: Vec<String> = (0..70).map(|index| format!("held {index}")).collect();
+    let held: Vec<(&str, Vec<String>)> = texts
+        .iter()
+        .map(|text| (text.as_str(), Vec::new()))
+        .collect();
+    let request_id = seed_held_question(&core, &cwd, &held, &["Continue on beta", "Don't send"]);
     let tail = core
         .doc_host
         .open(CHAT)
@@ -907,38 +855,15 @@ async fn many_held_sends_cannot_hide_the_question_even_after_restart() {
     drop(core);
 
     let (core, prompts) = engine(&data);
-    send(&core, "after-restart", "after restart", &cwd);
-    wait_send_applied(&core, "after-restart").await;
-    let entries = core
-        .doc_host
-        .open(CHAT)
-        .unwrap()
-        .doc()
-        .read_entries()
-        .unwrap();
-    let open_count = entries
-        .iter()
-        .flat_map(|entry| &entry.parts)
-        .filter(|part| {
-            matches!(part, MessagePart::Input { request_id, resolved: false, .. }
-            if request_id.starts_with("branch-drift-"))
-        })
-        .count();
-    assert_eq!(open_count, 1, "restart must find the original question");
     assert_eq!(open_question(&core).unwrap().0, request_id);
-    assert!(prompts.lock().unwrap().is_empty());
-
-    // No longer shared, and back on its branch: the question has no reason left.
-    core.workspace
-        .set_chat_cwd(PEER, &tmp.path().to_string_lossy())
-        .unwrap();
     git(&repo, &["switch", "alpha"]);
     send(&core, "release", "release", &cwd);
     wait_turn(&core, &prompts, 1).await;
     let prompt = prompts.lock().unwrap()[0].clone();
-    let expected = std::iter::once("held first".to_string())
-        .chain((0..70).map(|index| format!("held {index}")))
-        .chain(["after restart".to_string(), "release".to_string()])
+    let expected = texts
+        .iter()
+        .map(String::as_str)
+        .chain(["release"])
         .collect::<Vec<_>>()
         .join("\n\n");
     assert_eq!(
@@ -1061,12 +986,10 @@ async fn a_command_continued_after_a_branch_change_still_starts_the_prompt() {
     send(&core, "m1", "first", &cwd);
     wait_for(turns(1), "first turn").await;
 
-    // `/compact` held behind the question, then continued: the branch note
+    // `/compact` held behind a saved question, then continued: the branch note
     // went in front of it, so the agent read the command as plain text.
-    share_checkout(&core, &cwd);
     git(&repo, &["switch", "-c", "beta"]);
-    send(&core, "m2", "/compact", &cwd);
-    let (request_id, _) = wait_question(&core).await;
+    let request_id = seed_old_question(&core, "/compact", &["Continue on beta", "Don't send"]);
     answer(&core, &request_id, "Continue on beta");
     wait_for(turns(2), "the continued command").await;
     assert_eq!(prompts.lock().unwrap()[1], "/compact");

@@ -4,17 +4,13 @@
 //! answer to a dead run's question, crash recovery) compares the checkout with
 //! the chat's last accepted context. On drift the turn goes ahead, and the
 //! agent is told the branch moved so it doesn't assume its earlier work is
-//! there. Stopping to ask got in the way far more often than it helped.
+//! there. Nothing ever stops to ask, on a shared checkout or any other.
 //!
-//! A checkout other chats also use still asks, because there the person has a
-//! real choice: continue in an independent worktree. The question is an
-//! ordinary input part on an engine-written assistant entry, so every client
-//! already renders and answers it. Its request id carries [`REQUEST_PREFIX`],
-//! which routes the answer here instead of to an agent.
-//!
-//! Chats saved by earlier versions can still hold an open "Branch changed"
-//! question, with its "Switch back" choice on a clean tree. Those stay
-//! answerable, and the next send closes them.
+//! Earlier versions asked, and chats they saved can still hold an open
+//! question, with messages waiting behind it. Its request id carries
+//! [`REQUEST_PREFIX`], which routes the answer here instead of to an agent.
+//! Every choice it offered still works, and the next send closes it and takes
+//! the waiting messages along. Nothing writes a new one.
 
 use super::*;
 
@@ -322,40 +318,6 @@ fn continue_note(drift: &Drift) -> String {
     }
 }
 
-/// What a chat on a shared checkout is asked. A shared checkout never offers
-/// to switch back: that would move the other chats too.
-fn question(drift: &Drift) -> UserInputQuestion {
-    let (from, to) = (
-        branch_label(&drift.from_branch),
-        branch_label(&drift.to_branch),
-    );
-    let situation = if drift.checkout_replaced {
-        format!(
-            "This chat's folder now holds a different checkout, on {to}. \
-             Its earlier turns ran in the previous checkout, on {from}."
-        )
-    } else if drift.from_branch == drift.to_branch {
-        format!("This chat is using the checkout on {to}.")
-    } else {
-        format!("This chat was working on {from}, but its checkout is now on {to}.")
-    };
-    UserInputQuestion {
-        id: "branch".into(),
-        header: "Shared checkout".into(),
-        question: format!(
-            "{situation} This checkout is shared with other chats. Independent continuation creates a new worktree from this chat's recorded committed snapshot; uncommitted files stay in the shared checkout. How should it continue?"
-        ),
-        options: vec![
-            INDEPENDENT.to_string(),
-            format!("{CONTINUE}{}", drift.to_branch),
-            DONT_SEND.to_string(),
-        ],
-        multi_select: false,
-        prefill: None,
-        multiline: false,
-    }
-}
-
 /// The open drift question in this transcript, if any: `(entry id, request id)`.
 pub(super) fn open_question(entries: &[SessionMessageEntry]) -> Option<(String, String)> {
     entries.iter().rev().find_map(|entry| {
@@ -450,17 +412,8 @@ impl DocHost {
             return None;
         }
         let previous = self.workspace()?.chat(chat_id).ok()??.source_context?;
-        let shared =
-            previous.cwd == current.cwd && self.unacknowledged_shared_checkout(chat_id, current);
-        let drift = detect(&previous, current).or_else(|| {
-            shared.then(|| Drift {
-                from_branch: previous.branch.clone(),
-                to_branch: current.branch.clone(),
-                checkout_replaced: false,
-            })
-        })?;
-        if !shared
-            && !drift.checkout_replaced
+        let drift = detect(&previous, current)?;
+        if !drift.checkout_replaced
             && self
                 .own_turn_changed_branch(chat_id, &previous, &drift)
                 .await
@@ -615,87 +568,6 @@ impl DocHost {
         Ok(id)
     }
 
-    /// Hold `request` and ask how to continue. The user's message lands in
-    /// the transcript now, so it is not lost while the question waits.
-    pub(super) async fn hold_for_branch_drift(
-        &self,
-        chat_id: &str,
-        drift: &Drift,
-        harness: HarnessId,
-        request: harness_proto::RunRequest,
-        message_id: Option<String>,
-    ) -> Result<(), EngineError> {
-        let handle = self.open(chat_id)?;
-        if let Some(id) = &message_id {
-            handle.write_user_message(id, &request.prompt, now_ms())?;
-        }
-        let open = open_question_in_tail(&handle);
-        // A question left open across a restart still owns the messages it
-        // was asked about.
-        let rebuilt = match &open {
-            Some((entry_id, request_id))
-                if !lock(&self.inner.branch_drift_holds).contains_key(chat_id) =>
-            {
-                match self.load_branch_drift_held(&handle, request_id)? {
-                    Some(held) => merge_held(held),
-                    None => self.rebuild_held(
-                        chat_id,
-                        &handle.doc.read_entries()?,
-                        entry_id,
-                        message_id.as_deref(),
-                    ),
-                }
-            }
-            _ => None,
-        };
-        let request_id = open
-            .as_ref()
-            .map(|(_, id)| id.clone())
-            .unwrap_or_else(|| format!("{REQUEST_PREFIX}{}", new_id()));
-        {
-            let mut holds = lock(&self.inner.branch_drift_holds);
-            let held = holds.entry(chat_id.to_string()).or_default();
-            held.extend(rebuilt);
-            held.push(HeldDispatch {
-                harness,
-                request,
-                message_id,
-            });
-            let json = serde_json::to_string(held).map_err(|error| {
-                EngineError::Other(format!("held requests serialization failed: {error}"))
-            })?;
-            handle
-                .doc
-                .doc()
-                .get_map(HELD_REQUESTS_MAP)
-                .insert(&request_id, json)
-                .map_err(DocError::from)?;
-            handle.doc.doc().commit();
-        }
-        if open.is_none() {
-            handle.doc.push_message(&SessionMessageEntry {
-                id: new_id(),
-                role: MessageRole::Assistant,
-                parts: vec![MessagePart::Input {
-                    id: request_id.clone(),
-                    request_id,
-                    questions: vec![question(drift)],
-                    resolved: false,
-                }],
-                created_at: now_ms(),
-                device_id: self.inner.config.device_id.clone(),
-                status: Some(MessageStatus::Complete),
-                continuation_of: None,
-                duration_ms: None,
-            })?;
-        }
-        handle.publish_messages();
-        self.save_snapshot(&handle);
-        tracing::info!(chat = %chat_id, from = %drift.from_branch, to = %drift.to_branch,
-            replaced = drift.checkout_replaced, "dispatch held: checkout drifted");
-        Ok(())
-    }
-
     /// Answer (or dismissal, `answers: None`) to a drift question.
     pub(super) async fn answer_branch_drift(
         &self,
@@ -837,8 +709,8 @@ impl DocHost {
                 || current.branch != accepted_branch
             {
                 // Consent applies only to the displayed branch, never to a
-                // newer observation. Dispatch without advancing context: a
-                // shared checkout asks again, and any other tells the agent.
+                // newer observation. Dispatch without advancing context, which
+                // tells the agent about the branch it's really on.
                 handle.doc.resolve_input(request_id)?;
                 self.clear_branch_drift_held(handle, request_id)?;
                 self.dispatch_with_source_context(
@@ -863,8 +735,6 @@ impl DocHost {
         handle.publish_messages();
         self.save_snapshot(handle);
         if let Some(current) = continue_context {
-            self.acknowledge_shared_checkout(handle, &current)?;
-            self.save_snapshot(handle);
             // Accept only the observation that matched the displayed choice.
             let previous = self
                 .workspace()
@@ -1222,20 +1092,5 @@ mod tests {
             );
         }
         assert!(!created_through(&log(&[checkout]), 101, "alpha", "beta"));
-    }
-
-    #[test]
-    fn the_shared_checkout_question_never_offers_to_switch_back() {
-        let drift = Drift {
-            from_branch: "alpha".into(),
-            to_branch: "beta".into(),
-            checkout_replaced: false,
-        };
-        let asked = question(&drift);
-        assert_eq!(asked.header, "Shared checkout");
-        assert_eq!(
-            asked.options,
-            ["Continue independently", "Continue on beta", "Don't send"]
-        );
     }
 }

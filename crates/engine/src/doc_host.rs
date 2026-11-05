@@ -6070,20 +6070,11 @@ impl DocHost {
         let mut request = request;
         self.retarget_independent_request(chat_id, &mut request)?;
         let context = self.capture_source_context(&request.cwd).await;
-        let mut branch_change = None;
-        if let Some(context) = &context
-            && let Some(drift) = self.drift_since_last_turn(sessions, chat_id, context).await
-        {
-            // Only a checkout other chats also use still asks: it has a real
-            // choice to offer, an independent worktree. Otherwise carry on and
-            // tell the agent.
-            if self.checkout_is_shared(chat_id, &request.cwd) {
-                self.hold_for_branch_drift(chat_id, &drift, harness, request, message_id)
-                    .await?;
-                return Ok(None);
-            }
-            branch_change = Some(drift);
-        }
+        // A moved checkout never stops the turn: the agent is told instead.
+        let branch_change = match &context {
+            Some(context) => self.drift_since_last_turn(sessions, chat_id, context).await,
+            None => None,
+        };
         let (mut request, mut message_id) =
             self.release_branch_drift(chat_id, request, message_id)?;
         // Source capture and checkout questions can await. Recheck at the
