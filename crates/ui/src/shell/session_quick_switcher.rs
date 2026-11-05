@@ -77,6 +77,7 @@ impl Shell {
             || !self.settings.sidebar_collapsed
             || self.workspace_uses_shared_header(cx)
             || self.workspace_header_transition_active(cx)
+            || self.workspace_uses_strip(cx)
         {
             return None;
         }

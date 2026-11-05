@@ -10,6 +10,12 @@ impl Shell {
                 .is_some_and(|layout| layout.header_panel_count() == 1 && !layout.uses_strip())
     }
 
+    /// The strip owns the title row, so nothing else may draw its text there.
+    pub(in crate::shell) fn workspace_uses_strip(&self, cx: &App) -> bool {
+        self.panel_layout(cx)
+            .is_some_and(WorkspaceLayout::uses_strip)
+    }
+
     pub(in crate::shell) fn workspace_titlebar_buttons_end(&self, cx: &App) -> f32 {
         self.eval_tween(
             self.titlebar_tween,

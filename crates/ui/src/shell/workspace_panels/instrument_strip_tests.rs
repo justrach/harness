@@ -135,6 +135,78 @@ fn a_slots_plus_adds_a_tab_inside_that_panel(cx: &mut gpui::TestAppContext) {
     });
 }
 
+fn settle(cx: &mut gpui::VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    cx.run_until_parked();
+}
+
+fn assert_slots_stay_apart(ids: &[u64], cx: &mut gpui::VisualTestContext) {
+    let strip = cx.debug_bounds("instrument-strip").unwrap();
+    let slots: Vec<_> = ids
+        .iter()
+        .map(|id| at(cx, format!("instrument-slot-{id}")).unwrap())
+        .collect();
+    for pair in slots.windows(2) {
+        assert!(pair[0].right() <= pair[1].left(), "{slots:?}");
+    }
+    for slot in &slots {
+        assert!(slot.left() >= strip.left() && slot.right() <= strip.right());
+    }
+}
+
+/// With the sidebar closed, the window centres the focused tab's title in the
+/// title bar. The strip fills that row, so the two used to draw over each other.
+#[gpui::test]
+fn the_strip_has_the_title_row_to_itself(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (first, second, third) = three_panels(&shell, cx);
+    shell.update(cx, |shell, cx| {
+        shell.settings.sidebar_collapsed = true;
+        cx.notify();
+    });
+    settle(cx);
+    assert!(
+        cx.debug_bounds("workspace-titlebar-identity").is_none(),
+        "the title is already in the focused slot"
+    );
+    assert_slots_stay_apart(&[first, second, third], cx);
+    let switcher = cx.debug_bounds("workspace-session-quick-switcher").unwrap();
+    let slot = at(cx, format!("instrument-slot-{first}")).unwrap();
+    assert!(slot.left() >= switcher.right(), "{slot:?} {switcher:?}");
+}
+
+/// More panels than fit: they scroll sideways, but every slot stays on screen,
+/// narrower, with its contents clipped to it.
+#[gpui::test]
+fn slots_stay_apart_when_the_panels_do_not_fit(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let ids = shell.update(cx, |shell, cx| {
+        let layout = shell.panel_layout_mut(cx);
+        layout.axis = SplitAxis::Horizontal;
+        while layout.panels.len() < 9 {
+            let last = layout.panels.last().unwrap().id;
+            layout.add_panel(last);
+        }
+        layout.equalize();
+        cx.notify();
+        layout_ids(shell.panel_layout(cx).unwrap())
+    });
+    settle(cx);
+    assert_slots_stay_apart(&ids, cx);
+}
+
+fn layout_ids(layout: &WorkspaceLayout) -> Vec<u64> {
+    layout.panels.iter().map(|panel| panel.id).collect()
+}
+
 #[gpui::test]
 fn each_panel_gets_one_slot_and_no_tab_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

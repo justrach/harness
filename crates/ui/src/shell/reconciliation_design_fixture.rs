@@ -93,6 +93,7 @@ impl Shell {
         self.browser_subs.clear();
         self.chat_split = None;
         self.settings.sidebar_compact = false;
+        self.settings.sidebar_collapsed = variant == "attention-strip-closed";
         {
             let layout = self.panel_layout_mut(cx);
             layout.axis = SplitAxis::Horizontal;
@@ -133,7 +134,7 @@ impl Shell {
             layout.panels[0].tabs = vec![new_tab];
             layout.panels[0].active = 0;
         }
-        if variant == "attention-strip" {
+        if variant == "attention-strip" || variant == "attention-strip-closed" {
             self.fixture_instrument_strip(window, cx);
         }
         if variant == "attention-single" {

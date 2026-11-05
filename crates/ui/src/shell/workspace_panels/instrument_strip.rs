@@ -251,6 +251,7 @@ impl Shell {
                 None => slot.flex_1().max_w(px(SLOT_MAX_WIDTH)),
             })
             .h(px(SLOT_HEIGHT))
+            .overflow_hidden()
             .pl(px(7.0))
             .pr(px(4.0))
             .rounded(px(6.0))
