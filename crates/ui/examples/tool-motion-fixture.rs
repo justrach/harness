@@ -228,6 +228,67 @@ impl Render for Shot {
                 let group = after_group();
                 tool_call_rows::group(&group, true, &theme, phase, reduce)
             }
+            "after-expanded-rows" => {
+                // Expanded toolbar: same animated rows, with one disclosure open
+                // so INPUT/OUTPUT sits under the prettier header (not the old chip).
+                let group = after_group();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(tool_call_rows::header(&group, true, &theme, phase, reduce))
+                    .children(group.rows.iter().enumerate().map(|(ix, r)| {
+                        let open = ix == 2;
+                        let row = tool_call_rows::row(r, &theme, phase, reduce, Some(open));
+                        if open {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(row)
+                                .child(
+                                    div()
+                                        .mt(px(2.0))
+                                        .ml(px(8.0))
+                                        .px(px(10.0))
+                                        .py(px(8.0))
+                                        .rounded(px(8.0))
+                                        .bg(theme.ink(0.04))
+                                        .child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text_muted)
+                                                .child("INPUT"),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(4.0))
+                                                .font_family(theme.font_mono.clone())
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text)
+                                                .child(r.detail.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(8.0))
+                                                .text_size(px(11.0))
+                                                .text_color(theme.text_muted)
+                                                .child("OUTPUT"),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt(px(4.0))
+                                                .text_size(px(11.0))
+                                                .text_color(theme.success)
+                                                .child("+48 −12"),
+                                        ),
+                                )
+                                .into_any_element()
+                        } else {
+                            row
+                        }
+                    }))
+                    .into_any_element()
+            }
             "access-map" => {
                 let state = access_map();
                 tool_access::body(&state, &theme, phase, reduce)
@@ -243,6 +304,7 @@ impl Render for Shot {
         let title: SharedString = match kind {
             "before-rows" => "Before — tool call chips",
             "after-rows" => "After — animated tool call rows",
+            "after-expanded-rows" => "After — expanded tool toolbar",
             "access-map" => "After — Tool Access Map",
             "access-detail" => "After — Tool Access detail",
             other => other,
@@ -290,7 +352,7 @@ fn main() -> anyhow::Result<()> {
             ("dark", appearance::AppearanceMode::Dark),
         ],
     };
-    let kinds = ["before-rows", "after-rows", "access-map", "access-detail"];
+    let kinds = ["before-rows", "after-rows", "after-expanded-rows", "access-map", "access-detail"];
     let failure = std::sync::Arc::new(std::sync::Mutex::new(None));
     let result = failure.clone();
     let temp = tempfile::tempdir()?;

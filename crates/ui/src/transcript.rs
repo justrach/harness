@@ -9747,7 +9747,15 @@ impl Transcript {
             .zip(&affordances)
             .zip(&detail_opens)
             .zip(&detail_folds)
-            .map(|((((detail, invocation), affordance), open), fold)| {
+            .zip(tools.iter())
+            .map(|(((((detail, invocation), affordance), open), fold), tool)| {
+                // Call tools use the Shawn-style animated header height; thoughts
+                // and notes keep the older chip card height.
+                let header_h = if tool.kind == ToolItemKind::Call && !is_agent_tool(tool) {
+                    crate::tool_call_rows::ROW_HEIGHT
+                } else {
+                    CHIP_CARD_HEIGHT
+                };
                 let target = if *open {
                     base_row_height
                         + invocation.as_deref().map_or(0.0, detail_height)
@@ -9769,7 +9777,7 @@ impl Transcript {
                             motion_active = true;
                         }
                         return motion::lerp(
-                            fold.from + base_row_height - CHIP_CARD_HEIGHT,
+                            fold.from + base_row_height - header_h,
                             target,
                             t,
                         );
@@ -9966,9 +9974,12 @@ impl Transcript {
             motion::pulse_lease(cx.entity_id(), cx);
         }
         // Animated one-line rows (scramble / dither / result pills) for the
-        // activity rail and compact fold — same ToolItems the chips use.
+        // activity rail, compact fold, and the expanded tool toolbar — same
+        // ToolItems the chips use.
         let animated_group = crate::tool_call_rows::from_tools(tools, None);
-        let animated_phase = if collapses && (animated_group.live || !reduce_motion) {
+        // Scramble / timers run whenever the tool list is on screen — collapsed
+        // rail or the expanded toolbar — so expanding the group keeps Shawn-style motion.
+        let animated_phase = if !tools.is_empty() && (animated_group.live || !reduce_motion) {
             motion::pulse_lease(cx.entity_id(), cx);
             crate::tool_call_rows::pulse_phase(cx.entity_id(), cx)
         } else {
@@ -10049,19 +10060,28 @@ impl Transcript {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 let affordance = affordances[ix].clone();
-                if detail.is_none() && invocation.is_none() && affordance.is_none() {
-                    if collapses
-                        && tool.kind == ToolItemKind::Call
-                        && !is_agent_tool(tool)
-                        && let Some(animated) =
-                            animated_group.rows.iter().find(|r| r.id.as_ref() == tool.part_id)
-                    {
+                let expandable =
+                    detail.is_some() || invocation.is_some() || affordance.is_some();
+                // Shawn-style animated rows for ordinary Call tools whether the
+                // group is collapsed or expanded. Detail (INPUT/OUTPUT) opens
+                // under the prettier row instead of swapping back to the old chip.
+                let animated = (tool.kind == ToolItemKind::Call && !is_agent_tool(tool))
+                    .then(|| {
+                        animated_group
+                            .rows
+                            .iter()
+                            .find(|r| r.id.as_ref() == tool.part_id)
+                    })
+                    .flatten();
+                if !expandable {
+                    if let Some(animated) = animated {
                         return reveal_tool_row(
                             crate::tool_call_rows::row(
                                 animated,
                                 theme,
                                 animated_phase,
                                 reduce_motion,
+                                None,
                             ),
                             crate::tool_call_rows::ROW_HEIGHT,
                             reveal,
@@ -10097,15 +10117,31 @@ impl Transcript {
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
+                let use_animated_header = animated.is_some();
+                let header_h = if use_animated_header {
+                    crate::tool_call_rows::ROW_HEIGHT
+                } else if collapses {
+                    CHIP_CARD_HEIGHT
+                } else {
+                    CHIP_HEADER_HEIGHT
+                };
                 let mut card = div()
-                    .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
-                    .when(collapses, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
+                    .my(px((base_row_height
+                        - if use_animated_header {
+                            crate::tool_call_rows::ROW_HEIGHT
+                        } else {
+                            CHIP_CARD_HEIGHT
+                        })
+                        / 2.0))
+                    .when(collapses && !use_animated_header, |el| {
+                        el.ml(px(ACTIVITY_TEXT_GAP))
+                    })
                     .min_w_0()
                     .flex_1()
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .when(!collapses, |card| {
+                    .when(!collapses && !use_animated_header, |card| {
                         card.rounded(px(9.0))
                             .border_1()
                             .border_color(crate::theme::hairline(0.07))
@@ -10114,11 +10150,7 @@ impl Transcript {
                     .child(
                         div()
                             .id(key.clone())
-                            .h(px(if collapses {
-                                CHIP_CARD_HEIGHT
-                            } else {
-                                CHIP_HEADER_HEIGHT
-                            }))
+                            .h(px(header_h))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -10128,21 +10160,37 @@ impl Transcript {
                                 let entry =
                                     this.tool_details.entry(toggle_key.clone()).or_default();
                                 let currently_open = entry.open.unwrap_or(open);
-                                entry.from = row_height - base_row_height + CHIP_CARD_HEIGHT;
+                                entry.from = row_height - base_row_height
+                                    + if use_animated_header {
+                                        crate::tool_call_rows::ROW_HEIGHT
+                                    } else {
+                                        CHIP_CARD_HEIGHT
+                                    };
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
                                 entry.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
-                            .child(chip_header(
-                                tool,
-                                open,
-                                file_opener.as_ref(),
-                                preview_paths,
-                                theme,
-                                cx.entity_id(),
-                                cx,
-                            )),
+                            .child(if let Some(animated) = animated {
+                                crate::tool_call_rows::row(
+                                    animated,
+                                    theme,
+                                    animated_phase,
+                                    reduce_motion,
+                                    Some(open),
+                                )
+                            } else {
+                                chip_header(
+                                    tool,
+                                    open,
+                                    file_opener.as_ref(),
+                                    preview_paths,
+                                    theme,
+                                    cx.entity_id(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            }),
                     );
                 // The body stays mounted while the close tween shrinks over it.
                 // Invocation first (what was asked), then output/diff (what
@@ -10214,15 +10262,22 @@ impl Transcript {
                     }
                     card = card.child(panel);
                 }
-                let card = card.h(px(row_height - base_row_height + CHIP_CARD_HEIGHT));
+                let card_h = if use_animated_header {
+                    crate::tool_call_rows::ROW_HEIGHT
+                } else {
+                    CHIP_CARD_HEIGHT
+                };
+                let card = card.h(px(row_height - base_row_height + card_h));
                 let card = div().min_w_0().flex_1().child(card);
                 let row = div()
                     .w_full()
                     .flex_none()
                     .flex()
                     .flex_row()
-                    // Stretch the line alongside the expanded text.
-                    .when(collapses, |row| {
+                    // Stretch the line alongside the expanded text. Animated
+                    // Call headers skip the old connector tree — the pill row
+                    // is the chrome.
+                    .when(collapses && !use_animated_header, |row| {
                         row.child(activity_rail(
                             tool,
                             ix > 0,

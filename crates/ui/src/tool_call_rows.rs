@@ -1,6 +1,6 @@
 //! Animated one-line tool-call rows for the chat transcript.
 //!
-//! Compact rows under a "N tool calls" header: an active row sits in a gray
+//! Compact rows under a "N tool calls" header (collapsed or expanded): an active row sits in a gray
 //! pill with a scramble on the middle of its path and a ticking timer; a
 //! finished row fades the pill away, settles the path, and shows a short
 //! result (`12 matches`, `+8 −3`, `48 passed`); a failed or passed test run
@@ -439,7 +439,16 @@ pub fn header(
 }
 
 /// One compact animated row.
-pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> AnyElement {
+///
+/// `disclosure` is `Some(open)` when the row can expand to show INPUT/OUTPUT
+/// under it (chevron on the trailing edge); `None` for a plain one-line row.
+pub fn row(
+    row: &CallRow,
+    theme: &Theme,
+    phase: f32,
+    reduce_motion: bool,
+    disclosure: Option<bool>,
+) -> AnyElement {
     let active = matches!(row.result, RowResult::Running { .. });
     let detail = if active && !reduce_motion {
         SharedString::from(scramble_middle(row.detail.as_ref(), phase))
@@ -485,8 +494,13 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
         .gap(px(8.0))
         .px(px(8.0))
         .rounded(px(PILL_RADIUS))
-        .when(active, |el| el.bg(theme.ink(0.06)))
-        .when(!active, |el| el.opacity(if row.is_error { 0.95 } else { 0.72 }))
+        // Active row: clear gray pill highlight (Shawn-style).
+        .when(active, |el| {
+            el.bg(theme.ink(0.08))
+                .border_1()
+                .border_color(crate::theme::hairline(0.10))
+        })
+        .when(!active, |el| el.opacity(if row.is_error { 0.95 } else { 0.82 }))
         .when_some(wash, |el, (color, strength)| {
             el.child(dither_wash(color, strength))
         })
@@ -496,6 +510,8 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
                 .flex_none()
                 .text_color(if row.is_error {
                     theme.danger
+                } else if active {
+                    theme.text
                 } else {
                     theme.text_muted
                 })
@@ -505,9 +521,11 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
             div()
                 .flex_none()
                 .text_size(px(TEXT_BODY))
-                .font_weight(WEIGHT_REGULAR)
+                .font_weight(if active { WEIGHT_STRONG } else { WEIGHT_REGULAR })
                 .text_color(if row.is_error {
                     theme.danger
+                } else if active {
+                    theme.text
                 } else {
                     theme.text_muted
                 })
@@ -529,7 +547,20 @@ pub fn row(row: &CallRow, theme: &Theme, phase: f32, reduce_motion: bool) -> Any
                 })
                 .child(detail),
         )
-        .children(trail);
+        .children(trail)
+        .when_some(disclosure, |el, open| {
+            el.child(
+                icons::icon(if open {
+                    icons::ALT_ARROW_UP
+                } else {
+                    icons::ALT_ARROW_DOWN
+                })
+                .size(px(10.0))
+                .flex_none()
+                .text_color(theme.text_muted)
+                .mt(px(CAP_CENTER_NUDGE)),
+            )
+        });
 
     // Failed rows stay more opaque (already set); pass/fail icons replace verb icon when settled tests.
     match &row.result {
@@ -654,7 +685,7 @@ pub fn group(
         .gap(px(2.0))
         .child(header(group, open, theme, phase, reduce_motion))
         .when(open, |col| {
-            col.children(group.rows.iter().map(|r| row(r, theme, phase, reduce_motion)))
+            col.children(group.rows.iter().map(|r| row(r, theme, phase, reduce_motion, None)))
                 .when(!group.file_diffs.is_empty() && !group.live, |col| {
                     col.child(file_diff_summary(&group.file_diffs, theme))
                 })
