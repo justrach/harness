@@ -296,7 +296,7 @@ fn workspace_shared_header_multiple_panels_sidebar_toggle_has_a_stable_hit_targe
 }
 
 #[gpui::test]
-fn workspace_shared_header_expanded_panel_shares_the_row_and_restore_reveals_the_lane(
+fn workspace_shared_header_expanded_panel_keeps_the_strip_row_and_restores_in_place(
     cx: &mut TestAppContext,
 ) {
     let (_dir, source, mut visual) = setup(cx, true, 1200.0);
@@ -305,8 +305,8 @@ fn workspace_shared_header_expanded_panel_shares_the_row_and_restore_reveals_the
     for selector in ["workspace-panel-body-0", "workspace-panel-body-1"] {
         near(
             bounds(&mut visual, selector).top(),
-            84.0,
-            "multiple panels retain the separate titlebar lane",
+            42.0,
+            "multiple panels sit under the strip",
         );
     }
     source
@@ -321,7 +321,7 @@ fn workspace_shared_header_expanded_panel_shares_the_row_and_restore_reveals_the
     near(
         bounds(&mut visual, "workspace-panel-body-1").top(),
         42.0,
-        "the expanded panel shares the native session row",
+        "expanding doesn't move the panel's top",
     );
     assert!(visual.debug_bounds("workspace-panel-body-0").is_none());
     near(
@@ -332,29 +332,33 @@ fn workspace_shared_header_expanded_panel_shares_the_row_and_restore_reveals_the
         "window controls remain in their lane",
     );
     near(
-        bounds(&mut visual, "panel-tab-content-1-0").center().y,
+        bounds(&mut visual, "instrument-slot-1").center().y,
         21.0,
-        "expanded panel tabs share the window controls' centerline",
+        "slots share the window controls' centerline",
     );
     let controls = bounds(&mut visual, "workspace-titlebar-controls");
-    let tab = bounds(&mut visual, "panel-tab-1-0");
-    assert!(tab.left() >= controls.right());
+    let slot = bounds(&mut visual, "instrument-slot-0");
+    assert!(slot.left() >= controls.right());
     source
         .read_with(cx, |shell, cx| {
             let layout = shell.panel_layout(cx).unwrap();
             assert_eq!(layout.panels.len(), 2);
             assert_eq!(layout.expanded, Some(1));
-            assert!(shell.workspace_uses_shared_header(cx));
+            assert!(!shell.workspace_uses_shared_header(cx));
         })
         .unwrap();
-    let restore = bounds(&mut visual, "panel-expand-1");
-    visual.simulate_click(restore.center(), Default::default());
+    source
+        .update(cx, |shell, _, cx| {
+            shell.panel_layout_mut(cx).expanded = None;
+            cx.notify();
+        })
+        .unwrap();
     settle(&mut visual);
     for selector in ["workspace-panel-body-0", "workspace-panel-body-1"] {
         near(
             bounds(&mut visual, selector).top(),
-            84.0,
-            "restoring multiple panels restores the separate lane",
+            42.0,
+            "restoring keeps the same row",
         );
     }
     source

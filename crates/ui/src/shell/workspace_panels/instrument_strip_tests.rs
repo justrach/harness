@@ -674,6 +674,17 @@ fn the_slot_keys_leave_the_session_and_tab_jumps_alone() {
         !bound("ctrl-3").unwrap().partial_eq(&FocusPanelSlot3),
         "⌃3 stays the chat tab"
     );
+    // Ctrl+Alt is AltGr on Windows, where it types characters.
+    let keymap = gpui::Keymap::new(crate::shell::chat_split::chat_split_bindings(false));
+    let bound = |key: &str| {
+        let (matched, _) =
+            keymap.bindings_for_input(&[gpui::Keystroke::parse(key).unwrap()], &stack);
+        matched
+            .first()
+            .map(|binding| binding.action().boxed_clone())
+    };
+    assert!(bound("alt-shift-3").unwrap().partial_eq(&FocusPanelSlot3));
+    assert!(bound("ctrl-alt-3").is_none());
 }
 
 #[gpui::test]

@@ -1,10 +1,8 @@
-//! Dev tab layout: one panel keeps its folder tabs. Once the window splits, one
-//! strip replaces every panel's tab row. Each panel gets one slot, showing its
-//! active tab, with a + for another tab inside it; its other tabs and its
-//! actions live in the slot's menu. Built only with `dev-tab-layout`.
+//! One panel keeps its folder tabs. Once the window splits, one strip replaces
+//! every panel's tab row. Each panel gets one slot, showing its active tab, with
+//! a + for another tab inside it; its other tabs and its actions live in the
+//! slot's menu.
 use super::*;
-
-pub(super) const INSTRUMENT_STRIP: bool = cfg!(feature = "dev-tab-layout");
 
 const SLOT_MAX_WIDTH: f32 = 260.0;
 const SLOT_HEIGHT: f32 = 32.0;
@@ -318,6 +316,7 @@ impl Shell {
             .entry(format!("instrument-slot-{id}"))
             .or_insert_with(|| cx.focus_handle().tab_stop(true))
             .clone();
+        let middle_close = selected.clone();
         let drag = selected.clone().map(|tab| PanelTabDrag {
             workspace: workspace.into(),
             panel: id,
@@ -421,7 +420,17 @@ impl Shell {
                 .into_any_element()
         });
         let shortcut = (ix < 6)
-            .then(|| settings::badge_combo(&format!("cmd-alt-{}", ix + 1)))
+            .then(|| {
+                settings::badge_combo(&format!(
+                    "{}-{}",
+                    if cfg!(target_os = "macos") {
+                        "cmd-alt"
+                    } else {
+                        "alt-shift"
+                    },
+                    ix + 1
+                ))
+            })
             .unwrap_or_default();
         let leading = match attention {
             Some(attention) => div()
@@ -438,9 +447,22 @@ impl Shell {
                 .text_color(theme.text_muted)
                 .into_any_element(),
         };
+        let add_focus = self
+            .workspace_panels
+            .controls
+            .entry(format!("instrument-slot-add-{id}"))
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
+        let menu_focus = self
+            .workspace_panels
+            .controls
+            .entry(format!("instrument-slot-menu-{id}"))
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
         let add_button = div()
             .id(("instrument-slot-add", id))
             .debug_selector(move || format!("instrument-slot-add-{id}"))
+            .track_focus(&add_focus)
             .flex_none()
             .size(px(18.0))
             .rounded(px(4.0))
@@ -452,6 +474,17 @@ impl Shell {
             .opacity(0.0)
             .group_hover(group.clone(), |style| style.opacity(1.0))
             .hover(|style| style.bg(theme.ink(0.10)))
+            .focus_visible(|style| style.opacity(1.0).bg(theme.ink(0.10)))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.workspace_panels.target = Some(id);
+                        this.workspace_new_tab(cx);
+                        this.focus_workspace_new_tab(window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -467,9 +500,15 @@ impl Shell {
                     .size(px(11.0))
                     .text_color(theme.text_muted),
             );
+        // The menu hangs under the button when the keyboard opens it.
+        let measured_menu =
+            std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
+        let key_menu_bounds = measured_menu.clone();
         let menu_button = div()
             .id(("instrument-slot-menu", id))
             .debug_selector(move || format!("instrument-slot-menu-{id}"))
+            .relative()
+            .track_focus(&menu_focus)
             .flex_none()
             .h(px(18.0))
             .min_w(px(18.0))
@@ -490,6 +529,7 @@ impl Shell {
                     .group_hover(group.clone(), |style| style.opacity(1.0))
             })
             .hover(|style| style.bg(theme.ink(0.10)))
+            .focus_visible(|style| style.opacity(1.0).bg(theme.ink(0.10)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -498,11 +538,28 @@ impl Shell {
                     cx.stop_propagation();
                 }),
             )
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        let position = key_menu_bounds.get().bottom_left();
+                        this.open_strip_menu(id, position, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .when(tab_count > 1, |button| button.child(tab_count.to_string()))
             .child(
                 icon(icons::ALT_ARROW_DOWN)
                     .size(px(11.0))
                     .text_color(theme.text_muted),
+            )
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| measured_menu.set(bounds),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
             );
         div()
             .id(("instrument-slot", id))
@@ -556,6 +613,15 @@ impl Shell {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.open_strip_menu(id, event.position, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    if let Some(tab) = middle_close.clone() {
+                        this.close_workspace_tab_by_button(id, tab, window, cx);
+                    }
                     cx.stop_propagation();
                 }),
             )
@@ -647,17 +713,14 @@ impl Shell {
         }
     }
 
-    /// `⌘⌥1`–`⌘⌥6`: the slot at this position. Plain `⌘1` stays the session
-    /// jump and `⌃1` the chat tab.
+    /// `⌘⌥1`–`⌘⌥6` (`Alt+Shift+1`–`6` elsewhere): the slot at this position.
+    /// Plain `⌘1` stays the session jump and `⌃1` the chat tab.
     pub(in crate::shell) fn focus_strip_position(
         &mut self,
         position: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !INSTRUMENT_STRIP {
-            return;
-        }
         let panel = self
             .panel_layout(cx)
             .and_then(|layout| layout.panels.get(position))
@@ -674,9 +737,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !INSTRUMENT_STRIP {
-            return;
-        }
         let Some(layout) = self.panel_layout(cx).cloned() else {
             return;
         };
@@ -765,6 +825,17 @@ impl Shell {
             ));
         }
         if panel.selected().is_some() {
+            for after in [false, true] {
+                if let Some(to) = layout.neighbor(id, after) {
+                    let (label, glyph) = match (vertical, after) {
+                        (false, false) => ("Move tab to left panel", icons::ALT_ARROW_LEFT),
+                        (false, true) => ("Move tab to right panel", icons::ALT_ARROW_RIGHT),
+                        (true, false) => ("Move tab to panel above", icons::ALT_ARROW_UP),
+                        (true, true) => ("Move tab to panel below", icons::ALT_ARROW_DOWN),
+                    };
+                    rows.push((label.into(), glyph, MenuAction::Move(to)));
+                }
+            }
             rows.push((
                 "Move tab to new window".into(),
                 icons::ARROW_UP_RIGHT,
