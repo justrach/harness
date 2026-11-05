@@ -55,7 +55,7 @@ struct QueuePanel: View {
             case .reviewRequired: return "Needs review"
             case nil:
                 return MessageQueue.oneLine(
-                    MessageQueue.visibleText(item.text, attachments: item.attachments)
+                    ComposerCommandText.visibleText(MessageQueue.visibleText(item.text, attachments: item.attachments))
                 )
             }
         }()
@@ -109,7 +109,7 @@ struct QueuePanel: View {
         if item.deliveryGate == nil && !store.queueActionsPending.contains(item.id) {
             content.draggable(item.id) {
                 Text(MessageQueue.oneLine(
-                    MessageQueue.visibleText(item.text, attachments: item.attachments)
+                    ComposerCommandText.visibleText(MessageQueue.visibleText(item.text, attachments: item.attachments))
                 ))
                     .font(Theme.sans(12.5))
                     .foregroundStyle(Theme.text)

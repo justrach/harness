@@ -820,6 +820,11 @@ final class WorkspaceStore {
         }
     }
 
+    func listCommands(_ context: ComposerCommandContext) async throws -> [ComposerCommand] {
+        try await relay(for: context.deviceId).call(method: "ListCommands", params: context.params,
+                                                   timeoutSeconds: 100)
+    }
+
     func listModels(deviceId: String, harness: String) async -> [ModelInfo]? {
         struct WireChoice: Decodable {
             var id: String

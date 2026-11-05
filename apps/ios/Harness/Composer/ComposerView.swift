@@ -11,6 +11,13 @@
 import PhotosUI
 import SwiftUI
 
+private struct ComposerCommandRequest: Equatable {
+    let context: ComposerCommandContext?
+    let active: Bool
+    let online: Bool
+    let retry: Int
+}
+
 /// Shared glass shell + input + action row. `chips` render in the expanded
 /// toolbar row between the attach and send circles.
 struct ComposerShell<Chips: View>: View {
@@ -49,12 +56,22 @@ struct ComposerShell<Chips: View>: View {
     /// Screenshot rig (-focuscomposer): take keyboard focus shortly after
     /// appearing, so the keyboard-up transcript states can be driven headless.
     var autoFocus = false
+    var commandContext: ComposerCommandContext? = nil
+    var onWorkspaceCommand: (ComposerWorkspaceCommand) -> Void = { _ in }
     @ViewBuilder var chips: Chips
 
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     private var compact: Bool { verticalSizeClass == .compact }
     @State private var focused = false
     @State private var editor = ComposerEditorController()
+    @Environment(AppModel.self) private var model
+    @State private var caret = NSRange(location: 0, length: 0)
+    @State private var commands: [ComposerCommand] = []
+    @State private var commandSource: ComposerCommandContext?
+    @State private var commandsLoading = false
+    @State private var commandError: String?
+    @State private var commandRetry = 0
+    @State private var selectedCommand = 0
     /// Inside a stacked phone split: where this composer reports its keyboard focus (PhoneSplitContainer).
     @Environment(\.stackedComposerFocus) private var stackedComposerFocus
 
@@ -79,8 +96,79 @@ struct ComposerShell<Chips: View>: View {
             : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
     }
 
+    private var commandQuery: ComposerCommandQuery? {
+        let _ = caret
+        guard focused, commandContext != nil else { return nil }
+        return editor.commandQuery
+    }
+
+    private var commandCandidates: [ComposerCommand] {
+        guard let context = commandContext, let query = commandQuery else { return [] }
+        let providers = commandSource == context ? commands : []
+        return ComposerWorkspaceCommand.merging(providerCommands: providers, inChat: context.chatId != nil).filter {
+            ComposerCommandReference(name: $0.name).link != nil
+                && (query.query.isEmpty || $0.name.localizedCaseInsensitiveContains(query.query))
+        }
+    }
+
+    private var richReferences: Bool {
+        commandContext.map { model.hostSupportsComposerReferences(deviceId: $0.deviceId) } ?? false
+    }
+
+    private var needsHostUpdate: Bool {
+        commandContext != nil && !richReferences && !ComposerCommandText.links(in: draft).isEmpty
+    }
+
+    private func acceptCommand(_ command: ComposerCommand) {
+        guard !busy, command.workspaceCommand?.isDesktopOnly != true else { return }
+        if let action = command.workspaceCommand {
+            editor.removeCommandQuery(named: command.name)
+            focused = false
+            onWorkspaceCommand(action)
+        } else {
+            editor.selectCommand(command, richReferences: richReferences)
+        }
+        selectedCommand = 0
+    }
+
     var body: some View {
-        surface
+        VStack(spacing: 6) {
+            if commandQuery != nil {
+                ComposerCommandMenu(commands: commandCandidates, selected: selectedCommand,
+                                    loading: commandsLoading || commandSource != commandContext,
+                                    error: commandError, retry: { commandRetry += 1 }, accept: acceptCommand)
+            }
+            if needsHostUpdate {
+                Text("Update the chat's engine to send selected commands.")
+                    .font(Theme.sans(12))
+                    .foregroundStyle(Theme.warning)
+                    .padding(.horizontal, 24)
+            }
+            surface
+        }
+        .task(id: ComposerCommandRequest(context: commandContext, active: commandQuery != nil,
+                                        online: commandContext.map { model.deviceOnline($0.deviceId) } ?? false,
+                                        retry: commandRetry)) {
+            guard let context = commandContext, commandQuery != nil else { return }
+            if commandSource != context {
+                commands = []
+                commandError = nil
+                commandSource = context
+            }
+            commandsLoading = true
+            do {
+                let catalog = try await model.listCommands(context)
+                guard !Task.isCancelled, commandContext == context else { return }
+                var seen: Set<String> = []
+                commands = catalog.filter { seen.insert($0.name).inserted }
+                commandError = nil
+            } catch {
+                guard !Task.isCancelled, commandContext == context else { return }
+                commandError = "Couldn't load commands."
+            }
+            commandsLoading = false
+        }
+        .onChange(of: commandQuery) { _, _ in selectedCommand = 0 }
             // Focus-widen: margins pull in slightly while typing (chat-session.tsx).
             .padding(.horizontal, focused ? 10 : 16)
             .motionAnimation(Motion.resize, value: focused)
@@ -167,13 +255,26 @@ struct ComposerShell<Chips: View>: View {
                            guard !busy else { return }
                            editor.commit()
                            if hasContent {
-                               if sendEnabled { onSend() }
+                               if sendEnabled && !needsHostUpdate { onSend() }
                            } else {
                                onAdvanceQueue()
                            }
                            editor.apply(text: draft)
                        },
-                       onPasteImages: onPasteImages)
+                       onPasteImages: onPasteImages,
+                       onSelectionChange: { caret = $0 },
+                       onCompleteCommand: commandCandidates.isEmpty ? nil : {
+                           let index = min(selectedCommand, commandCandidates.count - 1)
+                           acceptCommand(commandCandidates[index])
+                       },
+                       onMoveCommand: { delta in
+                           let count = commandCandidates.count
+                           guard count > 0 else { return }
+                           for _ in 0..<count {
+                               selectedCommand = (selectedCommand + delta + count) % count
+                               if commandCandidates[selectedCommand].workspaceCommand?.isDesktopOnly != true { break }
+                           }
+                       })
             .overlay(alignment: .topLeading) {
                 if draft.isEmpty {
                     Text(placeholder)
@@ -252,7 +353,7 @@ struct ComposerShell<Chips: View>: View {
 
     private var buttonActive: Bool {
         if showStop, !hasContent { return true }
-        return sendEnabled && hasContent && !busy
+        return sendEnabled && hasContent && !busy && !needsHostUpdate
     }
 }
 
@@ -261,10 +362,12 @@ struct ComposerShell<Chips: View>: View {
 /// config row for the next dispatch), and the morphing action button.
 struct ComposerView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.composerWorkspaceCommandAction) private var workspaceCommandAction
     let store: SessionStore
     let chat: Chat
     let runLive: Bool
     let questionClosedAtMs: Int64?
+    let onRename: () -> Void
 
     // What was typed and not sent comes back with the chat (DraftStore).
     @State private var text: String
@@ -303,13 +406,26 @@ struct ComposerView: View {
     @State private var attachmentLease: QueueEditLease?
 
     init(store: SessionStore, chat: Chat, runLive: Bool, attachmentDraft: AttachmentDraft,
-         questionClosedAtMs: Int64? = nil) {
+         questionClosedAtMs: Int64? = nil, onRename: @escaping () -> Void = {}) {
         self.store = store
         self.chat = chat
         self.runLive = runLive
         self.questionClosedAtMs = questionClosedAtMs
+        self.onRename = onRename
         self.attachmentDraft = attachmentDraft
         _text = State(initialValue: DraftStore.load(DraftStore.chatKey(chat.id)))
+    }
+
+    private func performWorkspaceCommand(_ command: ComposerWorkspaceCommand) {
+        switch command {
+        case .model: showModelPicker = true
+        case .stop: store.sendInterrupt()
+        case .rename: onRename()
+        default:
+            workspaceCommandAction?(command, ComposerCommandContext(deviceId: chat.deviceId,
+                                                                    harness: harness, chatId: chat.id,
+                                                                    spaceId: chat.spaceId, path: chat.cwd))
+        }
     }
 
     private var harness: String { chat.config?.harness ?? "claude-code" }
@@ -458,7 +574,10 @@ struct ComposerView: View {
                 onPasteImages: editingQueuedId == nil ? { stagePasted($0) } : nil,
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } },
                 attachmentDraft: attachmentDraft,
-                autoFocus: model.launchFocusComposer
+                autoFocus: model.launchFocusComposer,
+                commandContext: ComposerCommandContext(deviceId: chat.deviceId, harness: harness, chatId: chat.id,
+                                                       spaceId: chat.spaceId, path: chat.cwd),
+                onWorkspaceCommand: performWorkspaceCommand
             ) {
                 if let pullRequest = model.changeRequest(for: chat) {
                     PullRequestBadge(summary: pullRequest, surface: .composer)

@@ -336,7 +336,12 @@ struct SessionView: View {
                     } else {
                         ComposerView(store: store, chat: chat, runLive: status == .working,
                                      attachmentDraft: attachmentDraft,
-                                     questionClosedAtMs: questionClosedAtMs)
+                                     questionClosedAtMs: questionClosedAtMs,
+                                     onRename: {
+                                         renameChatId = chat.id
+                                         renameTitle = chat.displayTitle
+                                         renamingSession = true
+                                     })
                             .id(chat.id)
                     }
                 }

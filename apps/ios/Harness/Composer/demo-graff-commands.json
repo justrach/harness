@@ -1,0 +1,324 @@
+{
+  "harness": "graff",
+  "version": "0.13",
+  "commands": [
+    {
+      "name": "model",
+      "description": "switch model/provider, fuzzy match (e.g. \"sonnet\", \"opus\"); name a provider to pin the seat",
+      "inputHint": "/model [<provider>] <name>"
+    },
+    {
+      "name": "models",
+      "description": "list known models: context window, compaction point, provider and what that seat costs (plan/credits/api/local); health shows live state",
+      "inputHint": "/models [health]"
+    },
+    {
+      "name": "clear",
+      "description": "wipe the conversation and start fresh"
+    },
+    {
+      "name": "new",
+      "description": "start a fresh autosaved session"
+    },
+    {
+      "name": "rename",
+      "description": "set the current session title",
+      "inputHint": "/rename <title>"
+    },
+    {
+      "name": "goal",
+      "description": "set a standing objective and work it autonomously; an optional 30s/30m/2h budget paces the run; pause/resume steering, status shows state, clear removes it",
+      "inputHint": "/goal [30m] [text|pause|resume|status|clear]"
+    },
+    {
+      "name": "goals",
+      "description": "show the current goal without changing it (alias for /goal status)"
+    },
+    {
+      "name": "schedule",
+      "description": "fire a prompt later after a 30s/5m/2h delay (not a standing goal)",
+      "inputHint": "/schedule <30s|5m|2h> <prompt>"
+    },
+    {
+      "name": "adapter",
+      "description": "channel-worker outbox / inbox (JSONL protocol; Discord/Slack fronts later)",
+      "inputHint": "/adapter send <text>|inbox"
+    },
+    {
+      "name": "review",
+      "description": "run one isolated read-only review pass; no edits, delegation, or workflows",
+      "inputHint": "/review <target or instructions>"
+    },
+    {
+      "name": "never",
+      "description": "standing constraints that ride every brief; bare opens a searchable picker (TTY) or lists them, rm <id-or-text> retires one (alias /constraint)",
+      "inputHint": "/never [<text>|rm <id-or-text>]"
+    },
+    {
+      "name": "tell",
+      "description": "message a running graff: <session> is a DM (only it hears, any folder); all broadcasts to every graff on this device; /sessions lists who's around",
+      "inputHint": "/tell <session|all> <text>"
+    },
+    {
+      "name": "daddy",
+      "description": "direct one live graff as the supervisor — control, not ambient room mail; /sessions lists who's around",
+      "inputHint": "/daddy <session> <text>"
+    },
+    {
+      "name": "peek",
+      "description": "see what a live co-resident session is doing right now (its transcript tail)",
+      "inputHint": "/peek <session>"
+    },
+    {
+      "name": "routes",
+      "description": "your own priced model lanes across providers — view the set and which seat wins each lane now",
+      "inputHint": "/routes [<set>|add <set> <frontier|mid|small> <provider/model>]"
+    },
+    {
+      "name": "plan",
+      "description": "toggle plan mode: read-only explore + propose; writes/edits denied"
+    },
+    {
+      "name": "ultracode",
+      "description": "toggle persistent workflow mode; bare opens an on/off picker, or /ultracode on|off"
+    },
+    {
+      "name": "fallback",
+      "description": "opt-in cross-provider fallback for this workspace (same-provider rollout stays on)",
+      "inputHint": "/fallback [allow|remove|off]"
+    },
+    {
+      "name": "key",
+      "description": "show API-key status; /key <provider> <secret> adds one live (+ Keychain)",
+      "inputHint": "/key [provider secret]"
+    },
+    {
+      "name": "login",
+      "description": "OAuth sign-in (no key to paste); bare opens a picker (chatgpt aliases: codex, openai, oai; zai aliases: glm, z.ai; kimi sites: kimi.ai, kimi.com)",
+      "inputHint": "/login [codegraff|chatgpt|kimi|xai|zai]"
+    },
+    {
+      "name": "keepcontext",
+      "description": "toggle keeping the conversation when /model switches wire format (default on)"
+    },
+    {
+      "name": "effort",
+      "description": "reasoning depth: low|medium|high|... (codex, deepseek, codegraff; persists)"
+    },
+    {
+      "name": "reasoning",
+      "description": "alias for /effort"
+    },
+    {
+      "name": "compact-at",
+      "description": "where automatic compaction starts, as % of the context window (default 80; persists)",
+      "inputHint": "/compact-at [10-95|default]"
+    },
+    {
+      "name": "fast",
+      "description": "codex only: priority service tier for lower latency (toggle, persists)"
+    },
+    {
+      "name": "thinking",
+      "description": "stream reasoning live vs spinner only (toggle, persists)"
+    },
+    {
+      "name": "title",
+      "description": "name the tab from your first prompt (AI session title; toggle, persists)"
+    },
+    {
+      "name": "strict",
+      "description": "toggle \"every message is a tool\" mode"
+    },
+    {
+      "name": "yolo",
+      "description": "toggle bash auto-approval (skip permission prompts)"
+    },
+    {
+      "name": "trace",
+      "description": "toggle this run's JSONL event trace (and show its path)"
+    },
+    {
+      "name": "privacy",
+      "description": "control prompt-learning data egress for this session",
+      "inputHint": "/privacy [local|aggregate|templates|examples]"
+    },
+    {
+      "name": "trajectory",
+      "description": "show this session's agent tree — turns + spawned subagents"
+    },
+    {
+      "name": "issue",
+      "description": "file one sanitized public tracker issue from this session",
+      "inputHint": "/issue <what went wrong>"
+    },
+    {
+      "name": "agents",
+      "description": "list agent types — builtin personas + .harness/agents"
+    },
+    {
+      "name": "workers",
+      "description": "inspect this session's subagents: click/Enter for live activity and reports, Esc to return",
+      "inputHint": "/workers [child-id]"
+    },
+    {
+      "name": "skills",
+      "description": "list SKILL.md playbooks + companion tools; add/remove enables or disables one",
+      "inputHint": "/skills [add|remove <name>]"
+    },
+    {
+      "name": "plugins",
+      "description": "list Claude/Cursor/Grok/Codex plugin trees graff is reading in place; load names one",
+      "inputHint": "/plugins [list|load <name>]"
+    },
+    {
+      "name": "hooks",
+      "description": "list lifecycle hooks and the built-in codedb guard"
+    },
+    {
+      "name": "doctor",
+      "description": "read-only health check: goal/todo, live jobs, model-call budget"
+    },
+    {
+      "name": "btw",
+      "description": "ask one side question about this conversation — billed, never added, rides the parent cache prefix",
+      "inputHint": "/btw <question>"
+    },
+    {
+      "name": "compact",
+      "description": "compact history into a fresh context (OpenAI server-side when available)"
+    },
+    {
+      "name": "rewind",
+      "description": "list past prompts; /rewind <n> drops prompt n+after & reverts its file edits; /rewind <snapshot id> restores a sandbox filesystem instead, never the conversation",
+      "inputHint": "/rewind [n|<snapshot>]"
+    },
+    {
+      "name": "edit",
+      "description": "replace prompt n, drop n+after, keep the prefix so the next turn can still hit cache",
+      "inputHint": "/edit <n> <text>"
+    },
+    {
+      "name": "snapshot",
+      "description": "capture the attached sandbox's filesystem under .graff/sessions/<session>/snapshots; attach puts this session in a Docker sandbox, list shows what it has captured, gc keeps the newest n (default 1)",
+      "inputHint": "/snapshot [attach [image]|detach|list|gc [n]]"
+    },
+    {
+      "name": "teleport",
+      "description": "restore a docker_image_tar snapshot onto a different CLI backend (Apple Container by default); filesystem only, never the conversation",
+      "inputHint": "/teleport <id> [docker|container]"
+    },
+    {
+      "name": "image",
+      "description": "attach an image to your next message (vision models only)",
+      "inputHint": "/image <path>"
+    },
+    {
+      "name": "images",
+      "description": "open image URLs from the last response (e.g. issue attachments) in your browser"
+    },
+    {
+      "name": "paste",
+      "description": "attach the clipboard image — macOS; also Ctrl-V (⌘V can't be captured)"
+    },
+    {
+      "name": "bash",
+      "description": "run a shell command directly",
+      "inputHint": "/bash <command>"
+    },
+    {
+      "name": "save",
+      "description": "write the conversation to <name>.session.json (default: current)",
+      "inputHint": "/save [name]"
+    },
+    {
+      "name": "resume",
+      "description": "restore a saved conversation, optionally cloning it into an independent branch",
+      "inputHint": "/resume [source] [--branch destination]"
+    },
+    {
+      "name": "fork",
+      "description": "branch this conversation into a new session and continue there; the original stays saved for /resume",
+      "inputHint": "/fork [name]"
+    },
+    {
+      "name": "sessions",
+      "description": "list saved sessions here and under ~/.graff/sessions"
+    },
+    {
+      "name": "workspace",
+      "description": "list git worktrees, switch, create a task workspace, or gc unused trees (free space)",
+      "inputHint": "/workspace [list|use <name>|create <name>|gc]"
+    },
+    {
+      "name": "experiment",
+      "description": "pre-mint N child worktrees (1-16) and seat the next spawns in them; off clears the pool",
+      "inputHint": "/experiment [N|off|status]"
+    },
+    {
+      "name": "todo",
+      "description": "show the current task list"
+    },
+    {
+      "name": "jobs",
+      "description": "list background jobs (age, port, idle stop); keep pins a server, restart reruns one",
+      "inputHint": "/jobs [keep|unkeep|stop|restart <id>]"
+    },
+    {
+      "name": "cost",
+      "description": "session token usage and cost"
+    },
+    {
+      "name": "usage",
+      "description": "session cost plus remaining Codex/xAI plan percent"
+    },
+    {
+      "name": "version",
+      "description": "show the version in this process and compare it with the latest release"
+    },
+    {
+      "name": "update",
+      "description": "check for a release and install it for the next launch (this session keeps running)",
+      "inputHint": "/update [install]"
+    },
+    {
+      "name": "debug",
+      "description": "live content-free observability HUD (turns, tokens, tools, last events)"
+    },
+    {
+      "name": "cache",
+      "description": "prompt-cache posture: prefix hash, hit rate, last bust, remaining max levers"
+    },
+    {
+      "name": "tools",
+      "description": "session tool balance: codedb-pro vs zigrep vs native usage, gate refusals, skew"
+    },
+    {
+      "name": "animation",
+      "description": "pick the thinking animation; persists to settings"
+    },
+    {
+      "name": "theme",
+      "description": "pick a color theme; /theme off resets to your terminal default; persists",
+      "inputHint": "/theme [name]"
+    },
+    {
+      "name": "fleet",
+      "description": "federated DGM contribution (propose/submit/elite_pull)",
+      "inputHint": "/fleet [on|off]"
+    },
+    {
+      "name": "mcp",
+      "description": "list MCP servers/tools; /mcp add <name> <cmd> [args...] connects one live; /mcp reconnect <name> starts one again",
+      "inputHint": "/mcp [add … | reconnect <name>]"
+    },
+    {
+      "name": "import-claude",
+      "description": "copy Claude/Cursor setup and import this project's Claude conversations for /resume"
+    },
+    {
+      "name": "help",
+      "description": "list every command"
+    }
+  ]
+}

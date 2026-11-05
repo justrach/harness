@@ -403,7 +403,7 @@ struct UserBubble: View {
     }
 
     private func prompt(_ text: String) -> some View {
-        Text(text)
+        Text(ComposerCommandText.visibleText(text))
             .font(Theme.sans(MD.textSize))
             .lineSpacing(MD.lineHeight - MD.textSize - 4)
             .foregroundStyle(Theme.text)
