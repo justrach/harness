@@ -162,7 +162,7 @@ struct TranscriptView: View {
 
     @ViewBuilder
     private func rowView(_ row: TranscriptRow, earlier: Bool) -> some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
             switch row.kind {
             case .user(let text):
                 UserBubble(text: text, pending: row.timestamp == nil,
@@ -201,6 +201,13 @@ struct TranscriptView: View {
                         reauthControls(reauth, row: row, earlier: earlier)
                     }
                 }
+            }
+            if let timestamp = row.timestamp {
+                MessageFooterView(timestamp: timestamp, copyText: row.copyText,
+                                  entryID: row.entryId, trailing: {
+                    if case .user = row.kind { return true }
+                    return false
+                }())
             }
         }
         .padding(.top, row.topGap)
