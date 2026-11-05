@@ -614,6 +614,10 @@ impl Shell {
     }
 
     pub(super) fn cycle_chat_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_cycle_panel(forward, window, cx);
+            return;
+        }
         if let Some(ix) = self.chat_split.as_ref().map(|split| split.cycled(forward)) {
             self.focus_chat_pane(ix, window, cx);
         }

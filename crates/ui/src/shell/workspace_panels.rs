@@ -391,6 +391,13 @@ impl WorkspaceLayout {
         };
         self.panels.get(next).map(|p| p.id)
     }
+    /// The panel after or before `id`, wrapping past either end.
+    fn cycled(&self, id: u64, forward: bool) -> Option<u64> {
+        let len = self.panels.len();
+        let i = self.panels.iter().position(|p| p.id == id)?;
+        let next = if forward { i + 1 } else { i + len - 1 } % len;
+        Some(self.panels[next].id).filter(|next| *next != id)
+    }
     fn direction(&self, direction: chat_split::PaneDirection) -> Option<bool> {
         use chat_split::PaneDirection::*;
         match (self.axis, direction) {
@@ -1823,6 +1830,33 @@ impl Shell {
             cx.notify();
         }
         true
+    }
+
+    /// ⌘] and ⌘[: the next or previous panel, wrapping. A zoomed window shows
+    /// the panel it moved to, so the keyboard never lands on a hidden one.
+    pub(super) fn workspace_cycle_panel(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.panel_layout(cx) else {
+            return;
+        };
+        let Some(id) = layout.cycled(layout.focused, forward) else {
+            return;
+        };
+        let tab = layout.panel(id).and_then(|p| p.selected()).cloned();
+        let layout = self.panel_layout_mut(cx);
+        if layout.expanded.is_some() {
+            layout.expanded = Some(id);
+        }
+        if let Some(tab) = tab {
+            self.focus_workspace_tab(id, tab, window, cx);
+        } else {
+            self.panel_layout_mut(cx).focused = id;
+            cx.notify();
+        }
     }
 
     pub(super) fn workspace_zoom(&mut self, cx: &mut Context<Self>) {

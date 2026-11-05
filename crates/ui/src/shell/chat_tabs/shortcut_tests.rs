@@ -102,6 +102,73 @@ fn new_tab_shortcut_stays_in_the_focused_panel_and_session(cx: &mut gpui::TestAp
     }
 }
 
+#[gpui::test]
+fn pane_cycle_shortcuts_move_between_panels_and_wrap(cx: &mut gpui::TestAppContext) {
+    let (next, previous) = if cfg!(target_os = "macos") {
+        ("mod-]", "mod-[")
+    } else {
+        ("ctrl-super-]", "ctrl-super-[")
+    };
+    let (_dir, window) = navigation_tests::fixture(cx, false, None);
+    let panels = window
+        .update(cx, |shell, window, cx| {
+            shell.boot_restored = true;
+            shell.ensure_workspace_sessions(cx);
+            shell.sync_panel_workspace(cx);
+            for chat in ["peer", "target"] {
+                shell.workspace_split(SplitAxis::Horizontal, cx);
+                let layout = shell.panel_layout_mut(cx);
+                let focused = layout.focused;
+                let panel = layout.panels.iter_mut().find(|panel| panel.id == focused);
+                let panel = panel.unwrap();
+                panel.tabs = vec![workspace_panels::PanelTab::Chat(chat.into())];
+                panel.active = 0;
+            }
+            let layout = shell.panel_layout(cx).unwrap();
+            let ids: Vec<_> = layout.panels.iter().map(|panel| panel.id).collect();
+            let first = workspace_panels::PanelTab::Chat("current".into());
+            shell.focus_workspace_tab(ids[0], first, window, cx);
+            ids
+        })
+        .unwrap();
+    assert_eq!(panels.len(), 3);
+    let focus = |cx: &mut gpui::TestAppContext| {
+        window
+            .update(cx, |shell, _, cx| {
+                (
+                    shell.panel_layout(cx).unwrap().focused,
+                    shell.state.read(cx).selected_chat.clone(),
+                )
+            })
+            .unwrap()
+    };
+    let at = |panel: usize, chat: &str| (panels[panel], Some(chat.to_string()));
+
+    test_support::press(cx, window, next);
+    assert_eq!(focus(cx), at(1, "peer"));
+    test_support::press(cx, window, next);
+    assert_eq!(focus(cx), at(2, "target"));
+    test_support::press(cx, window, next);
+    assert_eq!(focus(cx), at(0, "current"), "wraps past the last panel");
+    test_support::press(cx, window, previous);
+    assert_eq!(focus(cx), at(2, "target"), "wraps before the first panel");
+    test_support::press(cx, window, previous);
+    assert_eq!(focus(cx), at(1, "peer"));
+
+    // A zoomed panel fills the window, so moving on has to bring the next one
+    // with it. Otherwise the keyboard lands somewhere you can't see.
+    window
+        .update(cx, |shell, _, cx| shell.workspace_zoom(cx))
+        .unwrap();
+    test_support::press(cx, window, next);
+    assert_eq!(focus(cx), at(2, "target"));
+    window
+        .update(cx, |shell, _, cx| {
+            assert_eq!(shell.panel_layout(cx).unwrap().expanded, Some(panels[2]));
+        })
+        .unwrap();
+}
+
 /// Two sessions in project A and one in project B, each showing one chat.
 fn seed_sessions(shell: &mut Shell, cx: &mut Context<Shell>) {
     shell.boot_restored = true;
