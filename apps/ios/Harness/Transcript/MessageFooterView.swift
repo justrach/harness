@@ -31,7 +31,7 @@ struct MessageFooterView: View {
                 } label: {
                     Image(systemName: copied ? "checkmark" : "square.on.square")
                         .font(.system(size: 14))
-                        .frame(width: 44, height: 44)
+                        .frame(width: 44, height: 44, alignment: .leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
