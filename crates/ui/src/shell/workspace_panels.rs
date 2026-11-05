@@ -1492,7 +1492,9 @@ impl Shell {
                         return false;
                     }
                     let focused = self.panel_layout_mut(cx).focused;
-                    self.add_diff_surface(cx);
+                    if self.show_changes_review(cx).is_none() {
+                        self.add_diff_surface(cx);
+                    }
                     self.sync_panel_workspace(cx);
                     self.panel_layout_mut(cx).focused = focused;
                     cx.notify();

@@ -1017,20 +1017,7 @@ fn main() -> anyhow::Result<()> {
                                 if turn_changes_review {
                                     for (width, height) in [(1440., 900.), (980., 700.)] {
                                         window.update(cx, |_, window, _| window.resize(size(px(width), px(height))))?;
-                                        for (phase, name) in [(0,"review-card"), (1,"review-tab"), (4,"review-comment-draft"), (6,"review-comment-done-guard"), (7,"review-comment-close-guard"), (5,"review-comment-staged"), (2,"review-discard"), (3,"review-done")] {
-                                            if phase == 1 {
-                                                let position = window.update(cx, |shell, _, cx| shell.fixture_turn_review_card_center(cx))?;
-                                                let native: gpui::AnyWindowHandle = window.into();
-                                                native.update(cx, |_, window, cx| {
-                                                    window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                                                        position, button: gpui::MouseButton::Left, click_count: 1, ..Default::default()
-                                                    }), cx);
-                                                    window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                                                        position, button: gpui::MouseButton::Left, click_count: 1, ..Default::default()
-                                                    }), cx);
-                                                })?;
-                                                pause(cx, 150).await;
-                                            }
+                                        for (phase, name) in [(0,"review-chat"), (1,"review-tab"), (4,"review-comment-draft"), (6,"review-comment-done-guard"), (7,"review-comment-close-guard"), (5,"review-comment-staged"), (2,"review-discard"), (3,"review-done")] {
                                             window.update(cx, |shell, window, cx| shell.fixture_turn_changes_review(phase, window, cx))?;
                                             pause(cx, 600).await;
                                             capture(window.into(), cx, &output, &format!("{name}-{tone}-{width}"))?;

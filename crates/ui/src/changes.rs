@@ -2032,6 +2032,11 @@ impl Changes {
             .or_else(|| self.state.read(cx).selected_chat.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn in_review(&self) -> bool {
+        self.review_chat_id.is_some()
+    }
+
     pub(crate) fn review_working_tree(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.review_chat_id = Some(chat_id);
         self.set_scope(DiffScope::WorkingTree, cx);

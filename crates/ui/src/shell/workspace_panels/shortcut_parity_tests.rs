@@ -155,6 +155,10 @@ fn cmd_r_shows_and_hides_changes_beside_the_chat(cx: &mut gpui::TestAppContext) 
             };
             press(shell, window, cx);
             assert_eq!(changes(shell, cx), 1, "the first press shows changes");
+            assert!(
+                shell.diffs.values().all(|diff| diff.read(cx).in_review()),
+                "with Discard all and Done reviewing, which have no other way in"
+            );
             let layout = shell.panel_layout(cx).unwrap();
             assert_eq!(layout.panels.len(), 2, "beside the chat, not over it");
             let chat = PanelTab::Chat("current".into());
@@ -177,6 +181,43 @@ fn cmd_r_shows_and_hides_changes_beside_the_chat(cx: &mut gpui::TestAppContext) 
             assert_eq!(shell.diffs.len(), diffs);
         })
         .unwrap();
+}
+
+#[gpui::test]
+fn a_finished_turn_with_edits_shows_no_changes_card(cx: &mut gpui::TestAppContext) {
+    let (_dir, window) = panel_shell(cx);
+    window
+        .update(cx, |shell, _, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.state.update(cx, |state, _| {
+                state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.id == "current")
+                    .unwrap()
+                    .cwd = Some("/fixtures/a".into());
+                state.transcript = serde_json::from_value(serde_json::json!([
+                    {"id":"prompt", "role":"user", "parts":[], "createdAt":0, "deviceId":"local"},
+                    {"id":"reply", "role":"assistant", "createdAt":1, "deviceId":"local", "parts":[{
+                        "kind":"tool", "id":"edit", "resolved":true, "isError":false,
+                        "call": harness_proto::ToolCall::EditFile {
+                            path: "src/a.rs".into(),
+                            old_string: None,
+                            new_string: None,
+                        },
+                    }]},
+                ]))
+                .unwrap();
+            });
+        })
+        .unwrap();
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    assert!(visual.debug_bounds("composer-footer").is_some());
+    assert!(visual.debug_bounds("turn-changes-review").is_none());
 }
 
 #[gpui::test]

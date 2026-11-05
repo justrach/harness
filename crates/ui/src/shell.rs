@@ -11485,7 +11485,6 @@ impl Shell {
                                     ))
                                     .children(if has_selection {
                                         self.render_jump_to_bottom(cx)
-                                            .or_else(|| self.render_turn_changes_card(cx))
                                     } else {
                                         None
                                     }),

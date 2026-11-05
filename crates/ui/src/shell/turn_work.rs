@@ -1,211 +1,11 @@
-//! A manual entry into a completed turn's file review. Tool records are a cue,
-//! not a complete working-tree inventory or an attribution of every edit.
+//! Opening and closing a review of a chat's uncommitted changes.
 use super::workspace_panels::PanelTab;
 use super::*;
-use harness_doc::{MessagePart, MessageRole, SessionMessageEntry};
-use harness_proto::ToolCall;
-
-/// What the latest turn reports editing. A cue, as above: it says nothing of
-/// edits made outside the agent's tools.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct RecordedEdits {
-    /// Edited paths in first-touch order, each once.
-    paths: Vec<String>,
-    additions: u64,
-    deletions: u64,
-}
-
-impl RecordedEdits {
-    /// "1 file changed" / "3 files changed".
-    fn title(&self) -> String {
-        match self.paths.len() {
-            1 => "1 file changed".to_string(),
-            count => format!("{count} files changed"),
-        }
-    }
-
-    /// Up to three file names (not full paths), then "+N more".
-    fn names(&self) -> String {
-        let mut names: Vec<&str> = self
-            .paths
-            .iter()
-            .take(3)
-            .map(|path| path.rsplit('/').next().unwrap_or(path))
-            .collect();
-        let more = self.paths.len().saturating_sub(3);
-        let more_label = format!("+{more} more");
-        if more > 0 {
-            names.push(&more_label);
-        }
-        names.join(", ")
-    }
-}
-
-fn recorded_edits(entries: &[SessionMessageEntry]) -> RecordedEdits {
-    let mut edits = RecordedEdits::default();
-    let Some(start) = entries
-        .iter()
-        .rposition(|entry| entry.role == MessageRole::User)
-    else {
-        return edits;
-    };
-    for part in entries[start + 1..].iter().flat_map(|entry| &entry.parts) {
-        let MessagePart::Tool {
-            call,
-            resolved: true,
-            is_error: false,
-            diff,
-            diff_stats,
-            ..
-        } = part
-        else {
-            continue;
-        };
-        let path = match call {
-            ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => {
-                Some(path.clone())
-            }
-            ToolCall::ApplyPatch { path } => path.clone(),
-            _ => continue,
-        };
-        let mut stats = diff_stats.clone().unwrap_or_default();
-        if stats.is_empty()
-            && let Some(diff) = diff
-        {
-            stats.push(harness_doc::diff_stat(diff));
-        }
-        let mut recorded: Vec<String> = stats.iter().map(|stat| stat.path.clone()).collect();
-        if recorded.is_empty() {
-            recorded.extend(path);
-        }
-        for stat in &stats {
-            edits.additions = edits.additions.saturating_add(stat.additions);
-            edits.deletions = edits.deletions.saturating_add(stat.deletions);
-        }
-        for path in recorded {
-            if !path.is_empty() && !edits.paths.contains(&path) {
-                edits.paths.push(path);
-            }
-        }
-    }
-    edits
-}
-
-fn recorded_edit_paths(entries: &[SessionMessageEntry]) -> Vec<String> {
-    recorded_edits(entries).paths
-}
 
 impl Shell {
-    pub(super) fn render_turn_changes_card(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let state = self.state.read(cx);
-        let chat = state.selected_chat_row()?;
-        chat.cwd.as_ref()?;
-        if matches!(
-            state.indicator_for(&chat.id, Utc::now()),
-            Indicator::Working | Indicator::AwaitingInput
-        ) || self.composer.read(cx).is_sending()
-        {
-            return None;
-        }
-        let edits = recorded_edits(&state.transcript);
-        if edits.paths.is_empty() {
-            return None;
-        }
-        let theme = Theme::of(cx);
-        Some(
-            div()
-                .id("turn-changes-review")
-                .role(gpui::Role::Button)
-                .aria_label("Review all uncommitted changes, including your edits")
-                .debug_selector(|| "turn-changes-review".to_owned())
-                .absolute()
-                .top(px(-54.0))
-                // Match the inner composer surface, not its padded wrapper.
-                .left(px(Theme::SPACE_LG))
-                .right(px(Theme::SPACE_LG))
-                .h(px(46.0))
-                .px(px(12.0))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface_raised)
-                .hover(|s| s.bg(theme.surface_raised_hover))
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .cursor_pointer()
-                .child(
-                    icon(icons::DOCUMENT)
-                        .size(px(18.0))
-                        .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .debug_selector(|| "turn-changes-title".to_owned())
-                                .text_size(px(13.0))
-                                .text_color(theme.text)
-                                .child(edits.title()),
-                        )
-                        .child(
-                            div()
-                                .debug_selector(|| "turn-changes-names".to_owned())
-                                .truncate()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_muted)
-                                .child(edits.names()),
-                        ),
-                )
-                .when(edits.additions > 0 || edits.deletions > 0, |card| {
-                    card.child(
-                        div()
-                            .debug_selector(|| "turn-changes-counts".to_owned())
-                            .flex_none()
-                            .flex()
-                            .gap(px(6.0))
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(12.0))
-                            .child(
-                                div()
-                                    .text_color(theme.success)
-                                    .child(format!("+{}", edits.additions)),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.danger)
-                                    .child(format!("-{}", edits.deletions)),
-                            ),
-                    )
-                })
-                .child(
-                    icon(icons::ALT_ARROW_RIGHT)
-                        .size(px(16.0))
-                        .text_color(theme.text_muted),
-                )
-                .tab_index(0)
-                .focus_visible(|style| style.border_color(theme.accent))
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        cx.stop_propagation();
-                        this.show_turn_changes(cx);
-                    }
-                }))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_turn_changes(cx);
-                }))
-                .into_any_element(),
-        )
-    }
-
     /// Always select the whole working tree, including when reusing a tab that
     /// was showing Branch or Latest turn. Pinned history/commit tabs stay put.
-    pub(super) fn show_turn_changes(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+    pub(super) fn show_changes_review(&mut self, cx: &mut Context<Self>) -> Option<u64> {
         let chat_id = self.state.read(cx).selected_chat.clone()?;
         let key = self.panel_key(cx);
         let existing = self
@@ -334,17 +134,6 @@ impl Shell {
         }
     }
 
-    #[cfg(feature = "appshots-fixture")]
-    pub fn fixture_turn_review_card_center(&self, cx: &App) -> Point<Pixels> {
-        let bounds = self
-            .composer
-            .read(cx)
-            .surface_bounds()
-            .get()
-            .expect("review composer has been painted");
-        gpui::point(bounds.center().x, bounds.top() - px(31.0))
-    }
-
     /// Native fixture phases include a real comment editor and locally staged
     /// note. No destructive RPC or model request is sent by this fixture.
     #[cfg(feature = "appshots-fixture")]
@@ -381,8 +170,8 @@ impl Shell {
                 let entries = serde_json::from_value(serde_json::json!([
                     {"id":"review-prompt","role":"user","parts":[{"id":"p","kind":"text","text":"Make the welcome message warmer and adjust the spacing."}],"createdAt":1792620000000_i64,"deviceId":"fixture","status":"complete"},
                     {"id":"review-reply","role":"assistant","parts":[
-                        {"kind":"tool","id":"edit-greeting","call":ToolCall::EditFile { path:"src/greeting.rs".into(), old_string:None, new_string:None },"resolved":true,"isError":false},
-                        {"kind":"tool","id":"edit-theme","call":ToolCall::EditFile { path:"src/theme.rs".into(), old_string:None, new_string:None },"resolved":true,"isError":false},
+                        {"kind":"tool","id":"edit-greeting","call":harness_proto::ToolCall::EditFile { path:"src/greeting.rs".into(), old_string:None, new_string:None },"resolved":true,"isError":false},
+                        {"kind":"tool","id":"edit-theme","call":harness_proto::ToolCall::EditFile { path:"src/theme.rs".into(), old_string:None, new_string:None },"resolved":true,"isError":false},
                         {"id":"r","kind":"text","text":"The welcome message is warmer, and the spacing is more comfortable. You can review the files before continuing."}
                     ],"createdAt":1792620000001_i64,"deviceId":"fixture","status":"complete"}
                 ])).expect("synthetic review transcript");
@@ -393,12 +182,9 @@ impl Shell {
                 composer.focus_pending = false;
             });
         } else if phase == 1 {
-            // The native harness clicks the painted card before entering this phase.
-            let id = self.diff_seq;
-            assert!(
-                self.diffs.contains_key(&id),
-                "clicking Review changes must open the real Diff tab"
-            );
+            let id = self
+                .show_changes_review(cx)
+                .expect("the fixture has a selected chat");
             {
                 let chat = self.state.read(cx).chat_row("launch-0").unwrap().clone();
                 let patch = "diff --git a/src/greeting.rs b/src/greeting.rs\n--- a/src/greeting.rs\n+++ b/src/greeting.rs\n@@ -1,3 +1,3 @@\n pub fn welcome() -> &'static str {\n-    \"Welcome\"\n+    \"Welcome back. Let's make something good.\"\n }\ndiff --git a/src/theme.rs b/src/theme.rs\n--- a/src/theme.rs\n+++ b/src/theme.rs\n@@ -1,3 +1,3 @@\n-pub const CONTENT_GAP: f32 = 8.0;\n+pub const CONTENT_GAP: f32 = 12.0;\n pub const CARD_RADIUS: f32 = 10.0;\n pub const BODY_SIZE: f32 = 14.0;\n";
@@ -502,46 +288,6 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn entry(role: &str, parts: Vec<MessagePart>) -> SessionMessageEntry {
-        let mut entry: SessionMessageEntry = serde_json::from_value(
-            serde_json::json!({"id":"e","role":role,"parts":[],"createdAt":0,"deviceId":"d"}),
-        )
-        .unwrap();
-        entry.parts = parts;
-        entry
-    }
-    fn tool(path: &str, resolved: bool, error: bool) -> MessagePart {
-        serde_json::from_value(serde_json::json!({"kind":"tool","id":path,"call":ToolCall::EditFile { path: path.into(), old_string:None, new_string:None },"resolved":resolved,"isError":error})).unwrap()
-    }
-    #[test]
-    fn turn_review_counts_only_successful_recorded_edits_in_latest_turn() {
-        let entries = vec![
-            entry("user", vec![]),
-            entry("assistant", vec![tool("old.rs", true, false)]),
-            entry("user", vec![]),
-            entry(
-                "assistant",
-                vec![
-                    tool("a.rs", true, false),
-                    tool("a.rs", true, false),
-                    tool("failed.rs", true, true),
-                    tool("pending.rs", false, false),
-                ],
-            ),
-        ];
-        assert_eq!(recorded_edit_paths(&entries), vec!["a.rs"]);
-    }
-    #[test]
-    fn turn_review_does_not_infer_files_from_commands_or_missing_prompt() {
-        assert!(
-            recorded_edit_paths(&[entry("assistant", vec![tool("a.rs", true, false)])]).is_empty()
-        );
-        let exec = serde_json::from_value(serde_json::json!({"kind":"tool","id":"x","call":ToolCall::Exec { command:"touch unseen.rs".into() },"resolved":true,"isError":false})).unwrap();
-        assert!(
-            recorded_edit_paths(&[entry("user", vec![]), entry("assistant", vec![exec])])
-                .is_empty()
-        );
-    }
     #[gpui::test]
     fn turn_review_reuses_tab_and_done_only_closes_review(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -589,8 +335,8 @@ mod tests {
             .update(cx, |shell, window, cx| {
                 shell.ensure_workspace_sessions(cx);
                 shell.sync_panel_workspace(cx);
-                let first = shell.show_turn_changes(cx).unwrap();
-                let reused = shell.show_turn_changes(cx).unwrap();
+                let first = shell.show_changes_review(cx).unwrap();
+                let reused = shell.show_changes_review(cx).unwrap();
                 assert_eq!(first, reused);
                 assert_eq!(shell.diffs.len(), 1);
                 let review = shell.diffs.get(&first).unwrap().clone();
@@ -653,38 +399,5 @@ mod tests {
                 assert!(!state.chats[0].archived);
             })
             .unwrap();
-    }
-
-    #[test]
-    fn the_card_names_three_files_then_counts_the_rest() {
-        let edits = |paths: &[&str]| RecordedEdits {
-            paths: paths.iter().map(|path| (*path).to_string()).collect(),
-            ..Default::default()
-        };
-        assert_eq!(edits(&["src/a.rs"]).title(), "1 file changed");
-        assert_eq!(edits(&["src/a.rs"]).names(), "a.rs");
-        let many = edits(&["src/a.rs", "b.rs", "x/y/c.rs", "d.rs", "e.rs"]);
-        assert_eq!(many.title(), "5 files changed");
-        assert_eq!(many.names(), "a.rs, b.rs, c.rs, +2 more");
-    }
-
-    #[test]
-    fn the_card_adds_up_line_counts_without_overflowing() {
-        let counted = |additions: u64, deletions: u64| {
-            let mut part = tool("a.rs", true, false);
-            if let MessagePart::Tool { diff_stats, .. } = &mut part {
-                *diff_stats = Some(vec![harness_doc::ToolDiffStat {
-                    path: "a.rs".into(),
-                    additions,
-                    deletions,
-                }]);
-            }
-            part
-        };
-        let user = entry("user", vec![]);
-        let reply = entry("assistant", vec![counted(u64::MAX, 2), counted(5, 3)]);
-        let edits = recorded_edits(&[user, reply]);
-        assert_eq!(edits.paths, ["a.rs"]);
-        assert_eq!((edits.additions, edits.deletions), (u64::MAX, 5));
     }
 }
