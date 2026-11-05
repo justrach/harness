@@ -112,3 +112,22 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
         "typing re-rendered the sidebar {renders} times"
     );
 }
+
+/// An old engine is only worth noticing if the person can see it was noticed.
+#[gpui::test]
+fn an_older_engine_shows_in_the_sidebar(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    assert!(cx.debug_bounds("sidebar-notice").is_none());
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.engine_notice = Some("The engine is old".into());
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.sidebar_notice.as_deref(), Some("The engine is old"));
+        assert_eq!(shell.state.read(cx).engine_notice, None, "shown once");
+    });
+}

@@ -2988,6 +2988,9 @@ impl Shell {
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.sidebar_notice = Some(notice.into());
         }
+        if let Some(notice) = state.update(cx, |state, _| state.take_engine_notice()) {
+            self.sidebar_notice = Some(notice.into());
+        }
         self.drive_pending_folder_open(cx);
         self.publish_appearance(cx);
         let next_sync_flow = {
