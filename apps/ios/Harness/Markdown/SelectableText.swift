@@ -114,6 +114,19 @@ struct SelectableText: UIViewRepresentable {
             return size
         }
 
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
+                      suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard range.location < textView.textStorage.length else { return nil }
+            var codeRange = NSRange()
+            guard let code = textView.textStorage.attribute(.responseCodeBlock, at: range.location,
+                                                            effectiveRange: &codeRange) as? String,
+                  NSMaxRange(range) <= NSMaxRange(codeRange) else { return nil }
+            let copyCode = UIAction(title: "Copy code", image: UIImage(systemName: "doc.on.doc")) { _ in
+                UIPasteboard.general.string = code
+            }
+            return UIMenu(children: suggestedActions + [copyCode])
+        }
+
         func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem,
                       defaultAction: UIAction) -> UIAction? {
             guard case .link(let url) = textItem.content else { return defaultAction }
@@ -148,6 +161,37 @@ private final class InlineCodeLayoutManager: NSLayoutManager {
         fragment.size.height = max(fragment.height, extraLineHeight)
         used.size.height = max(used.height, extraLineHeight)
         super.setExtraLineFragmentRect(fragment, usedRect: used, textContainer: textContainer)
+    }
+
+    override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: CGPoint) {
+        if let storage = textStorage, let container = textContainers.first {
+            let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+            storage.enumerateAttribute(.responseCodeBlock, in: characters) { value, range, _ in
+                guard value != nil else { return }
+                let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+                var rect = boundingRect(forGlyphRange: glyphs, in: container).offsetBy(dx: origin.x, dy: origin.y)
+                rect.origin.x = origin.x
+                rect.size.width = container.size.width
+                UIColor(ink(0.035)).setFill()
+                UIBezierPath(roundedRect: rect, cornerRadius: Theme.panelRadius).fill()
+            }
+            storage.enumerateAttribute(.responseRule, in: characters) { value, range, _ in
+                guard value != nil else { return }
+                let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+                let rect = boundingRect(forGlyphRange: glyphs, in: container).offsetBy(dx: origin.x, dy: origin.y)
+                UIColor(Theme.border).setFill()
+                UIBezierPath(rect: CGRect(x: origin.x, y: rect.midY, width: container.size.width, height: 1)).fill()
+            }
+            storage.enumerateAttribute(.responseQuote, in: characters) { value, range, _ in
+                guard value != nil else { return }
+                let glyphs = glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+                let rect = boundingRect(forGlyphRange: glyphs, in: container).offsetBy(dx: origin.x, dy: origin.y)
+                UIColor(Theme.accent.opacity(0.6)).setFill()
+                UIBezierPath(rect: CGRect(x: rect.minX - 12, y: rect.minY, width: 2, height: rect.height)).fill()
+            }
+        }
+        // System selection and inline-code backgrounds stay above block paint.
+        super.drawBackground(forGlyphRange: glyphsToShow, at: origin)
     }
 
     override func fillBackgroundRectArray(_ rectArray: UnsafePointer<CGRect>, count rectCount: Int,

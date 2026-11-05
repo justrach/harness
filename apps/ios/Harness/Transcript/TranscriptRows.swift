@@ -1,11 +1,11 @@
 // Transcript row model — a port of crates/ui/src/shell/transcript.rs
-// rows_for_entry. One row = one markdown top-level block / tool group / chip,
-// never one message: streamed tokens re-render one row, and SwiftUI's lazy
-// stack only re-measures what changed.
+// rows_for_entry. Parsing/caching stays block-granular; consecutive Markdown
+// blocks of one response share a presentation row and native text storage.
+// Tool groups, images and chips remain independent virtualized rows.
 //
-// Stable ids: markdown rows are "{entryId}#{partId}.{blockIx}", tool groups
-// "{entryId}#g{groupIx}", chips "{entryId}#{partId}". Live and completed parts
-// split identically, so the live→complete handoff never changes row identity.
+// Stable ids: a response keeps its first block's "{entryId}#{partId}.{blockIx}"
+// id; tool groups use "{entryId}#g{groupIx}" and chips "{entryId}#{partId}".
+// Appending blocks or settling a response never changes its row identity.
 
 import Foundation
 
@@ -121,7 +121,43 @@ enum TranscriptRowBuilder {
                                   previous: ix > 0 ? rows[ix - 1] : nil,
                                   isFirst: ix == 0)
         }
-        return rows
+        return responseRows(rows)
+    }
+
+    /// UIKit cannot extend a native selection into another UITextView. Join
+    /// response text after the block-cache pass, without merging different
+    /// entries or moving text across interactive tool/image/chip rows.
+    private static func responseRows(_ rows: [TranscriptRow]) -> [TranscriptRow] {
+        var result: [TranscriptRow] = []
+        var response: TranscriptRow?
+        var blocks: [MDBlock] = []
+        var streaming = false
+        func flush() {
+            guard var row = response else { return }
+            row.kind = .markdown(block: .response(blocks), streaming: streaming)
+            result.append(row)
+            response = nil
+            blocks.removeAll(keepingCapacity: true)
+            streaming = false
+        }
+        for row in rows {
+            guard case .markdown(let block, let live) = row.kind else {
+                flush()
+                result.append(row)
+                continue
+            }
+            if response?.entryId != row.entryId { flush() }
+            if response == nil {
+                response = row
+            } else {
+                response!.version = (response!.version &* 0x100000001b3) ^ row.version
+                response!.timestamp = row.timestamp
+            }
+            blocks.append(block)
+            streaming = streaming || live
+        }
+        flush()
+        return result
     }
 
     private static func gap(for row: TranscriptRow,

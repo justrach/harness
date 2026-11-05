@@ -314,7 +314,9 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         let top = table.superview!.convert(table.superview!.bounds, to: window).minY
         return table.visibleCells.first {
             let rect = table.convert($0.frame, to: window)
-            return rect.minY > top && rect.minY < top + 300
+            // Unified response rows may start above the viewport; their
+            // visible content must keep the same anchor while the tail grows.
+            return rect.maxY > top && rect.minY < top + 300
         }
     }
 
@@ -482,10 +484,10 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         let anchors = table.visibleCells.compactMap { cell -> (String, CGFloat, CGFloat)? in
             guard let id = cell.accessibilityIdentifier else { return nil }
             let y = presentedY(cell)
-            guard y > viewportTop, y < viewportTop + 300 else { return nil }
+            guard y + cell.bounds.height > viewportTop, y < viewportTop + 300 else { return nil }
             return (id, y, cell.bounds.height)
         }
-        XCTAssertFalse(anchors.isEmpty, "history must have a fully visible anchor")
+        XCTAssertFalse(anchors.isEmpty, "history must have a visible reading anchor")
         let beforeRows = harness.scroll.tailWindow(harness.store.transcriptCache.rows(
             revision: harness.store.revision, entries: harness.store.entries, pendingSends: harness.store.pendingSends))
         let beforeLayout = visibleLayout()
@@ -506,7 +508,8 @@ final class TranscriptScrollMatrixTests: XCTestCase {
         assertViewportRealized("long-code/final-tail-append")
         let afterRows = harness.scroll.tailWindow(harness.store.transcriptCache.rows(
             revision: harness.store.revision, entries: harness.store.entries, pendingSends: harness.store.pendingSends))
-        XCTAssertEqual(afterRows.count, beforeRows.count + 1, "the closing fence adds one trailing paragraph")
+        XCTAssertEqual(afterRows.count, beforeRows.count,
+                       "the closing fence appends a paragraph inside the same selectable response row")
         XCTAssertEqual(Array(afterRows.prefix(beforeRows.count).map(\.id)), beforeRows.map(\.id),
                        "appending below a reader must not evict/reindex existing history rows")
     }

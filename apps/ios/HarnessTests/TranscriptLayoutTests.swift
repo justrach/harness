@@ -455,10 +455,12 @@ final class TranscriptLayoutTests: XCTestCase {
         table.setContentOffset(CGPoint(x: 0, y: table.contentOffset.y - 1600), animated: false)
         await settle()
         let top = table.superview!.convert(table.superview!.bounds, to: window).minY
-        let cell = table.visibleCells.first {
+        // A selectable response can be taller than the viewport. Its
+        // partially visible row is still the reader's stable content anchor.
+        guard let cell = table.visibleCells.first(where: {
             let rect = table.convert($0.frame, to: window)
-            return rect.minY > top && rect.minY < top + 250
-        }!
+            return rect.maxY > top && rect.minY < top + 250
+        }) else { return XCTFail("History must have a visible reading anchor") }
         func presentedY() -> CGFloat {
             let layer = cell.layer.presentation() ?? cell.layer
             return layer.convert(layer.bounds, to: window.layer.presentation() ?? window.layer).minY
