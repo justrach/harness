@@ -133,6 +133,10 @@ name = "tool-preview-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "tool-motion-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "question-wrap-fixture"
 required-features = ["appshots-fixture"]
 
