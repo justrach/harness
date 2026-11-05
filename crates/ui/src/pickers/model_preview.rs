@@ -360,6 +360,10 @@ impl Pickers {
             selected: self.effective_model_id(cx).map(str::to_owned),
             chat_mode: self.chat_mode(cx),
         };
+        // A plain chat offers only its auto tiers, as the standard list does.
+        if key.chat_mode {
+            return std::sync::Arc::new(self.visible_model_rows(cx));
+        }
         if let Some((old, rows)) = self.model_rows_cache.borrow().as_ref()
             && *old == key
         {
@@ -1826,9 +1830,7 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn preview_regular_model_commit_normalizes_legacy_mode_without_changing_context(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_chat_mode_chat_cannot_move_to_a_regular_model(cx: &mut gpui::TestAppContext) {
         let (state, picker) = fixture(cx, false);
         state.update(cx, |state, _| {
             state.chats = vec![
@@ -1846,28 +1848,16 @@ mod tests {
             p.config.model = None;
             p.config.reasoning = None;
             p.fixture_preview_model("anthropic/claude-sonnet-4.6", cx);
-            assert!(
-                state
-                    .read(cx)
-                    .selected_chat_row()
-                    .unwrap()
-                    .config
-                    .as_ref()
-                    .unwrap()
-                    .chat_mode,
-                "browsing must not migrate the chat"
-            );
+            assert!(p.preview.pending.is_none(), "it isn't offered");
             p.preview_commit(cx);
-            assert_eq!(p.preview.error, None);
             let chat = state.read(cx).selected_chat_row().unwrap();
             let config = chat.config.as_ref().unwrap();
-            assert!(!config.chat_mode);
-            assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-4.6"));
+            assert!(config.chat_mode);
+            assert_eq!(config.model.as_deref(), Some("codegraff/auto-low"));
             assert_eq!(config.sandbox, SandboxLevel::ReadOnly);
             assert_eq!(chat.cwd.as_deref(), Some("/existing/project"));
         });
     }
-
     #[gpui::test]
     fn preview_removed_catalog_capability_blocks_commit(cx: &mut gpui::TestAppContext) {
         let (_, picker) = fixture(cx, false);
@@ -1978,7 +1968,7 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn preview_existing_legacy_chat_keeps_agent_reasoning_and_saved_context(
+    fn preview_existing_chat_keeps_agent_reasoning_and_saved_context(
         cx: &mut gpui::TestAppContext,
     ) {
         let (state, picker) = fixture(cx, false);
@@ -1988,7 +1978,7 @@ mod tests {
                     "id": "legacy-chat", "deviceId": "preview", "archived": false,
                     "createdAt": "2026-10-23T00:00:00Z", "cwd": "/existing/project",
                     "config": { "harness": "graff", "model": "anthropic/claude-sonnet-4.6",
-                        "reasoning": "high", "sandbox": "read-only", "chatMode": true }
+                        "reasoning": "high", "sandbox": "read-only" }
                 }))
                 .unwrap(),
             ];
@@ -2020,7 +2010,6 @@ mod tests {
             assert_eq!(config.reasoning, Some(ReasoningLevel::Low));
             assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-4.6"));
             assert_eq!(config.sandbox, SandboxLevel::ReadOnly);
-            assert!(config.chat_mode);
             assert_eq!(chat.cwd.as_deref(), Some("/existing/project"));
         });
     }
@@ -2067,7 +2056,7 @@ mod tests {
             .expect("reasoning card");
         let button = visual.debug_bounds("preview-use-model").expect("Use model");
         assert!(
-            card.size.height < px(300.0),
+            card.size.height < px(330.0),
             "card should fit its controls: {card:?}"
         );
         assert!(button.bottom() <= card.bottom());

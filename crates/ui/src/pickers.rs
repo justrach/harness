@@ -8040,6 +8040,49 @@ mod tests {
     /// with a reason instead of opening an empty picker, a draft that was
     /// already switched says why, and the option turns on once a tier is
     /// listed.
+    /// The picker the app really shows. If a regular model could be picked
+    /// here, a plain chat would hold a model its own menu and mobile's Auto-only
+    /// menu don't offer, and its send would stay blocked.
+    #[cfg(feature = "model-picker-preview")]
+    #[gpui::test]
+    fn the_default_picker_offers_only_the_auto_tiers_in_chat_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        let labels = |rows: &[ModelRowData]| {
+            rows.iter()
+                .filter(|row| row.header.is_none())
+                .map(|row| row.model.label.clone())
+                .collect::<Vec<_>>()
+        };
+        pickers.update(cx, |pickers, cx| {
+            pickers.preview.enabled = true;
+            pickers.defaults = ComposerDefaults::default();
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Graff, "Graff")]);
+            pickers.apply_model_catalog(
+                HarnessId::Graff,
+                Loadable::Ready(vec![
+                    bare_model("codegraff/claude-opus-5-5", "Claude Opus 5.5"),
+                    bare_model("codegraff/auto-high", "Auto (high)"),
+                    bare_model("codegraff/auto-smart", "Auto (smart)"),
+                    bare_model("codegraff/auto-low", "Auto (low)"),
+                ]),
+                cx,
+            );
+            assert!(labels(&pickers.model_rows(cx)).contains(&"Claude Opus 5.5".to_string()));
+            pickers.set_chat_mode(true, cx);
+            assert_eq!(
+                labels(&pickers.model_rows(cx)),
+                ["Auto (low)", "Auto (high)", "Auto (smart)"]
+            );
+            pickers.set_chat_mode(false, cx);
+            assert!(
+                labels(&pickers.model_rows(cx)).contains(&"Claude Opus 5.5".to_string()),
+                "back to a coding session, the whole list returns"
+            );
+        });
+    }
+
     #[gpui::test]
     fn chat_mode_is_off_with_a_reason_while_no_auto_tier_is_listed(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
