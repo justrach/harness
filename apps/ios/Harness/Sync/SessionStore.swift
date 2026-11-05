@@ -273,7 +273,7 @@ final class SessionStore {
             cursor: { [weak self] in self?.cursor ?? 0 },
             containsFrontier: { [weak self] frontier in
                 guard let self else { return false }
-                return Self.containsFrontier(frontier, in: self.doc)
+                return await Self.frontierContained(frontier, in: self.doc)
             },
             applyCheckpoint: { [weak self] bytes, seq in
                 guard let self, await self.importRemote(bytes) else {
@@ -420,11 +420,21 @@ final class SessionStore {
 
     var admittedBatchIDs: Set<String> { admitted }
 
-    static func containsFrontier(_ frontier: Data, in doc: LoroDoc) -> Bool {
+    nonisolated static func containsFrontier(_ frontier: Data, in doc: LoroDoc) -> Bool {
         guard !frontier.isEmpty,
               let vv = try? VersionVector.decode(bytes: frontier),
               !vv.toHashmap().isEmpty else { return false }
         return doc.oplogVv().includesVv(other: vv)
+    }
+
+    /// `containsFrontier`, off the main actor. Reading the oplog's version waits
+    /// for the doc's lock, which an import off the main actor holds for as long as
+    /// it rebuilds a long text. Waiting on the main actor let the watchdog kill
+    /// the app (0x8BADF00D, TestFlight build 63) just as importing there did (#484).
+    nonisolated static func frontierContained(_ frontier: Data, in doc: LoroDoc) async -> Bool {
+        await Task.detached(priority: .userInitiated) {
+            containsFrontier(frontier, in: doc)
+        }.value
     }
 
     /// Mine the retired s2 snapshot for OUR OWN still-pending commands and
