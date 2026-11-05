@@ -113,6 +113,10 @@ name = "final-answer-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "tool-group-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "build-wait-fixture"
 required-features = ["appshots-fixture"]
 
@@ -130,6 +134,10 @@ required-features = ["appshots-fixture"]
 
 [[example]]
 name = "tool-preview-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
+name = "tool-motion-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]

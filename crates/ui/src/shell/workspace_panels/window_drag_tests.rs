@@ -31,7 +31,11 @@ fn tabs(source: WindowHandle<Shell>, cx: &mut TestAppContext) -> Vec<PanelTab> {
 }
 
 fn pickup(source: WindowHandle<Shell>, visual: &mut VisualTestContext) -> Point<Pixels> {
-    let start = visual.debug_bounds("panel-tab-0-0").unwrap().center();
+    let start = visual
+        .debug_bounds("panel-tab-0-0")
+        .or_else(|| visual.debug_bounds("instrument-slot-0"))
+        .unwrap()
+        .center();
     visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
     visual.simulate_mouse_move(
         start + point(px(12.0), px(4.0)),

@@ -93,10 +93,16 @@ impl Shell {
         self.browser_subs.clear();
         self.chat_split = None;
         self.settings.sidebar_compact = false;
+        self.settings.sidebar_collapsed = variant == "attention-strip-closed";
         {
             let layout = self.panel_layout_mut(cx);
             layout.axis = SplitAxis::Horizontal;
             layout.panels.truncate(2);
+            // A previous proposal may have left one panel.
+            if layout.panels.len() < 2 {
+                let first = layout.panels[0].id;
+                layout.add_panel(first);
+            }
             layout.panels[0].tabs = vec![
                 workspace_panels::PanelTab::Chat("launch-0".into()),
                 workspace_panels::PanelTab::Chat("launch-1".into()),
@@ -127,6 +133,15 @@ impl Shell {
             let new_tab = layout.panels[0].selected().unwrap().clone();
             layout.panels[0].tabs = vec![new_tab];
             layout.panels[0].active = 0;
+        }
+        if variant == "attention-strip" || variant == "attention-strip-closed" {
+            self.fixture_instrument_strip(window, cx);
+        }
+        if variant == "attention-single" {
+            self.fixture_single_panel_tabs(window, cx);
+        }
+        if variant == "attention-strip-folder" {
+            self.fixture_strip_folder_menu(window, cx);
         }
         cx.set_global(DesignPreview(variant.into()));
         cx.notify();
@@ -189,7 +204,7 @@ impl Shell {
                     bounds.origin + gpui::point(px(2.), px(2.)),
                     gpui::size(bounds.size.width - px(4.), px(30.)),
                 );
-                if mode != "attention-a" {
+                if mode != "attention-a" && !mode.starts_with("attention-strip") && mode != "attention-single" {
                     result.push(
                         frame(rect)
                             .rounded(px(7.))

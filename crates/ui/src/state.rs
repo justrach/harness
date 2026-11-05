@@ -524,6 +524,7 @@ impl EngineHandle {
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
                 capabilities,
+                version: Some(env!("CARGO_PKG_VERSION").into()),
             },
             deferred_state: None,
         }
@@ -552,6 +553,25 @@ impl EngineHandle {
 
 /// Query the current protocol first, with a conservative fallback for daemons
 /// from before `EngineInfo` existed. Old daemons are always treated as synced.
+/// What to tell someone whose updated app attached to an engine still running
+/// an older release. The app keeps working, but behaviour the engine owns stays
+/// the old version's until that engine restarts, with nothing else to show why.
+fn older_engine_notice(app: &str, engine: Option<&str>) -> Option<String> {
+    fn parts(version: &str) -> Option<Vec<u64>> {
+        version.split('.').map(|part| part.parse().ok()).collect()
+    }
+    let running = match engine {
+        Some(engine) if parts(engine)? >= parts(app)? => return None,
+        Some(engine) => format!("is still running {engine}"),
+        None => "is still running an older version".to_string(),
+    };
+    Some(format!(
+        "Harness {app} is connected to an engine that {running}, so some changes won't \
+         apply yet. To update it, run `harness daemon stop`, then quit and reopen Harness. \
+         Chats that are running will stop."
+    ))
+}
+
 async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
     match client
         .call_as(methods::ENGINE_INFO, serde_json::json!({}))
@@ -572,6 +592,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
                 workspace_scope: WorkspaceScope::Synced,
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                version: None,
             })
         }
         Err(err) => Err(err),
@@ -739,6 +760,8 @@ pub struct AppState {
     /// Validated conversation link; the shell owns tab-preserving navigation.
     pending_linked_chat: Option<String>,
     deep_link_notice: Option<String>,
+    /// The connected engine is older than this app; see [`older_engine_notice`].
+    pub(crate) engine_notice: Option<String>,
     /// The selected chat when a chats frame arrived without it. A later frame
     /// that lists it again re-selects it, unless something else was picked.
     vanished_selection: Option<String>,
@@ -922,6 +945,7 @@ impl AppState {
             pending_deep_link: None,
             pending_linked_chat: None,
             deep_link_notice: None,
+            engine_notice: None,
             vanished_selection: None,
             pending_open_folder: None,
         }
@@ -2375,6 +2399,12 @@ impl AppState {
         display_status(chat, self.session_for(&chat.id), now)
     }
 
+    /// Whether any chat is working right now, as its sidebar row would show.
+    pub(crate) fn any_chat_running(&self, now: DateTime<Utc>) -> bool {
+        self.visible_chats()
+            .any(|chat| self.display_status_for(chat, now) == ChatIndicator::Working)
+    }
+
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
     /// on any device — idle included — in pure recency order (status drives
     /// the dot, never the position; see [`sort_active`]).
@@ -2619,6 +2649,8 @@ impl AppState {
         // baseline instead of comparing the new runtime with the old one.
         self.connectivity_observed = false;
         let engine_info = handle.engine_info();
+        self.engine_notice =
+            older_engine_notice(env!("CARGO_PKG_VERSION"), engine_info.version.as_deref());
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
@@ -2821,6 +2853,10 @@ impl AppState {
             tracing::info!(chat = %id, "selected chat is back in the chats list; re-selecting it");
             self.select_chat(Some(id), cx);
         }
+    }
+
+    pub fn take_engine_notice(&mut self) -> Option<String> {
+        self.engine_notice.take()
     }
 
     pub fn take_deep_link_notice(&mut self) -> Option<String> {
@@ -3917,6 +3953,66 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_an_older_engine_raises_a_notice() {
+        let notice = older_engine_notice("0.2.170", Some("0.2.169")).expect("older");
+        assert!(
+            notice.contains("0.2.169") && notice.contains("0.2.170"),
+            "{notice}"
+        );
+        // Compared as numbers, not text.
+        assert!(older_engine_notice("0.2.170", Some("0.2.99")).is_some());
+        // An engine from before versions were reported is older by definition.
+        assert!(older_engine_notice("0.2.170", None).is_some());
+        for fine in ["0.2.170", "0.2.171", "0.3.0"] {
+            assert_eq!(older_engine_notice("0.2.170", Some(fine)), None, "{fine}");
+        }
+        // Nothing to compare: say nothing rather than cry wolf.
+        assert_eq!(older_engine_notice("0.2.170", Some("custom")), None);
+    }
+
+    #[test]
+    fn only_a_working_chat_counts_as_running() {
+        let now = Utc::now();
+        let mut s = AppState::new();
+        s.chats = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "c", "deviceId": "dev", "archived": false, "createdAt": now,
+            }))
+            .unwrap(),
+        ];
+        assert!(!s.any_chat_running(now));
+        s.apply_sessions_at(vec![session("c", SessionStatus::Idle, 0, now)], now);
+        assert!(!s.any_chat_running(now));
+        s.apply_sessions_at(vec![session("c", SessionStatus::Working, 0, now)], now);
+        assert!(s.any_chat_running(now));
+        s.chats[0].archived = true;
+        assert!(!s.any_chat_running(now));
+    }
+
+    #[gpui::test]
+    fn attaching_to_an_older_engine_leaves_a_notice_once(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+        let state = cx.new(|_| AppState::new());
+        let mut older = window_test_engine("old-runtime");
+        older.engine_info.version = Some("0.0.1".into());
+        state.update(cx, |state, cx| {
+            state.attach_engine(older, cx);
+            let notice = state
+                .take_engine_notice()
+                .expect("told about the old engine");
+            assert!(notice.contains("0.0.1"), "{notice}");
+            assert_eq!(state.take_engine_notice(), None);
+            // This build's own engine has nothing to report.
+            state.attach_engine(window_test_engine("current-runtime"), cx);
+            assert_eq!(state.take_engine_notice(), None);
+        });
+    }
+
     fn window_test_engine(device: &str) -> EngineHandle {
         EngineHandle {
             inner: Arc::new(RemoteEngine {
@@ -3929,6 +4025,7 @@ mod tests {
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                version: Some(env!("CARGO_PKG_VERSION").into()),
             },
             deferred_state: None,
         }
@@ -4234,6 +4331,7 @@ mod tests {
                     workspace_scope: WorkspaceScope::Local,
                     cursor_sdk_version: None,
                     capabilities: harness_proto::capabilities::current(),
+                    version: Some("0.0.1".into()),
                 },
                 state: state_rx,
             }),
@@ -4252,6 +4350,7 @@ mod tests {
         .await
         .expect("second viewport attaches over IPC");
         assert!(matches!(handle.mode(), EngineMode::Remote { .. }));
+        assert_eq!(handle.engine_info().version.as_deref(), Some("0.0.1"));
 
         let mut deferred = handle
             .deferred_state()

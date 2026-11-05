@@ -1,11 +1,10 @@
 use super::*;
 
-/// Typing in the composer redraws the composer, not the app: no shell or
-/// app-state notification, and no sidebar rebuild per keystroke (the sidebar
-/// re-renders on every shell notification and costs the most to rebuild).
-#[gpui::test]
-fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
+/// A settled shell with fifty chats in the sidebar and one open.
+pub(super) fn shell_with_chats<'a>(
+    cx: &'a mut gpui::TestAppContext,
+    dir: &tempfile::TempDir,
+) -> (Entity<Shell>, &'a mut gpui::VisualTestContext) {
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::default());
@@ -64,6 +63,16 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
         cx.executor().advance_clock(Duration::from_secs(2));
         cx.run_until_parked();
     }
+    (shell, cx)
+}
+
+/// Typing in the composer redraws the composer, not the app: no shell or
+/// app-state notification, and no sidebar rebuild per keystroke (the sidebar
+/// re-renders on every shell notification and costs the most to rebuild).
+#[gpui::test]
+fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
     cx.update(|window, cx| {
         let focus = shell.read(cx).composer.focus_handle(cx);
         window.focus(&focus, cx);
@@ -102,4 +111,39 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
         renders <= 3,
         "typing re-rendered the sidebar {renders} times"
     );
+}
+
+/// An old engine is only worth noticing if the person can see it was noticed.
+#[gpui::test]
+fn an_older_engine_shows_in_the_sidebar(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    assert!(cx.debug_bounds("sidebar-notice").is_none());
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.engine_notice = Some("The engine is old".into());
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.sidebar_notice.as_deref(), Some("The engine is old"));
+        assert_eq!(shell.state.read(cx).engine_notice, None, "shown once");
+    });
+}
+
+/// A tap that does nothing has to say why.
+#[gpui::test]
+fn the_hold_to_quit_hint_shows_during_a_hold(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, cx) = shell_with_chats(cx, &dir);
+    assert!(cx.debug_bounds("quit-hold-hint").is_none());
+    cx.update(|_, cx| crate::quit_hold::begin(cx, || true, |_| {}));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("quit-hold-hint").is_some());
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(30));
+        cx.run_until_parked();
+    }
+    assert!(cx.debug_bounds("quit-hold-hint").is_none());
 }

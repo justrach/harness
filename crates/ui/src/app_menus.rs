@@ -16,6 +16,7 @@ use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, ac
 
 use crate::appearance::{self, AppearanceMode};
 use crate::composer;
+use crate::quit_hold;
 use crate::shell;
 
 actions!(
@@ -123,7 +124,15 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
 
 /// All app-owned quit paths must flush file buffers before GPUI destroys windows.
 fn quit(_: &Quit, cx: &mut App) {
-    request_quit(cx);
+    let running = quit_hold::chat_is_running(cx);
+    match quit_hold::quit_press(native_quit::key_press(), running, quit_hold::holding(cx)) {
+        quit_hold::QuitPress::Now => request_quit(cx),
+        quit_hold::QuitPress::Ignore => {}
+        quit_hold::QuitPress::StartHold(key) => {
+            native_quit::watch_key(key);
+            quit_hold::begin(cx, native_quit::key_still_down, request_quit);
+        }
+    }
 }
 
 pub(crate) fn request_quit(cx: &mut App) {
@@ -642,6 +651,22 @@ mod about_panel {
     }
 }
 
+/// Off macOS a Quit request is never held: nothing here reports a key press.
+#[cfg(not(target_os = "macos"))]
+mod native_quit {
+    use super::quit_hold;
+
+    pub(super) fn key_press() -> Option<quit_hold::KeyPress> {
+        None
+    }
+
+    pub(super) fn watch_key(_: u16) {}
+
+    pub(super) fn key_still_down() -> bool {
+        false
+    }
+}
+
 // GPUI's on_app_quit runs after AppKit has committed to termination. Catch
 // Dock / system Quit at the earlier delegate decision, just like our menu
 // action, so failed saves can still cancel termination. The pinned GPUI
@@ -649,12 +674,21 @@ mod about_panel {
 #[cfg(target_os = "macos")]
 mod native_quit {
     use super::*;
+    use block::ConcreteBlock;
     use objc::runtime::{Class, Object, Sel, class_addMethod};
     use objc::{class, msg_send, sel, sel_impl};
     use std::cell::{Cell, RefCell};
 
+    const NS_EVENT_TYPE_KEY_DOWN: u64 = 10;
+    const NS_EVENT_MASK_KEY_UP: u64 = 1 << 11;
+    const NS_EVENT_MASK_FLAGS_CHANGED: u64 = 1 << 12;
+    const NS_EVENT_TYPE_KEY_UP: u64 = 11;
+    const NS_EVENT_MODIFIER_COMMAND: u64 = 1 << 20;
+
     thread_local! {
         static ALLOWED: Cell<bool> = const { Cell::new(false) };
+        /// The key of a hold in progress, until it or Command is let go.
+        static HELD_KEY: Cell<Option<u16>> = const { Cell::new(None) };
         static REQUEST: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     }
 
@@ -674,7 +708,72 @@ mod native_quit {
         ALLOWED.set(true);
     }
 
+    /// The key press being handled right now, if a key press is what's being
+    /// handled: a menu click or a Dock quit has none.
+    pub(super) fn key_press() -> Option<quit_hold::KeyPress> {
+        unsafe {
+            let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+            let event: *mut Object = msg_send![app, currentEvent];
+            if event.is_null() {
+                return None;
+            }
+            let kind: u64 = msg_send![event, type];
+            if kind != NS_EVENT_TYPE_KEY_DOWN {
+                return None;
+            }
+            let code: u16 = msg_send![event, keyCode];
+            let repeat: objc::runtime::BOOL = msg_send![event, isARepeat];
+            Some(quit_hold::KeyPress {
+                code,
+                repeat: repeat == objc::runtime::YES,
+            })
+        }
+    }
+
+    pub(super) fn watch_key(code: u16) {
+        HELD_KEY.set(Some(code));
+    }
+
+    pub(super) fn key_still_down() -> bool {
+        HELD_KEY.get().is_some()
+    }
+
+    /// AppKit drops the key-up of a key pressed with Command before it reaches
+    /// a window, so watch for it ahead of that. If this ever saw nothing, the
+    /// hold would simply complete: quitting can't get stuck behind it.
+    fn watch_for_release() {
+        let monitor = ConcreteBlock::new(|event: *mut Object| -> *mut Object {
+            if HELD_KEY.get().is_some() {
+                unsafe {
+                    let kind: u64 = msg_send![event, type];
+                    let released = if kind == NS_EVENT_TYPE_KEY_UP {
+                        let code: u16 = msg_send![event, keyCode];
+                        HELD_KEY.get() == Some(code)
+                    } else {
+                        let flags: u64 = msg_send![event, modifierFlags];
+                        flags & NS_EVENT_MODIFIER_COMMAND == 0
+                    };
+                    if released {
+                        HELD_KEY.set(None);
+                    }
+                }
+            }
+            event
+        })
+        .copy();
+        unsafe {
+            let _: *mut Object = msg_send![
+                class!(NSEvent),
+                addLocalMonitorForEventsMatchingMask: NS_EVENT_MASK_KEY_UP | NS_EVENT_MASK_FLAGS_CHANGED
+                handler: &*monitor
+            ];
+        }
+        // AppKit copied it, and this watches for as long as the app runs.
+        std::mem::forget(monitor);
+    }
+
     pub(super) fn init(cx: &mut App) {
+        watch_for_release();
         let executor = cx.foreground_executor().clone();
         let app = cx.to_async();
         REQUEST.with_borrow_mut(|request| {

@@ -370,7 +370,7 @@ impl Shell {
                         title: tab.title.to_string(),
                     })
                     .unwrap_or_default(),
-                RightSurface::Picker => SavedPanelTab::Empty,
+                RightSurface::Picker | RightSurface::ToolAccess(_) => SavedPanelTab::Empty,
             },
             PanelTab::Files(owner) => SavedPanelTab::Files {
                 target_device_id: self
