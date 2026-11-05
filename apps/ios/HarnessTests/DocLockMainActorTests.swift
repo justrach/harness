@@ -10,6 +10,14 @@ final class DocLockMainActorTests: XCTestCase {
     /// A phone doc holding `ops` scattered edits, one op of its own the host
     /// never saw, and the row whose import makes Loro rebuild the whole text.
     private func slowImportFixture(ops: Int = 2_000_000) throws -> (phone: LoroDoc, row: Data, frontier: Data) {
+        let (host, phone) = try longChat(ops: ops)
+        let before = host.oplogVv()
+        try host.getText(id: "reply").pushStr(s: "tail")
+        host.commit()
+        return (phone, try host.export(mode: .updates(from: before)), host.oplogVv().encode())
+    }
+
+    private func longChat(ops: Int) throws -> (host: LoroDoc, phone: LoroDoc) {
         let host = LoroDoc()
         try host.setPeerId(peer: 1)
         let phone = LoroDoc()
@@ -25,10 +33,7 @@ final class DocLockMainActorTests: XCTestCase {
         }
         host.commit()
         _ = try phone.importWith(bytes: host.export(mode: .updates(from: VersionVector())), origin: "remote")
-        let before = host.oplogVv()
-        try text.pushStr(s: "tail")
-        host.commit()
-        return (phone, try host.export(mode: .updates(from: before)), host.oplogVv().encode())
+        return (host, phone)
     }
 
     private func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 }
@@ -137,6 +142,52 @@ final class DocLockMainActorTests: XCTestCase {
         XCTAssertTrue(sent.isSubset(of: store.admittedBatchIDs), "the send waited for a quiet room")
         let loaded = try XCTUnwrap(DocDisk.loadChat2(into: LoroDoc(), id: id))
         XCTAssertTrue(sent.isSubset(of: Set(loaded.outbox.map(\.batchId))), "admitted before it was saved")
+    }
+
+    /// Bytes malloc has handed out and not had back.
+    private func bytesInUse() -> Int {
+        var stats = malloc_statistics_t()
+        malloc_zone_statistics(nil, &stats)
+        return Int(stats.size_in_use)
+    }
+
+    /// A phone doc on a long text, and rows from the host concurrent with its own
+    /// command, so importing them has to work out the whole text's history.
+    private func catchUpFixture(ops: Int, batches: Int) throws -> (doc: LoroDoc, batches: [[Data]], host: LoroDoc) {
+        let (host, doc) = try longChat(ops: ops)
+        let text = host.getText(id: "reply")
+        let rows = try (0..<batches).map { batch -> [Data] in
+            try (0..<2).map { row -> Data in
+                let before = host.oplogVv()
+                try text.pushStr(s: "row \(batch).\(row) ")
+                host.commit()
+                return try host.export(mode: .updates(from: before))
+            }
+        }
+        return (doc, rows, host)
+    }
+
+    /// A catch-up imports its rows as a batch, and Loro's batch import leaves a
+    /// diff calculator on the doc that holds a tracker of each changed text's
+    /// whole history, until something frees it. Nothing did, so every chat that
+    /// ever caught up kept one for as long as it stayed in memory.
+    @MainActor
+    func testACatchUpLeavesNoDiffStateOnTheDoc() async throws {
+        let (doc, batches, host) = try catchUpFixture(ops: 300_000, batches: 2)
+        let store = try storeOnALongChat(doc)
+        defer { store.stop() }
+        let failed = await store.importRemote(batch: batches[0])
+        XCTAssertEqual(failed, 0)
+        let held = bytesInUse()
+        store.doc.freeDiffCalculator()
+        store.doc.freeHistoryCache()
+        let left = held - bytesInUse()
+        print("catch-up: \(left >> 10) KB of diff state left on the doc")
+        XCTAssertLessThan(left, 1 << 20, "a catch-up left its diff state on the doc")
+        // And the next catch-up doesn't miss it.
+        let failedNext = await store.importRemote(batch: batches[1])
+        XCTAssertEqual(failedNext, 0)
+        XCTAssertEqual(store.doc.getText(id: "reply").toString(), host.getText(id: "reply").toString())
     }
 
     /// Queueing a message, moving it and taking one out, all during that import:

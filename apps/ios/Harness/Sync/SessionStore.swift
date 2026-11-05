@@ -722,13 +722,19 @@ final class SessionStore {
     /// Several rows in one import, so a rebuild happens once for the run.
     /// If the batch is rejected, each row is retried alone so a malformed
     /// row costs only itself. Returns how many rows failed.
-    private func importRemote(batch rows: [Data]) async -> Int {
+    func importRemote(batch rows: [Data]) async -> Int {
         guard rows.count > 1 else {
             guard let row = rows.first else { return 0 }
             return await importRemote(row) ? 0 : 1
         }
         let doc = self.doc
         return await docJob {
+            // A batch import leaves a diff calculator on the doc, holding a tracker
+            // of each changed text's whole history until something frees it: 91 MB
+            // at 300k edits, for as long as the chat stays in memory. Only checking
+            // out old versions gains from keeping it, and the next batch isn't
+            // slower without it.
+            defer { doc.freeDiffCalculator() }
             if (try? doc.importBatch(bytes: rows)) != nil { return 0 }
             return rows.filter { (try? doc.importWith(bytes: $0, origin: "remote")) == nil }.count
         }
