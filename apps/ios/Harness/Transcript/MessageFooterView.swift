@@ -19,7 +19,7 @@ struct MessageFooterView: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 8) {
             Text(Self.timestampLabel(timestamp))
                 .font(Theme.sans(12))
                 .accessibilityIdentifier("message-timestamp-\(entryID)")
