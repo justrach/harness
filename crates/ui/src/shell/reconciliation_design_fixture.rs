@@ -128,6 +128,9 @@ impl Shell {
             layout.panels[0].tabs = vec![new_tab];
             layout.panels[0].active = 0;
         }
+        if variant == "attention-strip" {
+            self.fixture_instrument_strip(window, cx);
+        }
         cx.set_global(DesignPreview(variant.into()));
         cx.notify();
     }
@@ -189,7 +192,7 @@ impl Shell {
                     bounds.origin + gpui::point(px(2.), px(2.)),
                     gpui::size(bounds.size.width - px(4.), px(30.)),
                 );
-                if mode != "attention-a" {
+                if mode != "attention-a" && mode != "attention-strip" {
                     result.push(
                         frame(rect)
                             .rounded(px(7.))

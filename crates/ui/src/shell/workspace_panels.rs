@@ -4,8 +4,12 @@ use super::*;
 use gpui::point;
 #[cfg(feature = "browser-fixture")]
 use gpui_base::ElementExt as _;
+use instrument_strip::INSTRUMENT_STRIP;
 use std::collections::{HashMap, HashSet};
 mod device_picker;
+mod instrument_strip;
+#[cfg(all(test, feature = "dev-tab-layout"))]
+mod instrument_strip_tests;
 mod recovery;
 mod sidebar_chat_drop;
 mod tab_metadata;
@@ -361,7 +365,7 @@ impl WorkspaceLayout {
                         y: 0.0,
                         width: span,
                         height,
-                        header_height: PANEL_HEADER_HEIGHT,
+                        header_height: if INSTRUMENT_STRIP { 0.0 } else { PANEL_HEADER_HEIGHT },
                     }
                 } else {
                     PanelFrame {
@@ -369,7 +373,9 @@ impl WorkspaceLayout {
                         y: cursor,
                         width,
                         height: span,
-                        header_height: if cursor < 1.0 {
+                        header_height: if INSTRUMENT_STRIP {
+                            0.0
+                        } else if cursor < 1.0 {
                             PANEL_HEADER_HEIGHT
                         } else {
                             STACKED_HEADER_HEIGHT
@@ -530,7 +536,9 @@ impl WorkspaceLayout {
             .filter_map(|panel| bounds.get(&panel.id).map(|rect| (panel.id, *rect)))
             .collect();
         let header_height = |rect: gpui::Bounds<Pixels>| {
-            if self.axis == SplitAxis::Vertical
+            if INSTRUMENT_STRIP {
+                0.0
+            } else if self.axis == SplitAxis::Vertical
                 && self.expanded.is_none()
                 && panels
                     .first()
@@ -873,6 +881,10 @@ enum MenuAction {
     MovePanel(bool),
     AddPanel(SplitAxis),
     CloseTab,
+    SelectTab(usize),
+    NewTab,
+    ToggleExpand,
+    ClosePanel,
 }
 #[derive(Clone)]
 pub(super) struct PanelMenu {
@@ -880,7 +892,7 @@ pub(super) struct PanelMenu {
     tab: Option<PanelTab>,
     placement: bool,
     position: Point<Pixels>,
-    rows: Vec<(&'static str, &'static str, MenuAction)>,
+    rows: Vec<(SharedString, &'static str, MenuAction)>,
     selected: usize,
     focus: FocusHandle,
 }
@@ -1979,6 +1991,9 @@ impl Shell {
 
     /// Multiple panels keep their own headers beneath the session controls.
     fn workspace_native_titlebar_lane(&self, panel_count: usize) -> f32 {
+        if INSTRUMENT_STRIP {
+            return Theme::TITLEBAR_HEIGHT;
+        }
         if panel_count == 1 {
             return 0.0;
         }
@@ -2317,7 +2332,7 @@ impl Shell {
         if let Some((panel, edge)) = target {
             self.split_workspace_tab(drag, panel, edge, window, cx);
         } else {
-            let before = if self.workspace_panels.window_drag.is_some() {
+            let before = if self.workspace_panels.window_drag.is_some() && !INSTRUMENT_STRIP {
                 // The release must use the same measured slot as its cue,
                 // including the right half of a tab and clipped strip bounds.
                 let Some(hover) = self.panel_tab_drop_at(window.mouse_position(), window, cx)
@@ -2643,7 +2658,7 @@ impl Shell {
                     .and_then(|browser| browser.read(cx).external_action_label())
             {
                 rows.push((
-                    label,
+                    label.into(),
                     icons::ARROW_UP_RIGHT,
                     MenuAction::OpenBrowserExternal(*id),
                 ));
@@ -2651,11 +2666,11 @@ impl Shell {
             let layout = self.panel_layout_mut(cx);
             for after in [false, true] {
                 if let Some(to) = layout.neighbor(panel, after) {
-                    rows.push((neighbor_label(after), arrow(after), MenuAction::Move(to)));
+                    rows.push((neighbor_label(after).into(), arrow(after), MenuAction::Move(to)));
                 }
             }
-            rows.push(("Move to new window", icons::ARROW_UP_RIGHT, MenuAction::MoveToWindow));
-            rows.push(("Close tab", icons::CLOSE, MenuAction::CloseTab));
+            rows.push(("Move to new window".into(), icons::ARROW_UP_RIGHT, MenuAction::MoveToWindow));
+            rows.push(("Close tab".into(), icons::CLOSE, MenuAction::CloseTab));
         } else if placement {
             let layout = self.panel_layout_mut(cx);
             for after in [false, true] {
@@ -2666,16 +2681,16 @@ impl Shell {
                         (true, false) => "Move up",
                         (true, true) => "Move down",
                     };
-                    rows.push((label, arrow(after), MenuAction::MovePanel(after)));
+                    rows.push((label.into(), arrow(after), MenuAction::MovePanel(after)));
                 }
             }
             rows.push((
-                "Add panel right",
+                "Add panel right".into(),
                 icons::ALT_ARROW_RIGHT,
                 MenuAction::AddPanel(SplitAxis::Horizontal),
             ));
             rows.push((
-                "Add panel below",
+                "Add panel below".into(),
                 icons::ALT_ARROW_DOWN,
                 MenuAction::AddPanel(SplitAxis::Vertical),
             ));
@@ -2758,19 +2773,44 @@ impl Shell {
                 let id = self.panel_layout_mut(cx).add_panel(menu.panel);
                 self.set_workspace_panel_device(id, device, cx);
                 self.start_panel_insertion(id, menu.panel, cx);
-                self.composer.update(cx, |c, _| c.focus_pending = false);
-                let focus = self
-                    .workspace_panels
-                    .controls
-                    .entry(format!("panel-header-{id}"))
-                    .or_insert_with(|| cx.focus_handle().tab_stop(true));
-                window.focus(focus, cx);
+                self.composer.update(cx, |c, _| c.focus_pending = INSTRUMENT_STRIP);
+                if !INSTRUMENT_STRIP {
+                    let focus = self
+                        .workspace_panels
+                        .controls
+                        .entry(format!("panel-header-{id}"))
+                        .or_insert_with(|| cx.focus_handle().tab_stop(true));
+                    window.focus(focus, cx);
+                }
             }
             MenuAction::CloseTab => {
                 if let Some(tab) = menu.tab {
                     self.close_workspace_tab_by_button(menu.panel, tab, window, cx);
                 }
             }
+            MenuAction::SelectTab(index) => {
+                let tab = self
+                    .panel_layout(cx)
+                    .and_then(|layout| layout.panel(menu.panel))
+                    .and_then(|panel| panel.tabs.get(index).cloned());
+                if let Some(tab) = tab {
+                    self.focus_workspace_tab(menu.panel, tab, window, cx);
+                }
+            }
+            MenuAction::NewTab => {
+                self.workspace_panels.target = Some(menu.panel);
+                self.workspace_new_tab(cx);
+                self.focus_workspace_new_tab(window, cx);
+            }
+            MenuAction::ToggleExpand => {
+                let layout = self.panel_layout_mut(cx);
+                layout.expanded = if layout.expanded == Some(menu.panel) {
+                    None
+                } else {
+                    Some(menu.panel)
+                };
+            }
+            MenuAction::ClosePanel => self.close_workspace_panel(menu.panel, window, cx),
         }
         self.workspace_panels.target = None;
         cx.notify();
@@ -2862,7 +2902,7 @@ impl Shell {
                 .id(("workspace-menu-row", ix))
                 .role(gpui::Role::Button)
                 .aria_label(if enabled {
-                    (*title).to_string()
+                    title.to_string()
                 } else {
                     format!("{title}, unavailable at this window height")
                 })
@@ -2880,7 +2920,7 @@ impl Shell {
                     })
                 })
                 .child(icon(glyph).size(px(15.0)).text_color(theme.text_muted))
-                .child(div().flex_1().child(*title)),
+                .child(div().flex_1().child(title.clone())),
             );
         }
         #[cfg(feature = "browser-fixture")]
@@ -4549,7 +4589,11 @@ impl Shell {
             window.request_animation_frame();
         }
         let full_titlebar_lane = self.workspace_native_titlebar_lane(2);
-        let native_titlebar_lane = full_titlebar_lane * PanelHeaderMode::lane_fraction(header_mode);
+        let native_titlebar_lane = if INSTRUMENT_STRIP {
+            full_titlebar_lane
+        } else {
+            full_titlebar_lane * PanelHeaderMode::lane_fraction(header_mode)
+        };
         let header_clearance = PanelHeaderMode::clearance_fraction(header_mode);
         let height = (self.viewport_height - GUTTER - native_titlebar_lane).max(1.0);
         let originals = layout.frames(width, height);
@@ -4707,16 +4751,20 @@ impl Shell {
             let caption_left = self.viewport_width - self.titlebar_right_pad(0.0);
             let trailing_inset =
                 4.0 + (panel_left + frame.width - caption_left).max(0.0) * clearance;
-            let header = self.render_workspace_header(
-                panel,
-                layout.expanded == Some(panel.id),
-                frame.width,
-                frame.header_height,
-                self.workspace_header_controls_inset(panel_left, cx) * clearance,
-                trailing_inset,
-                window,
-                cx,
-            );
+            let header = if INSTRUMENT_STRIP {
+                div().into_any_element()
+            } else {
+                self.render_workspace_header(
+                    panel,
+                    layout.expanded == Some(panel.id),
+                    frame.width,
+                    frame.header_height,
+                    self.workspace_header_controls_inset(panel_left, cx) * clearance,
+                    trailing_inset,
+                    window,
+                    cx,
+                )
+            };
             let content_height = (frame.height - frame.header_height - 2.0).max(0.0);
             let content =
                 self.render_workspace_content(panel, content_width, content_height, window, cx);
@@ -4840,6 +4888,20 @@ impl Shell {
                     &theme,
                 ))
                 .children(chat_drop_zones)
+                .when(
+                    INSTRUMENT_STRIP && visible.len() > 1 && layout.focused == panel_id,
+                    |column| {
+                        column.child(
+                            div()
+                                .debug_selector(move || format!("instrument-focus-{panel_id}"))
+                                .absolute()
+                                .inset_0()
+                                .rounded(px(10.0))
+                                .border(px(1.5))
+                                .border_color(theme.accent.opacity(0.7)),
+                        )
+                    },
+                )
                 .child(
                     gpui::canvas(
                         move |rect, _, _| {
@@ -5026,6 +5088,25 @@ impl Shell {
             },
             cx,
         );
+        let instrument_strip = INSTRUMENT_STRIP.then(|| {
+            let left = self.workspace_header_controls_inset(sidebar_now, cx).max(leading);
+            let right = GUTTER.max(self.titlebar_right_pad(0.0));
+            let in_a_row = layout.axis == SplitAxis::Horizontal
+                && layout.expanded.is_none()
+                && canvas_width <= width + 0.5
+                && right <= GUTTER;
+            let columns = in_a_row
+                .then(|| {
+                    let widths: Vec<_> = layout
+                        .panels
+                        .iter()
+                        .map(|panel| frames.get(&panel.id).map_or(0.0, |frame| frame.width))
+                        .collect();
+                    Self::strip_columns(&widths, leading, left)
+                })
+                .flatten();
+            self.render_instrument_strip(&layout, left, right, columns, window, cx)
+        });
         let row = div()
             .flex_1()
             .min_w_0()
@@ -5034,7 +5115,8 @@ impl Shell {
             .pt(px(native_titlebar_lane))
             .flex()
             .child(shadows)
-            .child(row);
+            .child(row)
+            .children(instrument_strip);
         let overlays = self.render_overlays(window.viewport_size(), window, cx);
         let menu = self.render_panel_menu(cx);
         if self
@@ -6729,7 +6811,7 @@ mod interaction_tests {
             let menu = s.workspace_panels.menu.as_ref().unwrap();
             assert_eq!(menu.position, placement.bottom_left());
             assert_eq!(
-                menu.rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                menu.rows.iter().map(|r| &*r.0).collect::<Vec<_>>(),
                 ["Move right", "Add panel right", "Add panel below"]
             );
         });
@@ -6749,7 +6831,7 @@ mod interaction_tests {
         shell.read_with(cx, |s, _| {
             let menu = s.workspace_panels.menu.as_ref().unwrap();
             assert_eq!(
-                menu.rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                menu.rows.iter().map(|r| &*r.0).collect::<Vec<_>>(),
                 ["Move left", "Add panel right", "Add panel below"]
             );
         });
@@ -6794,7 +6876,7 @@ mod interaction_tests {
             s.open_panel_menu(0, None, point(px(300.0), px(38.0)), true, window, cx);
             let menu = s.workspace_panels.menu.as_ref().unwrap();
             assert_eq!(
-                menu.rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                menu.rows.iter().map(|r| &*r.0).collect::<Vec<_>>(),
                 ["Add panel right", "Add panel below"]
             );
         });

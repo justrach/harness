@@ -388,6 +388,16 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
         KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
     ];
+    #[cfg(feature = "dev-tab-layout")]
+    bindings.extend([
+        KeyBinding::new(&b("cmd-alt-1", "ctrl-alt-1"), FocusPanelSlot1, None),
+        KeyBinding::new(&b("cmd-alt-2", "ctrl-alt-2"), FocusPanelSlot2, None),
+        KeyBinding::new(&b("cmd-alt-3", "ctrl-alt-3"), FocusPanelSlot3, None),
+        KeyBinding::new(&b("cmd-alt-4", "ctrl-alt-4"), FocusPanelSlot4, None),
+        KeyBinding::new(&b("cmd-alt-5", "ctrl-alt-5"), FocusPanelSlot5, None),
+        KeyBinding::new(&b("cmd-alt-6", "ctrl-alt-6"), FocusPanelSlot6, None),
+        KeyBinding::new(&b("cmd-shift-j", "ctrl-shift-j"), FocusNextAttention, None),
+    ]);
     // A shell needs its Ctrl+letter keys. On a Mac these are ⌘ combos anyway.
     if !mac {
         bindings.push(KeyBinding::new("ctrl-o", gpui::NoAction, Some("Terminal")));

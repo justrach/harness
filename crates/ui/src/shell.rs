@@ -170,6 +170,13 @@ actions!(
         ResizeChatPaneDown,
         EqualizeChatPanes,
         ToggleChatPaneZoom,
+        FocusPanelSlot1,
+        FocusPanelSlot2,
+        FocusPanelSlot3,
+        FocusPanelSlot4,
+        FocusPanelSlot5,
+        FocusPanelSlot6,
+        FocusNextAttention,
         FocusComposer,
         // Chat tabs, each holding its own split (`shell/chat_tabs.rs`).
         NewChatTab,
@@ -13676,6 +13683,27 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &ToggleChatPaneZoom, _, cx| this.toggle_chat_pane_zoom(cx)),
             )
+            .on_action(cx.listener(|this, _: &FocusPanelSlot1, window, cx| {
+                this.focus_strip_position(0, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot2, window, cx| {
+                this.focus_strip_position(1, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot3, window, cx| {
+                this.focus_strip_position(2, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot4, window, cx| {
+                this.focus_strip_position(3, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot5, window, cx| {
+                this.focus_strip_position(4, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPanelSlot6, window, cx| {
+                this.focus_strip_position(5, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusNextAttention, window, cx| {
+                this.focus_next_attention(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.workspace_new_tab(cx);
                 this.focus_workspace_new_tab(window, cx);

@@ -3,7 +3,8 @@ use super::*;
 
 impl Shell {
     pub(in crate::shell) fn workspace_uses_shared_header(&self, cx: &App) -> bool {
-        matches!(self.route, Route::Chat)
+        !INSTRUMENT_STRIP
+            && matches!(self.route, Route::Chat)
             && !self.session_overview
             && self
                 .panel_layout(cx)
