@@ -332,8 +332,10 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The list failed and nothing names an agent: GPUI's `effective_harness`
     // is none, so a muted terminal and no label, not a loader.
     const unresolved = a.harnesses.items.len == 0 and !chat_harness and a.harnesses_failed;
+    // Its label is always a child, empty or not, so its gap stays.
     if (unresolved) {
         icons.icon(c, .terminal, 16, k.muted, 0);
+        _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null);
         return;
     }
     if (a.harnesses.items.len == 0 and !chat_harness) {
@@ -350,9 +352,11 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (a.models.items.len == 0 and t.model == null) {
         // A failed catalog has nothing to name: no label, no ghost bar.
         const failed = if (a.view.model_picker.catalogs.get(t.harness)) |cat| cat.failed else false;
-        return if (failed) {} else skeleton(c);
+        if (failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
+        return;
     }
-    ui.text(c, a.modelLabel(t.model), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.text.alpha(0.9) });
+    // `hover_blend`: the label brightens under the pointer.
+    ui.text(c, a.modelLabel(t.model), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
     if (t.reasoning) |level| ui.text(c, rules.reasoningLabel(level), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.muted.alpha(0.7) });
 }
 

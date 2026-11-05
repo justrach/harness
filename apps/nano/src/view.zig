@@ -87,7 +87,9 @@ pub fn view(a: *App, c: *ui.Context) void {
         a.view.sidebar_press_frame = c.frame;
         const focused_sidebar = if (c.rects.get(c.focus)) |r| r.x < a.view.sidebar_width else false;
         a.view.sidebar_press_focus = @import("view_sidebar_search.zig").hasFocus(a) or focused_sidebar;
-        a.view.press_kept_keys = a.view.sidebar_press_focus;
+        // A press out of a menu holding the keys closes it and drops them,
+        // to no one: its focus handle goes with it (`restore_mounted_focus`).
+        a.view.press_kept_keys = a.view.sidebar_press_focus or menuKeepsKeys(a);
     }
     keys(c, a);
     a.syncPeers();
@@ -164,9 +166,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     // First-run setup, over the whole window.
     @import("view_setup.zig").overlay(c, a, k);
     @import("app_browser.zig").syncNative(a, c);
-    // After the overlays: a press that closes a menu has closed it, and a
-    // click that opens one has opened it.
-    if (c.input.pressed and menuKeepsKeys(a)) a.view.press_kept_keys = true;
+    // After the overlays: a click that opens a menu has opened it.
     if (handsKeysBack(.{
         .released = c.input.released,
         .composer_drawn = a.view.composer_frame == c.frame,
@@ -183,7 +183,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 /// A menu that takes the keys for itself (`window.focus` as it opens): the
 /// composer's border and caret go quiet while it's up. The account menu has
 /// no focus of its own, so it isn't one.
-fn menuKeepsKeys(a: *const App) bool {
+pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.chat_menu.open or
         v.menus.ctx_at != null or v.palette.open or a.picker != .none;

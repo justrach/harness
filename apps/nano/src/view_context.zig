@@ -172,14 +172,13 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors, b: cw.Breakdown) void {
     {
         const head = ui.div(c).row().wFull().itemsCenter();
         defer head.end();
-        ui.text(c, "Context", .{ .system_font = true, .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
+        ui.text(c, "Context", .{ .system_font = true, .size = title, .line_height = title * phi, .color = k.text });
         _ = c.leaf(.{ .width = .{ .px = 4 } }, .none, null);
         ui.text(c, if (b.compacting) "compacting" else "reading", .{ .system_font = true, .size = title, .line_height = title * phi, .color = k.muted });
         ui.spacer(c);
         var x: [16]u8 = undefined;
         var y: [16]u8 = undefined;
-        // The rolling counter (`WEIGHT_STRONG`, `tabular_nums`), settled.
-        ui.text(c, c.print("{s}", .{cw.compactCount(&x, b.tokens)}), .{ .system_font = true, .tabular = true, .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
+        counter(c, k, cw.compactCount(&x, b.tokens));
         _ = c.leaf(.{ .width = .{ .px = 3 } }, .none, null);
         ui.text(c, c.print("of {s}", .{cw.compactCount(&y, b.window)}), .{ .system_font = true, .tabular = true, .size = title, .line_height = title * phi, .color = k.faint });
     }
@@ -199,6 +198,22 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors, b: cw.Breakdown) void {
     ui.text(c, cw.statusLine(c.alloc(), b), .{ .system_font = true, .tabular = true, .size = body, .line_height = body * phi, .color = k.faint });
     if (a.transcript.savings) |sv| savingsMeter(c, a, k, sv, b);
     ui.text(c, if (b.history == .sealed) "Compacted context is sealed by the provider: size only." else "Split estimated from this chat; total reported by the agent.", .{ .system_font = true, .size = caption, .line_height = caption * phi, .color = k.faint });
+}
+
+/// The rolling counter (`rolling_count`), settled: each character a box of
+/// its own, so no kerning, its width on a device pixel. The system's font has
+/// no medium cut for GPUI's matcher, so `WEIGHT_STRONG` reads regular here.
+fn counter(c: *ui.Context, k: theme.Colors, count: []const u8) void {
+    const st: ui.TextStyle = .{ .system_font = true, .tabular = true, .size = title, .line_height = 16, .color = k.text };
+    const row = ui.div(c).row().h(16).clip();
+    defer row.end();
+    for (count, 0..) |_, i| {
+        const ch = c.alloc().dupe(u8, count[i .. i + 1]) catch return;
+        const w = @ceil(c.text.width(ch, st) * c.scale) / c.scale;
+        const box = ui.div(c).row().w(w).h(16);
+        defer box.end();
+        ui.text(c, ch, st);
+    }
 }
 
 fn segment(c: *ui.Context, color: ui.Color, h: f32) void {
@@ -266,7 +281,7 @@ fn savingsMeter(c: *ui.Context, a: *App, k: theme.Colors, sv: @import("transcrip
         const head = ui.div(c).row().gap(4).itemsEnd();
         defer head.end();
         var buf: [16]u8 = undefined;
-        ui.text(c, c.print("{s}", .{cw.compactCount(&buf, kept)}), .{ .system_font = true, .tabular = true, .size = title, .line_height = title * phi, .weight = .medium, .color = k.text });
+        ui.text(c, c.print("{s}", .{cw.compactCount(&buf, kept)}), .{ .system_font = true, .tabular = true, .size = title, .line_height = title * phi, .color = k.text });
         ui.text(c, "saved by graff", .{ .system_font = true, .tabular = true, .size = body, .line_height = title * phi, .color = k.muted });
     }
     var hovered: ?cw.SavedPart = null;

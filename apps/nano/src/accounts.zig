@@ -452,12 +452,13 @@ pub fn formatReset(buf: []u8, resets_ms: ?i64, now_ms: i64, offset_s: i64) ?[]co
         return std.fmt.bufPrint(buf, "resets {s}", .{names[@intCast(@mod(days, 7))]}) catch null;
     }
     const md = monthDay(days);
-    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    return std.fmt.bufPrint(buf, "resets {s} {d}", .{ months[md.month - 1], md.day }) catch null;
+    return std.fmt.bufPrint(buf, "resets {s} {d}", .{ month_names[md.month - 1], md.day }) catch null;
 }
 
+pub const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
 /// The civil month and day of a day count from 1970-01-01 (Hinnant).
-fn monthDay(days: i64) struct { month: u8, day: u8 } {
+pub fn monthDay(days: i64) struct { month: u8, day: u8 } {
     const z = days + 719468;
     const era = @divFloor(z, 146097);
     const doe = z - era * 146097;

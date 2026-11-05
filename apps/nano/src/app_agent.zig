@@ -172,7 +172,10 @@ pub fn chatAvailability(a: *const App) chat_mode.Availability {
         if (std.mem.eql(u8, h.id, chat_mode.harness)) break h.installed;
     } else false;
     const loaded = if (a.view.model_picker.catalogs.get(chat_mode.harness)) |cat| !cat.loading else false;
-    return chat_mode.availability(installed, graffCatalog(a), loaded or std.mem.eql(u8, a.models_for, chat_mode.harness) and a.models.items.len > 0);
+    // With the agents' list failed nothing has asked for graff's catalog
+    // (`effective_harness` is none): pending, not unavailable.
+    const list_failed = a.harnesses.items.len == 0 and a.harnesses_failed;
+    return chat_mode.availability(installed, graffCatalog(a), !list_failed and (loaded or std.mem.eql(u8, a.models_for, chat_mode.harness)) and a.models.items.len > 0);
 }
 
 /// The composer's note in a plain chat: why it can't run, else the tier's

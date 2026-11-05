@@ -140,6 +140,8 @@ pub const Entry = struct {
     parts: std.ArrayList(Part) = .empty,
     /// How long the turn worked (`durationMs`), once it has said.
     duration_ms: ?i64 = null,
+    /// When it was made (`createdAt`); 0 for one that hasn't said.
+    created_ms: i64 = 0,
 
     pub fn deinit(e: *Entry, gpa: Allocator) void {
         gpa.free(e.id);
@@ -312,6 +314,9 @@ fn parseEntry(gpa: Allocator, v: json.Value) !Entry {
     errdefer e.deinit(gpa);
     if (o.get("durationMs")) |d| if (d == .integer) {
         e.duration_ms = d.integer;
+    };
+    if (o.get("createdAt")) |d| if (d == .integer) {
+        e.created_ms = d.integer;
     };
     for (array(o.get("parts"))) |p| if (p == .object) try e.parts.append(gpa, try parsePart(gpa, p.object));
     return e;

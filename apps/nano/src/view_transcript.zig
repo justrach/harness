@@ -140,7 +140,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         ui.key(c, c.print("entry-{s}", .{e.id}));
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
-        const at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col };
+        const at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = c.rects.get(drawn.box) };
         switch (e.role) {
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
@@ -183,12 +183,49 @@ fn user(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, col: f32) ?ui.Rect 
     return c.rects.get(c.node(wrap.index).id);
 }
 
-/// Under a message: 32 points held for its copy button, shown on hover.
+/// `format_timestamp`: "Jul 1, 3:45 PM", `offset_s` from UTC.
+pub fn formatTimestamp(buf: []u8, ms: i64, offset_s: i64) []const u8 {
+    const accounts = @import("accounts.zig");
+    const at = ms + offset_s * 1000;
+    const day = accounts.monthDay(@divFloor(at, 86_400_000));
+    const in_day = @mod(at, 86_400_000);
+    const h = @divFloor(in_day, 3_600_000);
+    const m = @divFloor(@mod(in_day, 3_600_000), 60_000);
+    const h12: u64 = @intCast(if (@mod(h, 12) == 0) 12 else @mod(h, 12));
+    return std.fmt.bufPrint(buf, "{s} {d}, {d}:{d:0>2} {s}", .{ accounts.month_names[day.month - 1], day.day, h12, @as(u64, @intCast(m)), if (h < 12) "AM" else "PM" }) catch "";
+}
+
+test "a message's timestamp reads as the GPUI app's" {
+    var b: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("Jan 1, 12:00 AM", formatTimestamp(&b, 0, 0));
+    // 2026-07-01 15:45 UTC.
+    try std.testing.expectEqualStrings("Jul 1, 3:45 PM", formatTimestamp(&b, 1782920700000, 0));
+    try std.testing.expectEqualStrings("Jul 1, 11:45 PM", formatTimestamp(&b, 1782920700000, 8 * 3600));
+    try std.testing.expectEqualStrings("Jul 2, 12:05 AM", formatTimestamp(&b, 1782920700000 + 20 * 60_000, 8 * 3600));
+}
+
+/// Whether the pointer is in the padding the last row carries under it: the
+/// clearance that takes it down behind the composer, which nothing there
+/// occludes (`bottom_pad`). A menu or the picker over it does.
+fn underLastRow(c: *ui.Context, a: *const App, row: ?ui.Rect, scroll: ?ui.Rect) bool {
+    const r = row orelse return false;
+    const pane = scroll orelse return false;
+    const m = c.input.mouse;
+    if (@import("view.zig").menuKeepsKeys(a) or a.view.account_menu) return false;
+    return m.x >= pane.x and m.x < pane.x + pane.w and m.y >= r.y + r.h and m.y < c.size.h;
+}
+
+/// Under a message: 32 points held for its time and copy button, shown on
+/// hover (`strip`).
 fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
-    var l = ui.div(c).row().wFull().h(32).pt(8);
+    var l = ui.div(c).row().wFull().h(32).pt(8).gap(8).itemsCenter();
     if (right) l = l.justifyEnd();
     defer l.end();
     if (!hovered) return;
+    if (e.created_ms != 0) {
+        const buf = c.alloc().alloc(u8, 32) catch return;
+        ui.text(c, formatTimestamp(buf, e.created_ms, @import("accounts.zig").localOffset(e.created_ms)), .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted.alpha(0.55) });
+    }
     if (kit.iconButton(c, k, .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
         var text: std.ArrayList(u8) = .empty;
         for (e.parts.items) |*p| if (p.kind == .text) {
@@ -205,13 +242,15 @@ const At = struct {
     entries: []const tr.Entry,
     index: usize,
     col: f32,
+    /// The scroll box as last laid out.
+    scroll: ?ui.Rect = null,
 };
 
 fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) void {
     const last = at.index + 1 == at.entries.len;
     const col = ui.div(c).column().wFull();
     defer col.end();
-    const hovered = col.hovered();
+    const hovered = col.hovered() or (last and underLastRow(c, a, c.rects.get(c.node(col.index).id), at.scroll));
     // Its parts 12 apart; the lane right under the last (the row's
     // `strip`, with no gap of its own).
     const parts_box = ui.div(c).column().wFull().gap(12);

@@ -98,7 +98,6 @@ pub fn card(c: *ui.Context, a: *App, k: theme.Colors, t: turn_work.TurnChanges, 
         ns.color = k.muted;
         ui.text(c, t.names(c.alloc()), ns);
     }
-    ui.spacer(c);
     if (stats) {
         const counts = ui.div(c).row().gap(6).itemsCenter();
         defer counts.end();

@@ -1877,7 +1877,8 @@ test "the context ring sits at the footer's right; resting on it opens the card 
     try testing.expect(!h.t.hasText("Context"));
     h.t.advance(0.3);
     h.snap("context-card");
-    for ([_][]const u8{ "Context", "reading", "46k", "of 200k", "Files", "9.0k", "Commands", "2.0k", "System & other", "153k free of 200k", "24k", "saved by graff", "46,200 / 200,000 tokens", "153,800 tokens remaining" }) |t|
+    // The counter rolls a character at a time, so each is its own text.
+    for ([_][]const u8{ "Context", "reading", "4", "6", "k", "of 200k", "Files", "9.0k", "Commands", "2.0k", "System & other", "153k free of 200k", "24k", "saved by graff", "46,200 / 200,000 tokens", "153,800 tokens remaining" }) |t|
         if (!h.t.hasText(t)) {
             std.debug.print("missing {s}\n", .{t});
             return error.MissingText;

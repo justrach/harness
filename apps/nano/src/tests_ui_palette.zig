@@ -285,7 +285,7 @@ test "the sidebar search: the magnifier opens it focused; it finds names, the ar
     h.clickMagnifier();
     h.t.settle(1);
     try testing.expect(h.a.view.search.open);
-    try testing.expect(h.t.hasText("Search session names…"));
+    try testing.expect(h.t.hasText("Search names or session IDs…"));
     try testing.expect(h.t.hasText("Include archived sessions"));
     // Not filtering yet: the lists stay.
     try testing.expect(h.t.hasText("Sessions"));

@@ -449,7 +449,7 @@ fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, 
     {
         const t = ui.div(c).row().grow().w(0).clip();
         defer t.end();
-        kit.ellipsisText(c, r.model.label, .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.text }, room);
+        kit.ellipsisText(c, r.model.label, .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = if (hot or selected) k.text else k.text.alpha(0.9) }, room);
     }
     if (selected) icons.icon(c, .check, 12, k.muted, 12);
     const starred = p.favorite(r.harness, r.model.id);

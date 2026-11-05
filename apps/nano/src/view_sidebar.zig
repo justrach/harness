@@ -105,9 +105,10 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
         icons.icon(c, .@"alt-arrow-down", 14, k.muted.alpha(0.6), 0);
     }
-    // The magnifier, accent while the search is open (`render_sidebar_search_trigger`).
+    // The magnifier, muted, on a wash while the search is open
+    // (`render_sidebar_search_trigger`).
     const searching = a.view.search.open;
-    if (kit.iconButton(c, k, .magnifer, .{ .size = 29, .radius = 8, .icon = 16, .color = if (searching) k.accent else k.muted, .on = searching }))
+    if (kit.iconButton(c, k, .magnifer, .{ .size = 29, .radius = 8, .icon = 16, .color = k.muted, .on = searching }))
         @import("view_sidebar_search.zig").toggle(a);
     const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
     defer more.end();
