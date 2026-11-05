@@ -3,6 +3,9 @@
 
 #![cfg(unix)]
 
+#[path = "acp/command_edges.rs"]
+mod command_edges;
+
 use std::path::PathBuf;
 use std::time::Duration;
 

@@ -3034,7 +3034,8 @@ fn prompt_turn(
         let (text, room) = harness_proto::room_delivery::lift(&text);
         let (text, command) = if harness == HarnessId::Graff {
             let (text, selected) = harness_proto::invocation::graff_command_prompt(&text);
-            (text, Some(selected))
+            // Room deliveries are advisory, never the user's completion acceptance.
+            (text, Some(selected && room.is_none()))
         } else {
             (text, None)
         };

@@ -260,21 +260,27 @@ fn resolved_harness_prompt(text: &str, harness: crate::HarnessId) -> String {
 pub fn graff_command_prompt(text: &str) -> (String, bool) {
     let selected = invocation_links(text)
         .into_iter()
-        .any(|(range, invocation)| {
-            text[..range.start]
+        .find_map(|(range, invocation)| {
+            if !text[..range.start]
                 .trim_matches([' ', '\t', '\r', '\n'])
                 .is_empty()
-                && match invocation {
-                    Invocation::Command { .. } => true,
-                    Invocation::Skill {
-                        command: Some(command),
-                        ..
-                    } => command.harness == crate::HarnessId::Graff,
-                    _ => false,
-                }
+            {
+                return None;
+            }
+            match invocation {
+                Invocation::Command { name } => Some(name),
+                Invocation::Skill {
+                    command: Some(command),
+                    ..
+                } if command.harness == crate::HarnessId::Graff => Some(command.name),
+                _ => None,
+            }
         });
     let prompt = resolved_harness_prompt(text, crate::HarnessId::Graff);
-    let selected = selected && leading_command(&prompt).is_some();
+    // Adjacent ordinary text must not turn a selected /model into /models.
+    let selected = selected
+        .as_deref()
+        .is_some_and(|selected| leading_command(&prompt).is_some_and(|(name, _)| name == selected));
     (prompt, selected)
 }
 
@@ -344,6 +350,78 @@ mod tests {
             harness_prompt("/goal is ordinary prose", crate::HarnessId::Graff),
             "/goal is ordinary prose"
         );
+    }
+
+    #[test]
+    fn graff_command_selection_cannot_be_retargeted_by_adjacent_text() {
+        for (selected, name) in [
+            (
+                Invocation::Command {
+                    name: "model".into(),
+                }
+                .link(),
+                "model",
+            ),
+            (
+                Invocation::Skill {
+                    name: "inspect".into(),
+                    path: "harness-skill:inspect".into(),
+                    command: Some(SkillCommand {
+                        name: "review".into(),
+                        harness: crate::HarnessId::Graff,
+                    }),
+                }
+                .link(),
+                "review",
+            ),
+        ] {
+            for suffix in ["s", ":other", "/other", "-other", "é"] {
+                let (prompt, command) =
+                    graff_command_prompt(&format!("{selected}{suffix} argument"));
+                assert_eq!(prompt, format!("/{name}{suffix} argument"));
+                assert!(
+                    !command,
+                    "adjacent text changed the selected command: {suffix}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graff_command_intent_covers_whitespace_markdown_and_utf8_boundaries() {
+        let selected = Invocation::Command {
+            name: "help".into(),
+        }
+        .link();
+        for prefix in ["", " ", "   ", "\n", "\r\n", " \t\n", "\n  "] {
+            let raw = format!("{prefix}{selected} explain λ 🦀");
+            assert_eq!(
+                graff_command_prompt(&raw),
+                (format!("{prefix}/help explain λ 🦀"), true),
+                "{raw:?}"
+            );
+        }
+        for prefix in [
+            "    ", "\t", "\r\n    ", "\u{a0}", "\u{2003}", "\u{200b}", "text ", "> ", "- ", "1. ",
+            "\\",
+        ] {
+            let raw = format!("{prefix}{selected}");
+            assert!(!graff_command_prompt(&raw).1, "{raw:?}");
+        }
+        for raw in [
+            format!("`{selected}`"),
+            format!("``{selected}``"),
+            format!("```text\n{selected}\n```"),
+            format!("~~~\n{selected}\n~~~"),
+            format!("<!-- {selected} -->"),
+            format!("![{selected}](image.png)"),
+            "[/help](harness-invoke:bad)".into(),
+            "[/help](https://example.invalid/help)".into(),
+            "/help\u{a0}is a literal mention".into(),
+            "/绝对路径/文件".into(),
+        ] {
+            assert_eq!(graff_command_prompt(&raw), (raw.clone(), false), "{raw:?}");
+        }
     }
 
     #[test]
