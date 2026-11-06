@@ -10,6 +10,8 @@ const SLOT_MIN_WIDTH: f32 = 72.0;
 /// Below this a slot can't hold its + and still name its computer, so the +
 /// goes. The strip's own new-tab button stays, and focusing the slot aims it.
 pub(super) const SLOT_ROOM_FOR_ADD: f32 = 112.0;
+/// The ✕ needs a little more. Narrower than this, the slot's menu closes it.
+pub(super) const SLOT_ROOM_FOR_CLOSE: f32 = 136.0;
 const NEW_TAB_ROOM: f32 = 24.0 + GUTTER;
 /// What a single panel's tab row sets aside for the name of its computer.
 pub(super) const PANEL_DEVICE_ROOM: f32 = 120.0;
@@ -235,11 +237,20 @@ impl Shell {
                 .as_ref()
                 .and_then(|columns| columns.get(ix))
                 .copied();
-            let shows_add = width.unwrap_or(shared_room) >= SLOT_ROOM_FOR_ADD;
-            strip =
-                strip.child(self.render_strip_slot(
-                    panel, ix, focused, width, shows_add, &workspace, window, cx,
-                ));
+            let room = width.unwrap_or(shared_room);
+            let shows_add = room >= SLOT_ROOM_FOR_ADD;
+            let shows_close = room >= SLOT_ROOM_FOR_CLOSE;
+            strip = strip.child(self.render_strip_slot(
+                panel,
+                ix,
+                focused,
+                width,
+                shows_add,
+                shows_close,
+                &workspace,
+                window,
+                cx,
+            ));
         }
         strip
             .child(
@@ -335,6 +346,7 @@ impl Shell {
         focused: bool,
         width: Option<f32>,
         shows_add: bool,
+        shows_close: bool,
         workspace: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -357,6 +369,8 @@ impl Shell {
             .or_insert_with(|| cx.focus_handle().tab_stop(true))
             .clone();
         let middle_close = selected.clone();
+        let button_close = selected.clone();
+        let key_close = selected.clone();
         let drag = selected.clone().map(|tab| PanelTabDrag {
             workspace: workspace.into(),
             panel: id,
@@ -566,6 +580,60 @@ impl Shell {
                     .size(px(11.0))
                     .text_color(theme.text_muted),
             );
+        let close_focus = self
+            .workspace_panels
+            .controls
+            .entry(format!("instrument-slot-close-{id}"))
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
+        let close_button = div()
+            .id(("instrument-slot-close", id))
+            .debug_selector(move || format!("instrument-slot-close-{id}"))
+            .track_focus(&close_focus)
+            .flex_none()
+            .size(px(18.0))
+            .rounded(px(4.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(if selected.is_some() {
+                "Close tab"
+            } else {
+                "Close panel"
+            })
+            .opacity(0.0)
+            .group_hover(group.clone(), |style| style.opacity(1.0))
+            .hover(|style| style.bg(theme.ink(0.10)))
+            .focus_visible(|style| style.opacity(1.0).bg(theme.ink(0.10)))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                match button_close.clone() {
+                    Some(tab) => this.close_workspace_tab_by_button(id, tab, window, cx),
+                    None => this.close_workspace_panel(id, window, cx),
+                }
+            }))
+            .on_key_down(
+                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        match key_close.clone() {
+                            Some(tab) => this.close_workspace_tab_by_button(id, tab, window, cx),
+                            None => this.close_workspace_panel(id, window, cx),
+                        }
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(11.0))
+                    .text_color(theme.text_muted),
+            );
         // The menu hangs under the button when the keyboard opens it.
         let measured_menu =
             std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
@@ -754,7 +822,8 @@ impl Shell {
                     ),
             )
             .when(shows_add, |slot| slot.child(add_button))
-            .child(menu_button);
+            .child(menu_button)
+            .when(shows_close, |slot| slot.child(close_button));
         #[cfg(feature = "browser-fixture")]
         let slot = {
             use gpui_base::ElementExt as _;
