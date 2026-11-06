@@ -161,19 +161,29 @@ impl Shell {
             .iter()
             .position(|row| row.1 == icons::CHECK)
             .unwrap_or(0);
-        rows.push((
-            "Don't work in a project".into(),
-            icons::CLOSE,
-            MenuAction::SetFolder(None),
-        ));
-        rows.push(("New project…".into(), icons::PLUS, MenuAction::NewFolder));
+        let items = rows.clone();
+        let actions: Vec<(SharedString, &'static str, MenuAction)> = vec![
+            (
+                "Don't work in a project".into(),
+                icons::CLOSE,
+                MenuAction::SetFolder(None),
+            ),
+            ("New project…".into(), icons::PLUS, MenuAction::NewFolder),
+        ];
+        rows.extend(actions.iter().cloned());
         let return_focus = self
             .workspace_panels
             .controls
             .get(&format!("instrument-slot-folder-{id}"))
             .cloned();
+        let input = cx.new(|cx| {
+            ComposerInput::with_context("Search folders…", "PaletteSearch", cx)
+                .with_accessibility_role(gpui::Role::SearchInput)
+        });
+        self.watch_menu_search(&input, window, cx);
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        // The list is long enough that the first thing to do is type.
+        window.focus(&input.focus_handle(cx), cx);
         self.workspace_panels.menu_scroll.scroll_to_item(selected);
         self.workspace_panels.menu = Some(PanelMenu {
             panel: id,
@@ -184,6 +194,11 @@ impl Shell {
             selected,
             focus,
             return_focus,
+            search: Some(MenuSearch {
+                input,
+                items,
+                actions,
+            }),
         });
         cx.notify();
     }
@@ -389,6 +404,14 @@ impl Shell {
                 std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
             let mouse_bounds = measured.clone();
             let key_bounds = measured.clone();
+            // ⌘D's menu waits for the panel to finish sliding in, since it
+            // hangs under this button and the button is moving until then.
+            let open_now = self.workspace_panels.pending_folder_menu == Some(id)
+                && self.workspace_panels.layout_transition.is_none();
+            if open_now {
+                self.workspace_panels.pending_folder_menu = None;
+            }
+            let shell = cx.weak_entity();
             div()
                 .id(("instrument-slot-folder", id))
                 .debug_selector(move || format!("instrument-slot-folder-{id}"))
@@ -438,9 +461,27 @@ impl Shell {
                         .text_color(theme.text_muted),
                 )
                 .child(
-                    gpui::canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
-                        .absolute()
-                        .inset_0(),
+                    gpui::canvas(
+                        move |bounds, window, cx| {
+                            measured.set(bounds);
+                            if open_now {
+                                let shell = shell.clone();
+                                window.defer(cx, move |window, cx| {
+                                    let _ = shell.update(cx, |this, cx| {
+                                        this.open_new_split_folder_menu(
+                                            id,
+                                            bounds.bottom_left(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
                 )
                 .into_any_element()
         });
@@ -895,6 +936,7 @@ impl Shell {
             },
             focus,
             return_focus: None,
+            search: None,
         });
         cx.notify();
     }

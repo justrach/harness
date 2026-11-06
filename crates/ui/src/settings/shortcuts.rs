@@ -707,7 +707,7 @@ fn description(id: ShortcutId) -> &'static str {
             "Split the focused terminal to the right, like Ghostty ⌘D."
         }
         ShortcutId::SplitTerminalDown => "Split the focused terminal downward.",
-        ShortcutId::NewSession => "Open a blank tab in the focused panel.",
+        ShortcutId::NewSession => "Start a new chat in the focused panel.",
         ShortcutId::NewProject => "Open the new project dialog.",
         ShortcutId::OpenProjectPicker => {
             "Open the project picker to switch the project new sessions run in."

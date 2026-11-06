@@ -148,17 +148,15 @@ fn top_tab_survives_split_and_tab_closure(cx: &mut TestAppContext) {
     assert_eq!(header.size.height, px(NAV_ITEM_HEIGHT));
     assert!(cx.debug_bounds("chat-tab-group-0").is_none());
     assert!(cx.debug_bounds("chat-pane-card-0").is_none());
-    // Cmd+W removes the extra Cmd+D panel's tab, then the emptied panel; the
-    // header must not disappear at either step.
-    for panels in [2, 1] {
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                assert!(shell.workspace_close_focused(window, cx));
-                assert_eq!(shell.panel_layout(cx).unwrap().panels.len(), panels);
-            });
+    // Cmd+W removes the extra Cmd+D panel with its only tab; the header must
+    // not disappear with it.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            assert!(shell.workspace_close_focused(window, cx));
+            assert_eq!(shell.panel_layout(cx).unwrap().panels.len(), 1);
         });
-        assert_single_header(&shell, cx, "A");
-    }
+    });
+    assert_single_header(&shell, cx, "A");
     cx.update(|_, cx| {
         shell.update(cx, |shell, cx| shell.open_project_tab(Some("b".into()), cx));
     });

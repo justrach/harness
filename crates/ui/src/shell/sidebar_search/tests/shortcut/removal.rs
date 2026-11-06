@@ -226,7 +226,7 @@ fn sidebar_control_removal_retained_new_tab_actions_preserve_split_and_draft(
                             .iter()
                             .find(|panel| panel.id == original_panel)
                             .unwrap();
-                        assert!(matches!(panel.selected(), Some(PanelTab::New(_))));
+                        assert!(matches!(panel.selected(), Some(PanelTab::Draft(_))));
                         assert!(panel.tabs.contains(&PanelTab::Chat("current".into())));
                     } else {
                         assert_eq!(shell.chat_tabs.len(), 2, "New session opens one workspace");

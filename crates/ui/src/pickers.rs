@@ -3559,6 +3559,10 @@ impl Pickers {
                         ),
                 )
             })
+            .debug_selector({
+                let id = id.clone();
+                move || id.to_string()
+            })
             .id(id)
             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                 if this.project_menu_open() && this.active != index {
@@ -4784,8 +4788,56 @@ impl Pickers {
         )
     }
 
-    /// The composer footer: checkout/ref for projects, and the device target
-    /// for a draft outside a project. Project identity stays in the sidebar.
+    /// A new chat's folder on the chat box, with the searchable list behind it.
+    /// A chat that has started can't move, and a plain chat has no folder.
+    fn render_footer_project_chip(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.state.read(cx).selected_chat.is_some() || self.chat_mode(cx) {
+            return None;
+        }
+        let mut overlay = (self.mounted_kind() == Some(PickerKind::Space)).then(|| {
+            let content = self.render_space_popover(cx);
+            (PickerKind::Space, self.popover_frame(280.0, content, cx))
+        });
+        let closing = (self.open.closing_since(), self.menu_geometry().below);
+        let label: SharedString = self
+            .state
+            .read(cx)
+            .selected_space_row()
+            .map_or_else(
+                || "No project".to_string(),
+                |s| s.display_name().to_string(),
+            )
+            .into();
+        let chip = self
+            .footer_chip(
+                PickerKind::Space,
+                "picker-project",
+                crate::icons::FOLDER,
+                label.clone(),
+                theme,
+                cx,
+            )
+            .debug_selector(|| "draft-project-target".into())
+            .role(gpui::Role::Button)
+            .aria_label(format!("Choose folder: {label}"));
+        Some(
+            attach_overlay(
+                chip,
+                &mut overlay,
+                PickerKind::Space,
+                "project-popover",
+                closing,
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// The composer footer: the new chat's folder, its checkout and ref when
+    /// that folder has git, and the device target for a draft outside a project.
     pub fn render_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         // A selected chat whose workspace row hasn't synced yet (the moment
@@ -4901,6 +4953,7 @@ impl Pickers {
             let chat_mode = self.chat_mode(cx);
             self.render_chat_mode_switch(chat_mode, &theme, cx)
         });
+        let project_chip = self.render_footer_project_chip(&theme, cx);
 
         if space.is_none() {
             // A project choice also chooses its host. Without a project, keep
@@ -4950,6 +5003,7 @@ impl Pickers {
                         "device-popover",
                         closing,
                     ))
+                    .children(project_chip)
                     .into_any_element(),
             );
         }
@@ -4957,7 +5011,15 @@ impl Pickers {
         // New-session draft: editable checkout and ref, matching the session row.
         let git = space.as_ref().is_some_and(|s| s.git_detected);
         if !git {
-            return mode_switch.map(|switch| row().child(switch).into_any_element());
+            if mode_switch.is_none() && project_chip.is_none() {
+                return None;
+            }
+            return Some(
+                row()
+                    .children(mode_switch)
+                    .children(project_chip)
+                    .into_any_element(),
+            );
         }
         // Refs feed the draft labels — eager + idempotent.
         self.ensure_refs(false, cx);
@@ -4971,7 +5033,7 @@ impl Pickers {
                 let content = self.render_checkout_popover(cx);
                 Some((PickerKind::Checkout, self.popover_frame(224.0, content, cx)))
             }
-            // Space/Device popovers mount in the floating row above the pill.
+            // The folder's list mounts on its own chip, above.
             _ => None,
         };
 
@@ -5025,6 +5087,7 @@ impl Pickers {
         Some(
             row()
                 .children(mode_switch)
+                .children(project_chip)
                 .child(left)
                 .child(right)
                 .into_any_element(),

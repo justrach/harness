@@ -71,7 +71,7 @@ fn new_tab_shortcut_stays_in_the_focused_panel_and_session(cx: &mut gpui::TestAp
                         .unwrap();
                     assert_eq!(panel.tabs.len(), tab_count + ix + 1);
                     let selected = panel.selected().cloned().unwrap();
-                    assert!(matches!(selected, workspace_panels::PanelTab::New(_)));
+                    assert!(matches!(selected, workspace_panels::PanelTab::Draft(_)));
                     assert_ne!(
                         previous.as_ref(),
                         Some(&selected),
