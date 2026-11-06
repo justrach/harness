@@ -13791,8 +13791,7 @@ impl Render for Shell {
                 this.focus_next_attention(window, cx)
             }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
-                this.workspace_new_tab(cx);
-                this.focus_workspace_new_tab(window, cx);
+                this.workspace_new_session(window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewConversation, _, cx| this.open_new_session(cx)))
             .on_action(

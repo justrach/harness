@@ -351,6 +351,192 @@ fn folder_of(shell: &Entity<Shell>, panel: u64, cx: &mut gpui::VisualTestContext
 }
 
 /// The ask: split, start a new chat, change its folder at the top.
+fn focused_panel(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> u64 {
+    shell.read_with(cx, |shell, cx| shell.panel_layout(cx).unwrap().focused)
+}
+
+/// ⌘T used to open the choices page, which is a step short of a session.
+#[gpui::test]
+fn cmd_t_starts_a_chat_ready_to_type_in(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let before = shell.read_with(cx, |shell, cx| {
+        shell.panel_layout(cx).map_or(0, |layout| {
+            layout
+                .panel(layout.focused)
+                .map_or(0, |panel| panel.tabs.len())
+        })
+    });
+    cx.dispatch_action(crate::shell::NewTab);
+    settle(cx);
+    let panel = focused_panel(&shell, cx);
+    shell.read_with(cx, |shell, cx| {
+        let tabs = shell.panel_layout(cx).unwrap().panel(panel).unwrap();
+        assert_eq!(tabs.tabs.len(), before + 1, "exactly one new tab");
+        assert!(
+            matches!(tabs.selected(), Some(PanelTab::Draft(_))),
+            "a chat, not the choices page: {:?}",
+            tabs.selected()
+        );
+        assert!(shell.state.read(cx).selected_chat.is_none());
+    });
+    assert!(at(cx, format!("panel-new-tab-choices-{panel}")).is_none());
+    cx.update(|window, cx| {
+        let composer = shell.read(cx).composer.focus_handle(cx);
+        assert!(composer.contains_focused(window, cx), "the cursor is in it");
+    });
+}
+
+/// A + still offers everything else a tab can be.
+#[gpui::test]
+fn the_plus_button_keeps_the_choices_page(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (_, second, _) = three_panels(&shell, cx);
+    shell.update(cx, |shell, cx| shell.workspace_new_tab_in_panel(second, cx));
+    settle(cx);
+    assert!(at(cx, format!("panel-new-tab-choices-{second}")).is_some());
+}
+
+/// ⌘D, then ⌘W, with nothing in between: back where you were in one press.
+#[gpui::test]
+fn one_cmd_w_closes_the_panel_cmd_d_made(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    settle(cx);
+    let original = focused_panel(&shell, cx);
+    let panels = |shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext| {
+        shell.read_with(cx, |shell, cx| shell.panel_layout(cx).unwrap().panels.len())
+    };
+    let before = panels(&shell, cx);
+    cx.dispatch_action(crate::shell::SplitChatRight);
+    settle(cx);
+    assert_eq!(panels(&shell, cx), before + 1);
+    assert_ne!(focused_panel(&shell, cx), original);
+    shell.update_in(cx, |shell, window, cx| {
+        assert!(shell.workspace_close_focused(window, cx));
+    });
+    settle(cx);
+    assert_eq!(
+        panels(&shell, cx),
+        before,
+        "the panel went with its only tab"
+    );
+    assert_eq!(focused_panel(&shell, cx), original);
+    shell.read_with(cx, |shell, cx| {
+        assert!(
+            shell.workspace_panels.menu.is_none(),
+            "and nothing of it is left on screen"
+        );
+        assert_eq!(
+            shell.state.read(cx).selected_chat.as_deref(),
+            Some("chat-3"),
+            "the chat it was split from is selected again"
+        );
+    });
+}
+
+#[gpui::test]
+fn the_last_panel_in_a_window_survives_its_last_tab(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    settle(cx);
+    let panel = focused_panel(&shell, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        let tabs = shell
+            .panel_layout(cx)
+            .unwrap()
+            .panel(panel)
+            .unwrap()
+            .tabs
+            .clone();
+        for tab in tabs {
+            shell.close_workspace_tab(panel, tab, window, cx);
+        }
+    });
+    settle(cx);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.panel_layout(cx).unwrap().panels.len(), 1);
+    });
+}
+
+fn split_with_projects(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> u64 {
+    add_projects(shell, cx);
+    settle(cx);
+    cx.dispatch_action(crate::shell::SplitChatRight);
+    settle(cx);
+    focused_panel(shell, cx)
+}
+
+/// The folder was only a small button in the bar, easily missed, so a split
+/// came up working in the previous chat's folder.
+#[gpui::test]
+fn cmd_d_asks_which_folder_the_new_chat_is_in(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let panel = split_with_projects(&shell, cx);
+    let menu_rows = shell.read_with(cx, |shell, _| {
+        let menu = shell
+            .workspace_panels
+            .menu
+            .as_ref()
+            .expect("the menu opened");
+        assert_eq!(menu.panel, panel);
+        menu.rows
+            .iter()
+            .filter(|(_, _, action)| matches!(action, MenuAction::SetFolder(Some(_))))
+            .count()
+    });
+    assert!(menu_rows > 0);
+    let button = at(cx, format!("instrument-slot-folder-{panel}")).expect("its button");
+    shell.read_with(cx, |shell, _| {
+        let position = shell.workspace_panels.menu.as_ref().unwrap().position;
+        assert_eq!(position, button.bottom_left(), "it hangs under that button");
+    });
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    shell.read_with(cx, |shell, _| {
+        assert!(shell.workspace_panels.menu.is_none())
+    });
+    cx.update(|window, cx| {
+        let composer = shell.read(cx).composer.focus_handle(cx);
+        assert!(composer.contains_focused(window, cx), "ready to type there");
+    });
+}
+
+#[gpui::test]
+fn dismissing_cmd_d_s_menu_leaves_you_typing_in_the_new_chat(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    split_with_projects(&shell, cx);
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    shell.read_with(cx, |shell, _| {
+        assert!(shell.workspace_panels.menu.is_none())
+    });
+    cx.update(|window, cx| {
+        let composer = shell.read(cx).composer.focus_handle(cx);
+        assert!(composer.contains_focused(window, cx));
+    });
+}
+
+/// With no projects there is nothing to ask.
+#[gpui::test]
+fn cmd_d_without_projects_goes_straight_to_the_chat(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    settle(cx);
+    cx.dispatch_action(crate::shell::SplitChatRight);
+    settle(cx);
+    shell.read_with(cx, |shell, _| {
+        assert!(shell.workspace_panels.menu.is_none())
+    });
+    cx.update(|window, cx| {
+        let composer = shell.read(cx).composer.focus_handle(cx);
+        assert!(composer.contains_focused(window, cx));
+    });
+}
+
 #[gpui::test]
 fn a_new_chats_slot_changes_its_folder(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

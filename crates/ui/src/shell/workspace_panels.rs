@@ -919,6 +919,8 @@ pub(super) struct PanelWorkspaces {
     fixture_slot_bounds:
         std::rc::Rc<std::cell::RefCell<HashMap<(String, u64), gpui::Bounds<Pixels>>>>,
     pub(super) device_menu: Option<device_picker::PanelDeviceMenu>,
+    /// A panel ⌘D just made, whose folder menu opens once its slot has settled.
+    pub(super) pending_folder_menu: Option<u64>,
     device_choices: HashMap<(String, u64), device_picker::PanelDeviceContext>,
     pub(super) pending_tools: HashMap<String, Vec<(u64, usize, crate::settings::SavedPanelTab)>>,
     target: Option<u64>,
@@ -1584,6 +1586,15 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌘T: a new chat, ready to type in. The choices page stays behind the +
+    /// buttons, and is where this lands if the panel's computer is unavailable.
+    pub(super) fn workspace_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_new_tab(cx);
+        self.focus_workspace_new_tab(window, cx);
+        let panel = self.panel_layout_mut(cx).focused;
+        self.activate_workspace_empty(panel, 0, window, cx);
+    }
+
     pub(super) fn workspace_new_tab_in_panel(&mut self, panel: u64, cx: &mut Context<Self>) {
         self.workspace_panels.target = Some(panel);
         self.workspace_new_tab(cx);
@@ -2063,10 +2074,58 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn workspace_split(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
+    /// ⌘D: split, then ask where the new chat should work.
+    pub(super) fn workspace_split_choosing_folder(
+        &mut self,
+        axis: SplitAxis,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = self.workspace_split(axis, cx) {
+            self.workspace_panels.pending_folder_menu = Some(panel);
+        }
+    }
+
+    /// The folder menu a split opens by itself. Dismissing it means "here is
+    /// fine", so it hands the keyboard to the new chat rather than the button.
+    pub(super) fn open_new_split_folder_menu(
+        &mut self,
+        panel: u64,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let still_there = self
+            .panel_layout(cx)
+            .is_some_and(|layout| layout.focused == panel);
+        if !still_there || self.workspace_panels.menu.is_some() {
+            return;
+        }
+        self.open_strip_folder_menu(panel, position, window, cx);
+        let composer = self.composer.focus_handle(cx);
+        let Some(menu) = self.workspace_panels.menu.as_mut() else {
+            return;
+        };
+        let has_folders = menu
+            .rows
+            .iter()
+            .any(|(_, _, action)| matches!(action, MenuAction::SetFolder(Some(_))));
+        if has_folders {
+            menu.return_focus = Some(composer);
+        } else {
+            // Nothing to choose between.
+            self.workspace_panels.menu = None;
+            window.focus(&composer, cx);
+        }
+    }
+
+    pub(super) fn workspace_split(
+        &mut self,
+        axis: SplitAxis,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
         self.sync_panel_workspace(cx);
         if !self.panel_layout_mut(cx).can_add_panel(axis) {
-            return;
+            return None;
         }
         self.park_workspace_draft(cx);
         let layout = self.panel_layout_mut(cx);
@@ -2076,6 +2135,7 @@ impl Shell {
         self.start_panel_insertion(id, beside, cx);
         self.workspace_panels.target = Some(id);
         self.workspace_new_chat(cx);
+        Some(id)
     }
 
     pub(crate) fn workspace_close_focused(
@@ -2558,11 +2618,56 @@ impl Shell {
             }
             self.chat_split_selected = self.state.read(cx).selected_chat.clone();
         }
+        self.collapse_emptied_panel(panel, window, cx);
         if recoverable {
             self.persist_chat_tabs(cx);
             settings::flush(cx);
         }
         cx.notify();
+    }
+
+    /// A split panel whose last tab just closed goes with it, or ⌘W would need
+    /// a second press to get past an empty panel. The one panel left in a
+    /// window stays, with its choices page.
+    fn collapse_emptied_panel(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = self.panel_layout_mut(cx);
+        let Some(index) = layout
+            .panels
+            .iter()
+            .position(|p| p.id == panel && p.tabs.is_empty())
+            .filter(|_| layout.panels.len() > 1)
+        else {
+            return;
+        };
+        let was_focused = layout.focused == panel;
+        layout.panels.remove(index);
+        if layout.expanded == Some(panel) {
+            layout.expanded = None;
+        }
+        layout.equalize();
+        if self
+            .workspace_panels
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.panel == panel)
+        {
+            self.workspace_panels.menu = None;
+        }
+        if self.workspace_panels.pending_folder_menu == Some(panel) {
+            self.workspace_panels.pending_folder_menu = None;
+        }
+        if !was_focused {
+            return;
+        }
+        // Back to the panel this one was split from. Its draft, if any, is
+        // already parked, so this activates instead of parking over it.
+        let layout = self.panel_layout_mut(cx);
+        let neighbor = layout.panels[index.saturating_sub(1)].id;
+        layout.focused = neighbor;
+        let next = layout.panel(neighbor).and_then(|p| p.selected()).cloned();
+        if let Some(next) = next {
+            self.activate_workspace_tab(neighbor, next, window, cx);
+        }
     }
 
     pub(super) fn close_workspace_panel(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -2631,9 +2736,9 @@ impl Shell {
                     menu.panel
                 ))
             };
-            if let Some(focus) =
+            if let Some(focus) = menu.return_focus.as_ref().or_else(|| {
                 control.and_then(|control| self.workspace_panels.controls.get(&control))
-            {
+            }) {
                 window.focus(focus, cx);
             }
             self.workspace_panels.target = None;
@@ -6637,7 +6742,8 @@ mod interaction_tests {
             assert!(focus.is_focused(window));
             assert!(shell.workspace_close_focused(window, cx));
             let layout = shell.panel_layout(cx).unwrap();
-            assert!(layout.panel(0).unwrap().tabs.is_empty());
+            assert!(layout.panel(0).is_none(), "it went with its last tab");
+            assert_eq!(layout.focused, 1);
             assert_eq!(layout.panel(1).unwrap().tabs, [PanelTab::Terminal(2)]);
             window.remove_window();
         });

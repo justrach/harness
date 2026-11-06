@@ -166,7 +166,7 @@ fn before_rows() -> Vec<CallRow> {
 }
 
 fn access_map() -> MapState {
-    tool_access::from_turn(
+    tool_access::from_chat(
         "graff",
         "codegraff/auto",
         "Fix session expiry",

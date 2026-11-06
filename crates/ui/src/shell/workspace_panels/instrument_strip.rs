@@ -389,6 +389,14 @@ impl Shell {
                 std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<Pixels>::default()));
             let mouse_bounds = measured.clone();
             let key_bounds = measured.clone();
+            // ⌘D's menu waits for the panel to finish sliding in, since it
+            // hangs under this button and the button is moving until then.
+            let open_now = self.workspace_panels.pending_folder_menu == Some(id)
+                && self.workspace_panels.layout_transition.is_none();
+            if open_now {
+                self.workspace_panels.pending_folder_menu = None;
+            }
+            let shell = cx.weak_entity();
             div()
                 .id(("instrument-slot-folder", id))
                 .debug_selector(move || format!("instrument-slot-folder-{id}"))
@@ -438,9 +446,27 @@ impl Shell {
                         .text_color(theme.text_muted),
                 )
                 .child(
-                    gpui::canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
-                        .absolute()
-                        .inset_0(),
+                    gpui::canvas(
+                        move |bounds, window, cx| {
+                            measured.set(bounds);
+                            if open_now {
+                                let shell = shell.clone();
+                                window.defer(cx, move |window, cx| {
+                                    let _ = shell.update(cx, |this, cx| {
+                                        this.open_new_split_folder_menu(
+                                            id,
+                                            bounds.bottom_left(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
                 )
                 .into_any_element()
         });
