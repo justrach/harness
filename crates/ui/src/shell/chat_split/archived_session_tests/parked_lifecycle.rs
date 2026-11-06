@@ -36,9 +36,16 @@ fn closing_another_tab_cannot_restore_a_deleted_parked_selection(cx: &mut gpui::
         delete_chats(window, &["current"], cx);
         window
             .update(cx, |shell, window, cx| {
+                let survivor = shell.chat_tabs[0].id.clone();
                 assert!(shell.close_chat_tab(window, cx));
                 assert!(shell.state.read(cx).selected_chat.is_none());
-                assert!(shell.chat_tabs.is_empty());
+                assert_eq!(
+                    shell.chat_tabs.len(),
+                    1,
+                    "the surviving workspace keeps its identity"
+                );
+                assert_eq!(shell.chat_tabs[0].id, survivor);
+                assert!(shell.chat_tabs[0].selected.is_none());
                 if axis.is_some() {
                     assert_eq!(
                         shell.chat_split.as_ref().unwrap().panes[1].as_deref(),
@@ -296,6 +303,59 @@ fn parked_window(
 }
 
 fn delete_chats(window: gpui::WindowHandle<Shell>, ids: &[&str], cx: &mut gpui::TestAppContext) {
+    use futures::FutureExt;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _guard = runtime.enter();
+    let (out, mut requests) = tokio::sync::mpsc::channel(128);
+    let (replies, inbound) = tokio::sync::mpsc::channel(128);
+    let engine =
+        crate::state::EngineHandle::from_test_client(harness_rpc::RpcClient::new(out, inbound));
+    window
+        .update(cx, |shell, _, cx| {
+            shell
+                .state
+                .update(cx, |state, _| state.set_test_engine(engine));
+        })
+        .unwrap();
+
+    // An absent row can be an offline device or a partial catalogue. Exercise
+    // confirmed permanent deletion before publishing its resulting list.
+    for id in ids {
+        let task = window
+            .update(cx, |shell, _, cx| {
+                shell.delete_history_chat((*id).into(), cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let request = std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request).unwrap())
+            .find(|request| request["method"] == methods::MUTATE)
+            .expect("the confirmed-deletion fixture must receive deleteChat");
+        assert_eq!(
+            request["params"],
+            serde_json::json!({"op": "deleteChat", "chatId": id})
+        );
+        runtime.block_on(async {
+            replies
+                .send(serde_json::json!({"id": request["id"], "ok": {"ok": true}}).to_string())
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        cx.run_until_parked();
+        task.now_or_never()
+            .expect("deletion must complete after its reply")
+            .unwrap();
+    }
     window
         .update(cx, |shell, _, cx| {
             shell.state.update(cx, |state, cx| {

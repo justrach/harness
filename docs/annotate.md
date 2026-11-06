@@ -4,8 +4,8 @@ Point at parts of an image before sending it to the agent: draw boxes, number th
 
 ## Flow
 
-1. Click an image in the chat or a staged thumbnail in the composer. The preview opens with an **Annotate** pill in the bottom-right corner.
-2. Annotate shows the toolbar at the bottom center: Text, Rectangle (the default), four colors (red, the default, then blue, green, yellow), Undo, then Cancel and Done.
+1. Click an image in the chat or a staged thumbnail in the composer. On macOS, **Annotate** is centered beneath the image and filename.
+2. Annotate shows centered, opaque tools beneath the image: Text, Rectangle (the default), four colors (red, the default, then blue, green, yellow), Undo, then Cancel and Done. Narrow Mac windows stack the tool and action groups; the image keeps the same position when entering the editor.
 3. Drag on the image to draw a box. It gets a numbered pin, and an **Add a note…** popover opens under it (above it near the bottom edge). Enter commits the note. The x deletes the box.
 4. With the Text tool, click to place text and type it. Enter commits; an empty text mark is dropped.
 5. Click a box or its pin to select it. Backspace or Delete removes the selection, ⌘Z (Ctrl+Z) undoes, Esc commits an open note or leaves annotate mode.

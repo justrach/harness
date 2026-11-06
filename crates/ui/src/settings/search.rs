@@ -138,6 +138,11 @@ const ENTRIES: &[SettingsEntry] = &[
     ),
     entry(
         S::Appearance,
+        "Task view",
+        "sidebar workspaces sessions dashboard overview tasks",
+    ),
+    entry(
+        S::Appearance,
         "Reduce motion",
         "animation animations accessibility motion",
     ),
@@ -232,7 +237,7 @@ const ENTRIES: &[SettingsEntry] = &[
     entry(S::Appshots, "Appshots", "screenshot capture window share"),
     entry(
         S::Archived,
-        "Archive sessions when closing tabs or panes",
+        "Archive sessions when closing panes",
         "close tab pane archive automatically",
     ),
     entry(

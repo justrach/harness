@@ -32,9 +32,9 @@ use super::veil::{RowVeil, apply_veil, slice_spans};
 
 /// Gap between markdown blocks inside one message (harness mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
-/// Body text size / line height (harness: 14px / 22px).
-pub const MD_TEXT_SIZE: f32 = 14.0;
-pub const MD_LINE_HEIGHT: f32 = 22.0;
+/// Conversation body metrics, shared with the reference typography scale.
+pub const MD_TEXT_SIZE: f32 = crate::typography::CHAT_BODY_SIZE;
+pub const MD_LINE_HEIGHT: f32 = crate::typography::CHAT_BODY_LINE_HEIGHT;
 /// Default code block metrics; the rendered size comes from the theme.
 pub const CODE_TEXT_SIZE: f32 = 12.5;
 pub const CODE_LINE_HEIGHT: f32 = 18.0;
@@ -51,7 +51,7 @@ const CODE_SCROLLBAR_HIT_HEIGHT: f32 = 10.0;
 // resolved md theme. The design is frameless ("flat hairline"): 1px horizontal
 // rules under the header and between rows are the only chrome — no outer box,
 // no header fill, no corner radius (theme: headerBackground transparent,
-// radius 0). Cells use the body scale (14/22) with a uniform 12px padding;
+// radius 0). Cells use the shared body scale with a uniform 12px padding;
 // the header row is weight-700 per `table.headerWeight`.
 /// Uniform cell padding in px (harness `table.cellPadding`).
 pub const TABLE_CELL_PADDING: f32 = 12.0;
@@ -456,18 +456,7 @@ struct CodeBlockTooltip(&'static str);
 
 impl Render for CodeBlockTooltip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .px(px(8.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.surface_raised)
-            .shadow_md()
-            .text_size(px(11.0))
-            .text_color(theme.text)
-            .child(self.0)
+        crate::popover::tooltip_label(Theme::of(cx), self.0)
     }
 }
 
@@ -641,7 +630,7 @@ pub fn render_block(
             runs,
             MD_TEXT_SIZE,
             MD_LINE_HEIGHT,
-            false,
+            FontWeight::NORMAL,
             top_ix,
             ix,
             opts,
@@ -649,8 +638,8 @@ pub fn render_block(
             window,
         ),
         Block::Heading { level, runs } => {
-            let (size, line) = heading_metrics(*level);
-            text_element(runs, size, line, true, top_ix, ix, opts, theme, window)
+            let (size, line, weight) = heading_metrics(*level);
+            text_element(runs, size, line, weight, top_ix, ix, opts, theme, window)
         }
         Block::CodeBlock { language, code } => render_code_block(
             language.as_deref(),
@@ -840,15 +829,15 @@ pub fn render_block(
     }
 }
 
-/// Tight monochrome heading scale (harness: h2 ≈ 16px semibold; headings step
-/// down quickly toward body size).
-fn heading_metrics(level: u8) -> (f32, f32) {
-    match level {
-        1 => (19.0, 27.0),
-        2 => (16.0, 24.0),
-        3 => (15.0, 22.0),
-        _ => (14.0, 22.0),
-    }
+/// Dia's chat heading hierarchy inherits the body's 1.5 line-height ratio.
+fn heading_metrics(level: u8) -> (f32, f32, FontWeight) {
+    let (size, weight) = match level {
+        1 => (22.0, FontWeight::MEDIUM),
+        2 => (17.0, FontWeight::SEMIBOLD),
+        3 => (16.0, FontWeight::SEMIBOLD),
+        _ => (15.0, FontWeight::MEDIUM),
+    };
+    (size, size * 1.5, weight)
 }
 
 /// Shared per-column table geometry (port of mugen `tableColumns`).
@@ -1016,11 +1005,15 @@ fn render_table(
                         .iter()
                         .any(|run| opts.media.is_some() && run.style.image.is_some())
             }) {
-                cell = cell.child(super::math_flow::render_aligned(
+                cell = cell.child(super::math_flow::render_aligned_weighted(
                     &all[r][c],
                     MD_TEXT_SIZE,
                     MD_LINE_HEIGHT,
-                    has_header && r == 0,
+                    if has_header && r == 0 {
+                        TABLE_HEADER_WEIGHT
+                    } else {
+                        FontWeight::NORMAL
+                    },
                     table_cell_ix(ix, r, c),
                     opts,
                     theme,
@@ -1036,7 +1029,11 @@ fn render_table(
                     &all[r][c],
                     MD_TEXT_SIZE,
                     MD_LINE_HEIGHT,
-                    has_header && r == 0,
+                    if has_header && r == 0 {
+                        TABLE_HEADER_WEIGHT
+                    } else {
+                        FontWeight::NORMAL
+                    },
                     top_ix,
                     table_cell_ix(ix, r, c),
                     opts,
@@ -1109,7 +1106,11 @@ pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> Fl
 
 /// [`flatten_runs`] with an explicit base weight (table headers are 700 per
 /// harness's `table.headerWeight`; strong runs never drop below semibold).
-fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
+pub(super) fn flatten_runs_weighted(
+    runs: &[InlineRun],
+    theme: &Theme,
+    base_weight: FontWeight,
+) -> FlatText {
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -2073,7 +2074,7 @@ fn text_element(
     runs: &[InlineRun],
     size: f32,
     line_height: f32,
-    bold_default: bool,
+    weight: FontWeight,
     top_ix: usize,
     ix: usize,
     opts: &RenderOptions,
@@ -2084,7 +2085,7 @@ fn text_element(
         runs,
         size,
         line_height,
-        bold_default,
+        weight,
         top_ix,
         ix,
         opts,
@@ -2099,7 +2100,7 @@ fn text_element_aligned(
     runs: &[InlineRun],
     size: f32,
     line_height: f32,
-    bold_default: bool,
+    weight: FontWeight,
     top_ix: usize,
     ix: usize,
     opts: &RenderOptions,
@@ -2118,7 +2119,7 @@ fn text_element_aligned(
                             &runs[start..index],
                             size,
                             line_height,
-                            bold_default,
+                            weight,
                             top_ix,
                             ix.wrapping_mul(4099).wrapping_add(start + 1000),
                             opts,
@@ -2140,7 +2141,7 @@ fn text_element_aligned(
                     &runs[start..],
                     size,
                     line_height,
-                    bold_default,
+                    weight,
                     top_ix,
                     ix.wrapping_mul(4099).wrapping_add(start + 1000),
                     opts,
@@ -2158,11 +2159,11 @@ fn text_element_aligned(
         }
     }
     if runs.iter().any(|run| run.style.math.is_some()) {
-        return super::math_flow::render_aligned(
+        return super::math_flow::render_aligned_weighted(
             runs,
             size,
             line_height,
-            bold_default,
+            weight,
             ix,
             opts,
             theme,
@@ -2187,7 +2188,7 @@ fn text_element_aligned(
                     }],
                     size,
                     line_height,
-                    bold_default,
+                    weight,
                     top_ix,
                     ix.wrapping_mul(4099).wrapping_add(line_ix + 2000),
                     opts,
@@ -2198,11 +2199,6 @@ fn text_element_aligned(
             }))
             .into_any_element();
     }
-    let weight = if bold_default {
-        FontWeight::SEMIBOLD
-    } else {
-        FontWeight::NORMAL
-    };
     let flat = flatten_cached(runs, weight, top_ix, ix, opts, theme);
     let inner = flat_text_element(&flat, ix, opts, theme);
     let direct_file = opts
@@ -2428,7 +2424,7 @@ fn code_icon_action(
         .bg(crate::motion::hover_blend(
             &fade_key,
             gpui::transparent_black(),
-            crate::theme::ink(0.08),
+            theme.element_hover,
         ))
         .on_hover(crate::motion::hover_listener(fade_key))
         .on_click(move |_, window, cx| {
@@ -2468,7 +2464,7 @@ fn code_copy_button(
             .bg(crate::motion::hover_blend(
                 &fade_key,
                 gpui::transparent_black(),
-                crate::theme::ink(0.08),
+                theme.element_hover,
             ))
             .on_hover(crate::motion::hover_listener(fade_key))
             .text_size(px(10.5))
@@ -2927,7 +2923,7 @@ mod tests {
                     &plain("before"),
                     MD_TEXT_SIZE,
                     MD_LINE_HEIGHT,
-                    false,
+                    FontWeight::NORMAL,
                     0,
                     0,
                     &opts,
@@ -2947,7 +2943,7 @@ mod tests {
                     &plain("after"),
                     MD_TEXT_SIZE,
                     MD_LINE_HEIGHT,
-                    false,
+                    FontWeight::NORMAL,
                     2,
                     2,
                     &opts,

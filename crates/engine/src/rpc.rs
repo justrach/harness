@@ -793,6 +793,7 @@ impl EngineRpc {
             workspace_scope,
             cursor_sdk_version: Some(harness_adapters::CursorHarness::sdk_version().into()),
             capabilities: harness_proto::capabilities::current(),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
         };
         Self {
             sessions,
@@ -2095,6 +2096,11 @@ impl RpcService for EngineRpc {
             methods::GET_KEEP_AWAKE => RpcReply::value(&keep_awake_reply(&self.registry)),
             methods::SET_KEEP_AWAKE => {
                 let p: SetKeepAwakeParams = parse_params(params)?;
+                if p.enabled && !crate::keep_awake::SUPPORTED {
+                    return Err(RpcError::Failed(
+                        "Keeping this computer awake is not supported".into(),
+                    ));
+                }
                 self.registry.set_keep_awake(p.enabled);
                 RpcReply::value(&keep_awake_reply(&self.registry))
             }
@@ -2684,6 +2690,36 @@ impl RpcService for EngineRpc {
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&summary)
+            }
+            methods::CODEX_CONVERSATION_PREVIEW => {
+                #[derive(Deserialize)]
+                struct Params {
+                    reference: String,
+                }
+                let params: Params = parse_params(params)?;
+                let history = self.external_history()?;
+                let preview =
+                    tokio::task::spawn_blocking(move || history.codex_preview(&params.reference))
+                        .await
+                        .map_err(|e| RpcError::Failed(e.to_string()))?
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&preview)
+            }
+            methods::CODEX_CONVERSATION_IMPORT => {
+                #[derive(Deserialize)]
+                struct Params {
+                    reference: String,
+                    cwd: Option<String>,
+                }
+                let params: Params = parse_params(params)?;
+                let history = self.external_history()?;
+                let imported = tokio::task::spawn_blocking(move || {
+                    history.import_codex(&params.reference, params.cwd.as_deref())
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))?
+                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&imported)
             }
             methods::LOCAL_IMPORT_STATUS => {
                 let importer = self.local_importer()?.clone();

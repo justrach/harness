@@ -76,7 +76,9 @@ fn moving_focus_between_side_by_side_panes_moves_no_pane(cx: &mut TestAppContext
     let count = cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             for _ in 0..7 {
-                shell.split_chat(SplitAxis::Horizontal, window, cx);
+                // This host renders the legacy split, while the public shortcut
+                // now targets the session's workspace panels.
+                shell.split_chat_opening(SplitAxis::Horizontal, None, window, cx);
             }
             shell
                 .chat_split

@@ -524,6 +524,7 @@ impl EngineHandle {
                 workspace_scope: WorkspaceScope::Local,
                 cursor_sdk_version: None,
                 capabilities,
+                version: Some(env!("CARGO_PKG_VERSION").into()),
             },
             deferred_state: None,
         }
@@ -552,6 +553,25 @@ impl EngineHandle {
 
 /// Query the current protocol first, with a conservative fallback for daemons
 /// from before `EngineInfo` existed. Old daemons are always treated as synced.
+/// What to tell someone whose updated app attached to an engine still running
+/// an older release. The app keeps working, but behaviour the engine owns stays
+/// the old version's until that engine restarts, with nothing else to show why.
+fn older_engine_notice(app: &str, engine: Option<&str>) -> Option<String> {
+    fn parts(version: &str) -> Option<Vec<u64>> {
+        version.split('.').map(|part| part.parse().ok()).collect()
+    }
+    let running = match engine {
+        Some(engine) if parts(engine)? >= parts(app)? => return None,
+        Some(engine) => format!("is still running {engine}"),
+        None => "is still running an older version".to_string(),
+    };
+    Some(format!(
+        "Harness {app} is connected to an engine that {running}, so some changes won't \
+         apply yet. To update it, run `harness daemon stop`, then quit and reopen Harness. \
+         Chats that are running will stop."
+    ))
+}
+
 async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
     match client
         .call_as(methods::ENGINE_INFO, serde_json::json!({}))
@@ -572,6 +592,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
                 workspace_scope: WorkspaceScope::Synced,
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
+                version: None,
             })
         }
         Err(err) => Err(err),
@@ -661,6 +682,7 @@ pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
 /// paint (the spinner already animates each frame), so no notify plumbing is
 /// needed. A slow upload renders as "Uploading… N%" instead of a
 /// hang-indistinguishable "Sending…" (2026-08-18 user report).
+#[derive(Clone)]
 pub struct UploadProgress {
     done: std::sync::Arc<std::sync::atomic::AtomicU64>,
     total: u64,
@@ -738,6 +760,8 @@ pub struct AppState {
     /// Validated conversation link; the shell owns tab-preserving navigation.
     pending_linked_chat: Option<String>,
     deep_link_notice: Option<String>,
+    /// The connected engine is older than this app; see [`older_engine_notice`].
+    pub(crate) engine_notice: Option<String>,
     /// The selected chat when a chats frame arrived without it. A later frame
     /// that lists it again re-selects it, unless something else was picked.
     vanished_selection: Option<String>,
@@ -798,6 +822,11 @@ pub struct AppState {
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
     engine: Option<EngineHandle>,
+    /// A secondary window follows runtime replacement without sharing selection.
+    window_runtime_observation: Option<gpui::Subscription>,
+    /// Always the original runtime owner, so closing an intermediate pop-out
+    /// neither loses replacement events nor retains a chain of closed views.
+    window_runtime_source: Option<Entity<AppState>>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
@@ -894,6 +923,8 @@ impl AppState {
             update: None,
             data_dir: None,
             engine: None,
+            window_runtime_observation: None,
+            window_runtime_source: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
@@ -914,8 +945,216 @@ impl AppState {
             pending_deep_link: None,
             pending_linked_chat: None,
             deep_link_notice: None,
+            engine_notice: None,
             vanished_selection: None,
             pending_open_folder: None,
+        }
+    }
+
+    /// Make a separate window's view onto this runtime. The engine and catalog
+    /// are shared; selection, transcript watches and pending input stay local.
+    /// In particular this never probes, bootstraps or owns another engine.
+    pub(crate) fn for_window(source: &Entity<Self>, cx: &mut Context<Self>) -> Self {
+        let mut state = Self::new();
+        let runtime_source = source
+            .read(cx)
+            .window_runtime_source
+            .clone()
+            .unwrap_or_else(|| source.clone());
+        state.window_runtime_observation =
+            Some(cx.observe(&runtime_source, |state, source, cx| {
+                state.follow_window_runtime(&source, cx);
+            }));
+        state.window_runtime_source = Some(runtime_source);
+        let handle = {
+            let source = source.read(cx);
+            state.copy_window_catalog(source);
+            state.selected_space = source.selected_space.clone();
+            state.no_project = source.no_project;
+            state.selected_device = source.selected_device.clone();
+            source.engine.clone()
+        };
+        // The caller installs the detached tab, rather than boot restoration
+        // selecting a different conversation as the first watch frame arrives.
+        state.auto_selected = true;
+        if let Some(handle) = handle {
+            state.attach_engine(handle, cx);
+            let source = source.read(cx);
+            state.connection = source.connection.clone();
+            state.connectivity_observed = source.connectivity_observed;
+        }
+        state
+    }
+
+    /// App-wide lifecycle work belongs to the original runtime's owner.
+    pub(crate) fn is_window_fork(&self) -> bool {
+        self.window_runtime_observation.is_some()
+    }
+
+    pub(crate) fn runtime_owner(state: &Entity<Self>, cx: &App) -> Entity<Self> {
+        state
+            .read(cx)
+            .window_runtime_source
+            .clone()
+            .unwrap_or_else(|| state.clone())
+    }
+
+    /// Seed the destination before its first paint while opening its own feed.
+    /// Prepared rows remain shared Arcs, keeping the existing transcript view
+    /// reusable until the destination's independent watch catches up.
+    pub(crate) fn adopt_window_chat(
+        &mut self,
+        source: &Entity<Self>,
+        chat_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (snapshot, baseline, queue, pending, tools, echoes, send, comments, upload) = {
+            let source = source.read(cx);
+            let selected = source.selected_chat.as_deref() == Some(chat_id.as_str());
+            let cached = source
+                .transcript_cache
+                .iter()
+                .find(|cached| cached.chat_id == chat_id);
+            (
+                CachedTranscript {
+                    prepared: source
+                        .prepared_transcripts
+                        .get(&chat_id)
+                        .cloned()
+                        .or_else(|| cached.and_then(|cached| cached.prepared.clone())),
+                    chat_id: chat_id.clone(),
+                    entries: source.overview_transcript(&chat_id).to_vec(),
+                    context_usage: if selected {
+                        source.context_usage
+                    } else {
+                        cached.and_then(|cached| cached.context_usage)
+                    },
+                    bytes: 0,
+                },
+                source.transcript_baselines.get(&chat_id).cloned(),
+                if selected {
+                    source.queue.clone()
+                } else {
+                    Vec::new()
+                },
+                if selected {
+                    source.remote_pending.clone()
+                } else {
+                    Vec::new()
+                },
+                if selected {
+                    source.tool_progress.clone()
+                } else {
+                    Vec::new()
+                },
+                source.echoes.get(&chat_id).cloned(),
+                source.pending_sends.get(&chat_id).cloned(),
+                source.review_comments.get(&chat_id).cloned(),
+                selected.then(|| source.upload_progress.clone()).flatten(),
+            )
+        };
+        self.select_chat(Some(chat_id.clone()), cx);
+        self.transcript = snapshot.entries;
+        self.context_usage = snapshot.context_usage;
+        self.transcript_replayed = source.read(cx).selected_chat.as_deref()
+            != Some(chat_id.as_str())
+            || source.read(cx).transcript_replayed;
+        self.queue = queue;
+        self.remote_pending = pending;
+        self.tool_progress = tools;
+        self.upload_progress = upload;
+        if let Some(prepared) = snapshot.prepared {
+            self.prepared_transcripts.insert(chat_id.clone(), prepared);
+        }
+        if let Some(baseline) = baseline {
+            self.transcript_baselines.insert(chat_id.clone(), baseline);
+        }
+        if let Some(echoes) = echoes {
+            self.echoes.insert(chat_id.clone(), echoes);
+        }
+        if let Some(send) = send {
+            self.pending_sends.insert(chat_id.clone(), send);
+        }
+        if let Some(comments) = comments {
+            self.review_comments.insert(chat_id, comments);
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// Preserve a pinned live/frozen document and retain its original watch role.
+    pub(crate) fn adopt_window_doc(
+        &mut self,
+        source: &Entity<Self>,
+        doc_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (entries, prepared, baseline, live) = {
+            let source = source.read(cx);
+            (
+                source.overview_transcript(&doc_id).to_vec(),
+                source.prepared_transcripts.get(&doc_id).cloned(),
+                source.transcript_baselines.get(&doc_id).cloned(),
+                source.sub_watch_tasks.contains_key(&doc_id),
+            )
+        };
+        self.sub_transcripts.insert(doc_id.clone(), entries);
+        if let Some(prepared) = prepared {
+            self.prepared_transcripts.insert(doc_id.clone(), prepared);
+        }
+        if let Some(baseline) = baseline {
+            self.transcript_baselines.insert(doc_id.clone(), baseline);
+        }
+        if live {
+            self.watch_subagent_doc(doc_id, cx);
+        }
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        cx.notify();
+    }
+
+    fn copy_window_catalog(&mut self, source: &Self) {
+        self.connection = source.connection.clone();
+        self.workspace_scope = source.workspace_scope;
+        self.auth = source.auth.clone();
+        self.devices = source.devices.clone();
+        self.device_presentation = source.device_presentation.clone();
+        self.session_presence_presentation = source.session_presence_presentation.clone();
+        self.connectivity = source.connectivity.clone();
+        self.connectivity_observed = source.connectivity_observed;
+        self.spaces = source.spaces.clone();
+        self.chats = source.chats.clone();
+        self.sessions = source.sessions.clone();
+        self.sidebar_preferences = source.sidebar_preferences.clone();
+        self.session_presentation = source.session_presentation.clone();
+        self.chats_synced = source.chats_synced;
+        self.spaces_synced = source.spaces_synced;
+        self.local_device_id = source.local_device_id.clone();
+        self.update = source.update.clone();
+        self.data_dir = source.data_dir.clone();
+        self.transfers = source.transfers.clone();
+    }
+
+    fn follow_window_runtime(&mut self, source: &Entity<Self>, cx: &mut Context<Self>) {
+        let (handle, changed, connection) = {
+            let source = source.read(cx);
+            let changed = match (&self.engine, &source.engine) {
+                (Some(current), Some(next)) => !current.same_connection(next),
+                (None, None) => false,
+                _ => true,
+            };
+            (source.engine.clone(), changed, source.connection.clone())
+        };
+        if changed {
+            self.prepare_runtime_replacement(cx);
+            self.auto_selected = true;
+            self.copy_window_catalog(source.read(cx));
+            if let Some(handle) = handle {
+                self.attach_engine(handle, cx);
+            }
+        }
+        if changed || self.connection != connection {
+            self.connection = connection;
+            cx.notify();
         }
     }
 
@@ -943,16 +1182,20 @@ impl AppState {
     /// `space-canvas:{spaceId}` and the engine resolves the folder. Only
     /// a deliberate project-less canvas sends `~`.
     pub fn terminal_open_cwd(&self) -> Option<String> {
-        self.terminal_open_cwd_for(&self.panel_session_key())
+        let session_key = self.panel_session_key();
+        if self.no_project && session_key.starts_with(CANVAS_PANEL_PREFIX) {
+            return Some("~".to_string());
+        }
+        self.terminal_open_cwd_for(&session_key)
     }
 
-    /// [`Self::terminal_open_cwd`] for a specific panel key (the tab being
-    /// opened, which matches the selected session).
+    /// [`Self::terminal_open_cwd`] for a specific panel key. An independent
+    /// panel keeps its project even if the current canvas opts out of one.
     pub fn terminal_open_cwd_for(&self, session_key: &str) -> Option<String> {
         let Some(space_id) = session_key.strip_prefix(CANVAS_PANEL_PREFIX) else {
             return None;
         };
-        if space_id.is_empty() || self.no_project {
+        if space_id.is_empty() {
             return Some("~".to_string());
         }
         self.spaces
@@ -986,6 +1229,13 @@ impl AppState {
                 .clone()
         };
         (self.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
+    }
+
+    /// Review notes are unsent input, including notes on unfocused chats.
+    pub(crate) fn has_review_comments(&self) -> bool {
+        self.review_comments
+            .values()
+            .any(|comments| !comments.is_empty())
     }
 
     pub fn review_comments(&self, key: &str) -> &[ReviewComment] {
@@ -1578,6 +1828,24 @@ impl AppState {
         cx.notify();
     }
 
+    /// Read already-loaded rows for a monitoring card without changing the
+    /// selected conversation or opening another transcript watch.
+    pub(crate) fn overview_transcript(&self, chat_id: &str) -> &[SessionMessageEntry] {
+        if self.selected_chat.as_deref() == Some(chat_id) {
+            return &self.transcript;
+        }
+        if let Some(entries) = self.sub_transcripts.get(chat_id)
+            && !entries.is_empty()
+        {
+            return entries;
+        }
+        self.transcript_cache
+            .iter()
+            .find(|cached| cached.chat_id == chat_id)
+            .map(|cached| cached.entries.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
@@ -2131,6 +2399,12 @@ impl AppState {
         display_status(chat, self.session_for(&chat.id), now)
     }
 
+    /// Whether any chat is working right now, as its sidebar row would show.
+    pub(crate) fn any_chat_running(&self, now: DateTime<Utc>) -> bool {
+        self.visible_chats()
+            .any(|chat| self.display_status_for(chat, now) == ChatIndicator::Working)
+    }
+
     /// The sidebar's Sessions list: every non-archived chat of a LIVE space,
     /// on any device — idle included — in pure recency order (status drives
     /// the dot, never the position; see [`sort_active`]).
@@ -2151,7 +2425,8 @@ impl AppState {
     /// The sidebar's active list exactly as it is drawn: [`Self::overview_chats`]
     /// narrowed to the current project filter. The jump shortcuts and their
     /// hints both count positions here, so neither can drift from the rows on
-    /// screen.
+    /// screen. `None` includes every project; an empty filter is the shell's
+    /// explicit projectless selection.
     pub fn sidebar_chats(
         &self,
         now: DateTime<Utc>,
@@ -2160,6 +2435,7 @@ impl AppState {
         self.overview_chats(now)
             .into_iter()
             .filter(|(_, chat)| match space_filter {
+                Some("") => chat.space_id.is_none(),
                 Some(space_id) => chat.space_id.as_deref() == Some(space_id),
                 None => true,
             })
@@ -2206,9 +2482,12 @@ impl AppState {
         effective_indicator(self.session_for(chat_id), now)
     }
 
-    pub fn selected_chat_row(&self) -> Option<&Chat> {
-        let id = self.selected_chat.as_deref()?;
+    pub fn chat_row(&self, id: &str) -> Option<&Chat> {
         self.chats.iter().find(|c| c.id == id)
+    }
+
+    pub fn selected_chat_row(&self) -> Option<&Chat> {
+        self.chat_row(self.selected_chat.as_deref()?)
     }
 
     /// The chat the Archive session shortcut acts on: the selected one, unless
@@ -2271,6 +2550,10 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
+        self.queue_task = None;
+        self.tool_progress_task = None;
+        self.sub_watch_tasks.clear();
+        self.sub_transcripts.clear();
         self.change_request_tasks.clear();
         self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
@@ -2293,6 +2576,9 @@ impl AppState {
         self.chats_synced = false;
         self.spaces_synced = false;
         self.transcript.clear();
+        self.queue.clear();
+        self.remote_pending.clear();
+        self.tool_progress.clear();
         self.transcript_baselines.clear();
         self.transcript_cache.clear();
         self.prepared_transcripts.clear();
@@ -2301,6 +2587,8 @@ impl AppState {
         self.transcript_replayed = false;
         self.echoes.clear();
         self.pending_sends.clear();
+        self.review_comments.clear();
+        self.review_comment_flushes.clear();
         self.upload_progress = None;
         self.transfers.clear();
         self.local_device_id = None;
@@ -2314,6 +2602,14 @@ impl AppState {
     /// Kick off (or retry) the engine bootstrap: probe → connect-or-embed on
     /// tokio, then attach subscriptions. Safe to call again after `Failed`.
     pub fn bootstrap(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
+        let owner = Self::runtime_owner(&state, cx);
+        if owner.entity_id() != state.entity_id() {
+            // Retry and profile switches can originate in any window. Keep
+            // the retained process state on the replacement handle so every
+            // other window, Dock reopen and app quit observe the same engine.
+            owner.update(cx, |owner, cx| owner.prepare_runtime_replacement(cx));
+            return Self::bootstrap(owner, config, cx);
+        }
         let data_dir = config.data_dir.clone();
         state.update(cx, |s, cx| {
             s.connection = ConnectionStatus::Connecting;
@@ -2353,6 +2649,8 @@ impl AppState {
         // baseline instead of comparing the new runtime with the old one.
         self.connectivity_observed = false;
         let engine_info = handle.engine_info();
+        self.engine_notice =
+            older_engine_notice(env!("CARGO_PKG_VERSION"), engine_info.version.as_deref());
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
@@ -2364,7 +2662,9 @@ impl AppState {
             self.watch_peer_chat(chat_id, cx);
         }
         let mut watch_tasks = Vec::with_capacity(10);
-        if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
+        if !self.is_window_fork()
+            && let Some(task) = spawn_deferred_engine_watch(cx, handle.clone())
+        {
             watch_tasks.push(task);
         }
         watch_tasks.extend([
@@ -2553,6 +2853,10 @@ impl AppState {
             tracing::info!(chat = %id, "selected chat is back in the chats list; re-selecting it");
             self.select_chat(Some(id), cx);
         }
+    }
+
+    pub fn take_engine_notice(&mut self) -> Option<String> {
+        self.engine_notice.take()
     }
 
     pub fn take_deep_link_notice(&mut self) -> Option<String> {
@@ -3535,6 +3839,251 @@ mod tests {
     // itself derives everything through `harness_proto::view`.
     use harness_proto::{SessionStatus, UserProfile};
 
+    #[gpui::test]
+    fn window_state_keeps_selection_and_transcript_independent(cx: &mut gpui::TestAppContext) {
+        let source = cx.new(|_| {
+            let mut state = AppState::new();
+            state.connection = ConnectionStatus::Ready;
+            state.chats = vec![chat("source-chat", 0, None), chat("other-chat", 1, None)];
+            state.spaces = vec![space("project", "dev", "/tmp/project", 0)];
+            state.selected_chat = Some("source-chat".into());
+            state.selected_space = Some("project".into());
+            state.selected_device = Some("dev".into());
+            state.transcript = vec![user_entry("source-message")];
+            state.chats_synced = true;
+            state.spaces_synced = true;
+            state
+        });
+        let detached = cx.new(|cx| AppState::for_window(&source, cx));
+        detached.update(cx, |state, cx| {
+            assert!(state.is_window_fork());
+            assert_eq!(state.chats.len(), 2);
+            assert_eq!(state.spaces.len(), 1);
+            assert!(state.chats_synced && state.spaces_synced && state.auto_selected);
+            assert_eq!(state.selected_chat, None);
+            assert!(state.transcript.is_empty());
+            assert!(state.queue.is_empty());
+            assert!(state.transcript_task.is_none() && state.queue_task.is_none());
+            state.select_chat(Some("other-chat".into()), cx);
+            state.selected_space = None;
+            state.no_project = true;
+            state.selected_device = Some("other-device".into());
+            state.transcript.push(user_entry("detached-message"));
+        });
+        source.read_with(cx, |state, _| {
+            assert!(!state.is_window_fork());
+            assert_eq!(state.selected_chat.as_deref(), Some("source-chat"));
+            assert_eq!(state.selected_space.as_deref(), Some("project"));
+            assert_eq!(state.selected_device.as_deref(), Some("dev"));
+            assert!(!state.no_project);
+            assert_eq!(state.transcript[0].id, "source-message");
+        });
+    }
+
+    #[gpui::test]
+    fn window_state_adoption_seeds_chat_and_frozen_doc_before_first_frame(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let source = cx.new(|_| {
+            let mut state = AppState::new();
+            state.selected_chat = Some("moving-chat".into());
+            state.transcript = vec![user_entry("current-message")];
+            state.transcript_replayed = true;
+            state
+                .echoes
+                .insert("moving-chat".into(), vec![user_entry("pending-message")]);
+            state.set_subagent_snapshot("frozen-doc".into(), vec![user_entry("frozen-message")]);
+            state
+        });
+        let detached = cx.new(|cx| AppState::for_window(&source, cx));
+        detached.update(cx, |state, cx| {
+            state.adopt_window_chat(&source, "moving-chat".into(), cx);
+            state.adopt_window_doc(&source, "frozen-doc".into(), cx);
+            assert_eq!(state.selected_chat.as_deref(), Some("moving-chat"));
+            assert_eq!(state.transcript[0].id, "current-message");
+            assert!(state.transcript_replayed);
+            assert_eq!(state.echoes["moving-chat"][0].id, "pending-message");
+            assert_eq!(state.sub_transcript("frozen-doc")[0].id, "frozen-message");
+            assert!(!state.sub_watch_tasks.contains_key("frozen-doc"));
+            state.select_chat(None, cx);
+        });
+        source.read_with(cx, |state, _| {
+            assert_eq!(state.selected_chat.as_deref(), Some("moving-chat"));
+            assert_eq!(state.transcript[0].id, "current-message");
+            assert_eq!(state.sub_transcript("frozen-doc")[0].id, "frozen-message");
+        });
+    }
+
+    #[gpui::test]
+    fn window_state_forks_keep_the_original_runtime_owner_after_intermediate_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let original = cx.new(|_| AppState::new());
+        let first = cx.new(|cx| AppState::for_window(&original, cx));
+        let second = cx.new(|cx| AppState::for_window(&first, cx));
+        let owner = cx.update(|cx| AppState::runtime_owner(&second, cx));
+        assert_eq!(owner.entity_id(), original.entity_id());
+        let first_weak = first.downgrade();
+        drop(first);
+        cx.run_until_parked();
+        assert!(first_weak.upgrade().is_none());
+        original.update(cx, |state, cx| {
+            state.connection = ConnectionStatus::Failed("replacement failed".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        second.read_with(cx, |state, _| {
+            assert_eq!(
+                state.connection,
+                ConnectionStatus::Failed("replacement failed".into())
+            );
+        });
+    }
+
+    struct WindowStateRpc;
+
+    #[async_trait]
+    impl RpcService for WindowStateRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            _params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
+            Err(RpcError::UnknownMethod(method.into()))
+        }
+    }
+
+    #[test]
+    fn only_an_older_engine_raises_a_notice() {
+        let notice = older_engine_notice("0.2.170", Some("0.2.169")).expect("older");
+        assert!(
+            notice.contains("0.2.169") && notice.contains("0.2.170"),
+            "{notice}"
+        );
+        // Compared as numbers, not text.
+        assert!(older_engine_notice("0.2.170", Some("0.2.99")).is_some());
+        // An engine from before versions were reported is older by definition.
+        assert!(older_engine_notice("0.2.170", None).is_some());
+        for fine in ["0.2.170", "0.2.171", "0.3.0"] {
+            assert_eq!(older_engine_notice("0.2.170", Some(fine)), None, "{fine}");
+        }
+        // Nothing to compare: say nothing rather than cry wolf.
+        assert_eq!(older_engine_notice("0.2.170", Some("custom")), None);
+    }
+
+    #[test]
+    fn only_a_working_chat_counts_as_running() {
+        let now = Utc::now();
+        let mut s = AppState::new();
+        s.chats = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "c", "deviceId": "dev", "archived": false, "createdAt": now,
+            }))
+            .unwrap(),
+        ];
+        assert!(!s.any_chat_running(now));
+        s.apply_sessions_at(vec![session("c", SessionStatus::Idle, 0, now)], now);
+        assert!(!s.any_chat_running(now));
+        s.apply_sessions_at(vec![session("c", SessionStatus::Working, 0, now)], now);
+        assert!(s.any_chat_running(now));
+        s.chats[0].archived = true;
+        assert!(!s.any_chat_running(now));
+    }
+
+    #[gpui::test]
+    fn attaching_to_an_older_engine_leaves_a_notice_once(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+        let state = cx.new(|_| AppState::new());
+        let mut older = window_test_engine("old-runtime");
+        older.engine_info.version = Some("0.0.1".into());
+        state.update(cx, |state, cx| {
+            state.attach_engine(older, cx);
+            let notice = state
+                .take_engine_notice()
+                .expect("told about the old engine");
+            assert!(notice.contains("0.0.1"), "{notice}");
+            assert_eq!(state.take_engine_notice(), None);
+            // This build's own engine has nothing to report.
+            state.attach_engine(window_test_engine("current-runtime"), cx);
+            assert_eq!(state.take_engine_notice(), None);
+        });
+    }
+
+    fn window_test_engine(device: &str) -> EngineHandle {
+        EngineHandle {
+            inner: Arc::new(RemoteEngine {
+                client: Arc::new(memory_client(Arc::new(WindowStateRpc))),
+                url: "ws://window-test".into(),
+                lifecycle_task: tokio::sync::Mutex::new(None),
+            }),
+            engine_info: EngineInfo {
+                device_id: device.into(),
+                workspace_scope: WorkspaceScope::Local,
+                cursor_sdk_version: None,
+                capabilities: Vec::new(),
+                version: Some(env!("CARGO_PKG_VERSION").into()),
+            },
+            deferred_state: None,
+        }
+    }
+
+    #[gpui::test]
+    fn window_state_reuses_engine_and_follows_runtime_replacement(cx: &mut gpui::TestAppContext) {
+        // This verifies handle/watch ownership without serving RPC replies.
+        // Keep transport tasks on this thread: a multithreaded Tokio runtime
+        // would wake GPUI's deterministic scheduler from an external worker.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _runtime = runtime.enter();
+        let first = window_test_engine("first-runtime");
+        let source = cx.new(|_| {
+            let mut state = AppState::new();
+            state.connection = ConnectionStatus::Ready;
+            state.engine = Some(first.clone());
+            state
+        });
+        let detached = cx.new(|cx| AppState::for_window(&source, cx));
+        detached.read_with(cx, |state, _| {
+            assert!(state.engine().unwrap().same_connection(&first));
+            assert!(!state.watch_tasks.is_empty());
+            assert_eq!(state.local_device_id.as_deref(), Some("first-runtime"));
+        });
+        detached.update(cx, |state, cx| {
+            state.select_chat(Some("detached-chat".into()), cx);
+            state.transcript.push(user_entry("old-account-message"));
+        });
+        let replacement = window_test_engine("replacement-runtime");
+        source.update(cx, |state, cx| {
+            state.engine = Some(replacement.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        detached.read_with(cx, |state, _| {
+            assert!(state.engine().unwrap().same_connection(&replacement));
+            assert!(!state.engine().unwrap().same_connection(&first));
+            assert_eq!(
+                state.local_device_id.as_deref(),
+                Some("replacement-runtime")
+            );
+            assert!(state.selected_chat.is_none());
+            assert!(state.transcript.is_empty());
+            assert!(state.auto_selected);
+        });
+        source.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
+        cx.run_until_parked();
+        detached.read_with(cx, |state, _| {
+            assert!(state.engine().is_none());
+            assert_eq!(state.connection, ConnectionStatus::Connecting);
+            assert!(state.watch_tasks.is_empty());
+        });
+    }
+
     #[test]
     fn another_devices_pending_prompt_shows_until_its_message_lands() {
         let frame: PendingPromptFrame = serde_json::from_value(serde_json::json!({
@@ -3782,6 +4331,7 @@ mod tests {
                     workspace_scope: WorkspaceScope::Local,
                     cursor_sdk_version: None,
                     capabilities: harness_proto::capabilities::current(),
+                    version: Some("0.0.1".into()),
                 },
                 state: state_rx,
             }),
@@ -3800,6 +4350,7 @@ mod tests {
         .await
         .expect("second viewport attaches over IPC");
         assert!(matches!(handle.mode(), EngineMode::Remote { .. }));
+        assert_eq!(handle.engine_info().version.as_deref(), Some("0.0.1"));
 
         let mut deferred = handle
             .deferred_state()
@@ -4172,6 +4723,29 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         }
+    }
+
+    #[test]
+    fn overview_transcript_prefers_selected_then_live_then_cached_rows() {
+        let mut state = AppState::new();
+        state.transcript_cache.push_back(CachedTranscript {
+            prepared: None,
+            chat_id: "chat".into(),
+            entries: vec![user_entry("cached")],
+            context_usage: None,
+            bytes: 0,
+        });
+        state.sub_transcripts.insert("chat".into(), Vec::new());
+        assert_eq!(state.overview_transcript("chat")[0].id, "cached");
+        state
+            .sub_transcripts
+            .insert("chat".into(), vec![user_entry("live")]);
+        assert_eq!(state.overview_transcript("chat")[0].id, "live");
+        state.selected_chat = Some("chat".into());
+        assert!(state.overview_transcript("chat").is_empty());
+        state.transcript = vec![user_entry("selected")];
+        assert_eq!(state.overview_transcript("chat")[0].id, "selected");
+        assert!(state.overview_transcript("unknown").is_empty());
     }
 
     #[gpui::test]
@@ -4968,6 +5542,18 @@ mod tests {
         assert_eq!(state.panel_session_key(), "space-canvas:");
         assert_eq!(state.terminal_open_cwd().as_deref(), Some("~"));
         assert_eq!(
+            state.terminal_open_cwd_for("space-canvas:s1").as_deref(),
+            Some("/Users/me/proj"),
+            "a pinned project terminal ignores another canvas's opt-out"
+        );
+        state.selected_space = Some("s1".into());
+        assert_eq!(
+            state.terminal_open_cwd().as_deref(),
+            Some("~"),
+            "the selected canvas's explicit opt-out still wins over a stale project"
+        );
+        state.selected_space = None;
+        assert_eq!(
             state.terminal_target_device("space-canvas:").as_deref(),
             Some("remote")
         );
@@ -5159,6 +5745,30 @@ mod tests {
         assert_eq!(rows, ["parent"]);
         // The child row itself is still addressable (deep links, tabs).
         assert!(state.chats.iter().any(|c| c.id == "child"));
+    }
+
+    #[test]
+    fn sidebar_project_filters_distinguish_all_projectless_and_named_projects() {
+        let now = Utc::now();
+        let mut state = AppState::new();
+        let mut in_project = chat("project", 0, Some(2));
+        in_project.space_id = Some("project-a".into());
+        let mut archived = chat("archived", 0, Some(3));
+        archived.archived = true;
+        state.apply_spaces(vec![space("project-a", "d1", "/tmp/project-a", 0)]);
+        state.apply_chats(vec![in_project, chat("projectless", 0, Some(1)), archived]);
+        let ids = |filter| {
+            state
+                .sidebar_chats(now, filter)
+                .into_iter()
+                .map(|(_, chat)| chat.id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(ids(None), ["project", "projectless"]);
+        assert_eq!(ids(Some("project-a")), ["project"]);
+        assert!(ids(Some("missing-project")).is_empty());
+        assert_eq!(ids(Some("")), ["projectless"]);
     }
 
     #[test]
@@ -5736,6 +6346,27 @@ mod tests {
 
 #[cfg(feature = "appshots-fixture")]
 impl AppState {
+    /// Replace only the synthetic review chat's feed for deterministic captures.
+    pub(crate) fn fixture_review_transcript(
+        &mut self,
+        entries: Vec<SessionMessageEntry>,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript_task = None;
+        if let Some(id) = self.selected_chat.clone() {
+            self.sub_watch_tasks.remove(&id);
+            self.prepared_transcripts.remove(&id);
+            self.transcript_baselines.insert(
+                id,
+                Arc::new(harness_doc::TranscriptBaseline::capture(&entries)),
+            );
+        }
+        self.transcript = entries;
+        self.transcript_replayed = true;
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        cx.notify();
+    }
+
     /// Keep fixture documents deterministic while using the real attachment RPC.
     pub fn fixture_attachment_engine(&mut self, engine: EngineHandle) {
         self.engine = Some(engine);

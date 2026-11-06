@@ -28,4 +28,14 @@ enum HomeFilter {
             }
         }
     }
+
+    /// The Archived shelf: hidden sessions drop out of the plain list but a
+    /// search still finds them, so a hidden session is never lost.
+    static func archivedShelf(_ archived: [Chat], hidden: Set<String>, query: String,
+                              names: (Chat) -> Names) -> [Chat] {
+        guard query.split(whereSeparator: \.isWhitespace).isEmpty else {
+            return apply(archived, query: query, names: names)
+        }
+        return hidden.isEmpty ? archived : archived.filter { !hidden.contains($0.id) }
+    }
 }

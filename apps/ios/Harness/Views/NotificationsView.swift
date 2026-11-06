@@ -11,6 +11,7 @@ struct NotificationsView: View {
     @State private var kinds: [PushNotifications.Kind: Bool] = Dictionary(
         uniqueKeysWithValues: PushNotifications.Kind.allCases.map { ($0, PushNotifications.shared.isOn($0)) })
     @State private var status: UNAuthorizationStatus = .notDetermined
+    @State private var attachSound = AttachSound.enabled
 
     var body: some View {
         List {
@@ -40,6 +41,20 @@ struct NotificationsView: View {
                 }
                 .harnessListRow()
             }
+
+            Section {
+                Toggle("Attaching files", isOn: $attachSound)
+                    .accessibilityIdentifier("settings-attach-sound")
+                    .onChange(of: attachSound) { _, on in
+                        AttachSound.enabled = on
+                        AttachSound.play(added: 1)
+                    }
+            } header: {
+                Text("Sounds")
+            } footer: {
+                Text("A short sound when an image lands in the message box, like Harness on your computer.")
+            }
+            .harnessListRow()
 
             if enabled && status == .denied {
                 Section {

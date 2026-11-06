@@ -27,6 +27,9 @@ impl Shell {
     /// Called on every app-state change and every appearance change; sends
     /// only when the choice (or the engine) differs from the last send.
     pub(super) fn publish_appearance(&mut self, cx: &mut Context<Self>) {
+        if !self.owns_app_services(cx) {
+            return;
+        }
         let state = self.state.read(cx);
         if !matches!(
             state.workspace_scope,

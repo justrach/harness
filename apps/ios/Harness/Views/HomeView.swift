@@ -49,6 +49,14 @@ struct HomeView: View {
         model.spaces.first { $0.id == spaceFilter }
     }
 
+    /// The list shows only sessions outside any project.
+    private var projectlessSelected: Bool { spaceFilter == HomeListControls.projectlessFilter }
+
+    /// The scope the archived shelf follows: a project, No project, or nil for All.
+    private var shelfScope: String? {
+        selectedSpace?.id ?? (projectlessSelected ? HomeListControls.projectlessFilter : nil)
+    }
+
     /// Opt-in split on iPhone (Settings > Layout): the list and the open session together when the window has
     /// room for the chosen shape; the single stack otherwise. Off by default.
     @AppStorage(PhoneSplit.storageKey) private var phoneSplitRaw = PhoneSplit.off.rawValue
@@ -477,7 +485,7 @@ struct HomeView: View {
                 sessionsSection
                 // The desktop's archived shelf sits under the active list,
                 // scoped by the same space filter and search.
-                ArchivedSection(spaceId: selectedSpace?.id, query: searchText, path: sidebarPath)
+                ArchivedSection(spaceId: shelfScope, query: searchText, path: sidebarPath)
             }
             // In a split the list shrinks as the session opens below it, and the opened row was left cut in
             // half at the divider. Once the panes settle, bring the whole row into view.
@@ -700,10 +708,15 @@ struct HomeView: View {
     /// on the small second line without the three-line title wraps. Selection
     /// carries a checkmark in the icon slot.
     private var projectMenu: some View {
-        let title = HomeListControls.scopeTitle(projectName: selectedSpace?.displayName)
+        let title = HomeListControls.scopeTitle(projectName: selectedSpace?.displayName,
+                                                projectless: projectlessSelected)
         return Menu {
             Section("Show sessions from") {
                 spaceMenuButton(id: "", title: HomeListControls.allProjectsTitle, subtitle: nil)
+                if projectlessSelected || !HomeListControls.projectless(model.overviewChats).isEmpty {
+                    spaceMenuButton(id: HomeListControls.projectlessFilter,
+                                    title: HomeListControls.projectlessTitle, subtitle: nil)
+                }
                 ForEach(model.spaces) { space in
                     spaceMenuButton(id: space.id, title: space.displayName,
                                     subtitle: deviceTag(space))
@@ -717,7 +730,7 @@ struct HomeView: View {
             }
         } label: {
             // The owning device lives on the menu rows ("@ mac"), not here.
-            HomeControlPill(symbol: "folder", title: title, active: selectedSpace != nil)
+            HomeControlPill(symbol: "folder", title: title, active: selectedSpace != nil || projectlessSelected)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Filter by space")
@@ -758,7 +771,7 @@ struct HomeView: View {
     }
 
     private func spaceMenuButton(id: String, title: String, subtitle: String?) -> some View {
-        let selected = id.isEmpty ? selectedSpace == nil : spaceFilter == id
+        let selected = id.isEmpty ? selectedSpace == nil && !projectlessSelected : spaceFilter == id
         return Button {
             spaceFilter = id
         } label: {
@@ -795,7 +808,8 @@ struct HomeView: View {
     // MARK: Sessions
 
     @ViewBuilder private var sessionsSection: some View {
-        let scoped = selectedSpace.map { model.chats(in: $0.id) } ?? model.overviewChats
+        let scoped = selectedSpace.map { model.chats(in: $0.id) }
+            ?? (projectlessSelected ? HomeListControls.projectless(model.overviewChats) : model.overviewChats)
         let chats = HomeFilter.apply(scoped, query: searchText, names: model.homeFilterNames)
         let grouping = HomeGroupBy(rawValue: groupByRaw) ?? .none
         // The large title, then the pinned people row, then the chips. Not in
@@ -821,7 +835,7 @@ struct HomeView: View {
         }
         if HomeListControls.showsRow(hasSessions: !model.overviewChats.isEmpty,
                                      hasProjects: !model.spaces.isEmpty,
-                                     projectSelected: selectedSpace != nil) {
+                                     projectSelected: selectedSpace != nil || projectlessSelected) {
             Section {
                 listControls(showsGrouping: HomeListControls.showsGrouping(sessionsInScope: scoped.count))
                     .listRowBackground(Color.clear)
@@ -861,7 +875,7 @@ struct HomeView: View {
         if chats.isEmpty {
             // A search can still hit the archived shelf below.
             let archivedHit = !searchText.isEmpty
-                && !model.archivedMatches(in: selectedSpace?.id, query: searchText).isEmpty
+                && !model.archivedMatches(in: shelfScope, query: searchText).isEmpty
             if !archivedHit {
                 Section {
                     if scoped.isEmpty {

@@ -699,6 +699,16 @@ final class WorkspaceStore {
         try await relay(for: deviceId).call(method: "SetAutonomy", params: ["autonomy": autonomy.rawValue])
     }
 
+    /// GetKeepAwake on the target device (Settings → Agents there).
+    func keepAwake(deviceId: String) async throws -> KeepAwakeSetting {
+        try await relay(for: deviceId).call(method: "GetKeepAwake", params: [:])
+    }
+
+    /// SetKeepAwake; answers with what the device kept.
+    func setKeepAwake(deviceId: String, enabled: Bool) async throws -> KeepAwakeSetting {
+        try await relay(for: deviceId).call(method: "SetKeepAwake", params: ["enabled": enabled])
+    }
+
     /// SetHarnessEnabled: switch an agent on or off on that computer (Settings → Agents there).
     func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws {
         let _: JSONValue = try await relay(for: deviceId).call(method: "SetHarnessEnabled",

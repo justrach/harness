@@ -143,6 +143,12 @@ pub fn pulse_lease(view: EntityId, cx: &mut App) {
     pulse_lease_every(view, 1, cx);
 }
 
+/// Whether `view` is holding the shared clock awake right now.
+#[cfg(test)]
+pub(crate) fn has_pulse_lease(view: EntityId, cx: &mut App) -> bool {
+    cx.default_global::<PulseClock>().leases.contains_key(&view)
+}
+
 /// [`pulse_lease`] at 15Hz, for soft, slow cosmetic motion (the running tool
 /// title shimmer) that holds frames for as long as an agent works.
 pub fn pulse_lease_slow(view: EntityId, cx: &mut App) {
@@ -243,8 +249,7 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
                     // loaders at a third of the rate. Each tick redraws the
                     // whole window, so this is most of the background cost of
                     // a long agent run.
-                    if cx.active_window().is_none()
-                        && !tick.is_multiple_of(BACKGROUND_TICK_DIVISOR)
+                    if cx.active_window().is_none() && !tick.is_multiple_of(BACKGROUND_TICK_DIVISOR)
                     {
                         return false;
                     }
@@ -823,7 +828,7 @@ impl HoverFades {
         self.value_for(key, now, None)
     }
 
-    /// [`Self::value_at`], read while `owner` (a cached view) renders.
+    /// Read a fade on behalf of its cached view, retaining ownership between frames.
     fn value_for(&mut self, key: &str, now: Instant, owner: Option<EntityId>) -> f32 {
         let frame = self.frame;
         let (duration, curve) = (self.duration(), self.spec.curve);
@@ -839,9 +844,22 @@ impl HoverFades {
         }
     }
 
-    /// Whether a fade `owner` reads is mid-flight or held hovered at `now`:
-    /// the cached view must render again this frame, or its color freezes
-    /// (or, unread for a frame, the entry is pruned as unmounted).
+    /// Read a state-driven reveal without restarting its clock every render.
+    /// A changed target reverses from the current value; reduced motion snaps.
+    pub fn transition_at(&mut self, key: &str, visible: bool, reduced: bool, now: Instant) -> f32 {
+        let target = if visible { 1.0 } else { 0.0 };
+        if reduced
+            || self
+                .entries
+                .get(key)
+                .is_none_or(|entry| entry.target != target)
+        {
+            self.set_at(key, visible, reduced, now);
+        }
+        self.value_at(key, now)
+    }
+
+    /// Only views reading an active or held fade need another render.
     pub fn owner_needs_frame(&self, owner: EntityId, now: Instant) -> bool {
         let duration = self.duration();
         self.entries.values().any(|entry| {
@@ -879,8 +897,44 @@ impl HoverFades {
 /// and softer than a color wash, so the growing list reads as motion.
 pub const HOVER_REVEAL: MotionSpec = MotionSpec::new(320, EASE_OUT_QUINT);
 
+/// Cached views can use the same control key in different windows. Each view
+/// owns both its keys and its liveness clock; drawing another window must not
+/// steal a fade or age out an unchanged, still-mounted control.
+#[derive(Default)]
+struct ScopedHoverFades {
+    scopes: HashMap<Option<EntityId>, HoverFades>,
+}
+
+impl ScopedHoverFades {
+    fn set_at(&mut self, owner: Option<EntityId>, key: &str, hovered: bool, reduced: bool, now: Instant) {
+        self.scopes.entry(owner).or_default().set_at(key, hovered, reduced, now);
+    }
+
+    fn value_at(&mut self, owner: Option<EntityId>, key: &str, now: Instant) -> f32 {
+        self.scopes.get_mut(&owner).map_or(0.0, |fades| fades.value_for(key, now, owner))
+    }
+
+    fn tick_owner_at(&mut self, owner: EntityId, now: Instant) -> bool {
+        self.scopes.get_mut(&Some(owner)).is_some_and(|fades| {
+            let previous_entries = fades.entries.len();
+            fades.tick_at(now);
+            // Repaint once when a fade reaches rest or unmounts. Otherwise
+            // replay could retain its last nonzero wash after the clock parks.
+            fades.entries.len() != previous_entries || fades.owner_needs_frame(owner, now)
+        })
+    }
+
+    fn tick_unowned_at(&mut self, now: Instant) -> bool {
+        let unowned = self.scopes.get_mut(&None).is_some_and(|fades| fades.tick_at(now));
+        // Owner clocks advance only in their own window. This read merely
+        // keeps display frames coming while any owned fade is mid-flight.
+        unowned | self.scopes.iter().any(|(owner, fades)| owner.is_some()
+            && fades.entries.values().any(|entry| !entry.settled(now, fades.duration())))
+    }
+}
+
 thread_local! {
-    static HOVER_FADES: RefCell<HoverFades> = RefCell::new(HoverFades::default());
+    static HOVER_FADES: RefCell<ScopedHoverFades> = RefCell::default();
     static HOVER_REVEALS: RefCell<HoverFades> = RefCell::new(HoverFades::with_spec(HOVER_REVEAL).keep_unread());
 }
 
@@ -915,7 +969,7 @@ pub fn reveal_listener(
 /// Hover progress (0..1) for `key` this frame.
 pub fn hover_t(key: &str) -> f32 {
     let owner = HOVER_OWNER.with(Cell::get);
-    HOVER_FADES.with(|fades| fades.borrow_mut().value_for(key, Instant::now(), owner))
+    HOVER_FADES.with(|fades| fades.borrow_mut().value_at(owner, key, Instant::now()))
 }
 
 thread_local! {
@@ -943,16 +997,21 @@ impl Drop for HoverOwner {
 /// Whether a hover fade `owner` read is mid-flight or held: call after
 /// [`hover_fades_active`] in the same frame, and notify `owner` when true.
 pub fn hover_needs_frame(owner: EntityId) -> bool {
-    HOVER_FADES.with(|fades| fades.borrow().owner_needs_frame(owner, Instant::now()))
+    HOVER_FADES.with(|fades| fades.borrow_mut().tick_owner_at(owner, Instant::now()))
 }
 
 /// Record a hover flip for `key` (reduced motion snaps).
 pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
-    HOVER_FADES.with(|fades| {
-        fades
-            .borrow_mut()
-            .set_at(key, hovered, reduced, Instant::now())
-    });
+    set_hover_for(HOVER_OWNER.with(Cell::get), key, hovered, reduced);
+}
+
+fn set_hover_for(owner: Option<EntityId>, key: &str, hovered: bool, reduced: bool) {
+    HOVER_FADES.with(|fades| fades.borrow_mut().set_at(owner, key, hovered, reduced, Instant::now()));
+}
+
+/// Drop a released view's keys even if it disappeared while hovered.
+pub(crate) fn release_hover_owner(owner: EntityId) {
+    HOVER_FADES.with(|fades| { fades.borrow_mut().scopes.remove(&Some(owner)); });
 }
 
 /// An `.on_hover` listener driving the fade for `key` — pair with
@@ -961,13 +1020,18 @@ pub fn hover_listener(
     key: impl Into<SharedString>,
 ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
     let key = key.into();
+    let owner = HOVER_OWNER.with(Cell::get);
     move |hovered, window, cx| {
-        set_hover(&key, *hovered, reduced_motion(cx));
-        // Event-dispatch context: `request_animation_frame` is draw-phase-only
-        // (it resolves the current view) — `refresh` marks the whole window
-        // dirty, the root render re-evaluates the blend and keeps frames
-        // coming via its tail while the fade is mid-flight.
-        window.refresh();
+        set_hover_for(owner, &key, *hovered, reduced_motion(cx));
+        // Only the view reading this fade redraws. `refresh` would rebuild every
+        // cached view in the window, and with several panels open that is
+        // every transcript each time the pointer crosses a button. The root
+        // render re-evaluates the blend and keeps frames coming via its tail
+        // while the fade is mid-flight.
+        match owner {
+            Some(owner) => cx.notify(owner),
+            None => window.redraw_root(),
+        }
     }
 }
 
@@ -976,13 +1040,7 @@ pub fn hover_listener(
 pub fn hover_fades_active() -> bool {
     let now = Instant::now();
     let reveals = HOVER_REVEALS.with(|reveals| reveals.borrow_mut().tick_at(now));
-    HOVER_FADES.with(|fades| fades.borrow_mut().tick_at(now)) | reveals
-}
-
-/// Something is hovered (see [`HoverFades::any_held`]); call after
-/// [`hover_fades_active`] in the same frame.
-pub fn hover_fades_held() -> bool {
-    HOVER_FADES.with(|fades| fades.borrow().any_held())
+    HOVER_FADES.with(|fades| fades.borrow_mut().tick_unowned_at(now)) | reveals
 }
 
 /// Blend two colors by `t` the way the browser transitions them: component
@@ -1496,6 +1554,61 @@ mod tests {
     }
 
     #[test]
+    fn cached_hover_keys_and_clocks_are_isolated_between_windows() {
+        let mut fades = ScopedHoverFades::default();
+        let start = Instant::now();
+        let ms = |value| start + Duration::from_millis(value);
+        let (first, second) = (EntityId::from(41u64), EntityId::from(42u64));
+        fades.set_at(Some(first), "composer-attach", true, false, start);
+        fades.value_at(Some(first), "composer-attach", start);
+        assert_eq!(fades.value_at(Some(second), "composer-attach", ms(50)), 0.0,
+            "an identical control key in another window must not inherit the hover");
+        for time in [50, 75, 100, 125] {
+            fades.set_at(Some(second), "composer-attach", true, false, ms(time));
+            fades.value_at(Some(second), "composer-attach", ms(time));
+            fades.tick_owner_at(second, ms(time));
+            fades.tick_unowned_at(ms(time));
+        }
+        assert!(fades.tick_owner_at(first, ms(150)),
+            "other windows' frames must not prune the original window's mounted control");
+        assert!(fades.value_at(Some(first), "composer-attach", ms(150)) > 0.0);
+        fades.set_at(Some(second), "composer-attach", false, true, ms(150));
+        assert_eq!(fades.value_at(Some(second), "composer-attach", ms(150)), 0.0);
+        assert!(fades.value_at(Some(first), "composer-attach", ms(150)) > 0.0,
+            "leaving one window must not reset another view's fade");
+    }
+
+    #[test]
+    fn cached_hover_still_prunes_an_unmounted_control_in_its_own_window() {
+        let mut fades = ScopedHoverFades::default();
+        let start = Instant::now();
+        let owner = EntityId::from(43u64);
+        fades.set_at(Some(owner), "copy", true, false, start);
+        fades.value_at(Some(owner), "copy", start);
+        assert!(fades.tick_owner_at(owner, start + Duration::from_millis(16)));
+        assert!(fades.tick_owner_at(owner, start + Duration::from_millis(32)),
+            "pruning clears the last cached wash once");
+        assert_eq!(fades.value_at(Some(owner), "copy", start + Duration::from_millis(48)), 0.0);
+        assert!(!fades.tick_owner_at(owner, start + Duration::from_millis(48)));
+    }
+
+    #[test]
+    fn cached_hover_fade_out_repaints_its_final_rest_frame_then_parks() {
+        let mut fades = ScopedHoverFades::default();
+        let start = Instant::now();
+        let owner = EntityId::from(44u64);
+        fades.set_at(Some(owner), "attach", true, true, start);
+        assert_eq!(fades.value_at(Some(owner), "attach", start), 1.0);
+        fades.set_at(Some(owner), "attach", false, false, start);
+        assert!(fades.tick_owner_at(owner, start + Duration::from_millis(50)));
+        assert!(fades.value_at(Some(owner), "attach", start + Duration::from_millis(50)) > 0.0);
+        assert!(fades.tick_owner_at(owner, start + Duration::from_secs(1)),
+            "the final zero value must replace the cached intermediate frame");
+        assert_eq!(fades.value_at(Some(owner), "attach", start + Duration::from_secs(1)), 0.0);
+        assert!(!fades.tick_owner_at(owner, start + Duration::from_secs(2)));
+    }
+
+    #[test]
     fn hover_fade_reduced_motion_snaps() {
         let mut fades = HoverFades::default();
         let t0 = Instant::now();
@@ -1551,6 +1664,35 @@ mod tests {
         assert!(fades.any_held(), "settled hovered");
         fades.set_at("row", false, false, start + Duration::from_millis(500));
         assert!(!fades.any_held(), "left");
+    }
+
+    #[test]
+    fn hover_transition_keeps_its_clock_reverses_and_snaps_for_reduced_motion() {
+        let mut fades = HoverFades::with_spec(MotionSpec::new(180, EASE_OUT_QUINT));
+        let start = Instant::now();
+        let ms = |m| start + Duration::from_millis(m);
+        assert_eq!(fades.transition_at("details", false, false, start), 0.0);
+        assert_eq!(fades.transition_at("details", true, false, start), 0.0);
+        let entering = fades.transition_at("details", true, false, ms(30));
+        assert!(entering > 0.0 && entering < 1.0);
+        assert!(fades.transition_at("details", true, false, ms(60)) > entering);
+        let before_reverse = fades.value_at("details", ms(60));
+        assert_eq!(
+            fades.transition_at("details", false, false, ms(60)),
+            before_reverse
+        );
+        let exiting = fades.transition_at("details", false, false, ms(90));
+        assert!(exiting > 0.0 && exiting < before_reverse);
+        assert_eq!(fades.transition_at("details", true, false, ms(90)), exiting);
+        assert_eq!(fades.transition_at("details", true, false, ms(300)), 1.0);
+        assert!(
+            !fades.tick_at(ms(300)),
+            "settled reveals must stop requesting frames"
+        );
+        assert_eq!(fades.transition_at("details", false, true, ms(310)), 0.0);
+        assert!(!fades.tick_at(ms(310)));
+        assert_eq!(fades.transition_at("details", true, true, ms(320)), 1.0);
+        assert!(!fades.tick_at(ms(320)));
     }
 
     #[test]

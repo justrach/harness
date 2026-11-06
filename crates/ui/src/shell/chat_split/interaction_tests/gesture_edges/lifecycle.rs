@@ -78,8 +78,8 @@ fn pane_navigation_round_trips_do_not_revive_a_held_press(cx: &mut gpui::TestApp
                             shell.chat_split.as_mut().unwrap().panes.swap(0, 2);
                         }
                         "zoom" => {
-                            shell.toggle_chat_pane_zoom(cx);
-                            shell.toggle_chat_pane_zoom(cx);
+                            toggle_legacy_pane_zoom(shell, cx);
+                            toggle_legacy_pane_zoom(shell, cx);
                         }
                         _ => unreachable!(),
                     }

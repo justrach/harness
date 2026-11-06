@@ -430,18 +430,11 @@ impl Shell {
         };
         self.close_project_actions_menu(cx);
 
-        let panel = self.terminal_panel(cx);
-        let tab = panel.update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat(context.chat_id.clone(), action.name.clone(), cx)
-        });
-        self.panels
-            .update(&context.chat_id, |panels| panels.terminal_open = true);
-        self.terminal_tween = None;
-        self.terminal_tween_task = None;
-        panel.update(cx, |panel, cx| {
-            panel.set_open(true, cx);
-            panel.select_tab_by_key(tab, cx);
-        });
+        let (panel, tab) = self.reserve_workspace_action_terminal(
+            context.chat_id.clone(),
+            action.name.clone(),
+            cx,
+        );
 
         let params = project_action_params(
             serde_json::json!({
@@ -510,6 +503,125 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// Saved project actions live inside the conversation, on one scrollable row.
+    pub(super) fn render_project_actions_toolbar(
+        &mut self,
+        owner: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.ensure_project_actions(cx);
+        let status = self.project_actions.active_status()?.clone();
+        if matches!(
+            status,
+            ProjectActionsStatus::Idle
+                | ProjectActionsStatus::Loading
+                | ProjectActionsStatus::Unsupported
+        ) {
+            return None;
+        }
+        if matches!(status, ProjectActionsStatus::Unavailable { .. }) {
+            let theme = Theme::of(cx).clone();
+            let control = self.render_project_actions_control(320.0, px(self.viewport_height), cx);
+            return Some(
+                div()
+                    .h(px(super::workspace_panels::ACTION_BAR_HEIGHT))
+                    .flex_none()
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .children(control)
+                    .into_any_element(),
+            );
+        }
+        let snapshot = self.project_actions.visible_snapshot()?;
+        let theme = Theme::of(cx).clone();
+        let mut row = div()
+            .id("conversation-actions")
+            .debug_selector(|| "conversation-actions".into())
+            .h(px(super::workspace_panels::ACTION_BAR_HEIGHT))
+            .flex_none()
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .border_b_1()
+            .border_color(theme.border);
+        let mut actions = div()
+            .id("conversation-actions-scroll")
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .overflow_x_scroll();
+        for action in &snapshot.actions {
+            let run = action.clone();
+            let action_owner = owner.clone();
+            actions = actions.child(
+                action_segment(
+                    &theme,
+                    SharedString::from(format!("saved-project-action-{}", action.id)),
+                )
+                .rounded(px(5.0))
+                .when(status.can_run(), |button| {
+                    button
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(owner) = &action_owner {
+                                this.state
+                                    .update(cx, |s, cx| s.select_chat(Some(owner.clone()), cx));
+                            }
+                            this.run_project_action(run.clone(), cx)
+                        }))
+                })
+                .when(!status.can_run(), |button| button.opacity(0.45))
+                .child(
+                    icon(action_icon(action.icon))
+                        .size(px(13.0))
+                        .text_color(theme.text_muted),
+                )
+                .child(SharedString::from(action.name.clone())),
+            );
+        }
+        actions = actions.child(
+            action_segment(&theme, "conversation-add-action")
+                .rounded(px(5.0))
+                .cursor_pointer()
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.open_project_action_editor(None, None, cx)),
+                )
+                .child(
+                    icon(icons::PLUS)
+                        .size(px(13.0))
+                        .text_color(theme.text_muted),
+                )
+                .child("Add action"),
+        );
+        row = row.child(actions);
+        if !snapshot.actions.is_empty() || !snapshot.importable_actions.is_empty() {
+            let mut menu = action_chevron(
+                &theme,
+                cx.listener(|this, _, _, cx| this.toggle_project_actions_menu(cx)),
+            );
+            if self.project_actions.menu.get().is_some() {
+                menu = menu.relative().child(popover::anchored_menu_below(
+                    "project-actions-menu",
+                    self.render_project_actions_menu(
+                        &status,
+                        &snapshot,
+                        px(self.viewport_height),
+                        cx,
+                    ),
+                    self.project_actions.menu.closing_since(),
+                ));
+            }
+            row = row.child(menu);
+        }
+        Some(row.into_any_element())
     }
 
     pub(super) fn render_project_actions_control(
@@ -732,7 +844,7 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .rounded(px(5.0))
-                            .hover(|style| style.bg(crate::theme::ink(0.08)))
+                            .hover(|style| style.bg(theme.element_hover))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.open_project_action_editor(Some(edit.clone()), None, cx)
@@ -1019,7 +1131,7 @@ fn project_action_params(
     params
 }
 
-fn action_segment(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+fn action_segment(theme: &Theme, id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h_full()
@@ -1029,7 +1141,7 @@ fn action_segment(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> 
         .gap(px(5.0))
         .text_size(px(11.5))
         .text_color(theme.text.opacity(0.9))
-        .hover(|style| style.bg(crate::theme::ink(0.07)))
+        .hover(|style| style.bg(theme.element_hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
@@ -1047,7 +1159,7 @@ fn action_chevron(
         .border_l_1()
         .border_color(theme.border)
         .cursor_pointer()
-        .hover(|style| style.bg(crate::theme::ink(0.07)))
+        .hover(|style| style.bg(theme.element_hover))
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
@@ -1188,3 +1300,6 @@ mod project_actions_scroll_tests {
         );
     }
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("../menu_review/actions.rs");

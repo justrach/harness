@@ -196,7 +196,7 @@
             {
               "id": "r",
               "kind": "reasoning",
-              "reasoning": "hidden"
+              "reasoning": "weighing the plan"
             },
             {
               "kind": "text",
@@ -219,7 +219,8 @@
             "input q request=q questions=0 resolved=false",
             "input q3 request=q3 questions=1 resolved=true",
             "error e signed out reauth=codex",
-            "error e2 boom reauth=-"
+            "error e2 boom reauth=-",
+            "reasoning r weighing the plan"
           ]
         }
       ],

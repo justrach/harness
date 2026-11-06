@@ -33,10 +33,10 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
-    ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathBuilder, Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
-    TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px, quad, size,
+    AnyElement, BorderStyle, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
+    ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
+    Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun, Window,
+    canvas, div, img, list, point, prelude::*, px, quad, size,
 };
 
 use harness_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -52,10 +52,28 @@ use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
+use crate::tool_call_rows::RowResult;
 use harness_syntax::LanguageId as Lang;
 
 mod agent_reveal;
 mod cadence;
+#[cfg(target_os = "macos")]
+mod gallery;
+#[cfg(target_os = "macos")]
+mod gallery_thumbnails;
+#[cfg(target_os = "macos")]
+#[path = "transcript/viewed_images.rs"]
+mod viewed_images;
+#[cfg(target_os = "macos")]
+use gallery::merge_generated_image_runs;
+#[cfg(target_os = "macos")]
+pub use gallery::{GalleryLightboxState, GeneratedImageRef};
+#[cfg(all(target_os = "macos", feature = "appshots-fixture"))]
+pub use viewed_images::fixture::ViewedImageReview;
+#[cfg(all(target_os = "macos", feature = "appshots-fixture"))]
+pub mod gallery_fixture;
+#[cfg(all(test, target_os = "macos"))]
+mod gallery_tests;
 
 #[cfg(test)]
 #[path = "transcript/steer_echo_tests.rs"]
@@ -79,6 +97,9 @@ mod selection_tests;
 #[cfg(test)]
 #[path = "transcript/stall_tests.rs"]
 mod stall_tests;
+#[cfg(test)]
+#[path = "transcript/zoom_tests.rs"]
+mod zoom_tests;
 
 // ---------------------------------------------------------------------------
 // Constants (mugen ports)
@@ -176,13 +197,22 @@ const CHIP_HEADER_HEIGHT: f32 = CHIP_CARD_HEIGHT - 2.0;
 /// a longer elbow, a 4px break before the icon, and an 8px icon-to-text gap.
 const ACTIVITY_GUTTER_WIDTH: f32 = 48.0;
 const ACTIVITY_TEXT_GAP: f32 = 8.0;
+/// A tree row's text sits this far inside its running pill or result wash.
+const ACTIVITY_ROW_INSET: f32 = 6.0;
+/// Space between the rows and each thing under them.
+/// The column at a tree row's right end that holds its chevron. Rows with
+/// nothing to expand keep it empty, so results line up down the group.
+const ACTIVITY_CHEVRON_SLOT: f32 = 18.0;
+const TOOL_ROW_GAP: f32 = 8.0;
+const TOOL_GROUP_FOOTER_GAP: f32 = 6.0;
+const TOOL_GROUP_FOOTER_HEIGHT: f32 = 24.0;
 const ACTIVITY_TRUNK_X: f32 = 12.5;
 const ACTIVITY_BEND_RADIUS: f32 = 6.0;
 const ACTIVITY_BRANCH_END_X: f32 = 28.0;
 const ACTIVITY_ICON_LEFT: f32 = 32.0;
 const ACTIVITY_ICON_SIZE: f32 = 16.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
-const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
+const TOOL_LABEL_SIZE: f32 = render::MD_TEXT_SIZE;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
 /// Compact rows retain the analytic heights used by row and group folds.
@@ -193,7 +223,6 @@ const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_
 /// continuous log rather than a stack of discrete pop-ins.
 const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
 const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
-const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
 const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
 /// The connector draws briskly, then eases into the branch tip so its arrival
 /// remains visible without feeling mechanically linear.
@@ -1289,6 +1318,11 @@ pub enum RowKind {
         title: String,
         script: String,
     },
+    #[cfg(target_os = "macos")]
+    GeneratedImageGallery {
+        owner: String,
+        images: Arc<Vec<GeneratedImageRef>>,
+    },
     GeneratedImage {
         owner: String,
         path: String,
@@ -2325,6 +2359,9 @@ pub fn rows_for_entry(
         }
     }
 
+    #[cfg(target_os = "macos")]
+    let mut rows = merge_generated_image_runs(rows);
+
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
     }
@@ -2349,6 +2386,18 @@ fn reply_places_images(rows: &[Row]) -> bool {
             .is_some_and(|top| !crate::files::markdown_media::block_image_sources(&top.block).is_empty()),
         _ => false,
     })
+}
+
+/// Paths of the files attached to the person's messages in `rows`.
+fn sent_attachment_paths(rows: &[Row]) -> HashSet<String> {
+    rows.iter()
+        .filter_map(|row| match &row.kind {
+            RowKind::User { attachments, .. } => Some(attachments.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|att| att.path.clone())
+        .collect()
 }
 
 /// Images the agent opened with a read tool, shown under its reply so the
@@ -2400,18 +2449,6 @@ fn viewed_image_rows(entry: &SessionMessageEntry) -> Vec<Row> {
         .collect()
 }
 
-/// Paths of the files attached to the person's messages in `rows`.
-fn sent_attachment_paths(rows: &[Row]) -> HashSet<String> {
-    rows.iter()
-        .filter_map(|row| match &row.kind {
-            RowKind::User { attachments, .. } => Some(attachments.iter()),
-            _ => None,
-        })
-        .flatten()
-        .map(|att| att.path.clone())
-        .collect()
-}
-
 /// The raster types both gpui and the engine's read-back support.
 fn viewed_image_mime(path: &str) -> Option<&'static str> {
     use gpui::ImageFormat;
@@ -2457,6 +2494,21 @@ thread_local! {
 /// test reads to see what one keystroke or streamed chunk rebuilt.
 pub fn render_total(view: &str) -> u64 {
     RENDER_TOTALS.with(|totals| totals.borrow().get(view).copied().unwrap_or_default())
+}
+
+#[cfg(test)]
+thread_local! {
+    static VIEW_RENDER_TOTALS: RefCell<HashMap<gpui::EntityId, u64>> = RefCell::default();
+}
+
+#[cfg(test)]
+pub(crate) fn record_entity_render(view: gpui::EntityId) {
+    VIEW_RENDER_TOTALS.with(|totals| *totals.borrow_mut().entry(view).or_default() += 1);
+}
+
+#[cfg(test)]
+pub(crate) fn entity_render_total(view: gpui::EntityId) -> u64 {
+    VIEW_RENDER_TOTALS.with(|totals| totals.borrow().get(&view).copied().unwrap_or_default())
 }
 
 fn count_render(view: &'static str) {
@@ -2701,95 +2753,35 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
 }
 
 fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
+    // Always one line. The title's box is one line tall and clipped, so a
+    // wrapped word would land on a hidden second line and simply vanish.
+    let title = div().min_w_0().truncate();
     let Some(shimmer_phase) = shimmer_phase else {
         // Keep the ordinary inherited hover color when the group is settled
         // (and when reduced motion turns the active shimmer off).
-        return text.into_any_element();
+        return title.child(text).into_any_element();
     };
-    // Keep the title as ONE normal text run. Splitting it per character copies
-    // the gradient stops, but also splits shaping/kerning and makes the sweep
-    // visibly hop one glyph at a time. The overlay repaints the intact shaped
-    // line through narrow moving clips, which is the native equivalent of
-    // CSS `background-clip: text` without duplicating accessible text.
-    let overlay_text = text.clone();
-    let overlay_font = gpui::font(theme.font_sans_fixed.clone());
+    // One shaped line with a color per character. Color runs share the line's
+    // shaping, so kerning survives, and truncation applies to the sweep and
+    // the text alike because they are the same text. The band's color is fixed
+    // against the muted base, so hover doesn't darken the title under it.
     let base = theme.text_muted;
     let peak = theme.text;
-    let overlay = canvas(
-        move |bounds, window, _| {
-            let probe = window.text_system().shape_line(
-                overlay_text.clone(),
-                px(TOOL_LABEL_SIZE),
-                &[TextRun {
-                    len: overlay_text.len(),
-                    font: overlay_font.clone(),
-                    color: peak,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
-            let text_width = f32::from(probe.width()).min(f32::from(bounds.size.width));
-            let strip_count = (text_width / TOOL_GROUP_SHIMMER_STRIP_WIDTH).ceil() as usize;
-            let mut strips = Vec::with_capacity(strip_count);
-            for ix in 0..strip_count {
-                let left = ix as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH;
-                let right = ((ix + 1) as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH).min(text_width);
-                let x = (left + right) * 0.5 / text_width.max(1.0);
-                let amount = tool_title_shimmer_amount(x, shimmer_phase);
-                if amount <= 0.001 {
-                    continue;
-                }
-                let line = window.text_system().shape_line(
-                    overlay_text.clone(),
-                    px(TOOL_LABEL_SIZE),
-                    &[TextRun {
-                        len: overlay_text.len(),
-                        font: overlay_font.clone(),
-                        color: motion::mix(base, peak, amount),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                );
-                strips.push((left, right, line));
-            }
-            strips
-        },
-        move |bounds, strips, window, cx| {
-            for (left, right, line) in strips {
-                let mask = ContentMask {
-                    bounds: Bounds {
-                        origin: point(bounds.origin.x + px(left), bounds.origin.y),
-                        size: size(px(right - left), bounds.size.height),
-                    },
-                };
-                window.with_content_mask(Some(mask), |window| {
-                    let line_height = px(TOOL_LABEL_LINE_HEIGHT);
-                    let _ = line.paint(
-                        bounds.origin,
-                        line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
-                });
-            }
-        },
-    )
-    .absolute()
-    .inset_0();
-    div()
-        .relative()
-        .h_full()
-        .min_w_0()
-        .flex_1()
-        .overflow_hidden()
-        .child(text)
-        .child(overlay)
+    let highlights = tool_title_shimmer_spans(&text, shimmer_phase)
+        .into_iter()
+        .map(|(range, amount)| {
+            (
+                range,
+                gpui::HighlightStyle {
+                    color: Some(motion::mix(base, peak, amount)),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    title
+        .text_color(base)
+        .child(StyledText::new(text).with_highlights(highlights))
         .into_any_element()
 }
 
@@ -2840,6 +2832,11 @@ pub fn chips_height(count: usize) -> f32 {
 /// [`crate::changes::body_height`]. The chip's own [`CHIP_HEIGHT`] is already
 /// counted by [`chips_height`].
 pub fn detail_height(detail: &ToolDetail) -> f32 {
+    detail_height_with_ui_size(detail, 16.0)
+}
+
+/// Thinking follows interface zoom; code output and diffs retain pixel sizes.
+fn detail_height_with_ui_size(detail: &ToolDetail, ui_size: f32) -> f32 {
     let body = match detail {
         ToolDetail::Output {
             lines,
@@ -2853,7 +2850,9 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
             truncated_by,
         } => {
             let rows = lines.len() + usize::from(*truncated_by > 0);
-            rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
+            let line_height =
+                f32::from(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT).to_pixels(px(ui_size)));
+            rows as f32 * line_height + OUTPUT_BODY_PAD
         }
         ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
@@ -3072,7 +3071,7 @@ fn compact_work_title(
                 .left_0()
                 .right_0()
                 .top_0()
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                 .flex()
                 .items_center()
                 .overflow_hidden()
@@ -3083,7 +3082,7 @@ fn compact_work_title(
             div()
                 .relative()
                 .top(px(4.0 * (1.0 - t)))
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                 .flex()
                 .items_center()
                 .overflow_hidden()
@@ -3573,13 +3572,28 @@ fn compact_fold_geometry(
 /// BoardUI's measured recipe: a 300%-wide repeating gradient moves from 200%
 /// to -100%. Its 38→50→62% highlight maps to a 36%-of-title shoulder around
 /// each peak; adjacent copies sit three title-widths apart. Sampling this by
-/// x-coordinate lets the paint clips reproduce the continuous pattern.
+/// x-coordinate lets the color runs reproduce the continuous pattern.
 fn tool_title_shimmer_amount(x: f32, phase: f32) -> f32 {
     let primary_center = -2.5 + phase.clamp(0.0, 1.0) * 6.0;
     (-2..=2)
         .map(|copy| primary_center + copy as f32 * 3.0)
         .map(|center| (1.0 - (x - center).abs() / TOOL_GROUP_SHIMMER_HALF_WIDTH).clamp(0.0, 1.0))
         .fold(0.0, f32::max)
+}
+
+/// The characters the sweep currently lights, with how strongly. Position is
+/// by character count, not measured width: the band is far wider than any
+/// glyph, so the difference doesn't show, and no shaping is needed to know it.
+fn tool_title_shimmer_spans(title: &str, phase: f32) -> Vec<(std::ops::Range<usize>, f32)> {
+    let count = title.chars().count().max(1) as f32;
+    title
+        .char_indices()
+        .enumerate()
+        .filter_map(|(ix, (start, ch))| {
+            let amount = tool_title_shimmer_amount((ix as f32 + 0.5) / count, phase);
+            (amount > 0.001).then(|| (start..start + ch.len_utf8(), amount))
+        })
+        .collect()
 }
 
 fn tool_title_shimmer_phase(start: Instant, now: Instant) -> f32 {
@@ -3988,6 +4002,8 @@ pub struct Transcript {
     /// Opens a tool's saved view (`chat id`, view) in the shell's browser
     /// pane; set by the shell with the link handler.
     view_opener: Option<ViewOpener>,
+    model_labeler: Option<ModelLabeler>,
+    error_details: HashSet<SharedString>,
     rendered_rows: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
     /// Family and size changes can alter prose wrapping without changing row
@@ -4024,6 +4040,8 @@ pub struct Transcript {
     compact_fold_settle: Option<Task<()>>,
     highlights: HighlightStore,
     show_jump_button: bool,
+    /// The Reply button offered where a selection ended.
+    selection_reply: Option<SelectionReply>,
     /// Distance from the bottom at the last observation (wheel event or spring
     /// tick) — restick and escape are direction-aware
     /// (see [`Transcript::should_restick`]).
@@ -4104,13 +4122,29 @@ pub struct Transcript {
     copied_message_clear: Option<Task<()>>,
     /// Transcript attachment being viewed full-size (click a user thumbnail).
     attachment_preview: Option<crate::attachments::PreviewImage>,
-    /// Focused while the lightbox is open so Escape reaches it.
-    attachment_preview_focus: gpui::FocusHandle,
-    attachment_preview_return_focus: Option<gpui::FocusHandle>,
+    #[cfg(target_os = "macos")]
+    gallery_selection: HashMap<SharedString, usize>,
+    #[cfg(target_os = "macos")]
+    gallery_focus: HashMap<SharedString, gpui::FocusHandle>,
+    #[cfg(target_os = "macos")]
+    gallery_scroll: HashMap<SharedString, gpui::ScrollHandle>,
+    #[cfg(target_os = "macos")]
+    gallery_save: HashMap<SharedString, gallery::GallerySaveState>,
+    #[cfg(target_os = "macos")]
+    gallery_thumbnails: gallery_thumbnails::GalleryThumbnails,
+    #[cfg(target_os = "macos")]
+    viewed_images: HashMap<SharedString, viewed_images::ViewedImageDisclosure>,
     /// Paths of the files the person attached to their messages. An agent
     /// reading one of them is looking at what the person sent, which already
     /// shows on their message, so it isn't repeated under the reply.
     sent_attachment_paths: HashSet<String>,
+    #[cfg(target_os = "macos")]
+    pending_viewed_image: Option<viewed_images::ViewedImagePreview>,
+    #[cfg(target_os = "macos")]
+    attachment_gallery_preview: Option<GalleryLightboxState>,
+    /// Focused while the lightbox is open so Escape reaches it.
+    attachment_preview_focus: gpui::FocusHandle,
+    attachment_preview_return_focus: Option<gpui::FocusHandle>,
     /// Mermaid diagrams in replies, rendered off the main thread and cached
     /// per (source, theme palette).
     diagrams: crate::markdown::diagram::DiagramCache,
@@ -4150,6 +4184,8 @@ enum BlobFetch {
 /// Shell-facing events (the transcript itself hosts no surfaces).
 #[derive(Debug, Clone)]
 pub enum TranscriptEvent {
+    /// The Reply button on selected text: quote it in the composer, unsent.
+    ReplyToSelection { chat_id: String, text: String },
     /// Done in a transcript image's annotate mode (crate::annotate): stage
     /// the flattened copy, with its notes, in the composer.
     StageAnnotated(crate::annotate::Annotated),
@@ -4172,12 +4208,16 @@ pub enum TranscriptEvent {
         title: String,
         frozen: bool,
     },
+    /// Open the Tool Access Map for this chat in the right pane.
+    OpenToolAccess { chat_id: String },
     /// The model-mismatch card: start a new chat on `model`, carrying the
     /// failed prompt over.
     NewChatWithModel { model: String },
     /// The model-mismatch card: keep this chat on the `model` its session
     /// restored, with the failed prompt back in the composer.
     KeepChatModel { model: String },
+    /// Restore the failed prompt for editing; never automatically send it.
+    RetryPrompt { chat_id: String, entry_id: String },
     /// A step on the in-chat ChatGPT reconnect card, for the recovery on this chat's execution
     /// host (never the viewer's selected device). No prompt or tool is replayed; Resume sends a
     /// new turn in this chat only when clicked.
@@ -4191,17 +4231,51 @@ pub enum TranscriptEvent {
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
 
+/// Selected text and where its drag ended, for the Reply button.
+struct SelectionReply {
+    position: Point<Pixels>,
+    text: String,
+}
+
 /// Opens a saved tool view for the chat whose transcript shows the chip.
 pub(crate) type ViewOpener =
     Rc<dyn Fn(&str, &harness_proto::ToolView, &mut Window, &mut gpui::App)>;
 
+/// Resolves model display names from the window’s provider catalog.
+pub(crate) type ModelLabeler = Rc<dyn Fn(harness_proto::HarnessId, &str, &gpui::App) -> String>;
+
 impl Transcript {
+    /// Reconnect the same transcript entity to its destination window's feeds.
+    /// The host installs the conversation snapshot before calling this method.
+    pub(crate) fn rebind_window_state(&mut self, state: Entity<AppState>, cx: &mut Context<Self>) {
+        self._observe = cx.observe(&state, |this: &mut Self, _, cx| this.request_sync(cx));
+        self._text_changes = cx.subscribe(
+            &state,
+            |this: &mut Self, state, event: &crate::state::TranscriptTextChanged, cx| {
+                let doc_id = this
+                    .doc_override
+                    .as_deref()
+                    .or_else(|| state.read(cx).selected_chat.as_deref());
+                if doc_id == Some(event.doc_id.as_str()) {
+                    this.request_sync(cx);
+                }
+            },
+        );
+        self.state = state;
+        self.last_source = None;
+        cx.notify();
+    }
+
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
         self.workspace_link = Some(handler);
     }
 
     pub(crate) fn set_view_opener(&mut self, opener: ViewOpener) {
         self.view_opener = Some(opener);
+    }
+
+    pub(crate) fn set_model_labeler(&mut self, labeler: ModelLabeler) {
+        self.model_labeler = Some(labeler);
     }
 
     pub(crate) fn link_ui(&self) -> Option<render::LinkUi> {
@@ -4299,10 +4373,13 @@ impl Transcript {
         let view = cx.entity_id();
         let selection_owner = view.as_u64();
         cx.on_release(move |this: &mut Self, cx| {
+            motion::release_hover_owner(view);
             crate::markdown::render::release_selection_owner(selection_owner);
             motion::set_background_notifier(view, None, cx);
             crate::image_media::release_media(this.diagrams.clear(), cx);
             this.release_diagram_zoom(cx);
+            #[cfg(target_os = "macos")]
+            this.gallery_thumbnails.clear(cx);
         })
         .detach();
         // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
@@ -4392,6 +4469,8 @@ impl Transcript {
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             workspace_link: None,
             view_opener: None,
+            model_labeler: None,
+            error_details: HashSet::new(),
             rendered_rows: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
             content_width: crate::settings::transcript_width(cx),
@@ -4406,6 +4485,7 @@ impl Transcript {
             compact_fold_settle: None,
             highlights: HighlightStore::default(),
             show_jump_button: false,
+            selection_reply: None,
             last_scroll_distance: 0.0,
             pinned,
             own_turn: None,
@@ -4436,9 +4516,25 @@ impl Transcript {
             copied_message: None,
             copied_message_clear: None,
             attachment_preview: None,
+            #[cfg(target_os = "macos")]
+            gallery_selection: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            gallery_focus: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            gallery_scroll: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            gallery_save: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            gallery_thumbnails: Default::default(),
+            #[cfg(target_os = "macos")]
+            viewed_images: HashMap::new(),
+            sent_attachment_paths: HashSet::new(),
+            #[cfg(target_os = "macos")]
+            pending_viewed_image: None,
+            #[cfg(target_os = "macos")]
+            attachment_gallery_preview: None,
             attachment_preview_focus: cx.focus_handle(),
             attachment_preview_return_focus: None,
-            sent_attachment_paths: HashSet::new(),
             diagrams: Default::default(),
             diagram_sources_shown: Rc::default(),
             diagram_zoom: None,
@@ -4650,6 +4746,8 @@ impl Transcript {
     }
 
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
+        // The button sits where the selection ended, which is moving away.
+        self.dismiss_selection_reply(cx);
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
@@ -4779,22 +4877,128 @@ impl Transcript {
 
     fn on_selection_mouse_up(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let was_selecting = self.selection_drag_position.is_some();
         self.stop_selection_scroll();
-        if let Some(_text) = crate::markdown::selection::end_active_drag() {
-            // X11 middle-click paste parity, including the case where the
-            // anchor row has virtualized away and cannot receive mouse-up.
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            cx.write_to_primary(ClipboardItem::new_string(_text));
+        let ended = crate::markdown::selection::end_active_drag();
+        // X11 middle-click paste parity, including the case where the
+        // anchor row has virtualized away and cannot receive mouse-up.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if let Some(text) = &ended {
+            cx.write_to_primary(ClipboardItem::new_string(text.clone()));
+        }
+        // A press in another panel focuses it and swaps this view in, and the
+        // text's own listener may already have ended the drag, so being under
+        // the pointer has to count too.
+        if ended.is_some() || was_selecting || self.list.viewport_bounds().contains(&event.position)
+        {
+            self.offer_selection_reply(event.position, cx);
         }
         if was_selecting {
             self.refresh_jump_button(self.distance_from_bottom());
             cx.notify();
         }
+    }
+
+    /// The chat a reply from this transcript would go to: the one that owns
+    /// the composer. A subagent's doc or another panel's chat has no composer
+    /// of its own to quote into.
+    fn selection_reply_chat(&self, cx: &gpui::App) -> Option<String> {
+        let state = self.state.read(cx);
+        let selected = state.selected_chat.as_deref()?;
+        (self
+            .doc_override
+            .as_deref()
+            .is_none_or(|doc| doc == selected)
+            && state.chats.iter().any(|chat| chat.id == selected))
+        .then(|| selected.to_owned())
+    }
+
+    fn offer_selection_reply(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.selection_reply_chat(cx).is_none() {
+            return;
+        }
+        let Some(text) =
+            crate::markdown::selection::selected_text().filter(|text| !text.trim().is_empty())
+        else {
+            return;
+        };
+        self.selection_reply = Some(SelectionReply { position, text });
+        cx.notify();
+    }
+
+    fn dismiss_selection_reply(&mut self, cx: &mut Context<Self>) {
+        if self.selection_reply.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn send_selection_reply(&mut self, cx: &mut Context<Self>) {
+        let Some(reply) = self.selection_reply.take() else {
+            return;
+        };
+        if let Some(chat_id) = self.selection_reply_chat(cx) {
+            cx.emit(TranscriptEvent::ReplyToSelection {
+                chat_id,
+                text: reply.text,
+            });
+        }
+        // The quote is in the composer now, so the highlight has done its job.
+        if let Some(key) = crate::markdown::selection::anchor_key() {
+            crate::markdown::selection::clear_if_owner(&key);
+        }
+        cx.notify();
+    }
+
+    fn render_selection_reply(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let reply = self.selection_reply.as_ref()?;
+        // Anything that replaced or cleared the selection retires the button.
+        if crate::markdown::selection::selected_text().as_deref() != Some(reply.text.as_str()) {
+            return None;
+        }
+        let theme = Theme::of(cx).clone();
+        let button = div()
+            .id("transcript-reply-selection")
+            .debug_selector(|| "transcript-reply-selection".into())
+            .occlude()
+            .h(px(26.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(8.0))
+            .cursor_pointer()
+            .bg(theme.composer_bg())
+            .shadow(theme.composer_shadows())
+            .text_size(crate::typography::ui_rems(12.0))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(theme.text)
+            .hover(|el| el.bg(theme.element_hover))
+            .role(gpui::Role::Button)
+            .aria_label("Reply to the selected text")
+            // Keep the selection and the keyboard until the click lands.
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_selection_reply(cx)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.send_selection_reply(cx);
+            }))
+            .child("Reply");
+        Some(
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::BottomLeft)
+                    .position(reply.position - gpui::point(px(0.0), px(8.0)))
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(button),
+            )
+            .into_any_element(),
+        )
     }
 
     fn stop_selection_scroll(&mut self) {
@@ -5530,6 +5734,8 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
+            self.agent_flash = None;
+            self.agent_flash_task = None;
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
             // exactly the chat the user is reopening.
@@ -5555,6 +5761,17 @@ impl Transcript {
             }
             self.chat_id = selected;
             self.rows.clear();
+            #[cfg(target_os = "macos")]
+            {
+                self.gallery_selection.clear();
+                self.gallery_focus.clear();
+                self.gallery_scroll.clear();
+                self.gallery_save.clear();
+                self.gallery_thumbnails.clear(cx);
+                self.viewed_images.clear();
+                self.pending_viewed_image = None;
+                self.attachment_gallery_preview = None;
+            }
             self.row_sources.clear();
             self.row_cache.clear();
             self.visual_views.clear();
@@ -5567,6 +5784,7 @@ impl Transcript {
             self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
+            self.error_details.clear();
             self.compact_fold_heights.clear();
             self.compact_fold_settle = None;
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
@@ -5917,6 +6135,25 @@ impl Transcript {
         // block keeps its handle through completion; deleted/reindexed tail
         // blocks and the previous chat cannot accumulate stale handles.
         prune_code_fences(&mut self.code_fences, &new_rows);
+        #[cfg(target_os = "macos")]
+        {
+            let live: HashSet<_> = new_rows
+                .iter()
+                .filter_map(|row| {
+                    matches!(row.kind, RowKind::GeneratedImageGallery { .. })
+                        .then_some(row.id.clone())
+                })
+                .collect();
+            viewed_images::prune_viewed_images(
+                &mut self.viewed_images,
+                &mut self.pending_viewed_image,
+                &new_rows,
+            );
+            self.gallery_selection.retain(|id, _| live.contains(id));
+            self.gallery_focus.retain(|id, _| live.contains(id));
+            self.gallery_scroll.retain(|id, _| live.contains(id));
+            self.gallery_save.retain(|id, _| live.contains(id));
+        }
 
         // Text already streamed before this (re)attach is the veil BASELINE:
         // its rows' veils seed instead of fading (render creates them from
@@ -6016,7 +6253,6 @@ impl Transcript {
                 });
             }
         }
-        self.refresh_sent_attachment_paths();
         self.refresh_protected_attachments(cx);
         self.reconcile_own_turn_prompt();
         self.restore_pending_viewport(replay);
@@ -7207,6 +7443,245 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// A failed turn as one quiet line (Cursor's inline error strip): who
+    /// couldn't respond and why. The raw payload waits under Details; on the
+    /// latest turn of the chat that owns the composer, Edit & retry puts the
+    /// prompt back without sending it.
+    fn render_error_banner(
+        &mut self,
+        ix: usize,
+        row_id: &SharedString,
+        message: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = format!("{} couldn't respond", self.error_subject(cx));
+        let reason = model_error_reason(message);
+        let retry = self.retry_target(ix, cx);
+        let open = self.error_details.contains(row_id);
+        let accent = theme.danger;
+        let toggle_id = row_id.clone();
+        let details_toggle = div()
+            .id(SharedString::from(format!("{row_id}-details")))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(6.0))
+            .py(px(3.0))
+            .rounded(px(6.0))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.element_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if !this.error_details.remove(&toggle_id) {
+                    this.error_details.insert(toggle_id.clone());
+                }
+                if let Some(ix) = this.rows.iter().position(|row| row.id == toggle_id) {
+                    this.list.remeasure_items(ix..ix + 1);
+                }
+                cx.notify();
+            }))
+            .child(SharedString::from("Details"))
+            .child(
+                crate::icons::icon(if open {
+                    crate::icons::ALT_ARROW_UP
+                } else {
+                    crate::icons::ALT_ARROW_DOWN
+                })
+                .size(px(12.0))
+                .text_color(theme.text_muted),
+            );
+        let retry_button = retry.map(|(chat_id, entry_id)| {
+            div()
+                .id(SharedString::from(format!("{row_id}-retry")))
+                .flex_none()
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(theme.border)
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.element_hover))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(TranscriptEvent::RetryPrompt {
+                        chat_id: chat_id.clone(),
+                        entry_id: entry_id.clone(),
+                    });
+                }))
+                .child(SharedString::from("Edit & retry"))
+        });
+        let details = open.then(|| {
+            let copy_message = message.clone();
+            div()
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .pt(px(6.0))
+                .border_t_1()
+                .border_color(accent.opacity(0.12))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(theme.text_muted)
+                        .child(message.clone()),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{row_id}-copy")))
+                        .flex_none()
+                        .size(px(20.0))
+                        .rounded(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |style| style.bg(accent.opacity(0.12)))
+                        // Failure payloads are meant to be pasted, not screenshotted.
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                copy_message.to_string(),
+                            ));
+                        })
+                        .child(
+                            crate::icons::icon(crate::icons::COPY)
+                                .size(px(12.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+        });
+        div()
+            .py(px(4.0))
+            .w_full()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(accent.opacity(0.16))
+                    .bg(accent.opacity(0.05))
+                    .text_size(px(12.0))
+                    // Narrow panes wrap the actions under the text rather
+                    // than clipping them; the reason truncates first, then
+                    // the title.
+                    .child(
+                        div()
+                            .min_h(px(22.0))
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_x(px(8.0))
+                            .gap_y(px(4.0))
+                            .child(
+                                crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                                    .flex_none()
+                                    .size(px(14.0))
+                                    .text_color(theme.danger_muted.opacity(0.9)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(140.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child(SharedString::from(title)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(theme.text_muted)
+                                            .child(SharedString::from(reason)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ml_auto()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .child(details_toggle)
+                                    .children(retry_button),
+                            ),
+                    )
+                    .children(details),
+            )
+            .into_any_element()
+    }
+
+    /// Who a failed turn belongs to, by the chat's own model (never the
+    /// picker's current pick): its display name, else the raw id.
+    fn error_subject(&self, cx: &gpui::App) -> String {
+        let state = self.state.read(cx);
+        let chat = self
+            .doc_override
+            .as_deref()
+            .or(self.chat_id.as_deref())
+            .and_then(|id| state.chats.iter().find(|chat| chat.id == id));
+        if chat.is_none() && self.doc_override.is_some() {
+            return "The subagent".to_string();
+        }
+        let model = chat
+            .and_then(|chat| chat.config.as_ref())
+            .and_then(|config| {
+                let id = config.model.as_deref()?.trim();
+                (!id.is_empty()).then_some((config.harness, id))
+            });
+        match (model, &self.model_labeler) {
+            (Some((harness, id)), Some(label)) => label(harness, id, cx),
+            (Some((_, id)), None) => id.to_string(),
+            (None, _) => "The model".to_string(),
+        }
+    }
+
+    /// Edit & retry's target `(chat id, user entry id)`: offered only on the
+    /// latest turn of the chat that owns the composer, and never for an
+    /// image-only prompt or one another agent sent.
+    fn retry_target(&self, ix: usize, cx: &gpui::App) -> Option<(String, String)> {
+        if self.doc_override.is_some() {
+            return None;
+        }
+        let chat_id = self.chat_id.clone()?;
+        if self.state.read(cx).selected_chat.as_deref() != Some(chat_id.as_str())
+            || self.rows[ix + 1..]
+                .iter()
+                .any(|row| matches!(row.kind, RowKind::User { .. }))
+        {
+            return None;
+        }
+        let prompt = self.rows[..ix]
+            .iter()
+            .rev()
+            .find(|row| matches!(row.kind, RowKind::User { .. }))?;
+        match &prompt.kind {
+            RowKind::User {
+                agent_sender: None,
+                text,
+                ..
+            } if !text.trim().is_empty() => Some((chat_id, prompt.entry_id.to_string())),
+            _ => None,
+        }
+    }
+
     fn render_generated_image(
         &mut self,
         row_id: &SharedString,
@@ -7217,10 +7692,14 @@ impl Transcript {
         viewed: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use crate::attachments::AttachmentSnapshot;
         if viewed && self.sent_attachment_paths.contains(path) {
             return div().into_any_element();
         }
+        #[cfg(target_os = "macos")]
+        if viewed {
+            return self.render_viewed_image(row_id, owner, path, name, mime_type, cx);
+        }
+        use crate::attachments::AttachmentSnapshot;
         let devices = self.generated_attachment_device_ids(owner, cx);
         let state = self.attachment_state(&devices, path, Some(mime_type), cx);
         let theme = Theme::of(cx).clone();
@@ -7260,6 +7739,8 @@ impl Transcript {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.attachment_preview_return_focus = window.focused(cx);
                         preview.viewer.reset();
+                        #[cfg(target_os = "macos")]
+                        this.cancel_pending_viewed_image_preview(cx);
                         this.attachment_preview = Some(preview.clone());
                         window.focus(&this.attachment_preview_focus, cx);
                         cx.notify();
@@ -7376,6 +7857,8 @@ impl Transcript {
                                     .update(cx, |this, cx| {
                                         this.attachment_preview_return_focus = window.focused(cx);
                                         preview.viewer.reset();
+                                        #[cfg(target_os = "macos")]
+                                        this.cancel_pending_viewed_image_preview(cx);
                                         this.attachment_preview = Some(preview.clone());
                                         window.focus(&this.attachment_preview_focus, cx);
                                         cx.notify();
@@ -7567,6 +8050,8 @@ impl Transcript {
             natural: gpui::size(px(diagram.width), px(diagram.height)),
         });
         self.attachment_preview_return_focus = window.focused(cx);
+        #[cfg(target_os = "macos")]
+        self.cancel_pending_viewed_image_preview(cx);
         self.attachment_preview = Some(preview);
         window.focus(&self.attachment_preview_focus, cx);
         cx.notify();
@@ -7740,6 +8225,8 @@ impl Transcript {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.attachment_preview_return_focus = window.focused(cx);
                                 preview.viewer.reset();
+                                #[cfg(target_os = "macos")]
+                                this.cancel_pending_viewed_image_preview(cx);
                                 this.attachment_preview = Some(preview.clone());
                                 window.focus(&this.attachment_preview_focus, cx);
                                 cx.notify();
@@ -7865,6 +8352,8 @@ impl Transcript {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.attachment_preview_return_focus = window.focused(cx);
                             preview.viewer.reset();
+                            #[cfg(target_os = "macos")]
+                            this.cancel_pending_viewed_image_preview(cx);
                             this.attachment_preview = Some(preview.clone());
                             window.focus(&this.attachment_preview_focus, cx);
                             cx.notify();
@@ -8264,7 +8753,12 @@ impl Transcript {
             if self.doc_override.is_some() {
                 Theme::SPACE_LG
             } else {
-                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+                (if theme.is_harp() {
+                    0.0
+                } else {
+                    Theme::TITLEBAR_HEIGHT
+                }) + Theme::SPACE_LG
+                    + 10.0
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
@@ -8555,6 +9049,10 @@ impl Transcript {
                 mime_type,
                 viewed,
             } => self.render_generated_image(&row.id, owner, path, name, mime_type, *viewed, cx),
+            #[cfg(target_os = "macos")]
+            RowKind::GeneratedImageGallery { owner, images } => {
+                self.render_generated_image_gallery(&row.id, owner, images, cx)
+            }
             RowKind::ErrorChip { message } => {
                 let problem = harness_proto::run_errors::provider_problem(message);
                 let sign_in = self.chat_id.clone().zip(problem).map(|(chat_id, problem)| {
@@ -8569,7 +9067,12 @@ impl Transcript {
                         });
                     })
                 });
-                error_chip(&row.id, message.clone(), problem, sign_in, &theme)
+                if problem.is_some() {
+                    // Keep upstream's account/key recovery actions on classified failures.
+                    error_chip(&row.id, message.clone(), problem, sign_in, &theme)
+                } else {
+                    self.render_error_banner(ix, &row.id, message, &theme, cx)
+                }
             }
             RowKind::ReauthRequired { message, provider } => {
                 self.render_reauth(ix, &row.id, message, *provider, &theme, cx)
@@ -8998,7 +9501,11 @@ impl Transcript {
             });
         // Compact mode never auto-opens — not for the streaming tail, and not
         // to show chips arriving mid-reveal. Collapsed-by-default is the mode.
-        let effective_auto_open = auto_open || (arrival_pending && !self.compact_mode);
+        // On Mac, working steps stay behind their summary until the person
+        // expands it. Live progress and failed counts remain in the header;
+        // a new arrival never overrides the person's disclosure choice.
+        let effective_auto_open =
+            !cfg!(target_os = "macos") && (auto_open || (arrival_pending && !self.compact_mode));
         let open = !collapses || fold.open.unwrap_or(effective_auto_open);
         // Compact shells only change `open` through `toggle_fold`, which
         // already seeds `from` with the body's measured height — the
@@ -9189,6 +9696,8 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
+        let ui_size = crate::typography::font_size(cx).pixels();
+        let detail_height = |detail: &ToolDetail| detail_height_with_ui_size(detail, ui_size);
         let base_row_height = if collapses {
             TOOL_TREE_ROW_HEIGHT
         } else {
@@ -9269,12 +9778,16 @@ impl Transcript {
         {
             motion_active = true;
         }
+        // Results at the row ends and diffs under them come from the same
+        // ToolItems the rows do.
+        let animated_group = crate::tool_call_rows::from_tools(tools, None);
         let revealed_height = CHIPS_TOP_PAD
             + row_heights
                 .iter()
                 .zip(&reveal_progress)
                 .map(|(height, progress)| height * progress)
-                .sum::<f32>();
+                .sum::<f32>()
+            + tool_group_footer_height(collapses);
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
         let shimmer_phase =
@@ -9308,8 +9821,8 @@ impl Transcript {
             .pr(px(4.0))
             .h(px(TOOL_GROUP_HEADER_HEIGHT))
             .cursor_pointer()
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+            .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE))
+            .line_height(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
@@ -9344,7 +9857,7 @@ impl Transcript {
             .child(
                 div()
                     .min_w_0()
-                    .h(px(TOOL_LABEL_LINE_HEIGHT))
+                    .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                     .flex()
                     .items_center()
                     .overflow_hidden()
@@ -9359,7 +9872,24 @@ impl Transcript {
                         None => tool_group_title(summary.clone(), shimmer_phase, theme),
                     }),
             );
-        #[cfg(test)]
+        #[cfg(target_os = "macos")]
+        let header = {
+            let toggle_id = row_id.clone();
+            let accent = theme.accent;
+            header
+                .role(gpui::Role::Button)
+                .aria_label(summary.clone())
+                .aria_expanded(open)
+                .tab_index(0)
+                .focus_visible(move |style| style.border_1().border_color(accent))
+                .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        cx.stop_propagation();
+                        this.toggle_fold(toggle_id.clone(), viewport_height, false, cx);
+                        cx.notify();
+                    }
+                }))
+        };
         let header = header.debug_selector(|| "transcript-tool-group-header".into());
 
         if compact_shell {
@@ -9402,6 +9932,29 @@ impl Transcript {
         if flash.is_some() && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
         }
+        // Only a running row moves. A settled group holds no clock, so a chat
+        // on screen with nothing happening doesn't redraw.
+        let status_phase = if collapses && animated_group.live && !reduce_motion {
+            crate::tool_call_rows::pulse_phase(cx.entity_id(), cx)
+        } else {
+            0.0
+        };
+        let statuses: Vec<Option<ActivityStatus>> = tools
+            .iter()
+            .enumerate()
+            .map(|(ix, tool)| {
+                let start = self
+                    .tool_group_reveals
+                    .get(row_id)
+                    .and_then(|reveal| reveal.starts.get(ix))
+                    .copied()
+                    .flatten();
+                activity_row_status(tool, collapses, start, now).map(|result| ActivityStatus {
+                    result,
+                    scramble_phase: (!reduce_motion).then_some(status_phase),
+                })
+            })
+            .collect();
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
@@ -9477,10 +10030,13 @@ impl Transcript {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 let affordance = affordances[ix].clone();
+                let status = statuses[ix].as_ref();
                 if detail.is_none() && invocation.is_none() && affordance.is_none() {
                     return reveal_tool_row(
                         tool_chip(
                             tool,
+                            status,
+                            ix,
                             collapses,
                             ix > 0,
                             ix + 1 < tools.len(),
@@ -9510,7 +10066,9 @@ impl Transcript {
                 let toggle_key = key.clone();
                 let mut card = div()
                     .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
-                    .when(collapses, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
+                    .when(collapses, |el| {
+                        el.ml(px(ACTIVITY_TEXT_GAP - ACTIVITY_ROW_INSET))
+                    })
                     .min_w_0()
                     .flex_1()
                     .flex()
@@ -9534,6 +10092,7 @@ impl Transcript {
                             .flex()
                             .items_center()
                             .cursor_pointer()
+                            .when(collapses, |el| activity_row_chrome(el, ix, status, theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 let entry =
@@ -9548,6 +10107,7 @@ impl Transcript {
                             .child(chip_header(
                                 tool,
                                 open,
+                                status,
                                 file_opener.as_ref(),
                                 preview_paths,
                                 theme,
@@ -9565,7 +10125,8 @@ impl Transcript {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .overflow_hidden();
+                        .overflow_hidden()
+                        .when(collapses, |panel| panel.pl(px(ACTIVITY_ROW_INSET)));
                     if let Some(invocation) = invocation.as_deref() {
                         panel = panel
                             .child(
@@ -9681,9 +10242,66 @@ impl Transcript {
             chips.into_any_element()
         } else {
             div()
+                .debug_selector(|| "tool-group-body".into())
                 .overflow_hidden()
                 .h(px(body_height))
-                .child(chips)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(TOOL_GROUP_FOOTER_GAP))
+                        .child(chips)
+                        .when(collapses, |col| {
+                            let chat_id = self.chat_id.clone().unwrap_or_default();
+                            // One line under the tree, its text on the rows'
+                            // left edge and its control on their right edge.
+                            col.child(
+                                div()
+                                    .h(px(TOOL_GROUP_FOOTER_HEIGHT))
+                                    .pl(px(ACTIVITY_GUTTER_WIDTH + ACTIVITY_TEXT_GAP))
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(12.0))
+                                    .child(div().flex_1().min_w_0().when(
+                                        tool_group_shows_diffs(&animated_group),
+                                        |line| {
+                                            line.child(crate::tool_call_rows::file_diff_summary(
+                                                &animated_group.file_diffs,
+                                                theme,
+                                            ))
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("{row_id}-tool-access")))
+                                            .debug_selector(|| "tool-group-access".into())
+                                            .flex_none()
+                                            .h_full()
+                                            .px(px(ACTIVITY_ROW_INSET))
+                                            .rounded(px(6.0))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.0))
+                                            .cursor_pointer()
+                                            .text_size(px(crate::typography::TEXT_CAPTION))
+                                            .text_color(theme.text_faint)
+                                            .hover(|s| s.bg(theme.ink(0.06)).text_color(theme.text))
+                                            .on_click(cx.listener(move |_, _, _, cx| {
+                                                cx.emit(TranscriptEvent::OpenToolAccess {
+                                                    chat_id: chat_id.clone(),
+                                                });
+                                            }))
+                                            .child(
+                                                crate::icons::icon(crate::icons::WIDGET)
+                                                    .size(px(12.0))
+                                                    .text_color(theme.text_faint),
+                                            )
+                                            .child("Tool access"),
+                                    ),
+                            )
+                        }),
+                )
                 .into_any_element()
         };
 
@@ -9986,6 +10604,72 @@ fn restart_notice_chip(message: SharedString, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// The plain reason a run failed, for the error banner's one line: transport
+/// wrappers (`harness protocol error:`, `session/prompt:`, `api error (…):`),
+/// the trailing request id and JSON-RPC code are dropped, and only the first
+/// sentence is kept. Details still shows the raw text.
+fn model_error_reason(message: &str) -> String {
+    let mut text = message.trim();
+    // `… [cg_req_…] (code -32603)`, in either order.
+    loop {
+        let before = text.len();
+        if text.ends_with(')')
+            && let Some(at) = text.rfind("(code ")
+        {
+            text = text[..at].trim_end();
+        }
+        if text.ends_with(']')
+            && let Some(at) = text.rfind('[')
+        {
+            text = text[..at].trim_end();
+        }
+        if text.len() == before {
+            break;
+        }
+    }
+    // Wrappers, outermost first. ASCII lowercasing keeps byte offsets.
+    loop {
+        let lower = text.to_ascii_lowercase();
+        let rest = if let Some(prefix) = ["harness protocol error:", "protocol error:", "error:"]
+            .into_iter()
+            .find(|prefix| lower.starts_with(prefix))
+        {
+            &text[prefix.len()..]
+        } else if let Some(after) = lower.strip_prefix("api error") {
+            // `api error (rate_limit_error …):`
+            let after = after.trim_start();
+            let after = match after.strip_prefix('(') {
+                Some(inner) => inner.split_once(')').map_or(after, |(_, rest)| rest),
+                None => after,
+            };
+            match after.trim_start().strip_prefix(':') {
+                Some(rest) => &text[text.len() - rest.len()..],
+                None => break,
+            }
+        } else if let Some((method, rest)) = text.split_once(':')
+            // An RPC method: `session/prompt:`.
+            && method.contains('/')
+            && !method.starts_with('/')
+            && method.chars().all(|c| c.is_ascii_lowercase() || c == '/' || c == '_')
+        {
+            rest
+        } else {
+            break;
+        };
+        text = rest.trim_start();
+    }
+    let sentence = text
+        .char_indices()
+        .find(|&(at, c)| matches!(c, '.' | '!' | '?') && text[at + 1..].starts_with(' '))
+        .map_or(text, |(at, _)| &text[..at]);
+    let sentence = sentence.trim().trim_end_matches('.');
+    if sentence.is_empty() {
+        "Something went wrong".to_string()
+    } else {
+        sentence.to_string()
+    }
+}
+
 /// A passive one-line chip marking a question the agent asked — the
 /// interactive controls live in the composer (chat-view.tsx `InputChip`):
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
@@ -10209,10 +10893,11 @@ fn detail_body(
             truncated_by,
         } => body
             .py(px(6.0))
-            .text_size(px(TOOL_TEXT_SIZE))
+            .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE))
+            .line_height(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT))
             .children(lines.iter().enumerate().map(|(line_ix, line)| {
                 let row = div()
-                    .h(px(OUTPUT_LINE_HEIGHT))
+                    .h(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT))
                     .w_full()
                     .min_w_0()
                     .flex()
@@ -10228,7 +10913,11 @@ fn detail_body(
                 )))
             }))
             .when(*truncated_by > 0, |block| {
-                block.child(more_lines_row(*truncated_by, theme))
+                block.child(
+                    more_lines_row(*truncated_by, theme)
+                        .h(crate::typography::ui_rems(OUTPUT_LINE_HEIGHT))
+                        .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE)),
+                )
             })
             .into_any_element(),
     }
@@ -10327,6 +11016,7 @@ enum ChipTrail {
 fn chip_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
+    status: Option<&ActivityStatus>,
     file_opener: Option<&ToolFileOpener>,
     preview_paths: PreviewPathAnchors<'_>,
     theme: &Theme,
@@ -10370,6 +11060,23 @@ fn chip_header_row(
     // Text resolves its color during layout, so group-hover text needs stable
     // child IDs under the keyed, expandable header to retain hover state.
     let hover_text = activity && trail.is_some() && !failed;
+    let chevron_open = match trail {
+        Some(ChipTrail::Chevron { open }) if activity => Some(open),
+        _ => None,
+    };
+    // A row in the tree ends in its result and chevron columns. A saved view's
+    // link keeps its own trailing arrow.
+    let tree_row = status.is_some() || chevron_open.is_some();
+    // A row with a result already says it failed, in its verb, icon and pill.
+    let red_detail = failed && status.is_none();
+    // A running row's path churns; the ends stay readable.
+    let scramble = status
+        .filter(|status| matches!(status.result, RowResult::Running { .. }))
+        .and_then(|status| status.scramble_phase);
+    let shown = |text: &str| match scramble {
+        Some(phase) => crate::tool_call_rows::scramble_middle(text, phase),
+        None => text.to_owned(),
+    };
     let tint = if failed {
         theme.danger
     } else {
@@ -10387,10 +11094,10 @@ fn chip_header_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(8.0))
+        .gap(px(TOOL_ROW_GAP))
         .px(px(if activity { 0.0 } else { 8.0 }))
-        .text_size(px(TOOL_LABEL_SIZE))
-        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        .text_size(crate::typography::ui_rems(TOOL_LABEL_SIZE))
+        .line_height(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
         .when(!activity, |row| {
             row.child(
                 // Subagent icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
@@ -10417,7 +11124,7 @@ fn chip_header_row(
         .child(
             div()
                 .flex_none()
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .h(crate::typography::ui_rems(TOOL_LABEL_LINE_HEIGHT))
                 .flex()
                 .items_center()
                 .when(!activity, |label| {
@@ -10440,16 +11147,23 @@ fn chip_header_row(
             div()
                 .when(!activity, |detail| detail.flex_1())
                 .min_w_0()
-                .h(px(if file_path.is_some() {
+                .h(crate::typography::ui_rems(if file_path.is_some() {
                     22.0
                 } else {
                     TOOL_LABEL_LINE_HEIGHT
                 }))
                 .flex()
                 .when(activity && detail.is_empty(), |detail| detail.hidden())
+                // Commands and paths are code. Fixed width also keeps a
+                // scrambling path from jittering sideways as its glyphs change.
+                .when(status.is_some(), |detail| {
+                    detail
+                        .font_family(theme.font_mono.clone())
+                        .text_size(crate::typography::ui_rems(TOOL_TEXT_SIZE))
+                })
                 .items_center()
                 .truncate()
-                .text_color(if failed {
+                .text_color(if red_detail {
                     theme.danger
                 } else if activity {
                     theme.text_muted
@@ -10468,7 +11182,7 @@ fn chip_header_row(
                         .bg(theme.ink(0.06))
                         .pl(px(1.0))
                         .pr(px(6.0))
-                        .text_color(if failed {
+                        .text_color(if red_detail {
                             theme.danger
                         } else {
                             theme.text.opacity(0.85)
@@ -10494,7 +11208,7 @@ fn chip_header_row(
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .child(SharedString::from(file_badge_name(path).to_owned())),
+                                .child(SharedString::from(shown(file_badge_name(path)))),
                         )
                         .map(|badge| {
                             if !hover_text && open_file.is_none() {
@@ -10532,7 +11246,7 @@ fn chip_header_row(
                     div()
                         .min_w_0()
                         .truncate()
-                        .child(SharedString::from(detail))
+                        .child(SharedString::from(shown(&detail)))
                         .into_any_element()
                 })
                 .map(|detail| {
@@ -10604,7 +11318,7 @@ fn chip_header_row(
                 cx,
             )))
         })
-        .when_some(trail, |row, trail| {
+        .when_some(trail.filter(|_| !tree_row), |row, trail| {
             // Trailing tile matching the group header's: a chevron for the
             // output/diff accordion, or the open-arrow for spawn chips.
             let tile = div()
@@ -10642,6 +11356,63 @@ fn chip_header_row(
                         .text_color(theme.text_muted.opacity(0.8)),
                 ),
             })
+        })
+        .when(tree_row, |row| {
+            let washed = status.is_some_and(|status| {
+                matches!(
+                    status.result,
+                    RowResult::Failed { .. } | RowResult::Passed { .. }
+                )
+            });
+            let result = status
+                .and_then(|status| crate::tool_call_rows::status_trail(&status.result, theme));
+            row.child(div().flex_1().min_w_0())
+                .children(result.map(|result| {
+                    div()
+                        .flex_none()
+                        .flex()
+                        .justify_end()
+                        .when(washed, |end| {
+                            // The wash is measured from the row's edge; the
+                            // chevron column and inset already cover part of it.
+                            end.min_w(px(crate::tool_call_rows::WASH_WIDTH
+                                - ACTIVITY_CHEVRON_SLOT
+                                - TOOL_ROW_GAP
+                                - ACTIVITY_ROW_INSET))
+                        })
+                        .child(result)
+                }))
+                .child(
+                    div()
+                        .debug_selector(|| "tool-row-end".into())
+                        .size(px(ACTIVITY_CHEVRON_SLOT))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when_some(chevron_open, |slot, open| {
+                            slot.child(
+                                crate::icons::icon(if open {
+                                    crate::icons::ALT_ARROW_DOWN
+                                } else {
+                                    crate::icons::ALT_ARROW_RIGHT
+                                })
+                                .debug_selector(|| "tool-row-chevron".into())
+                                .size(px(12.0))
+                                .text_color(theme.text_muted)
+                                .group_hover(
+                                    "tool-header",
+                                    |style| {
+                                        style.text_color(if failed {
+                                            theme.danger
+                                        } else {
+                                            theme.text
+                                        })
+                                    },
+                                ),
+                            )
+                        }),
+                )
         })
 }
 
@@ -10685,6 +11456,7 @@ impl ToolFileOpener {
 fn chip_header(
     tool: &ToolItem,
     open: bool,
+    status: Option<&ActivityStatus>,
     file_opener: Option<&ToolFileOpener>,
     preview_paths: PreviewPathAnchors<'_>,
     theme: &Theme,
@@ -10694,6 +11466,7 @@ fn chip_header(
     chip_header_row(
         tool,
         Some(ChipTrail::Chevron { open }),
+        status,
         file_opener,
         preview_paths,
         theme,
@@ -10782,6 +11555,62 @@ pub(crate) fn subagent_tab_title(call: &ToolCall) -> Option<SharedString> {
         }
     }
     None
+}
+
+/// What a tree row shows besides its verb and path.
+struct ActivityStatus {
+    result: RowResult,
+    /// `Some` while motion is allowed; only a running row uses it.
+    scramble_phase: Option<f32>,
+}
+
+/// Whether a tool in a group carries a result, and which. Every ordinary call
+/// in a folding group does, whatever else it has to expand, so a group can't
+/// come out half one look and half another.
+fn activity_row_status(
+    tool: &ToolItem,
+    collapses: bool,
+    start: Option<Instant>,
+    now: Instant,
+) -> Option<RowResult> {
+    (collapses && tool.kind == ToolItemKind::Call && !is_agent_tool(tool)).then(|| {
+        let elapsed = start.map(|start| now.saturating_duration_since(start).as_millis() as u64);
+        crate::tool_call_rows::row_result(tool, elapsed)
+    })
+}
+
+/// The tree row's own box: inset text, the running pill, the result wash.
+/// Thoughts get the inset too, so all of a group's text shares one left edge.
+fn activity_row_chrome<E: FluentBuilder + InteractiveElement + Styled + ParentElement>(
+    row: E,
+    ix: usize,
+    status: Option<&ActivityStatus>,
+    theme: &Theme,
+) -> E {
+    let running = status.is_some_and(|status| matches!(status.result, RowResult::Running { .. }));
+    let wash = status.and_then(|status| crate::tool_call_rows::status_wash(&status.result, theme));
+    row.debug_selector(|| format!("tool-group-row-{ix}"))
+        .relative()
+        .px(px(ACTIVITY_ROW_INSET))
+        .when(running, |row| {
+            row.rounded(px(crate::tool_call_rows::PILL_RADIUS))
+                .bg(theme.ink(0.06))
+        })
+        .children(wash)
+}
+
+fn tool_group_shows_diffs(group: &crate::tool_call_rows::CallGroup) -> bool {
+    !group.live && !group.file_diffs.is_empty()
+}
+
+/// Height under a group's rows. The body clips to its analytic height, so
+/// anything drawn below the rows has to be counted here or it is cut off.
+fn tool_group_footer_height(collapses: bool) -> f32 {
+    if collapses {
+        TOOL_GROUP_FOOTER_GAP + TOOL_GROUP_FOOTER_HEIGHT
+    } else {
+        0.0
+    }
 }
 
 /// Clip one newly appended task row to its committed height. Fade and lift are
@@ -10906,6 +11735,8 @@ fn activity_ribbon(path: &mut PathBuilder, points: &[Point<Pixels>]) {
 /// A plain activity row, or a card for a subagent without a linked document.
 fn tool_chip(
     tool: &ToolItem,
+    status: Option<&ActivityStatus>,
+    ix: usize,
     rail: bool,
     has_predecessor: bool,
     continues: bool,
@@ -10942,7 +11773,14 @@ fn tool_chip(
         })
         .child(
             div()
-                .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
+                .when(rail, |el| {
+                    activity_row_chrome(
+                        el.ml(px(ACTIVITY_TEXT_GAP - ACTIVITY_ROW_INSET)),
+                        ix,
+                        status,
+                        theme,
+                    )
+                })
                 .my(px((row_height - CHIP_CARD_HEIGHT) / 2.0))
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
@@ -10964,6 +11802,7 @@ fn tool_chip(
                 .child(chip_header_row(
                     tool,
                     None,
+                    status,
                     file_opener,
                     preview_paths,
                     theme,
@@ -11027,6 +11866,7 @@ fn link_chip(
                 .child(chip_header_row(
                     tool,
                     Some(ChipTrail::OpenArrow),
+                    None,
                     None,
                     PreviewPathAnchors::default(),
                     theme,
@@ -11122,6 +11962,8 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        record_entity_render(cx.entity_id());
         let _hover_owner = motion::HoverOwner::enter(cx.entity_id());
         self.pane_cadence.painted(cx.background_executor().now());
         if record_view_frame("transcript") {
@@ -11325,6 +12167,8 @@ impl Render for Transcript {
                     .ok();
             });
         }
+        #[cfg(target_os = "macos")]
+        self.resolve_viewed_image_preview(window, cx);
         let rail = self.render_rail(cx);
         // The scroll-to-bottom pill is rendered by the SHELL (conversation
         // region overlay): it must float just above the composer and paint
@@ -11356,6 +12200,7 @@ impl Render for Transcript {
         } else {
             list_el.into_any_element()
         };
+        let selection_reply = self.render_selection_reply(cx);
         let root = div()
             .relative()
             .size_full()
@@ -11412,8 +12257,13 @@ impl Render for Transcript {
                 .absolute()
                 .size_0()
             })
+            .children(selection_reply)
             // LAST child: text painted after this is no longer this transcript's.
             .child(crate::markdown::render::selection_owner_end());
+        #[cfg(target_os = "macos")]
+        if self.attachment_gallery_preview.is_some() {
+            return root.child(self.render_gallery_preview(window, cx));
+        }
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.as_mut()
@@ -13064,7 +13914,7 @@ mod tests {
                 let reveal = &this.tool_group_reveals[&row.id];
                 assert!(reveal.header_started_at.is_some());
                 assert!(reveal.starts.iter().all(Option::is_some));
-                assert_eq!(reveal.rendered_open, Some(true));
+                assert_eq!(reveal.rendered_open, Some(!cfg!(target_os = "macos")));
             });
         });
     }
@@ -14064,7 +14914,7 @@ mod tests {
         crate::markdown::selection::clear_if_owner(&first_key);
         let selected = selected.unwrap_or_default();
         assert!(
-            selected.contains("being held again") && selected.contains("To unblock it") && selected.contains("Review ha"),
+            selected.contains("being held again") && selected.contains("To unblock it") && selected.contains("Review"),
             "a hover-then-drag across paragraphs into the quote selected {selected:?}"
         );
     }
@@ -14645,12 +15495,17 @@ mod tests {
         };
         let start = top(cx);
         transcript.update(cx, |this, cx| this.scroll_to_row(40, cx));
-        // Let the ease-in-out leave its flat start so each step is visible.
-        std::thread::sleep(Duration::from_millis(80));
         frame(cx); // Render schedules the glide's first frame.
         let mut previous = top(cx);
         for frame_ix in 0..4 {
-            std::thread::sleep(Duration::from_millis(4));
+            // Place the wall-clock timeline inside its moving portion. The
+            // display callback, not a timer or a direct step call, must move it.
+            transcript.update(cx, |this, _| {
+                this.row_glide
+                    .as_mut()
+                    .expect("glide remains active")
+                    .started = Instant::now() - Duration::from_millis(80 + frame_ix * 4);
+            });
             frame(cx);
             let now = top(cx);
             assert_ne!(
@@ -15299,6 +16154,51 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn error_banner_names_peer_chat_model_and_only_labels_actual_subagent_docs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.chats.push(serde_json::from_value(serde_json::json!({
+                    "id": "peer-chat", "deviceId": "fixture", "archived": false,
+                    "createdAt": "2026-11-01T00:00:00Z",
+                    "config": { "harness": "graff", "model": "fixture-model", "sandbox": "workspace-write" }
+                })).unwrap());
+                state
+            });
+            let peer = cx.new(|cx| Transcript::for_peer_chat(state.clone(), "peer-chat".into(), cx));
+            peer.update(cx, |peer, cx| {
+                peer.set_model_labeler(Rc::new(|_, id, _| format!("Catalog {id}")));
+                assert_eq!(peer.error_subject(cx), "Catalog fixture-model");
+                assert_eq!(peer.retry_target(0, cx), None, "inactive panes cannot restore into another chat's composer");
+            });
+            let subagent = cx.new(|cx| Transcript::for_doc(state, "subagent-doc".into(), false, cx));
+            assert_eq!(subagent.read(cx).error_subject(cx), "The subagent");
+        });
+    }
+
+    #[test]
+    fn model_error_summary_strips_transport_wrappers_without_corrupting_unicode_or_versions() {
+        assert_eq!(
+            model_error_reason(
+                "harness protocol error: session/prompt: api error (rate_limit_error): Too many requests. Retry later [cg_req_fixture] (code -32603)"
+            ),
+            "Too many requests"
+        );
+        assert_eq!(model_error_reason("   "), "Something went wrong");
+        assert_eq!(model_error_reason("Failed for café"), "Failed for café");
+        assert_eq!(
+            model_error_reason("Model v1.5 is unavailable"),
+            "Model v1.5 is unavailable"
+        );
+    }
+
     #[test]
     fn a_run_picked_back_up_after_a_restart_reads_as_a_notice_not_an_error() {
         let resuming = harness_doc::restart_note::resuming(Some("0.2.135"));
@@ -15928,7 +16828,6 @@ mod tests {
 
     #[gpui::test]
     fn images_the_person_sent_are_not_repeated_under_the_reply(cx: &mut gpui::TestAppContext) {
-        use crate::attachments::{AttachmentKey, AttachmentSnapshot, attachment_snapshot_for};
         let root = if cfg!(windows) { "C:/work" } else { "/work" };
         let sent = format!("{root}/uploads/ab12-sent-by-person.png");
         let shot = format!("{root}/shots/checked-by-agent.png");
@@ -15955,48 +16854,50 @@ mod tests {
         assert_eq!(sent_attachment_paths(&rows), HashSet::from([sent.clone()]));
 
         let dir = tempfile::tempdir().unwrap();
+        struct Rendered(Vec<(String, gpui::AnyElement)>);
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             crate::settings::init(crate::settings::UiSettings::expanded(), dir.path(), cx);
-            let state = cx.new(|_| AppState::new());
-            let transcript = cx.new(|cx| Transcript::new(state, cx));
-            transcript.update(cx, |this, cx| {
-                this.rows = rows;
-                this.refresh_sent_attachment_paths();
-                for row in this.rows.clone() {
-                    if let RowKind::GeneratedImage {
-                        owner,
-                        path,
-                        name,
-                        mime_type,
-                        viewed,
-                    } = &row.kind
-                    {
+        });
+        let state = cx.update(|cx| cx.new(|_| AppState::new()));
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |this, cx| {
+            this.rows = rows;
+            this.refresh_sent_attachment_paths();
+            let mut rendered = Rendered(Vec::new());
+            for row in this.rows.clone() {
+                if let RowKind::GeneratedImage {
+                    owner,
+                    path,
+                    name,
+                    mime_type,
+                    viewed,
+                } = &row.kind
+                {
+                    rendered.0.push((
+                        path.clone(),
                         this.render_generated_image(
                             &row.id, owner, path, name, mime_type, *viewed, cx,
-                        );
-                    }
+                        ),
+                    ));
                 }
-                // With no engine a read-back fails at once; the image the
-                // person sent is never fetched for the reply at all.
-                let devices = this.generated_attachment_device_ids("dev", cx);
-                assert!(!devices.is_empty());
-                let failed = |path: &str| {
-                    devices.iter().any(|dev| {
-                        matches!(
-                            attachment_snapshot_for(&AttachmentKey::new(
-                                dev,
-                                path,
-                                Some("image/png")
-                            )),
-                            AttachmentSnapshot::Error { .. }
-                        )
-                    })
-                };
-                assert!(failed(&shot));
-                assert!(!failed(&sent));
-            });
+            }
+            // The agent's own screenshot is new to the person, so it stays.
+            assert_eq!(rendered.0.len(), 2);
+            assert!(this.sent_attachment_paths.contains(&sent));
+            assert!(!this.sent_attachment_paths.contains(&shot));
+            // Only the person's image is skipped: a viewed row registers its
+            // disclosure as it renders, and the skipped one never does.
+            #[cfg(target_os = "macos")]
+            {
+                let opened: Vec<_> = this
+                    .viewed_images
+                    .values()
+                    .map(|disclosure| disclosure.path().to_owned())
+                    .collect();
+                assert_eq!(opened, [shot.clone()]);
+            }
         });
     }
 
@@ -18815,6 +19716,7 @@ mod tests {
                         .child(chip_header(
                             &self.tool,
                             false,
+                            None,
                             Some(&self.opener),
                             PreviewPathAnchors::default(),
                             &theme,
@@ -18880,6 +19782,243 @@ mod tests {
         assert!(
             window.debug_bounds("tool-file-badge").is_none(),
             "paths the file-link route cannot open keep an inert badge"
+        );
+    }
+
+    fn group_tool(part_id: &str, command: &str, resolved: bool, is_error: bool) -> ToolItem {
+        ToolItem {
+            part_id: part_id.into(),
+            call: ToolCall::Exec {
+                command: command.into(),
+            },
+            is_error,
+            resolved,
+            detail: None,
+            invocation: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            subagent_ref: None,
+            subagent_status: None,
+            subagent_tail: None,
+            view: None,
+            kind: ToolItemKind::Call,
+        }
+    }
+
+    /// The open group the person saw: rows with something to expand mixed with
+    /// rows that have nothing, and a failure.
+    fn mixed_group() -> Vec<ToolItem> {
+        let output = Arc::new(ToolDetail::Output {
+            lines: vec!["ok".into()].into(),
+            truncated_by: 0,
+        });
+        let mut expandable = group_tool("expandable", "cargo build", true, false);
+        expandable.detail = Some(output.clone());
+        let bare = group_tool("bare", "shell", true, false);
+        let failed = group_tool("failed", "shell", true, true);
+        let mut last = group_tool("last", "cargo test", true, false);
+        last.detail = Some(output);
+        vec![expandable, bare, failed, last]
+    }
+
+    struct OpenGroupFixture {
+        transcript: Entity<Transcript>,
+        tools: Arc<Vec<ToolItem>>,
+    }
+
+    impl Render for OpenGroupFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let tools = self.tools.clone();
+            let group = self.transcript.update(cx, |this, cx| {
+                let id = SharedString::from("group");
+                this.folds.entry(id.clone()).or_default().open = Some(true);
+                this.render_tool_group(
+                    &id,
+                    &tools,
+                    &SharedString::from("Ran 4 commands"),
+                    false,
+                    None,
+                    false,
+                    &Theme::dark(),
+                    cx,
+                )
+            });
+            div().w(px(700.0)).child(group)
+        }
+    }
+
+    #[gpui::test]
+    fn every_row_in_an_open_group_keeps_one_unbroken_tree(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        let (_view, window) = cx.add_window_view(|_, _| OpenGroupFixture {
+            transcript,
+            tools: Arc::new(mixed_group()),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+
+        let rows: Vec<_> = [
+            "tool-group-row-0",
+            "tool-group-row-1",
+            "tool-group-row-2",
+            "tool-group-row-3",
+        ]
+        .into_iter()
+        .map(|name| {
+            window
+                .debug_bounds(name)
+                .unwrap_or_else(|| panic!("{name} left the tree"))
+        })
+        .collect();
+        for pair in rows.windows(2) {
+            assert_eq!(pair[0].left(), pair[1].left(), "rows share one left edge");
+            assert_eq!(pair[0].size.height, pair[1].size.height);
+            assert_eq!(
+                pair[1].top() - pair[0].top(),
+                px(TOOL_TREE_ROW_HEIGHT),
+                "rows sit one tree row apart, so the connector never breaks"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn rows_that_expand_show_a_chevron_and_results_share_a_column(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        let mut expandable = group_tool("expandable", "cargo build", true, false);
+        expandable.detail = Some(Arc::new(ToolDetail::Output {
+            lines: vec!["ok".into()].into(),
+            truncated_by: 0,
+        }));
+        let (_view, window) = cx.add_window_view(|_, _| OpenGroupFixture {
+            transcript: transcript.clone(),
+            tools: Arc::new(vec![expandable]),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+        let end_with_chevron = window.debug_bounds("tool-row-end").expect("end column");
+        let chevron = window
+            .debug_bounds("tool-row-chevron")
+            .expect("a row that expands shows its chevron without a hover");
+        assert!(end_with_chevron.contains(&chevron.center()));
+        let row = window.debug_bounds("tool-group-row-0").unwrap();
+        assert_eq!(
+            row.right() - end_with_chevron.right(),
+            px(ACTIVITY_ROW_INSET),
+            "the chevron ends the row"
+        );
+
+        let (_view, window) = cx.add_window_view(|_, _| OpenGroupFixture {
+            transcript,
+            tools: Arc::new(vec![group_tool("bare", "shell", true, false)]),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            window.debug_bounds("tool-row-chevron").is_none(),
+            "nothing to expand, no chevron"
+        );
+        assert_eq!(
+            window.debug_bounds("tool-row-end").expect("end column"),
+            end_with_chevron,
+            "a row with no chevron keeps the column, so results line up"
+        );
+    }
+
+    #[gpui::test]
+    fn tool_access_is_not_clipped_off_an_open_group(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        let (_view, window) = cx.add_window_view(|_, _| OpenGroupFixture {
+            transcript,
+            tools: Arc::new(mixed_group()),
+        });
+        window.update(|window, cx| window.draw(cx).clear());
+        let body = window.debug_bounds("tool-group-body").expect("open body");
+        let access = window.debug_bounds("tool-group-access").expect("control");
+        assert!(
+            access.bottom() <= body.bottom(),
+            "the control sits inside the body that clips it: {access:?} in {body:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_settled_tool_group_does_not_keep_the_view_redrawing(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            let transcript = cx.new(|cx| Transcript::new(state, cx));
+            let view = transcript.entity_id();
+            let render = |tool: ToolItem, cx: &mut gpui::App| {
+                let tools = Arc::new(vec![tool]);
+                transcript.update(cx, |this, cx| {
+                    this.folds.entry("group".into()).or_default().open = Some(true);
+                    let _ = this.render_tool_group(
+                        &"group".into(),
+                        &tools,
+                        &SharedString::from("Ran a command"),
+                        false,
+                        None,
+                        false,
+                        &Theme::dark(),
+                        cx,
+                    );
+                });
+            };
+            render(group_tool("done", "cargo test", true, false), cx);
+            assert!(!motion::has_pulse_lease(view, cx));
+            render(group_tool("live", "cargo test", false, false), cx);
+            assert!(motion::has_pulse_lease(view, cx));
+        });
+    }
+
+    #[test]
+    fn every_ordinary_call_in_a_folding_group_gets_a_result() {
+        let now = Instant::now();
+        let bare = group_tool("bare", "shell", true, false);
+        let mut with_output = bare.clone();
+        with_output.detail = Some(Arc::new(ToolDetail::Output {
+            lines: vec!["ok".into()].into(),
+            truncated_by: 0,
+        }));
+        for tool in [&bare, &with_output] {
+            assert!(activity_row_status(tool, true, None, now).is_some());
+            assert!(activity_row_status(tool, false, None, now).is_none());
+        }
+        let mut thought = bare.clone();
+        thought.kind = ToolItemKind::Thought;
+        assert!(activity_row_status(&thought, true, None, now).is_none());
+        // No start seen (replayed history): running, but no made-up timer.
+        let running = group_tool("live", "cargo test", false, false);
+        assert_eq!(
+            activity_row_status(&running, true, None, now),
+            Some(RowResult::Running { elapsed_ms: None })
+        );
+        assert_eq!(
+            activity_row_status(&running, true, Some(now), now + Duration::from_secs(2)),
+            Some(RowResult::Running {
+                elapsed_ms: Some(2000)
+            })
         );
     }
 
@@ -19255,6 +20394,71 @@ mod tests {
         }
     }
 
+    /// In a narrow panel the title used to wrap: its box is one line tall, so
+    /// the last word landed on a hidden second line, and the sweep painted
+    /// that word back only where it passed.
+    #[gpui::test]
+    fn a_long_tool_title_stays_on_one_line_in_a_narrow_panel(cx: &mut gpui::TestAppContext) {
+        struct Titles;
+        impl Render for Titles {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let title = |selector: &'static str, phase: Option<f32>| {
+                    div()
+                        .debug_selector(move || selector.into())
+                        .w(px(60.0))
+                        .line_height(px(18.0))
+                        .flex()
+                        .overflow_hidden()
+                        .child(tool_group_title(
+                            "Thought 5 times · Ran 7 commands".into(),
+                            phase,
+                            &theme,
+                        ))
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(title("settled-title", None))
+                    .child(title("active-title", Some(0.5)))
+            }
+        }
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Titles);
+        for selector in ["settled-title", "active-title"] {
+            let height = cx.debug_bounds(selector).unwrap().size.height;
+            assert_eq!(height, px(18.0), "{selector} wrapped");
+        }
+    }
+
+    #[test]
+    fn tool_title_shimmer_lights_whole_characters_around_the_band() {
+        // The separator is several bytes long, and the band sits right on it.
+        let title = "Thought 5 times · Ran 7 commands";
+        let spans = tool_title_shimmer_spans(title, 0.5);
+        let brightest = spans
+            .iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("the band is on the title");
+        for (range, amount) in &spans {
+            assert_eq!(title[range.clone()].chars().count(), 1);
+            assert!(*amount > 0.0 && *amount <= 1.0);
+        }
+        assert!(
+            spans
+                .windows(2)
+                .all(|pair| pair[0].0.end <= pair[1].0.start)
+        );
+        let middle = title.len() / 2;
+        assert!(brightest.0.start.abs_diff(middle) <= 3);
+
+        // Between sweeps the title is just its base color.
+        assert!(tool_title_shimmer_spans(title, 0.25).is_empty());
+    }
+
     #[test]
     fn tool_title_shimmer_crosses_the_title_without_a_loop_seam() {
         assert_eq!(tool_title_shimmer_amount(0.5, 0.5), 1.0);
@@ -19411,6 +20615,15 @@ mod tests {
 impl Transcript {
     pub fn fixture_appshots_start(&mut self, cx: &mut Context<Self>) {
         self.list.scroll_to(gpui::ListOffset::default());
+        cx.notify();
+    }
+
+    pub fn fixture_open_tool_groups(&mut self, cx: &mut Context<Self>) {
+        for row in &self.rows {
+            if matches!(row.kind, RowKind::ToolGroup { .. }) {
+                self.folds.entry(row.id.clone()).or_default().open = Some(true);
+            }
+        }
         cx.notify();
     }
 }

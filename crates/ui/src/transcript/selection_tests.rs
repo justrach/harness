@@ -117,6 +117,190 @@ fn collapsed_prompt_does_not_capture_reply_selection(cx: &mut gpui::TestAppConte
 }
 
 #[gpui::test]
+fn selected_text_offers_a_reply_that_carries_it_to_the_composer(cx: &mut gpui::TestAppContext) {
+    let _selection = crate::markdown::selection::test_state_lock();
+    struct Host(Entity<Transcript>);
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let state = cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        cx.new(|_| AppState::new())
+    });
+    let (host, cx) =
+        cx.add_window_view(|_, cx| Host(cx.new(|cx| Transcript::new(state.clone(), cx))));
+    cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
+    let transcript = host.read_with(cx, |host, _| host.0.clone());
+    let reply = "A finished reply with enough words to drag across and quote.";
+    state.update(cx, |state, _| {
+        state.chats = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "reply-chat", "deviceId": "dev", "archived": false,
+                "createdAt": chrono::Utc::now(),
+            }))
+            .unwrap(),
+        ];
+        state.selected_chat = Some("reply-chat".into());
+        state.transcript_replayed = true;
+        state.transcript = vec![SessionMessageEntry {
+            id: "reply".into(),
+            role: MessageRole::Assistant,
+            parts: vec![MessagePart::Text {
+                id: "text".into(),
+                text: reply.into(),
+            }],
+            created_at: 0,
+            device_id: "dev".into(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: None,
+        }];
+        state.transcript_revision += 1;
+    });
+    let paint = |cx: &mut gpui::VisualTestContext| {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+    };
+    for _ in 0..3 {
+        transcript.update(cx, |this, cx| this.sync(cx));
+        paint(cx);
+    }
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _events = cx.update(|_, cx| {
+        let sent = sent.clone();
+        cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
+            if let TranscriptEvent::ReplyToSelection { chat_id, text } = event {
+                sent.borrow_mut().push((chat_id.clone(), text.clone()));
+            }
+        })
+    });
+    let entries = render::selection_test_entries();
+    let (key, _, bounds) = entries
+        .iter()
+        .find(|(_, text, _)| text == reply)
+        .unwrap()
+        .clone();
+    let start = gpui::point(bounds.left() + px(1.0), bounds.top() + px(8.0));
+    let end = start + gpui::point(px(120.0), px(0.0));
+    let select = |cx: &mut gpui::VisualTestContext| {
+        cx.simulate_event(gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position: start,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: end,
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: end,
+            ..Default::default()
+        });
+        paint(cx);
+    };
+    const BUTTON: &str = "transcript-reply-selection";
+    assert!(cx.debug_bounds(BUTTON).is_none(), "nothing is selected yet");
+
+    // A click selects nothing, so it offers nothing.
+    cx.simulate_click(start, gpui::Modifiers::none());
+    paint(cx);
+    assert!(cx.debug_bounds(BUTTON).is_none());
+
+    select(cx);
+    let selected = crate::markdown::selection::selected_text().expect("the drag selects text");
+    let button = cx.debug_bounds(BUTTON).expect("a selection offers Reply");
+    assert!(
+        button.bottom() <= end.y,
+        "the button doesn't cover the text under the pointer"
+    );
+    cx.simulate_click(button.center(), gpui::Modifiers::none());
+    paint(cx);
+    assert_eq!(*sent.borrow(), [("reply-chat".to_string(), selected)]);
+    assert!(cx.debug_bounds(BUTTON).is_none(), "one reply per selection");
+    assert_eq!(crate::markdown::selection::selected_text(), None);
+
+    // Pressing anywhere else retires the button without replying.
+    select(cx);
+    assert!(cx.debug_bounds(BUTTON).is_some());
+    cx.simulate_click(gpui::point(px(450.0), px(700.0)), gpui::Modifiers::none());
+    paint(cx);
+    assert!(cx.debug_bounds(BUTTON).is_none());
+    assert_eq!(sent.borrow().len(), 1);
+
+    // Scrolling moves the text out from under it.
+    select(cx);
+    assert!(cx.debug_bounds(BUTTON).is_some());
+    transcript.update(cx, |this, cx| {
+        this.handle_scroll(
+            &ListScrollEvent {
+                visible_range: 0..1,
+                count: 1,
+                is_scrolled: true,
+                is_following_tail: false,
+            },
+            cx,
+        )
+    });
+    paint(cx);
+    assert!(cx.debug_bounds(BUTTON).is_none());
+    crate::markdown::selection::clear_if_owner(&key);
+}
+
+#[gpui::test]
+fn only_the_chat_that_owns_the_composer_offers_a_reply(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = cx.update(|cx| {
+        gpui_base::init(cx);
+        cx.set_global(Theme::dark());
+        crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats = ["open", "peer"]
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": "dev", "archived": false,
+                        "createdAt": chrono::Utc::now(),
+                    }))
+                    .unwrap()
+                })
+                .into();
+            state.selected_chat = Some("open".into());
+            state
+        })
+    });
+    let chat = |doc: Option<&str>, cx: &mut gpui::TestAppContext| {
+        let doc = doc.map(str::to_owned);
+        let state = state.clone();
+        cx.update(|cx| {
+            let view = cx.new(|cx| match doc {
+                Some(doc) => Transcript::for_doc(state, doc, true, cx),
+                None => Transcript::new(state, cx),
+            });
+            view.read(cx).selection_reply_chat(cx)
+        })
+    };
+    assert_eq!(chat(None, cx).as_deref(), Some("open"));
+    assert_eq!(chat(Some("open"), cx).as_deref(), Some("open"));
+    assert_eq!(chat(Some("peer"), cx), None, "another panel's chat");
+    assert_eq!(
+        chat(Some("subagent-doc"), cx),
+        None,
+        "a subagent has no composer"
+    );
+}
+
+#[gpui::test]
 fn whitespace_selection_anchors_at_line_boundaries_in_its_pane(cx: &mut gpui::TestAppContext) {
     let _selection = crate::markdown::selection::test_state_lock();
     struct Split(Entity<Transcript>, Entity<Transcript>);

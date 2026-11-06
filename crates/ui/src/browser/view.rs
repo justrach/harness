@@ -1,25 +1,55 @@
-use super::{BrowserEvent, BrowserSurface};
-use crate::{icons, surface_chrome, theme::Theme};
+use super::{BrowserEvent, BrowserSurface, NavigationShortcut};
+use crate::{icons, motion, theme::Theme};
 use gpui::{
     AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div,
     prelude::*, px,
 };
+use gpui_base::ElementExt;
 
 fn button(
     id: &'static str,
     label: &'static str,
     glyph: &'static str,
     enabled: bool,
+    shortcut: Option<NavigationShortcut>,
     theme: &Theme,
     _cx: &mut Context<BrowserSurface>,
 ) -> gpui::Stateful<gpui::Div> {
-    // Match Files/History chrome, including focus-preserving mouse-down and
-    // tooltips. Disabled controls have neither a pointer cursor nor a handler.
-    crate::files::toolbar_button(id, label)
+    let button = div()
+        .id(id)
+        .size(px(28.0))
+        .flex_none()
+        .rounded(px(6.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .when(enabled, |el| {
+            el.cursor_pointer().hover(|s| s.bg(theme.element_hover))
+        })
+        .tooltip_show_delay(std::time::Duration::from_millis(350))
+        .when(shortcut.is_none(), |el| {
+            el.tooltip(move |_, cx| crate::popover::shortcut_tooltip(label, String::new(), cx))
+        });
+    button
         .when(!enabled, |el| el.cursor_default().opacity(0.35))
+        .when_some(shortcut, |el, shortcut| {
+            el.tooltip(move |_, cx| {
+                let keys = crate::settings::with_current(cx, |settings| {
+                    shortcut
+                        .combo(&settings.keymap)
+                        .map(crate::settings::badge_combo)
+                        .unwrap_or_default()
+                });
+                crate::popover::shortcut_tooltip(label, keys, cx)
+            })
+        })
         .child(
             icons::icon(glyph)
-                .size(px(surface_chrome::ICON_SIZE))
+                .size(px(16.0))
                 .text_color(theme.text_muted),
         )
 }
@@ -37,6 +67,9 @@ impl BrowserSurface {
             return;
         }
         let address_focused = self.address.focus_handle(cx).is_focused(window);
+        if address_focused && self.address.read(cx).has_marked_text() {
+            return;
+        }
         #[cfg(target_os = "linux")]
         if !address_focused
             && self.focus.is_focused(window)
@@ -216,7 +249,7 @@ impl BrowserSurface {
                             .aria_label(format!("Open {} preview", service.name))
                             .when(available, |el| {
                                 el.cursor_pointer()
-                                    .hover(|style| style.bg(crate::theme::ink(0.05)))
+                                    .hover(|style| style.bg(theme.element_hover))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.navigate(&url, window, cx)
@@ -401,51 +434,172 @@ impl BrowserSurface {
 
 impl Render for BrowserSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        if self.presentation == super::model::Presentation::Live
+            && self
+                .native
+                .as_ref()
+                .is_some_and(|native| native.will_restore_page_focus())
+        {
+            // The native host restores its existing responder after paint has
+            // installed destination geometry. Keep GPUI's logical focus out
+            // of the address input while that live page takes the keyboard.
+            window.focus(&self.focus, cx);
+        }
         let theme = Theme::of(cx).clone();
         let focused = self.address.focus_handle(cx).is_focused(window);
         let external = !cfg!(any(target_os = "macos", target_os = "linux"));
         let has_page = self.page.url.is_some();
+        let editing_address = focused || self.address_edited || !has_page;
+        let site = self.page.url.as_deref().and_then(|address| {
+            let url = url::Url::parse(address).ok()?;
+            let host = url.host_str()?;
+            Some(match url.port() {
+                Some(port) => format!("{host}:{port}"),
+                None => host.to_owned(),
+            })
+        });
         let back = button(
             "browser-back",
             "Back",
             icons::ARROW_LEFT,
             self.page.can_back,
+            Some(NavigationShortcut::Back),
             &theme,
             cx,
         )
         .when(self.page.can_back, |el| {
             el.on_click(cx.listener(|this, _, _, _| this.history(false)))
         });
-        let forward = button(
+        let forward_t = self.forward_reveal.transition_at(
+            "forward",
+            self.page.can_forward,
+            motion::reduced_motion(cx),
+            std::time::Instant::now(),
+        );
+        if self.forward_reveal.tick_at(std::time::Instant::now()) {
+            window.request_animation_frame();
+        }
+        #[cfg(feature = "browser-fixture")]
+        self.fixture_forward_control.set((forward_t, None));
+        let forward_button = button(
             "browser-forward",
             "Forward",
             icons::ARROW_RIGHT,
-            self.page.can_forward,
+            true,
+            Some(NavigationShortcut::Forward),
             &theme,
             cx,
         )
-        .when(self.page.can_forward, |el| {
-            el.on_click(cx.listener(|this, _, _, _| this.history(true)))
-        });
+        .ml(px(4.0))
+        .on_click(cx.listener(|this, _, _, _| this.history(true)));
+        // The slot includes its own gap, so both disappear completely. Only
+        // toolbar controls reflow; the native page keeps its existing bounds.
+        let forward = div()
+            .w(px(32.0 * forward_t))
+            .h(px(28.0))
+            .flex_none()
+            .overflow_hidden()
+            .opacity(forward_t)
+            .when(forward_t > 0.0 && self.page.can_forward, |slot| {
+                slot.child(forward_button)
+            })
+            .when(forward_t > 0.0 && !self.page.can_forward, |slot| {
+                // An exiting arrow is decorative: it loses its action,
+                // accessibility node and tooltip as soon as history ends.
+                slot.child(
+                    div()
+                        .ml(px(4.0))
+                        .size(px(28.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            icons::icon(icons::ARROW_RIGHT)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
+            .map(|slot| {
+                #[cfg(feature = "browser-fixture")]
+                {
+                    let control = self.fixture_forward_control.clone();
+                    let interactive = self.page.can_forward && forward_t > 0.0;
+                    return slot.on_children_prepainted(move |bounds, _, _| {
+                        control.set((
+                            forward_t,
+                            interactive.then(|| bounds.first().copied()).flatten(),
+                        ));
+                    });
+                }
+                #[cfg(not(feature = "browser-fixture"))]
+                slot
+            });
+        let history = div()
+            .flex()
+            .items_center()
+            .flex_none()
+            .child(back)
+            .child(forward);
         let reload = button(
             "browser-reload",
             "Reload page",
             icons::REFRESH,
             has_page,
+            Some(NavigationShortcut::Reload),
             &theme,
             cx,
         )
         .when(has_page, |el| {
             el.on_click(cx.listener(|this, _, w, cx| this.reload(w, cx)))
         });
-        let address = surface_chrome::input()
+        #[cfg(feature = "browser-fixture")]
+        let reload = {
+            let measured = self.fixture_reload_bounds.clone();
+            reload.on_prepaint(move |bounds, _, _| measured.set(Some(bounds)))
+        };
+        let address_bounds = self.search.address_bounds.clone();
+        let search_open = self.search_suggestions_open(window, cx);
+        let address = div()
             .id("browser-address")
+            .relative()
+            .role(gpui::Role::EditableComboBox)
+            .aria_label("Search or enter address")
+            .aria_expanded(self.search_suggestions_open(window, cx))
+            .on_prepaint(move |bounds, window, _| {
+                if address_bounds.replace(bounds) != bounds && search_open {
+                    window.request_animation_frame();
+                }
+            })
+            .h(px(30.0))
+            .min_w_0()
+            .flex_1()
+            .px(px(7.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .when(editing_address, |el| el.bg(theme.bg))
+            .when(focused, |el| el.border_color(theme.accent.opacity(0.65)))
+            .when(!editing_address, |el| {
+                el.hover(|s| s.bg(theme.element_hover))
+            })
             .when(self.validation.is_some(), |el| {
                 el.border_1().border_color(theme.danger)
             })
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| {
+                cx.listener(move |this, _, w, cx| {
+                    if !editing_address {
+                        w.prevent_default();
+                        this.focus_address(w, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     #[cfg(target_os = "macos")]
                     if let Some(native) = &this.native {
                         native.focus_chrome();
@@ -455,67 +609,91 @@ impl Render for BrowserSurface {
                 }),
             )
             .child(
-                icons::icon(icons::GLOBE)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
+                icons::icon(if search_open {
+                    icons::MAGNIFER
+                } else {
+                    icons::GLOBE
+                })
+                .size(px(14.0))
+                .flex_none()
+                .text_color(theme.text_muted),
             )
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
-                    .h(px(16.0))
+                    .h(crate::typography::ui_rems(
+                        super::BROWSER_ADDRESS_LINE_HEIGHT,
+                    ))
                     .overflow_hidden()
-                    .child(self.address.clone()),
+                    // Keep the input mounted so Cmd+L can select the URL in
+                    // the same dispatch, even while the quiet label is shown.
+                    .child(
+                        div()
+                            .opacity(if editing_address { 1.0 } else { 0.0 })
+                            .child(self.address.clone()),
+                    )
+                    .when(!editing_address, |el| {
+                        el.child(
+                            div()
+                                .id("browser-address-label")
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .cursor_text()
+                                .text_size(crate::typography::ui_rems(
+                                    super::BROWSER_ADDRESS_TEXT_SIZE,
+                                ))
+                                .line_height(crate::typography::ui_rems(
+                                    super::BROWSER_ADDRESS_LINE_HEIGHT,
+                                ))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, w, cx| {
+                                        w.prevent_default();
+                                        this.focus_address(w, cx);
+                                        cx.stop_propagation();
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .w_full()
+                                        .truncate()
+                                        .text_color(theme.text)
+                                        .child(site.clone().unwrap_or_else(|| "Saved view".into())),
+                                ),
+                        )
+                    }),
             )
-            .when(focused || self.address_edited, |el| {
-                el.child(
-                    div()
-                        .id("browser-go")
-                        .size(px(18.0))
-                        .flex_none()
-                        .rounded(px(4.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .role(gpui::Role::Button)
-                        .aria_label("Go to address")
-                        .hover(|s| s.bg(crate::theme::wash(0.10)))
-                        .on_mouse_down(MouseButton::Left, |_, w, _| w.prevent_default())
-                        .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
-                        .child(
-                            icons::icon(icons::RETURN)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        ),
-                )
-            });
-        let open = button(
-            "browser-external",
-            if self.preview_request.is_some() {
-                "Open source file"
-            } else {
-                "Open in default browser"
-            },
-            icons::ARROW_UP_RIGHT,
-            has_page,
-            &theme,
-            cx,
-        )
-        .when(has_page, |el| {
-            el.on_click(cx.listener(|this, _, _, cx| this.open_external(cx)))
-        });
-        let toolbar = surface_chrome::toolbar(&theme)
-            .when(!external, |el| el.child(back).child(forward).child(reload))
-            .child(address)
-            .child(open);
+            .when_some(
+                self.render_search_suggestions(window, cx),
+                |address, suggestions| address.child(suggestions),
+            );
+        let toolbar = div()
+            .id("browser-toolbar")
+            .h(px(40.0))
+            .w_full()
+            .flex_none()
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .rounded_t(px(super::BROWSER_SURFACE_RADIUS))
+            .bg(theme.bg)
+            .border_b_1()
+            .border_color(theme.border)
+            .when(!external, |el| el.child(history).child(reload))
+            .child(address);
 
         let body = div()
             .id("browser-page")
             .relative()
             .flex_1()
             .min_h_0()
+            .rounded_b(px(super::BROWSER_SURFACE_RADIUS))
             .overflow_hidden()
             // Empty tabs share the shell's glass, like the sidebar tab picker.
             // Keep an opaque backing while native web content is loading.
@@ -528,6 +706,7 @@ impl Render for BrowserSurface {
                 let native = native.handle();
                 let resize_inset = self.resize_inset;
                 let right_occlusion = self.right_occlusion;
+                let passthrough = self.presentation == super::model::Presentation::Passthrough;
                 body.child(
                     gpui::canvas(
                         |_, _, _| (),
@@ -537,12 +716,16 @@ impl Render for BrowserSurface {
                             let right =
                                 (window.viewport_size().width - right_occlusion).max(mask.left());
                             mask.size.width = mask.size.width.min(right - mask.left());
-                            let dragging = cx.has_active_drag();
+                            let dragging = passthrough || cx.has_active_drag();
                             window.on_present(move || {
                                 if let Some(native) = native.upgrade() {
-                                    native
-                                        .borrow_mut()
-                                        .sync(bounds, mask, dragging, resize_inset);
+                                    native.borrow_mut().sync(
+                                        bounds,
+                                        mask,
+                                        dragging,
+                                        resize_inset,
+                                        px(super::BROWSER_SURFACE_RADIUS),
+                                    );
                                 }
                             });
                         },
@@ -599,7 +782,16 @@ impl Render for BrowserSurface {
                 .on_mouse_down(MouseButton::Right,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {
                     w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers);cx.stop_propagation();
                 }))
-                .on_mouse_up(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
+                .on_mouse_up(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {
+                    // Presentation updates at render time. A divider release
+                    // can arrive first, so only consume presses owned by this page.
+                    if this.presentation == super::model::Presentation::Live
+                        && this.native.as_ref().is_some_and(|native| native.pressed.get() == Some(event.button))
+                    {
+                        this.linux_pointer("up",event.position,Some(event.button),event.modifiers);
+                        cx.stop_propagation();
+                    }
+                }))
                 .on_mouse_up_out(MouseButton::Left,cx.listener(|this,event: &gpui::MouseUpEvent,_,_| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);}))
                 .on_mouse_up(MouseButton::Right,cx.listener(|this,event: &gpui::MouseUpEvent,_,cx| {this.linux_pointer("up",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
                 .on_mouse_down(MouseButton::Middle,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {w.focus(&this.focus,cx);this.linux_pointer("down",event.position,Some(event.button),event.modifiers);cx.stop_propagation();}))
@@ -644,12 +836,20 @@ impl Render for BrowserSurface {
             gpui::canvas(
                 |_, _, _| (),
                 move |bounds, _, window, _| {
+                    let pointer_end = native.clone();
                     window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, _| {
                         if phase == gpui::DispatchPhase::Capture
                             && !bounds.contains(&event.position)
                             && let Some(native) = native.upgrade()
                         {
-                            native.borrow().release_focus();
+                            native.borrow_mut().release_focus_for_pointer();
+                        }
+                    });
+                    window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, _, _| {
+                        if phase == gpui::DispatchPhase::Capture
+                            && let Some(native) = pointer_end.upgrade()
+                        {
+                            native.borrow_mut().end_pointer_focus_candidate();
                         }
                     });
                 },
@@ -659,18 +859,38 @@ impl Render for BrowserSurface {
         });
         #[cfg(not(target_os = "macos"))]
         let reclaim_keyboard: Option<gpui::Div> = None;
-        div().id("browser-surface").size_full().relative().flex().flex_col().track_focus(&self.focus)
+        div()
+            .id("browser-surface")
+            .size_full()
+            .min_h_0()
+            .min_w_0()
+            .rounded(px(super::BROWSER_SURFACE_RADIUS))
+            .bg(theme.bg)
+            .overflow_hidden()
+            .relative()
+            .flex()
+            .flex_col()
+            .track_focus(&self.focus)
             .children(reclaim_keyboard)
-            .key_context("Browser").on_key_down(cx.listener(Self::key_down))
-            .on_key_up(cx.listener(|this,event: &gpui::KeyUpEvent,w,cx| {
+            .key_context("Browser")
+            .capture_key_down(cx.listener(Self::search_key_down))
+            .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, w, cx| {
                 #[cfg(target_os = "linux")]
-                if this.focus.is_focused(w) {this.linux_key(&event.keystroke,false);cx.stop_propagation();}
+                if this.focus.is_focused(w) {
+                    this.linux_key(&event.keystroke, false);
+                    cx.stop_propagation();
+                }
                 #[cfg(not(target_os = "linux"))]
-                let _=(this,event,w,cx);
+                let _ = (this, event, w, cx);
             }))
             .on_action(cx.listener(|this, _: &super::Reload, w, cx| this.reload(w, cx)))
-            .on_action(cx.listener(|this, _: &super::FocusAddress, w, cx| this.focus_address(w, cx)))
-            .on_action(cx.listener(|_, _: &super::NewTab, _, cx| cx.emit(BrowserEvent::NewTab(None))))
+            .on_action(
+                cx.listener(|this, _: &super::FocusAddress, w, cx| this.focus_address(w, cx)),
+            )
+            .on_action(
+                cx.listener(|_, _: &super::NewTab, _, cx| cx.emit(BrowserEvent::NewTab(None))),
+            )
             .on_action(cx.listener(|_, _: &super::CloseTab, _, cx| cx.emit(BrowserEvent::Close)))
             .on_action(cx.listener(|this, _: &super::Back, _, _| this.history(false)))
             .on_action(cx.listener(|this, _: &super::Forward, _, _| this.history(true)))

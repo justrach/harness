@@ -700,14 +700,14 @@ fn description(id: ShortcutId) -> &'static str {
         ShortcutId::SaveFile => "Save the active workspace file.",
         ShortcutId::BrowserReload => "Reload the focused browser tab.",
         ShortcutId::ToggleSidebar => "Show or hide sessions and settings navigation.",
-        ShortcutId::ToggleChanges => "Show or hide the right sidebar for the current session.",
+        ShortcutId::ToggleChanges => "Show or hide the changes panel for the current session.",
         ShortcutId::ToggleFiles => "Show or hide the files panel for the current session.",
         ShortcutId::ToggleTerminal => "Show or hide the terminal for the current session.",
         ShortcutId::SplitTerminal => {
             "Split the focused terminal to the right, like Ghostty ⌘D."
         }
         ShortcutId::SplitTerminalDown => "Split the focused terminal downward.",
-        ShortcutId::NewSession => "Open a new chat tab, preserving the current chat and split layout.",
+        ShortcutId::NewSession => "Open a blank tab in the focused panel.",
         ShortcutId::NewProject => "Open the new project dialog.",
         ShortcutId::OpenProjectPicker => {
             "Open the project picker to switch the project new sessions run in."
@@ -724,7 +724,7 @@ fn description(id: ShortcutId) -> &'static str {
             "Close the focused pane or tab without archiving, regardless of the archive-on-close setting."
         }
         ShortcutId::ReopenClosedTab => {
-            "Reopen the most recently closed chat tab where it was; press again for earlier ones."
+            "Reopen the most recently closed tab where it was; press again for earliers."
         }
         // One line per slot would repeat itself nine times; the ordinal is
         // already in the row's label.
@@ -805,7 +805,7 @@ impl Render for ShortcutsPage {
                         .justify_center()
                         .text_color(theme.text_muted)
                         .cursor_pointer()
-                        .hover(|s| s.bg(crate::theme::ink(0.04)).text_color(theme.text))
+                        .hover(|s| s.bg(theme.element_hover).text_color(theme.text))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_composer_send_behavior(ComposerSendBehavior::Enter, cx)
                         }))
@@ -1282,10 +1282,10 @@ mod tests {
             cx.set_global(Theme::default());
             cx.bind_keys([gpui::KeyBinding::new(
                 &crate::settings::platform_combo(ShortcutId::NewSession.default_combo()),
-                crate::shell::NewChatTab,
+                crate::shell::NewTab,
                 None,
             )]);
-            cx.on_action(move |_: &crate::shell::NewChatTab, _| observed.set(true));
+            cx.on_action(move |_: &crate::shell::NewTab, _| observed.set(true));
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -1314,7 +1314,7 @@ mod tests {
                     page.conflict_notice
                         .as_deref()
                         .unwrap()
-                        .contains("New chat")
+                        .contains("New tab")
                 );
                 assert_eq!(
                     page.keymap.capture_appshot,

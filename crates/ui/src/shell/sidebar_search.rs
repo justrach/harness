@@ -122,7 +122,7 @@ impl Shell {
         matching_chats(
             &self.state.read(cx).chats,
             search.input.read(cx).text(),
-            self.settings.space_filter.as_deref(),
+            self.sidebar_scope(),
             search.include_archived,
             self.settings.sidebar_sort,
         )
@@ -133,7 +133,20 @@ impl Shell {
 
     pub(super) fn toggle_sidebar_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sidebar_search.take().is_some() {
-            window.focus(&self.sidebar_search_trigger_focus, cx);
+            // Legacy sidebars retain a search trigger. The workspace sidebar
+            // opens Find on demand, so return typing to its mounted composer.
+            let composer = self.composer.focus_handle(cx);
+            let focus = if self
+                .shortcut_focus
+                .contains(&self.sidebar_search_trigger_focus, window)
+            {
+                &self.sidebar_search_trigger_focus
+            } else if self.shortcut_focus.contains(&composer, window) {
+                &composer
+            } else {
+                &self.session_switcher_focus
+            };
+            window.focus(focus, cx);
         } else {
             self.cancel_sidebar_session_transfer(cx);
             self.cancel_pinned_session_drag(cx);
@@ -171,7 +184,7 @@ impl Shell {
                 clear_focus: cx.focus_handle().tab_stop(true),
                 archive_focus: cx.focus_handle().tab_stop(true),
                 include_archived: false,
-                project: self.settings.space_filter.clone(),
+                project: self.sidebar_scope().map(str::to_owned),
                 active: 0,
                 active_id: None,
                 keyboard_selection: false,
@@ -227,10 +240,22 @@ impl Shell {
     }
 
     fn sync_sidebar_search_scope(&mut self, cx: &mut Context<Self>) {
+        let scope = self.sidebar_scope().map(str::to_owned);
         if let Some(search) = self.sidebar_search.as_mut() {
-            if search.project != self.settings.space_filter {
-                search.project = self.settings.space_filter.clone();
+            if search.project != scope {
+                search.project = scope;
+                // Opening a result can move the filter to that chat's project.
+                // The cursor stays on the row that was opened, so Enter can't
+                // open a different one. Any other project change starts fresh.
+                let selected = self.state.read(cx).selected_chat.as_deref();
+                let opened = search
+                    .active_id
+                    .clone()
+                    .filter(|id| selected == Some(id.as_str()));
                 self.reset_sidebar_search(cx);
+                if let Some(search) = self.sidebar_search.as_mut() {
+                    search.active_id = opened;
+                }
             }
         }
     }
@@ -541,7 +566,7 @@ impl Shell {
             matching_chats(
                 &state.chats,
                 &query,
-                self.settings.space_filter.as_deref(),
+                self.sidebar_scope(),
                 search.include_archived,
                 self.settings.sidebar_sort,
             )

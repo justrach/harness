@@ -74,7 +74,7 @@ fn closed_child_links_stay_revoked_when_the_same_document_reopens(cx: &mut gpui:
 }
 
 #[gpui::test]
-fn removed_owners_release_child_surfaces_but_partial_snapshots_keep_them(
+fn unplaced_children_release_removed_owners_but_partial_snapshots_keep_them(
     cx: &mut gpui::TestAppContext,
 ) {
     let _selection = selection::test_state_lock();
@@ -96,6 +96,26 @@ fn removed_owners_release_child_surfaces_but_partial_snapshots_keep_them(
                     "partial list is not deletion proof"
                 );
                 shell.state.update(cx, |state, _| state.chats_synced = true);
+                shell.on_state_changed(&shell.state.clone(), cx);
+                assert_eq!(
+                    shell.subagent_tabs.len(),
+                    1,
+                    "an explicit workspace placement keeps its child open"
+                );
+                // The legacy host does not render workspace placements, but
+                // opening the surface creates one. Remove that placement to
+                // exercise orphan pruning, without closing the resource itself.
+                let child = shell.subagent_seq;
+                for layout in shell.workspace_panels.layouts.values_mut() {
+                    for panel in &mut layout.panels {
+                        panel.tabs.retain(|tab| {
+                            !matches!(tab,
+                                crate::shell::workspace_panels::PanelTab::Surface {
+                                    surface: RightSurface::Subagent(id), ..
+                                } if *id == child)
+                        });
+                    }
+                }
                 shell.on_state_changed(&shell.state.clone(), cx);
                 assert!(
                     shell.subagent_tabs.is_empty(),

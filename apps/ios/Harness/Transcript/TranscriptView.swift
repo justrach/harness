@@ -716,7 +716,7 @@ struct ToolChipRow: View {
     var body: some View {
         Button {
             // Lying flat on a Duo, the row opens in the Inspect pane beside the chat.
-            if let inspectTool { inspectTool(tool); return }
+            if let inspectTool, !tool.call.isThought { inspectTool(tool); return }
             withAnimation(reduceMotion ? nil : Motion.resize) { expanded.toggle() }
             onResize()
         } label: {
@@ -739,10 +739,13 @@ struct ToolChipRow: View {
                         if tool.isError {
                             Text("Failed").font(Theme.sans(12)).foregroundStyle(Theme.danger)
                         } else if !tool.resolved {
-                            Text("Running").font(Theme.sans(12)).foregroundStyle(Theme.textFaint)
+                            Text(tool.call.isThought ? "Thinking" : "Running")
+                                .font(Theme.sans(12)).foregroundStyle(Theme.textFaint)
                         }
                     }
-                    if !tool.call.chipDetail.isEmpty {
+                    if tool.call.isThought {
+                        ThoughtDetail(text: tool.call.chipDetail, live: !tool.resolved, expanded: expanded)
+                    } else if !tool.call.chipDetail.isEmpty {
                         Text(expanded ? tool.call.expandedDetail : tool.call.chipDetail)
                             .font(Theme.mono(13))
                             .foregroundStyle(Theme.text.opacity(0.85))
@@ -760,12 +763,37 @@ struct ToolChipRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-        .accessibilityHint("Shows the full tool details")
+        .accessibilityHint(tool.call.isThought ? "Shows the full thought" : "Shows the full tool details")
         .contextMenu {
             Button("Copy details", systemImage: "doc.on.doc") {
                 UIPasteboard.general.string = tool.call.expandedDetail
             }
         }
+    }
+}
+
+/// A thought's body: prose in the reply's typeface, so it scales with
+/// Dynamic Type like the reply does. Collapsed, it previews two lines, the
+/// newest while the model is still thinking.
+private struct ThoughtDetail: View {
+    let text: String
+    let live: Bool
+    let expanded: Bool
+
+    var body: some View {
+        if !text.isEmpty {
+            Text(Self.inlineMarkdown(expanded ? text : thoughtPreview(text, live: live)))
+                .font(Theme.sans(14))
+                .foregroundStyle(Theme.text.opacity(0.85))
+                .lineLimit(expanded ? nil : 2)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private static func inlineMarkdown(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
     }
 }
 

@@ -231,6 +231,8 @@ pub struct AppearancePage {
     terminal_size_menu_dismissed_at: Option<std::time::Instant>,
     code_size_menu_dismissed_at: Option<std::time::Instant>,
     light_theme_menu: Popup<()>,
+    light_theme_list: widgets::PageScroll,
+    dark_theme_list: widgets::PageScroll,
     dark_theme_menu: Popup<()>,
     import_dialog: Option<ImportDialog>,
     review_entry: Option<String>,
@@ -505,6 +507,8 @@ impl AppearancePage {
             terminal_size_menu_dismissed_at: None,
             code_size_menu_dismissed_at: None,
             light_theme_menu: Popup::default(),
+            light_theme_list: widgets::PageScroll::default(),
+            dark_theme_list: widgets::PageScroll::default(),
             dark_theme_menu: Popup::default(),
             import_dialog: None,
             review_entry: None,
@@ -1291,7 +1295,7 @@ fn choice_chip(
         .border_1()
         .border_color(if selected { theme.accent } else { theme.border })
         .bg(if selected {
-            theme.accent_wash
+            theme.active_bg(theme.accent_wash)
         } else {
             theme.surface_raised.opacity(0.28)
         })
@@ -1302,7 +1306,11 @@ fn choice_chip(
             gpui::FontWeight::NORMAL
         })
         .text_color(if selected {
-            theme.accent
+            if theme.is_harp() {
+                theme.text
+            } else {
+                theme.accent
+            }
         } else {
             theme.text_muted
         })
@@ -1590,7 +1598,10 @@ fn report_panel(theme: &Theme, report: &ImportReport) -> gpui::Stateful<gpui::Di
         .children(report.adjustments.iter().map(|adjustment| {
             div().mt(px(4.0)).child(SharedString::from(format!(
                 "Adjusted · {} {} → {} · {}",
-                adjustment.harness_role, adjustment.original, adjustment.resolved, adjustment.reason
+                adjustment.harness_role,
+                adjustment.original,
+                adjustment.resolved,
+                adjustment.reason
             )))
         }))
         .children(report.fallbacks.iter().map(|message| {
@@ -1706,6 +1717,13 @@ impl AppearancePage {
         match appearance {
             Appearance::Light => &mut self.light_theme_menu,
             Appearance::Dark => &mut self.dark_theme_menu,
+        }
+    }
+
+    fn theme_list_mut(&mut self, appearance: Appearance) -> &mut widgets::PageScroll {
+        match appearance {
+            Appearance::Light => &mut self.light_theme_list,
+            Appearance::Dark => &mut self.dark_theme_list,
         }
     }
 
@@ -1996,7 +2014,7 @@ impl AppearancePage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let registry = ThemeRegistry::active();
+        let registry = ThemeRegistry::desktop_active();
         let selected_id = selections
             .variant_id(model_appearance(appearance_kind))
             .to_owned();
@@ -2037,7 +2055,11 @@ impl AppearancePage {
             } else {
                 theme.border
             })
-            .bg(theme.surface_raised.opacity(if open { 0.75 } else { 0.42 }))
+            .bg(if open {
+                theme.active_bg(theme.surface_raised.opacity(0.75))
+            } else {
+                theme.surface_raised.opacity(0.42)
+            })
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -2089,6 +2111,85 @@ impl AppearancePage {
             } else {
                 "Dark themes"
             };
+            let (host_id, list_id, rail_id) = if appearance_kind.is_light() {
+                (
+                    "light-theme-host",
+                    "light-theme-scroll",
+                    "light-theme-scrollbar",
+                )
+            } else {
+                (
+                    "dark-theme-host",
+                    "dark-theme-scroll",
+                    "dark-theme-scrollbar",
+                )
+            };
+            let rows = registry
+                .variants_for(model_appearance(appearance_kind))
+                .enumerate()
+                .map(|(index, variant)| {
+                    let id = variant.id.clone();
+                    let name = variant.name.clone();
+                    let active = id == selected_id;
+                    let sample = Theme::for_selection(
+                        appearance_kind,
+                        &id,
+                        AccentSelection::ThemeDefault,
+                        theme.surface_preference,
+                    );
+                    popover::menu_row(
+                        theme,
+                        active,
+                        SharedString::from(format!(
+                            "appearance-theme-menu-{appearance_kind:?}-{index}"
+                        )),
+                    )
+                    .id(SharedString::from(format!(
+                        "appearance-theme-row-{appearance_kind:?}-{index}"
+                    )))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        appearance::set_theme(appearance_kind, id.clone(), cx);
+                        this.close_theme_menu(appearance_kind, cx);
+                        cx.notify();
+                    }))
+                    .child(palette_preview(&sample))
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .when(active, |row| {
+                        row.child(
+                            icons::icon(icons::CHECK)
+                                .size(px(14.0))
+                                .text_color(theme.accent),
+                        )
+                    })
+                })
+                .map(IntoElement::into_any_element)
+                .collect::<Vec<_>>();
+            let scroll = self.theme_list_mut(appearance_kind).scroll.clone();
+            let rail = widgets::rail(
+                self.theme_list_mut(appearance_kind),
+                rail_id,
+                theme,
+                cx,
+                move |page| page.theme_list_mut(appearance_kind),
+            );
+            let list = popover::menu_scroll_host(host_id)
+                .on_hover(cx.listener(move |page, hovered: &bool, _, cx| {
+                    if page
+                        .theme_list_mut(appearance_kind)
+                        .set_list_hovered(*hovered)
+                    {
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    popover::menu_scroll_list(list_id, &scroll)
+                        .max_h(px(360.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(popover::MENU_GAP))
+                        .children(rows),
+                )
+                .children(rail);
             let menu = popover::popover_card(theme)
                 .w(px(260.0))
                 .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
@@ -2099,46 +2200,7 @@ impl AppearancePage {
                 .flex_col()
                 .gap(px(2.0))
                 .child(popover::menu_heading(theme, heading))
-                .children(
-                    registry
-                        .variants_for(model_appearance(appearance_kind))
-                        .enumerate()
-                        .map(|(index, variant)| {
-                            let id = variant.id.clone();
-                            let name = variant.name.clone();
-                            let active = id == selected_id;
-                            let sample = Theme::for_selection(
-                                appearance_kind,
-                                &id,
-                                AccentSelection::ThemeDefault,
-                                theme.surface_preference,
-                            );
-                            popover::menu_row(
-                                theme,
-                                active,
-                                SharedString::from(format!(
-                                    "appearance-theme-menu-{appearance_kind:?}-{index}"
-                                )),
-                            )
-                            .id(SharedString::from(format!(
-                                "appearance-theme-row-{appearance_kind:?}-{index}"
-                            )))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                appearance::set_theme(appearance_kind, id.clone(), cx);
-                                this.close_theme_menu(appearance_kind, cx);
-                                cx.notify();
-                            }))
-                            .child(palette_preview(&sample))
-                            .child(div().flex_1().min_w_0().truncate().child(name))
-                            .when(active, |row| {
-                                row.child(
-                                    icons::icon(icons::CHECK)
-                                        .size(px(14.0))
-                                        .text_color(theme.accent),
-                                )
-                            })
-                        }),
-                )
+                .child(list)
                 .into_any_element();
             trigger = trigger.child(popover::anchored_menu_below(
                 SharedString::from(format!(
@@ -2196,7 +2258,7 @@ impl AppearancePage {
                 .border_1()
                 .border_color(if active { theme.accent } else { theme.border })
                 .bg(if active {
-                    theme.accent_wash
+                    theme.active_bg(theme.accent_wash)
                 } else {
                     theme.surface_raised.opacity(0.28)
                 })
@@ -2365,7 +2427,7 @@ impl AppearancePage {
                             theme.border
                         })
                         .bg(if selected_now {
-                            theme.accent_wash.opacity(0.42)
+                            theme.active_bg(theme.accent_wash.opacity(0.42))
                         } else {
                             theme.surface_raised.opacity(0.22)
                         })
@@ -2958,6 +3020,7 @@ impl Render for AppearancePage {
         let current_background = ui_settings.new_thread_composer_background;
         let current_background_effect = ui_settings.new_thread_background_effect;
         let compact_mode = ui_settings.transcript_compact_mode;
+        let task_view = ui_settings.sidebar_task_view;
         let cards = AppearanceMode::ALL
             .into_iter()
             .map(|mode| {
@@ -3276,6 +3339,34 @@ impl Render for AppearancePage {
                         })),
                 )
                 .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(widgets::row_tile(&theme, icons::WIDGET))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Task view"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from(
+                                        "Show open workspaces in the sidebar, with the All sessions dashboard, instead of your conversations.",
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, task_view)
+                        .id("sidebar-task-view-toggle")
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_sidebar_task_view(!task_view, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
         ];
         let current_reduce_motion = crate::motion::preference(cx);
         let reduce_motion_controls = ReduceMotion::ALL
@@ -3534,17 +3625,19 @@ mod tests {
 
     #[test]
     fn registry_offers_both_appearances_and_keeps_single_dark_families_valid() {
-        let registry = ThemeRegistry::builtin();
+        let registry = ThemeRegistry::desktop_builtin();
         assert_eq!(
             registry
                 .variants_for(harness_theme::Appearance::Light)
                 .count(),
-            // Codegraff adds a light and a dark variant.
-            11
+            // Codegraff, Harp, and Warm Harp each include both appearances.
+            13
         );
         assert_eq!(
-            registry.variants_for(harness_theme::Appearance::Dark).count(),
-            20
+            registry
+                .variants_for(harness_theme::Appearance::Dark)
+                .count(),
+            22
         );
     }
 
@@ -3867,3 +3960,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(feature = "appshots-fixture")]
+include!("../menu_review/appearance.rs");

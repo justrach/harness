@@ -36,6 +36,8 @@ x11 = [
 screen-capture = [
     "scap",
 ]
+# Read back only this app's rendered scene for tab/window drag previews.
+scene-capture = []
 windows-manifest = ["dep:embed-resource"]
 input-latency-histogram = ["dep:hdrhistogram"]
 profiler = []

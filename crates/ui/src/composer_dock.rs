@@ -424,7 +424,7 @@ pub(crate) type SharedDock = Rc<RefCell<DockState>>;
 pub(crate) struct DockedComposer {
     child: AnyElement,
     state: SharedDock,
-    viewport_height: f32,
+    pinned: bool,
     reduced: bool,
     now: Instant,
 }
@@ -432,16 +432,23 @@ pub(crate) struct DockedComposer {
 pub(crate) fn docked_composer(
     child: impl IntoElement,
     state: SharedDock,
-    viewport_height: f32,
     reduced: bool,
     now: Instant,
 ) -> DockedComposer {
     DockedComposer {
         child: child.into_any_element(),
         state,
-        viewport_height,
+        pinned: false,
         reduced,
         now,
+    }
+}
+
+impl DockedComposer {
+    /// Keep the same bottom slot before and after the first message.
+    pub(crate) fn pin_to_bottom(mut self) -> Self {
+        self.pinned = true;
+        self
     }
 }
 
@@ -473,13 +480,27 @@ impl Element for DockedComposer {
         cx: &mut App,
     ) {
         let mut state = self.state.borrow_mut();
-        let docked = state.frame.docked;
+        let docked = self.pinned || state.frame.docked;
         let x = f32::from(bounds.left());
         // Anchor by the top of the input surface, not its shrinking bottom.
         let y = if docked {
             f32::from(bounds.top())
         } else {
-            (self.viewport_height - f32::from(bounds.size.height)) * 0.5 + 8.0
+            // The inherited clip is the visible conversation body, already in
+            // window coordinates after panel headers, margins and scrolling.
+            // Centering against the window puts a lower panel's input above
+            // its clip. Read the current mask in prepaint so resizes use this
+            // frame's geometry, including the panel's vertical origin.
+            let viewport = window.content_mask().bounds;
+            let spare_height = (f32::from(viewport.size.height - bounds.size.height)).max(0.0);
+            // Destination controls float above the layout slot. Keep them
+            // visible while giving the input priority if space runs out.
+            let top_clearance =
+                crate::composer::NEW_THREAD_SELECTOR_TOP + crate::theme::Theme::SPACE_SM;
+            f32::from(viewport.top())
+                + (spare_height * 0.5 + 8.0)
+                    .max(top_clearance)
+                    .min(spare_height)
         };
         let dt = if state.last_docked != docked {
             0.0
@@ -509,6 +530,11 @@ impl Element for DockedComposer {
         } else {
             position.0.advance(x, dt, duration(docked));
             position.1.advance(y, dt, duration(docked));
+        }
+        if self.pinned {
+            // Clearing or growing a draft moves its natural top edge. Follow
+            // that layout immediately so the bottom never lifts off its dock.
+            position.1 = Glide::new(y);
         }
         let offset = point(
             px(position.0.value - x),
@@ -794,6 +820,67 @@ mod tests {
     }
 
     #[gpui::test]
+    fn pinned_dock_keeps_its_bottom_when_the_first_message_clears_a_tall_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct Fixture {
+            state: SharedDock,
+            now: Instant,
+            docked: bool,
+            height: f32,
+            measured: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.state.borrow_mut().tick(self.docked, false, self.now);
+                let measured = self.measured.clone();
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1())
+                    .child(
+                        docked_composer(
+                            div().relative().w_full().h(px(self.height)).child(
+                                canvas(
+                                    move |bounds, _, _| measured.set(Some(bounds)),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .inset_0(),
+                            ),
+                            self.state.clone(),
+                            false,
+                            self.now,
+                        )
+                        .pin_to_bottom(),
+                    )
+            }
+        }
+        let measured = Rc::new(std::cell::Cell::new(None));
+        let handle = cx.open_window(gpui::size(px(600.0), px(700.0)), |_, _| Fixture {
+            state: Default::default(),
+            now: Instant::now(),
+            docked: false,
+            height: 220.0,
+            measured: measured.clone(),
+        });
+        for (docked, height) in [(false, 220.0), (true, 49.0), (false, 280.0)] {
+            handle
+                .update(cx, |fixture, _, cx| {
+                    fixture.docked = docked;
+                    fixture.height = height;
+                    fixture.now += std::time::Duration::from_millis(16);
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+                .unwrap();
+            assert_eq!(measured.get().unwrap().bottom(), px(700.0));
+        }
+    }
+
+    #[gpui::test]
     fn measured_dock_retargets_without_a_first_frame_jump(cx: &mut gpui::TestAppContext) {
         struct Fixture {
             state: SharedDock,
@@ -803,7 +890,7 @@ mod tests {
             measured: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
         }
         impl Render for Fixture {
-            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 self.state.borrow_mut().tick(self.docked, false, self.now);
                 let width = self
                     .state
@@ -825,7 +912,6 @@ mod tests {
                             .inset_0(),
                         ),
                         self.state.clone(),
-                        f32::from(window.viewport_size().height),
                         false,
                         self.now,
                     ))
@@ -901,7 +987,7 @@ mod tests {
             measured: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
         }
         impl Render for Fixture {
-            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let pane = if self.docked { 320.0 } else { 0.0 };
                 let frame = {
                     let mut state = self.state.borrow_mut();
@@ -934,7 +1020,6 @@ mod tests {
                                 .inset_0(),
                             ),
                         self.state.clone(),
-                        f32::from(window.viewport_size().height),
                         false,
                         self.now,
                     ))

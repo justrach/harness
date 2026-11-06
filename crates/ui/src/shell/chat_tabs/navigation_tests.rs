@@ -34,40 +34,55 @@ pub(in crate::shell) fn fixture(
             },
             cx,
         );
-        shell.settings.space_filter = None;
+        shell.settings.space_filter = Some("a".into());
         shell.state.update(cx, |state, cx| {
             state.local_device_id = Some("local".into());
             state.workspace_scope = Some(WorkspaceScope::Local);
+            state.spaces = ["a", "b", "empty"]
+                .map(|id| {
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "deviceId": "local", "path": format!("/fixtures/{id}"),
+                        "name": id.to_uppercase(), "createdAt": Utc::now(),
+                    }))
+                    .unwrap()
+                })
+                .into();
             state.chats = ["current", "peer", "target", "parked"]
                 .map(|id| {
                     serde_json::from_value(serde_json::json!({
                         "id": id, "deviceId": "local", "archived": false,
+                        "spaceId": if id == "current" || id == "peer" { "a" } else { "b" },
                         "createdAt": Utc::now(),
                     }))
                     .unwrap()
                 })
                 .into();
             state.select_chat(Some("current".into()), cx);
+            state.select_space(Some("a".into()), cx);
         });
         if split {
             shell.chat_split = chat_split::ChatSplit::split(
                 None,
                 SplitAxis::Horizontal,
                 Some("peer".into()),
-                None,
+                Some("a".into()),
             );
         }
         if let Some(peer) = parked {
             shell.chat_tabs = vec![
-                ChatTab::default(),
                 ChatTab {
+                    project: Some("a".into()),
+                    ..Default::default()
+                },
+                ChatTab {
+                    project: Some("b".into()),
                     selected: Some(if peer { "parked" } else { "target" }.into()),
                     split: peer.then(|| {
                         chat_split::ChatSplit::split(
                             None,
                             SplitAxis::Horizontal,
                             Some("target".into()),
-                            None,
+                            Some("b".into()),
                         )
                         .unwrap()
                     }),
@@ -81,9 +96,16 @@ pub(in crate::shell) fn fixture(
 }
 
 pub(in crate::shell) fn assert_target_preserved(shell: &Shell, cx: &App) {
-    assert_eq!(shell.chat_tabs.len(), 2, "must reveal or append, not duplicate");
+    assert_eq!(
+        shell.chat_tabs.len(),
+        2,
+        "must reveal or append, not duplicate"
+    );
     assert_eq!(shell.chat_tab, 1);
-    assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("target"));
+    assert_eq!(
+        shell.state.read(cx).selected_chat.as_deref(),
+        Some("target")
+    );
     assert_eq!(shell.chat_tabs[0].selected.as_deref(), Some("current"));
 }
 
@@ -92,24 +114,34 @@ fn notification_clicks_preserve_tabs_and_split_layouts(cx: &mut gpui::TestAppCon
     for split in [false, true] {
         for parked in [None, Some(false), Some(true)] {
             let (_dir, window) = fixture(cx, split, parked);
-            let (state, layout, draft) = window.update(cx, |shell, _, cx| {
-                shell.route = Route::Settings(SettingsSection::Appearance);
-                (shell.state.clone(), shell.chat_split.clone(), shell.current_canvas_draft(cx))
-            }).unwrap();
+            let (state, layout, draft) = window
+                .update(cx, |shell, _, cx| {
+                    shell.route = Route::Settings(SettingsSection::Appearance);
+                    (
+                        shell.state.clone(),
+                        shell.chat_split.clone(),
+                        shell.current_canvas_draft(cx),
+                    )
+                })
+                .unwrap();
             for _ in 0..2 {
                 // Exercise the actual desktop-notification click entry point.
                 cx.update(|cx| crate::open_notified_chat("target".into(), &state, cx));
                 cx.run_until_parked();
-                window.update(cx, |shell, _, cx| {
-                    assert_target_preserved(shell, cx);
-                    assert!(matches!(shell.route, Route::Chat));
-                    assert_eq!(shell.chat_tabs[0].split, layout);
-                    assert_eq!(shell.chat_tabs[0].draft.as_ref(), Some(&draft));
-                }).unwrap();
+                window
+                    .update(cx, |shell, _, cx| {
+                        assert_target_preserved(shell, cx);
+                        assert!(matches!(shell.route, Route::Chat));
+                        assert_eq!(shell.chat_tabs[0].split, layout);
+                        assert_eq!(shell.chat_tabs[0].draft.as_ref(), Some(&draft));
+                    })
+                    .unwrap();
             }
             // Notification clicks target the first Shell window. Keep each
             // matrix case isolated from the previous case's window.
-            window.update(cx, |_, window, _| window.remove_window()).unwrap();
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
         }
     }
 }
@@ -119,31 +151,63 @@ fn unsaved_file_reveal_preserves_existing_chat_tabs(cx: &mut gpui::TestAppContex
     for split in [false, true] {
         for parked in [None, Some(false), Some(true)] {
             let (_dir, window) = fixture(cx, split, parked);
-            let (layout, draft) = window.update(cx, |shell, _, cx| {
-                let state = shell.state.clone();
-                let files = cx.new(|cx| {
-                    let mut files = FilesSurface::new(state, "target".into(), false, 1000, 13.0, false, false, cx);
-                    files.seed_pending_exit_test_document(true);
-                    files
-                });
-                shell.file_surfaces.insert(0, files);
-                shell.file_surface_keys.insert(("target".into(), "test.rs".into()), 0);
-                shell.file_surface_paths.insert(0, "test.rs".into());
-                shell.right_tabs.insert("target".into(), vec![RightSurface::File(0)]);
-                (shell.chat_split.clone(), shell.current_canvas_draft(cx))
-            }).unwrap();
+            let (layout, draft) = window
+                .update(cx, |shell, _, cx| {
+                    let state = shell.state.clone();
+                    let files = cx.new(|cx| {
+                        let mut files = FilesSurface::new(
+                            state,
+                            "target".into(),
+                            false,
+                            1000,
+                            13.0,
+                            false,
+                            false,
+                            cx,
+                        );
+                        files.seed_pending_exit_test_document(true);
+                        files
+                    });
+                    shell.file_surfaces.insert(0, files);
+                    shell
+                        .file_surface_keys
+                        .insert(("target".into(), "target".into(), "test.rs".into()), 0);
+                    shell.file_surface_paths.insert(0, "test.rs".into());
+                    shell
+                        .right_tabs
+                        .insert("target".into(), vec![RightSurface::File(0)]);
+                    (shell.chat_split.clone(), shell.current_canvas_draft(cx))
+                })
+                .unwrap();
             for _ in 0..2 {
-                window.update(cx, |shell, _, cx| {
-                    assert!(!shell.prepare_exit(PendingExit::Quit, cx));
-                }).unwrap();
+                window
+                    .update(cx, |shell, _, cx| {
+                        assert!(!shell.prepare_exit(PendingExit::Quit, cx));
+                    })
+                    .unwrap();
                 // The shell observer updates the active chat's panel key.
                 cx.run_until_parked();
-                window.update(cx, |shell, _, cx| {
-                    assert_target_preserved(shell, cx);
-                    assert_eq!(shell.chat_tabs[0].split, layout);
-                    assert_eq!(shell.chat_tabs[0].draft.as_ref(), Some(&draft));
-                    assert_eq!(shell.resolved_right_active(cx), RightSurface::File(0));
-                }).unwrap();
+                window
+                    .update(cx, |shell, _, cx| {
+                        assert_target_preserved(shell, cx);
+                        assert_eq!(shell.chat_tabs[0].split, layout);
+                        assert_eq!(shell.chat_tabs[0].draft.as_ref(), Some(&draft));
+                        let layout = shell.panel_layout(cx).unwrap();
+                        let selected = layout
+                            .panels
+                            .iter()
+                            .find(|panel| panel.id == layout.focused)
+                            .unwrap()
+                            .selected();
+                        assert!(matches!(
+                            selected,
+                            Some(workspace_panels::PanelTab::Surface {
+                                surface: RightSurface::File(0),
+                                ..
+                            })
+                        ));
+                    })
+                    .unwrap();
             }
         }
     }
@@ -152,58 +216,91 @@ fn unsaved_file_reveal_preserves_existing_chat_tabs(cx: &mut gpui::TestAppContex
 #[gpui::test]
 fn notification_to_live_peer_only_focuses_that_pane(cx: &mut gpui::TestAppContext) {
     let (_dir, window) = fixture(cx, true, Some(false));
-    let (state, parked) = window.update(cx, |shell, _, _| (shell.state.clone(), shell.chat_tabs[1].clone())).unwrap();
+    let (state, parked) = window
+        .update(cx, |shell, _, _| {
+            (shell.state.clone(), shell.chat_tabs[1].clone())
+        })
+        .unwrap();
     cx.update(|cx| crate::open_notified_chat("peer".into(), &state, cx));
     cx.run_until_parked();
-    window.update(cx, |shell, _, cx| {
-        assert_eq!(shell.chat_tabs.len(), 2);
-        assert_eq!(shell.chat_tab, 0);
-        assert_eq!(shell.chat_tabs[1], parked);
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
-        assert!(shell.chat_split.as_ref().unwrap().panes.iter().any(|id| id.as_deref() == Some("current")));
-    }).unwrap();
+    window
+        .update(cx, |shell, _, cx| {
+            assert_eq!(shell.chat_tabs.len(), 2);
+            assert_eq!(shell.chat_tab, 0);
+            assert_eq!(shell.chat_tabs[1], parked);
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("peer"));
+            assert!(
+                shell
+                    .chat_split
+                    .as_ref()
+                    .unwrap()
+                    .panes
+                    .iter()
+                    .any(|id| id.as_deref() == Some("current"))
+            );
+        })
+        .unwrap();
 }
 
 #[gpui::test]
 fn blank_canvas_unsaved_file_reveal_stays_in_current_tab(cx: &mut gpui::TestAppContext) {
     let (_dir, window) = fixture(cx, true, Some(false));
-    window.update(cx, |shell, _, cx| {
-        let tabs = shell.chat_tabs.clone();
-        let state = shell.state.clone();
-        let files = cx.new(|cx| {
-            let mut files = FilesSurface::new(state, String::new(), false, 1000, 13.0, false, false, cx);
-            files.seed_pending_exit_test_document(true);
-            files
-        });
-        shell.file_surfaces.insert(0, files);
-        shell.file_surface_keys.insert((String::new(), "test.rs".into()), 0);
-        assert!(!shell.prepare_exit(PendingExit::Quit, cx));
-        assert_eq!(shell.chat_tabs, tabs);
-        assert_eq!(shell.chat_tab, 0);
-        assert!(shell.state.read(cx).selected_chat.is_none());
-    }).unwrap();
+    window
+        .update(cx, |shell, _, cx| {
+            let tabs = shell.chat_tabs.clone();
+            let state = shell.state.clone();
+            let files = cx.new(|cx| {
+                let mut files =
+                    FilesSurface::new(state, String::new(), false, 1000, 13.0, false, false, cx);
+                files.seed_pending_exit_test_document(true);
+                files
+            });
+            shell.file_surfaces.insert(0, files);
+            shell
+                .file_surface_keys
+                .insert((String::new(), String::new(), "test.rs".into()), 0);
+            assert!(!shell.prepare_exit(PendingExit::Quit, cx));
+            assert_eq!(shell.chat_tabs, tabs);
+            assert_eq!(shell.chat_tab, 0);
+            assert!(shell.state.read(cx).selected_chat.is_none());
+        })
+        .unwrap();
 }
 
 #[gpui::test]
 fn conversation_deep_links_preserve_tabs_after_validation(cx: &mut gpui::TestAppContext) {
     for parked in [None, Some(false), Some(true)] {
         let (_dir, window) = fixture(cx, true, parked);
-        let layout = window.update(cx, |shell, _, cx| {
-            let layout = shell.chat_split.clone();
-            let workspace = crate::links::workspace_locator(Some(WorkspaceScope::Local), None, Some("local")).unwrap();
-            let url = crate::links::harness_conversation_link("target", &workspace);
-            shell.state.update(cx, |state, cx| state.open_deep_link(&url, cx));
-            layout
-        }).unwrap();
+        let layout = window
+            .update(cx, |shell, _, cx| {
+                let layout = shell.chat_split.clone();
+                let workspace = crate::links::workspace_locator(
+                    Some(WorkspaceScope::Local),
+                    None,
+                    Some("local"),
+                )
+                .unwrap();
+                let url = crate::links::harness_conversation_link("target", &workspace);
+                shell
+                    .state
+                    .update(cx, |state, cx| state.open_deep_link(&url, cx));
+                layout
+            })
+            .unwrap();
         cx.run_until_parked();
-        window.update(cx, |shell, _, cx| {
-            assert_target_preserved(shell, cx);
-            assert_eq!(shell.chat_tabs[0].split, layout);
-            let url = crate::links::harness_conversation_link("peer", "different-workspace");
-            shell.state.update(cx, |state, cx| state.open_deep_link(&url, cx));
-        }).unwrap();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_target_preserved(shell, cx);
+                assert_eq!(shell.chat_tabs[0].split, layout);
+                let url = crate::links::harness_conversation_link("peer", "different-workspace");
+                shell
+                    .state
+                    .update(cx, |state, cx| state.open_deep_link(&url, cx));
+            })
+            .unwrap();
         cx.run_until_parked();
-        window.update(cx, |shell, _, cx| assert_target_preserved(shell, cx)).unwrap();
+        window
+            .update(cx, |shell, _, cx| assert_target_preserved(shell, cx))
+            .unwrap();
     }
 }
-

@@ -2,7 +2,7 @@ use super::*;
 
 /// A Ready shell with `count` sessions in the sidebar, `working` among them
 /// running, in a window `height` tall, settled.
-fn sidebar_shell<'a>(
+pub(super) fn sidebar_shell<'a>(
     cx: &'a mut gpui::TestAppContext,
     count: usize,
     working: Option<&str>,
@@ -24,7 +24,10 @@ fn sidebar_shell<'a>(
             Default::default(),
             cx,
         );
-        settings::init(settings::UiSettings::expanded(), dir.path(), cx);
+        // The conversation sidebar, as people get it; test builds default to task view.
+        let mut settings = settings::UiSettings::expanded();
+        settings.sidebar_task_view = false;
+        settings::init(settings, dir.path(), cx);
     });
     let data_dir = dir.path().to_path_buf();
     let (shell, cx) = cx.add_window_view(|_, cx| {
@@ -131,6 +134,12 @@ fn selector(name: String) -> &'static str {
 #[gpui::test]
 fn far_off_screen_sidebar_rows_are_slots_until_scrolled_into_view(cx: &mut gpui::TestAppContext) {
     let (_dir, shell, cx) = sidebar_shell(cx, 200, None, 700.0);
+    shell.update(cx, |shell, cx| {
+        shell
+            .sidebar_unfolded_groups
+            .insert("project:home:local".into());
+        cx.notify();
+    });
     // The sidebar is a cached view: re-render it, as a sidebar update would,
     // so this frame's rows are the ones queried.
     let built = |cx: &mut gpui::VisualTestContext| {

@@ -65,6 +65,13 @@ final class AppModel {
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
     var demoPinnedSessionIds: [String] = []
+    /// Archived sessions hidden from the Archived shelf on this phone, like
+    /// Hide in the desktop's Chat history. Search still finds them, and
+    /// unarchiving one brings it back.
+    var hiddenArchivedIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: AppModel.hiddenArchivedKey) ?? []) {
+        didSet { UserDefaults.standard.set(hiddenArchivedIds.sorted(), forKey: AppModel.hiddenArchivedKey) }
+    }
+    static let hiddenArchivedKey = "archivedHidden.v1"
     /// Graced connectivity truth — one stream every consumer inherits calm
     /// from (home pill, composer notice, Queued/Failed badges).
     let connectivity = ConnectivityCenter()
@@ -1059,6 +1066,25 @@ final class AppModel {
         return try await workspace.setAutonomy(deviceId: deviceId, autonomy)
     }
 
+    /// Demo mode's keep-awake, a Mac's default (off).
+    @ObservationIgnored private var demoKeepAwake = KeepAwakeSetting(enabled: false, supported: true)
+
+    /// Whether a computer stays awake while its agents work (Settings → Autonomy).
+    func keepAwake(deviceId: String) async throws -> KeepAwakeSetting {
+        if demo != nil { return demoKeepAwake }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.keepAwake(deviceId: deviceId)
+    }
+
+    func setKeepAwake(deviceId: String, enabled: Bool) async throws -> KeepAwakeSetting {
+        if demo != nil {
+            demoKeepAwake.enabled = enabled
+            return demoKeepAwake
+        }
+        guard let workspace else { throw RelayError.notConnected }
+        return try await workspace.setKeepAwake(deviceId: deviceId, enabled: enabled)
+    }
+
     /// Switch an agent on for one computer (the setup's optional extras).
     func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws {
         if demo != nil { return }
@@ -1114,9 +1140,11 @@ final class AppModel {
 
     /// The archived shelf narrowed by Home's search text.
     func archivedMatches(in spaceId: String?, query: String) -> [Chat] {
-        let archived = archivedChats(in: spaceId)
-        guard !query.isEmpty else { return archived }
-        return HomeFilter.apply(archived, query: query, names: homeFilterNames)
+        let archived = spaceId == HomeListControls.projectlessFilter
+            ? HomeListControls.projectless(archivedChats())
+            : archivedChats(in: spaceId)
+        return HomeFilter.archivedShelf(archived, hidden: hiddenArchivedIds,
+                                 query: query, names: homeFilterNames)
     }
 
     func homeFilterNames(_ chat: Chat) -> HomeFilter.Names {
@@ -1124,7 +1152,12 @@ final class AppModel {
     }
 
     func archive(chatId: String) { setArchived(chatId: chatId, archived: true) }
-    func unarchive(chatId: String) { setArchived(chatId: chatId, archived: false) }
+    func unarchive(chatId: String) {
+        hiddenArchivedIds.remove(chatId)
+        setArchived(chatId: chatId, archived: false)
+    }
+    /// Hide an archived session from the shelf on this phone; it stays archived everywhere.
+    func hideArchived(chatId: String) { hiddenArchivedIds.insert(chatId) }
 
     /// Delete a session for good, everywhere (the desktop's Delete session).
     func delete(chatId: String) {

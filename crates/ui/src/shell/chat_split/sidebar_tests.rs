@@ -1,30 +1,25 @@
 use super::*;
 
-/// Exercise the actual pane buttons and tab headers, not just width arithmetic.
-struct SidebarPaneCards(Entity<Shell>);
+/// Split layouts keep one ordinary workspace tab at every sidebar width.
+struct SplitTabHost(Entity<Shell>);
 
-impl Render for SidebarPaneCards {
+impl Render for SplitTabHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
-            let mut strip = shell.render_pane_strip(&theme, cx);
-            div()
-                .w(px(shell.settings.sidebar_width))
-                // Give the tab list's percentage scroll cap a definite height.
-                .h(px(600.0))
-                .flex()
-                .flex_col()
-                .children(
-                    shell
-                        .render_chat_tabs(&theme, &mut strip, cx)
-                        .map(|tabs| div().h_full().debug_selector(|| "tabs-header".into()).child(tabs)),
-                )
-                .children(strip)
+            div().w(px(1800.0)).h(px(600.0)).flex().flex_row().children(
+                shell.render_chat_tabs(&theme, cx).map(|tabs| {
+                    div()
+                        .w_full()
+                        .debug_selector(|| "tabs-header".into())
+                        .child(tabs)
+                }),
+            )
         })
     }
 }
 
-fn assert_pane_cards(cx: &mut gpui::TestAppContext, width: f32, count: usize, tabs: bool) {
+fn assert_split_tab(cx: &mut gpui::TestAppContext, width: f32, count: usize, tabs: bool) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -40,7 +35,7 @@ fn assert_pane_cards(cx: &mut gpui::TestAppContext, width: f32, count: usize, ta
         settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
-        SidebarPaneCards(cx.new(|cx| {
+        SplitTabHost(cx.new(|cx| {
             let state = cx.new(|_| AppState::new());
             let mut shell = Shell::new(
                 state,
@@ -91,64 +86,40 @@ fn assert_pane_cards(cx: &mut gpui::TestAppContext, width: f32, count: usize, ta
     });
     let shell = host.read_with(cx, |host, _| host.0.clone());
     assert!(cx.debug_bounds("tabs-header").is_some());
-    let cards: Vec<_> = [
-        "chat-pane-card-0",
-        "chat-pane-card-1",
-        "chat-pane-card-2",
-        "chat-pane-card-3",
-        "chat-pane-card-4",
-        "chat-pane-card-5",
-        "chat-pane-card-6",
-        "chat-pane-card-7",
-    ][..count]
-        .iter()
-        .map(|selector| cx.debug_bounds(selector).unwrap())
-        .collect();
-    let viewport = shell.read_with(cx, |shell, _| shell.chat_tab_scroll.bounds());
-    for (ix, card) in cards.iter().enumerate() {
-        assert!(card.left() >= viewport.left());
-        assert!(card.right() <= viewport.right());
-        assert!(card.left() >= px(Theme::SPACE_SM));
-        assert!(card.right() <= px(width - Theme::SPACE_SM + 0.5));
-        assert_eq!(card.size.width, cards[0].size.width);
-        assert!(card.size.width < px(width / 2.0));
-        if ix % 2 == 1 {
-            assert_eq!(card.top(), cards[ix - 1].top());
-            assert!(card.left() > cards[ix - 1].right());
-        } else if ix > 0 {
-            assert_eq!(card.left(), cards[0].left());
-            assert!(card.top() > cards[ix - 1].bottom());
-        }
-    }
-    // Wrapping and explicit sizing must preserve the actual focus handler.
-    cx.simulate_click(cards[0].center(), Default::default());
+    let tab = cx.debug_bounds("chat-tab-0").unwrap();
+    assert_eq!(tab.size.height, px(NAV_ITEM_HEIGHT));
+    assert_eq!(cx.debug_bounds("chat-tab-1").is_some(), tabs);
+    assert!(cx.debug_bounds("chat-tab-2").is_none());
+    assert!(cx.debug_bounds("chat-pane-card-0").is_none());
+    assert!(cx.debug_bounds("chat-tab-group-0").is_none());
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.focus_chat_pane(0, window, cx)));
     cx.run_until_parked();
     shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.chat_split.as_ref().unwrap().focus, 0, "cards: {cards:?}, viewport: {viewport:?}");
+        assert_eq!(shell.chat_split.as_ref().unwrap().focus, 0);
+        assert_eq!(shell.chat_split.as_ref().unwrap().panes.len(), count);
         assert_eq!(
             shell.state.read(cx).selected_chat.as_deref(),
             Some("pane-0")
         );
     });
-    assert!(cx.debug_bounds("tabs-header").is_some());
 }
 
 #[gpui::test]
-fn sidebar_pane_cards_wrap_without_stretching_last_row(cx: &mut gpui::TestAppContext) {
+fn split_panes_do_not_create_tab_groups(cx: &mut gpui::TestAppContext) {
     for tabs in [false, true] {
         for width in [220.0, 310.0] {
             for count in [3, 4] {
-                assert_pane_cards(cx, width, count, tabs);
+                assert_split_tab(cx, width, count, tabs);
             }
         }
     }
 }
 
 #[gpui::test]
-fn sidebar_pane_cards_fit_narrow_sidebar(cx: &mut gpui::TestAppContext) {
+fn split_tabs_are_independent_of_sidebar_width(cx: &mut gpui::TestAppContext) {
     for tabs in [false, true] {
         for count in [3, 4, 8] {
-            assert_pane_cards(cx, 180.0, count, tabs);
+            assert_split_tab(cx, 180.0, count, tabs);
         }
     }
 }

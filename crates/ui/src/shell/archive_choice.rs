@@ -22,6 +22,75 @@ pub(super) fn archive_choice_copy(close: &str, close_only: &str) -> (String, Str
 }
 
 impl Shell {
+    /// The chat ⌘W would close: the one showing in the focused panel. Other
+    /// panel tabs (drafts, terminals, files) have no session to archive.
+    fn focused_panel_chat(&self, cx: &App) -> Option<String> {
+        if !matches!(self.route, Route::Chat) {
+            return None;
+        }
+        let layout = self.panel_layout(cx)?;
+        let panel = layout
+            .panels
+            .iter()
+            .find(|panel| panel.id == layout.focused)?;
+        match panel.selected()? {
+            workspace_panels::PanelTab::Chat(id) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    fn close_focused_panel_chat(
+        &mut self,
+        chat_id: String,
+        may_archive: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_close_focused(window, cx);
+        if may_archive {
+            self.archive_closed_session_if_idle(chat_id, window, cx);
+        }
+    }
+
+    /// ⌘W on a panel showing a chat: the same question and saved default as
+    /// [`Self::close_chat_view_by_shortcut`]. False when no chat is focused.
+    pub(crate) fn close_focused_panel_chat_by_shortcut(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(chat_id) = self.focused_panel_chat(cx) else {
+            return false;
+        };
+        if settings::archive_on_close_chosen(cx) {
+            let archive = settings::archive_sessions_on_close(cx);
+            self.close_focused_panel_chat(chat_id, archive, window, cx);
+        } else {
+            self.archive_choice_prompt = true;
+            cx.notify();
+        }
+        true
+    }
+
+    /// A panel's ✕, middle click or menu close: never asks, and follows the
+    /// saved default ([`Self::archive_closed_session`]).
+    pub(super) fn close_workspace_tab_by_button(
+        &mut self,
+        panel: u64,
+        tab: workspace_panels::PanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let chat_id = match &tab {
+            workspace_panels::PanelTab::Chat(id) => Some(id.clone()),
+            _ => None,
+        };
+        self.close_workspace_tab(panel, tab, window, cx);
+        if let Some(chat_id) = chat_id {
+            self.archive_closed_session(chat_id, window, cx);
+        }
+    }
+
     /// The first ⌘W chat close asks for a default. Later closes follow the
     /// saved archive-on-close preference without asking again.
     pub(crate) fn close_chat_view_by_shortcut(
@@ -49,6 +118,10 @@ impl Shell {
         }
         settings::set_archive_sessions_on_close(archive, cx);
         self.sync_independent_settings(cx);
+        if let Some(chat_id) = self.focused_panel_chat(cx) {
+            self.close_focused_panel_chat(chat_id, archive, window, cx);
+            return true;
+        }
         self.close_chat_view_with_archive(archive, window, cx)
     }
 

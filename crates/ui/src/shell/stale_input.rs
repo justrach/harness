@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{Action, App, Global, InteractiveElement, Window};
 
-use super::{NewChatTab, SplitChatDown, SplitChatRight};
+use super::{NewChatTab, NewTab, SplitChatDown, SplitChatRight};
 use crate::terminal::panel::{SplitDown, SplitRight};
 
 /// Input that waited this long for the main thread was buffered in a stall,
@@ -80,10 +80,11 @@ fn gate<A: Action>(_: &A, _: &mut Window, cx: &mut App) {
     }
 }
 
-/// Gate the shell's layout commands (new chat tab, chat and terminal splits)
-/// before their handlers run.
+/// Gate the shell's layout commands (new tab, new chat tab, chat and terminal
+/// splits) before their handlers run.
 pub(super) fn coalesce_late_layout_commands<E: InteractiveElement>(root: E) -> E {
-    root.capture_action(gate::<NewChatTab>)
+    root.capture_action(gate::<NewTab>)
+        .capture_action(gate::<NewChatTab>)
         .capture_action(gate::<SplitChatRight>)
         .capture_action(gate::<SplitChatDown>)
         .capture_action(gate::<SplitRight>)
@@ -207,24 +208,24 @@ mod tests {
         };
         let layout = |cx: &mut gpui::TestAppContext| {
             window
-                .update(cx, |shell, _, _| {
-                    (
-                        shell.chat_tabs.len().max(1),
-                        shell
-                            .chat_split
-                            .as_ref()
-                            .map_or(1, |split| split.panes.len()),
-                    )
+                .update(cx, |shell, _, cx| {
+                    shell.panel_layout(cx).map_or((0, 1), |layout| {
+                        (
+                            layout.panels.iter().map(|panel| panel.tabs.len()).sum(),
+                            layout.panels.len(),
+                        )
+                    })
                 })
                 .unwrap()
         };
         let new_tab = ShortcutId::NewSession.default_combo();
-        assert_eq!(layout(cx), (1, 1));
+        let (tabs, panels) = layout(cx);
 
         // The backlog: ⌘T ⌘T ⌘T ⌘D ⌘D ⌘D, all pressed during the freeze.
         for _ in 0..3 {
             press(new_tab, LATE, cx);
         }
+        assert_eq!(layout(cx), (tabs + 1, panels), "one tab, not one per press");
         let split = if cfg!(target_os = "macos") {
             "mod-d"
         } else {
@@ -233,15 +234,12 @@ mod tests {
         for _ in 0..3 {
             press(split, LATE, cx);
         }
-        assert_eq!(
-            layout(cx),
-            (2, 2),
-            "one tab and one split, not one per press"
-        );
+        let (split_tabs, split_panels) = layout(cx);
+        assert_eq!(split_panels, panels + 1, "one split, not one per press");
 
         // After the stall, a fresh press opens a tab as always.
         press(new_tab, Some(Duration::from_millis(4)), cx);
-        assert_eq!(layout(cx).0, 3);
+        assert_eq!(layout(cx), (split_tabs + 1, split_panels));
     }
 
     #[test]

@@ -10,13 +10,11 @@ impl Render for HeaderHost {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.shell.update(cx, |shell, cx| {
             let theme = Theme::of(cx).clone();
-            let mut strip = shell.render_pane_strip(&theme, cx);
             div()
-                .w(px(shell.settings.sidebar_width))
+                .w(px(1000.0))
                 .flex()
-                .flex_col()
-                .children(shell.render_chat_tabs(&theme, &mut strip, cx))
-                .children(strip)
+                .flex_row()
+                .children(shell.render_chat_tabs(&theme, cx))
         })
     }
 }
@@ -56,11 +54,20 @@ fn setup<'a>(
             );
             shell.settings.sidebar_width = 220.0;
             shell.state.update(cx, |state, cx| {
+                state.spaces = ["a", "b", "c"]
+                    .map(|id| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "deviceId": "local", "path": format!("/fixtures/{id}"),
+                            "name": id.to_uppercase(), "createdAt": Utc::now(),
+                        }))
+                        .unwrap()
+                    })
+                    .into();
                 state.chats = [("first", "First\nchat"), ("second", "Second chat")]
                     .map(|(id, title)| {
                         serde_json::from_value(serde_json::json!({
                             "id": id, "deviceId": "local", "title": title,
-                            "archived": false, "createdAt": Utc::now(),
+                            "archived": false, "spaceId": "a", "createdAt": Utc::now(),
                         }))
                         .unwrap()
                     })
@@ -79,6 +86,13 @@ fn setup<'a>(
     (shell, cx)
 }
 
+/// The real workspace session a ⌘D splits, as a restored window has it.
+fn seed_workspace_session(shell: &mut Shell, cx: &mut Context<Shell>) {
+    shell.boot_restored = true;
+    shell.ensure_workspace_sessions(cx);
+    shell.sync_panel_workspace(cx);
+}
+
 fn assert_single_header(shell: &Entity<Shell>, cx: &mut VisualTestContext, title: &str) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("chat-tab-0").is_some());
@@ -90,14 +104,14 @@ fn assert_single_header(shell: &Entity<Shell>, cx: &mut VisualTestContext, title
 }
 
 #[gpui::test]
-fn sidebar_single_tab_header_tracks_live_chat_and_canvas(cx: &mut TestAppContext) {
+fn project_tab_name_stays_stable_across_chats_and_canvas(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = setup(cx, dir.path());
-    assert_single_header(&shell, cx, "First chat");
+    assert_single_header(&shell, cx, "A");
     cx.update(|_, cx| {
         shell.update(cx, |shell, cx| shell.open_chat("second".into(), cx));
     });
-    assert_single_header(&shell, cx, "Second chat");
+    assert_single_header(&shell, cx, "A");
     cx.update(|_, cx| {
         shell.update(cx, |shell, cx| {
             shell
@@ -106,7 +120,7 @@ fn sidebar_single_tab_header_tracks_live_chat_and_canvas(cx: &mut TestAppContext
             cx.notify();
         });
     });
-    assert_single_header(&shell, cx, "New session");
+    assert_single_header(&shell, cx, "A");
     // This chat-specific header must not leak into Settings.
     cx.update(|_, cx| {
         shell.update(cx, |shell, cx| {
@@ -119,45 +133,44 @@ fn sidebar_single_tab_header_tracks_live_chat_and_canvas(cx: &mut TestAppContext
 }
 
 #[gpui::test]
-fn sidebar_single_tab_header_survives_split_and_tab_closure(cx: &mut TestAppContext) {
+fn top_tab_survives_split_and_tab_closure(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = setup(cx, dir.path());
-    cx.update(|window, cx| {
+    cx.update(|_, cx| {
         shell.update(cx, |shell, cx| {
-            shell.split_chat(SplitAxis::Horizontal, window, cx)
+            seed_workspace_session(shell, cx);
+            shell.workspace_split(SplitAxis::Horizontal, cx);
+            assert_eq!(shell.panel_layout(cx).unwrap().panels.len(), 2);
         });
     });
-    assert_single_header(&shell, cx, "New session");
+    assert_single_header(&shell, cx, "A");
     let header = cx.debug_bounds("chat-tab-0").unwrap();
-    let first = cx.debug_bounds("chat-pane-card-0").unwrap();
-    let second = cx.debug_bounds("chat-pane-card-1").unwrap();
-    assert!(header.bottom() <= first.top());
-    assert_eq!(first.top(), second.top());
-    // Two tracks inside the tab list's inset: (220 - 20 - 16 - 6) / 2.
-    assert_eq!(first.size.width, px(89.0));
-    assert_eq!(first.size.width, second.size.width);
-    // Cmd+W removes the extra Cmd+D pane; the header must not disappear.
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            assert!(shell.close_focused_chat_pane(window, cx));
-            assert!(shell.chat_split.is_none());
+    assert_eq!(header.size.height, px(NAV_ITEM_HEIGHT));
+    assert!(cx.debug_bounds("chat-tab-group-0").is_none());
+    assert!(cx.debug_bounds("chat-pane-card-0").is_none());
+    // Cmd+W removes the extra Cmd+D panel's tab, then the emptied panel; the
+    // header must not disappear at either step.
+    for panels in [2, 1] {
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                assert!(shell.workspace_close_focused(window, cx));
+                assert_eq!(shell.panel_layout(cx).unwrap().panels.len(), panels);
+            });
         });
-    });
-    assert_single_header(&shell, cx, "First chat");
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.new_chat_tab(Some("second".into()), window, cx)
-        });
+        assert_single_header(&shell, cx, "A");
+    }
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| shell.open_project_tab(Some("b".into()), cx));
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("chat-tab-1").is_some());
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             assert!(shell.close_chat_tab(window, cx));
-            assert!(shell.chat_tabs.is_empty());
+            assert_eq!(shell.chat_tabs.len(), 1);
         });
     });
-    assert_single_header(&shell, cx, "First chat");
+    assert_single_header(&shell, cx, "A");
 }
 
 #[gpui::test]
@@ -166,8 +179,8 @@ fn tab_row_close_button_closes_that_tab(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx, dir.path());
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            shell.new_chat_tab(Some("second".into()), window, cx);
-            shell.new_chat_tab(None, window, cx);
+            shell.open_project_tab(Some("b".into()), cx);
+            shell.open_project_tab(Some("c".into()), cx);
         });
     });
     cx.run_until_parked();
@@ -175,11 +188,7 @@ fn tab_row_close_button_closes_that_tab(cx: &mut TestAppContext) {
         assert_eq!(shell.chat_tab, 2);
         assert_eq!(
             shell.chat_tab_labels(cx),
-            vec![
-                SharedString::from("First chat"),
-                "Second chat".into(),
-                "New session".into()
-            ]
+            vec![SharedString::from("A"), "B".into(), "C".into()]
         );
     });
     // The ✕ on a parked tab closes that tab; the lit tab stays lit.
@@ -191,7 +200,7 @@ fn tab_row_close_button_closes_that_tab(cx: &mut TestAppContext) {
         assert_eq!(shell.state.read(cx).selected_chat, None);
         assert_eq!(
             shell.chat_tab_labels(cx),
-            vec![SharedString::from("Second chat"), "New session".into()]
+            vec![SharedString::from("B"), "C".into()]
         );
     });
     // Closing the lit tab hands off to the last visited one, back to one tab.
@@ -200,11 +209,106 @@ fn tab_row_close_button_closes_that_tab(cx: &mut TestAppContext) {
             assert!(shell.close_chat_tab_at(1, window, cx))
         });
     });
-    assert_single_header(&shell, cx, "Second chat");
-    // A lone tab has nothing to close.
+    assert_single_header(&shell, cx, "B");
+    // A lone project closes to the projectless canvas, without deleting chats.
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            assert!(!shell.close_chat_tab_at(0, window, cx))
+            assert!(shell.close_chat_tab_at(0, window, cx))
         });
+    });
+}
+
+#[gpui::test]
+fn selecting_and_switching_tabs_preserves_split_and_draft(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = setup(cx, dir.path());
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.split_chat(SplitAxis::Horizontal, window, cx)
+        });
+    });
+    cx.run_until_parked();
+    let (layout, selected, draft) = shell.read_with(cx, |shell, cx| {
+        (
+            shell.chat_split.clone(),
+            shell.state.read(cx).selected_chat.clone(),
+            shell.current_canvas_draft(cx),
+        )
+    });
+    let header = cx.debug_bounds("chat-tab-0").unwrap();
+    cx.simulate_click(header.center(), Default::default());
+    cx.run_until_parked();
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.chat_split, layout);
+        assert_eq!(shell.state.read(cx).selected_chat, selected);
+        assert_eq!(shell.current_canvas_draft(cx), draft);
+    });
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| shell.open_project_tab(Some("b".into()), cx));
+    });
+    cx.run_until_parked();
+    let header = cx.debug_bounds("chat-tab-0").unwrap();
+    cx.simulate_click(header.center(), Default::default());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("chat-pane-card-0").is_none());
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.chat_split, layout);
+        assert_eq!(shell.current_canvas_draft(cx), draft);
+    });
+}
+
+#[gpui::test]
+fn top_strip_reveals_the_selected_tab_when_it_overflows(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = setup(cx, dir.path());
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.chat_tabs = vec![ChatTab::default(); 25];
+            shell.chat_tab = 24;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let bounds = shell.read_with(cx, |shell, _| shell.chat_tab_scroll.bounds());
+    let last = cx.debug_bounds("chat-tab-24").unwrap();
+    assert!(
+        last.left() >= bounds.left() && last.right() <= bounds.right(),
+        "{last:?} vs {bounds:?}"
+    );
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.switch_chat_tab(0, window, cx)));
+    cx.run_until_parked();
+    let first = cx.debug_bounds("chat-tab-0").unwrap();
+    assert!(
+        first.left() >= bounds.left() && first.right() <= bounds.right(),
+        "{first:?} vs {bounds:?}"
+    );
+}
+
+#[gpui::test]
+fn pane_focus_updates_one_top_tab_instead_of_adding_subtabs(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = setup(cx, dir.path());
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            seed_workspace_session(shell, cx);
+            for _ in 0..7 {
+                shell.workspace_split(SplitAxis::Horizontal, cx);
+            }
+        });
+    });
+    assert_single_header(&shell, cx, "A");
+    assert!(cx.debug_bounds("chat-pane-card-7").is_none());
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            crate::shell::exit_regressions::focus_workspace_panel_for_test(shell, 0, window, cx)
+        })
+    });
+    assert_single_header(&shell, cx, "A");
+    shell.read_with(cx, |shell, cx| {
+        let layout = shell.panel_layout(cx).unwrap();
+        assert_eq!(layout.panels.len(), 8);
+        assert_eq!(layout.focused, layout.panels[0].id);
     });
 }

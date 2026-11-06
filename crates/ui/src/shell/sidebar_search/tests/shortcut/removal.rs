@@ -1,4 +1,5 @@
 use super::*;
+use crate::shell::workspace_panels::PanelTab;
 
 fn assert_no_duplicate_actions(cx: &mut gpui::VisualTestContext) {
     assert!(cx.debug_bounds("sidebar-new-chat").is_none());
@@ -42,19 +43,29 @@ fn sidebar_control_removal_layout_survives_empty_compact_and_many_tab_states(
                         cx.notify();
                     });
                     cx.run_until_parked();
+                    // Cached sidebar paint replays its scene, but GPUI's test
+                    // debug selectors are recorded only during a fresh paint.
+                    cx.update(|window, cx| {
+                        window.refresh();
+                        let _ = window.draw(cx);
+                    });
                     assert_no_duplicate_actions(cx);
-                    let filter = cx.debug_bounds("spaces-filter").unwrap();
-                    let trigger = cx.debug_bounds("sidebar-search-toggle").unwrap();
-                    assert!(trigger.left() >= filter.right());
-                    assert!(trigger.right() <= px(width));
+                    let filter = cx.debug_bounds("session-switcher").unwrap();
+                    let list = cx.debug_bounds("workspace-session-list").unwrap();
+                    assert!(list.top() >= filter.bottom());
                     assert!(filter.right() <= px(width));
+                    assert!(cx.debug_bounds("sidebar-search-toggle").is_none());
 
-                    let input = super::super::edge_cases::open_search(&shell, cx);
+                    let input = open_workspace_search(&shell, cx);
                     super::super::edge_cases::query(&input, "no matching session", cx);
                     assert!(cx.debug_bounds("sidebar-search-empty").is_some());
                     press_keys(cx, "escape escape");
+                    cx.update(|window, cx| {
+                        window.refresh();
+                        let _ = window.draw(cx);
+                    });
                     assert_no_duplicate_actions(cx);
-                    let restored = cx.debug_bounds("spaces-filter").unwrap();
+                    let restored = cx.debug_bounds("session-switcher").unwrap();
                     assert_eq!(restored.size, filter.size);
                     assert_eq!(restored.left(), filter.left());
                     // Text layout may round by half a pixel between frames;
@@ -89,23 +100,14 @@ fn sidebar_control_removal_search_and_collapse_cycles_preserve_unsent_draft(
         });
         seed_draft(&shell, "keep this unsent draft", cx);
         for _ in 0..3 {
-            let input = super::super::edge_cases::open_search(&shell, cx);
+            let input = open_workspace_search(&shell, cx);
             super::super::edge_cases::query(&input, "missing", cx);
             let archive = cx.debug_bounds("sidebar-search-archived").unwrap();
             cx.simulate_click(archive.center(), Default::default());
             cx.run_until_parked();
-            let trigger = cx.debug_bounds("sidebar-search-toggle").unwrap();
-            cx.simulate_click(trigger.center(), Default::default());
-            cx.run_until_parked();
+            // Escape clears the query and then closes the on-demand search.
+            press_keys(cx, "escape escape");
             assert_no_duplicate_actions(cx);
-            cx.update(|window, cx| {
-                assert!(
-                    shell
-                        .read(cx)
-                        .sidebar_search_trigger_focus
-                        .is_focused(window)
-                );
-            });
 
             press_keys(cx, &platform_combo("mod-b"));
             shell.read_with(cx, |shell, _| assert!(shell.settings.sidebar_collapsed));
@@ -163,37 +165,89 @@ fn sidebar_control_removal_retained_new_tab_actions_preserve_split_and_draft(
                 });
                 cx.run_until_parked();
                 seed_draft(&shell, "draft in the original chat", cx);
-                let layout = shell.read_with(cx, |shell, _| shell.chat_split.clone());
-                let input = super::super::edge_cases::open_search(&shell, cx);
+                let (layout, original_panel, panel_tabs) = shell.read_with(cx, |shell, cx| {
+                    assert!(shell.boot_restored);
+                    assert_eq!(shell.chat_tabs.len(), 1);
+                    let panels = shell.panel_layout(cx).unwrap();
+                    (
+                        shell.chat_split.clone(),
+                        panels.focused,
+                        panels
+                            .panels
+                            .iter()
+                            .map(|panel| panel.tabs.len())
+                            .sum::<usize>(),
+                    )
+                });
+                let input = open_workspace_search(&shell, cx);
                 super::super::edge_cases::query(&input, "no matching session", cx);
                 if collapsed {
                     press_keys(cx, &platform_combo("mod-b"));
                 }
                 if keyboard {
-                    // New chat is Ctrl+Shift+T off macOS; use this platform's default.
+                    // The configurable shortcut creates a panel tab in this workspace.
                     press_keys(
                         cx,
                         &platform_combo(crate::settings::ShortcutId::NewSession.default_combo()),
                     );
                 } else {
-                    let plus = cx.debug_bounds("titlebar-new-session").unwrap();
-                    cx.simulate_click(plus.center(), Default::default());
-                    cx.run_until_parked();
+                    if collapsed {
+                        let switcher = cx.debug_bounds("workspace-session-quick-switcher").unwrap();
+                        cx.simulate_click(switcher.center(), Default::default());
+                        cx.run_until_parked();
+                        // The compact menu retains New session as its last action.
+                        press_keys(cx, "end enter");
+                    } else {
+                        let plus = cx.debug_bounds("sidebar-session-create").unwrap();
+                        cx.simulate_click(plus.center(), Default::default());
+                        cx.run_until_parked();
+                    }
                 }
                 shell.read_with(cx, |shell, cx| {
-                    assert_eq!(
-                        shell.chat_tabs.len(),
-                        2,
-                        "one activation opens exactly one tab"
-                    );
-                    assert_eq!(shell.chat_tab, 1);
                     assert!(shell.state.read(cx).selected_chat.is_none());
-                    assert!(shell.chat_split.is_none());
-                    assert_eq!(shell.chat_tabs[0].selected.as_deref(), Some("current"));
-                    assert_eq!(shell.chat_tabs[0].split, layout);
                     assert_eq!(shell.composer.read(cx).input.read(cx).text(), "");
+                    if keyboard {
+                        assert_eq!(shell.chat_tabs.len(), 1, "New tab stays in this workspace");
+                        assert_eq!(shell.chat_tab, 0);
+                        assert_eq!(shell.chat_split, layout);
+                        let panels = shell.panel_layout(cx).unwrap();
+                        assert_eq!(panels.focused, original_panel);
+                        assert_eq!(
+                            panels
+                                .panels
+                                .iter()
+                                .map(|panel| panel.tabs.len())
+                                .sum::<usize>(),
+                            panel_tabs + 1,
+                            "one shortcut opens exactly one panel tab"
+                        );
+                        let panel = panels
+                            .panels
+                            .iter()
+                            .find(|panel| panel.id == original_panel)
+                            .unwrap();
+                        assert!(matches!(panel.selected(), Some(PanelTab::New(_))));
+                        assert!(panel.tabs.contains(&PanelTab::Chat("current".into())));
+                    } else {
+                        assert_eq!(shell.chat_tabs.len(), 2, "New session opens one workspace");
+                        assert_eq!(shell.chat_tab, 1);
+                        assert!(shell.chat_split.is_none());
+                        assert_eq!(shell.chat_tabs[0].selected.as_deref(), Some("current"));
+                        assert_eq!(shell.chat_tabs[0].split, layout);
+                    }
                 });
-                shell.update_in(cx, |shell, window, cx| shell.switch_chat_tab(0, window, cx));
+                shell.update_in(cx, |shell, window, cx| {
+                    if keyboard {
+                        shell.focus_workspace_tab(
+                            original_panel,
+                            PanelTab::Chat("current".into()),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        shell.switch_chat_tab(0, window, cx);
+                    }
+                });
                 cx.run_until_parked();
                 shell.read_with(cx, |shell, cx| {
                     assert_eq!(

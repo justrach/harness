@@ -22,6 +22,40 @@ pub(super) struct CodegraffStatus {
 }
 
 impl Shell {
+    /// A cloud sidebar click lands on that computer's existing Accounts row.
+    /// This is navigation only: no Start, Stop or Delete action is dispatched.
+    pub(super) fn open_cloud_computer_settings(
+        &mut self,
+        sandbox_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_search_result(SettingsSection::Agents, cx);
+        self.ensure_settings_search(cx).focus_pending = false;
+        if self.accounts_page.is_none() {
+            let state = self.state.clone();
+            self.accounts_page = Some(cx.new(|cx| AccountsPage::new(state, cx)));
+        }
+        if let Some(page) = self.accounts_page.clone() {
+            page.update(cx, |page, cx| {
+                page.reveal_cloud_computer(sandbox_id, window, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    #[cfg(feature = "appshots-fixture")]
+    pub fn fixture_cloud_settings_selected(&self, cx: &App) -> Option<String> {
+        if !matches!(self.route, Route::Settings(SettingsSection::Agents)) {
+            return None;
+        }
+        self.accounts_page
+            .as_ref()?
+            .read(cx)
+            .fixture_revealed_cloud_computer()
+            .map(str::to_owned)
+    }
+
     /// Re-read the sign-in state (menu open, after a flow finishes).
     pub(super) fn refresh_codegraff_status(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {

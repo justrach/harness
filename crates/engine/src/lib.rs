@@ -178,7 +178,7 @@ pub struct EngineCore {
     updater_wake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Holds the Mac awake while agents work (see [`keep_awake`]); owned so
     /// shutdown releases the assertion.
-    keep_awake: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    keep_awake: std::sync::Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     /// Exclusive data-dir lock — held for the engine's lifetime (single-instance).
     _instance_lock: InstanceLock,
 }
@@ -819,6 +819,7 @@ impl Engine {
             workspace_scope,
             cursor_sdk_version: Some(harness_adapters::CursorHarness::sdk_version().into()),
             capabilities: harness_proto::capabilities::current(),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
         })
     }
 

@@ -15,8 +15,8 @@ use crate::{
     theme::Theme,
 };
 
-pub const TREE_ROW_HEIGHT: f32 = 27.0;
-pub(super) const TREE_INDENT: f32 = 14.0;
+pub const TREE_ROW_HEIGHT: f32 = 36.0;
+pub(super) const TREE_INDENT: f32 = 16.0;
 
 /// Draw each ancestor's guide in the row itself so virtualized rows join
 /// seamlessly, including when the parent has scrolled out of view.
@@ -178,6 +178,8 @@ impl FilesSurface {
         let scrollbar = popover::rail(self, "files-tree-scrollbar", &theme, cx);
         div()
             .id("files-tree")
+            .px(px(8.0))
+            .py(px(8.0))
             .role(gpui::Role::Tree)
             .aria_label("Workspace file tree")
             .relative()
@@ -232,7 +234,7 @@ impl FilesSurface {
                 } else if selected {
                     theme.text
                 } else {
-                    theme.text_muted
+                    theme.text
                 };
                 let file_identity = match node.entry.kind {
                     WorkspaceEntryKind::Directory => {
@@ -251,13 +253,14 @@ impl FilesSurface {
                     .aria_selected(selected)
                     .when(is_directory, |element| element.aria_expanded(expanded))
                     .h(px(TREE_ROW_HEIGHT))
+                    .rounded(px(6.0))
                     .w_full()
                     .flex_none()
                     .pl(px(padding))
                     .pr(px(8.0))
                     .flex()
                     .items_center()
-                    .gap(px(4.0))
+                    .gap(px(6.0))
                     .cursor_pointer()
                     .when(node.entry.ignored && decoration.is_none(), |element| {
                         element.opacity(0.52)
@@ -266,7 +269,7 @@ impl FilesSurface {
                         element.bg(crate::theme::wash(if focused { 0.12 } else { 0.08 }))
                     })
                     .when(!selected, |element| {
-                        element.hover(|style| style.bg(crate::theme::wash(0.055)))
+                        element.hover(|style| style.bg(theme.element_hover))
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.tree_focus.focus(window, cx);
@@ -299,7 +302,7 @@ impl FilesSurface {
                     )
                     .child(
                         file_icons::icon(file_identity, theme.appearance)
-                            .size(px(14.0))
+                            .size(px(16.0))
                             .flex_none(),
                     )
                     .child(
@@ -307,7 +310,7 @@ impl FilesSurface {
                             .min_w_0()
                             .truncate()
                             .font_family(theme.font_sans.clone())
-                            .text_size(px(11.5))
+                            .text_size(crate::typography::ui_rems(13.0))
                             .text_color(text_color)
                             .child(node.entry.name),
                     )
@@ -338,7 +341,7 @@ impl FilesSurface {
                 .items_center()
                 .gap(px(6.0))
                 .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::wash(0.055)))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let cursor = this
                         .tree
@@ -368,7 +371,7 @@ impl FilesSurface {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::wash(0.055)))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.load_directory(directory.clone(), Some(cursor.clone()), cx);
                 }))

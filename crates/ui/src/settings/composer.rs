@@ -30,11 +30,9 @@ pub type ModelOptions = serde_json::Map<String, serde_json::Value>;
 pub struct RememberedModel {
     pub id: String,
     pub label: String,
-    /// graff only: the picker also listed `claude-agent/<same model>` when
-    /// this `anthropic/<model>` was picked, so Anthropic was chosen over
-    /// Claude Agent on purpose and a new chat keeps it. Absent (false) for a
-    /// pick made before Claude Agent was listed: a new chat then moves to
-    /// Claude Agent once it is (`pickers::claude_agent_twin`).
+    /// Legacy metadata: whether graff also listed `claude-agent/<same model>`
+    /// when this Anthropic route was chosen. Retained for settings compatibility;
+    /// every remembered provider route is preserved regardless of this flag.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chose_over_claude_agent: bool,
 }

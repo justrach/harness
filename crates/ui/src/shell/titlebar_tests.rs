@@ -1,67 +1,36 @@
 use super::*;
 
-#[test]
-fn new_session_action_lives_in_the_titlebar_on_every_chat_tab() {
-    assert_eq!(titlebar_new_session_alpha(true), 1.0);
-    assert_eq!(titlebar_new_session_alpha(false), 0.0);
-}
-
-#[test]
-fn titlebar_distribution_handles_fullscreen_captions_and_fractional_widths() {
-    for (width, start, buttons, expected) in [
-        (256.0, 88.0, 5, 9.5),
-        (224.0, 88.0, 5, 2.0),
-        (225.0, 88.0, 5, 2.0),
-        (255.5, 88.0, 5, 9.5),
-        (400.0, 88.0, 5, 45.5),
-        (256.0, 12.0, 5, 28.5),
-        (240.0, 50.0, 5, 15.0),
-        (256.0, 10.0, 5, 29.0),
-        (256.0, 36.0, 5, 22.5),
-        (256.0, 88.0, 4, 21.0),
-        (0.0, 88.0, 5, 2.0),
-        (128.0, 88.0, 5, 2.0),
-        (256.0, 88.0, 0, 2.0),
-        (256.0, 88.0, 1, 2.0),
-    ] {
-        let gap = distributed_titlebar_gap(width, start, buttons, 2.0);
-        assert!(
-            (gap - expected).abs() < 0.001,
-            "width={width}, start={start}, buttons={buttons}: expected {expected}, got {gap}"
-        );
-        assert!(gap.is_finite() && gap >= TITLEBAR_CONTROL_GAP);
-    }
-    for (scale, expected) in [
-        (1.0, 10.0),
-        (1.25, 9.6),
-        (1.5, 28.0 / 3.0),
-        (2.0, 9.5),
-        (3.0, 28.0 / 3.0),
-    ] {
-        let gap = distributed_titlebar_gap(255.0, 88.0, 5, scale);
-        assert!(
-            (gap - expected).abs() < 0.001,
-            "display scale {scale}: got {gap}"
-        );
-        let physical_gap = gap * scale;
-        assert!((physical_gap - physical_gap.round()).abs() < 0.001);
-    }
-}
-
 struct ToolbarHost(Entity<Shell>);
 
 impl Render for ToolbarHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.0.update(cx, |shell, cx| {
-            div()
-                .size_full()
-                .child(shell.render_titlebar_cluster(window, cx))
+            if matches!(shell.route, Route::Chat) {
+                shell.render_top_tab_bar(cx)
+            } else {
+                div()
+                    .size_full()
+                    .child(shell.render_titlebar_cluster(cx))
+                    .into_any_element()
+            }
+        })
+    }
+}
+
+/// Exercise the production workspace/Settings cluster independently of the
+/// legacy tab bar used by the tab-opening tests below.
+struct TitlebarClusterHost(Entity<Shell>);
+
+impl Render for TitlebarClusterHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0.update(cx, |shell, cx| {
+            div().size_full().child(shell.render_titlebar_cluster(cx))
         })
     }
 }
 
 #[gpui::test]
-fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
+fn titlebar_keeps_toggle_and_update_inside_sidebar_across_first_prompt(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -79,7 +48,7 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
         settings::init(settings::UiSettings::expanded(), dir.path(), cx);
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
-        ToolbarHost(cx.new(|cx| {
+        TitlebarClusterHost(cx.new(|cx| {
             let state = cx.new(|_| AppState::new());
             let mut shell = Shell::new(
                 state,
@@ -100,15 +69,11 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
             shell.install = harness_update::InstallKind::MacApp {
                 bundle: PathBuf::from("/nonexistent/Harness.app"),
             };
+            shell.app_update.postponed = Some("9.9.9".into());
             shell.update_flow = UpdateFlow::Ready(StagedUpdate {
                 path: PathBuf::from("/nonexistent/staged"),
                 version: "9.9.9".into(),
             });
-            // Postponed, so it waits on the person and the control shows.
-            shell.app_update.postponed = Some("9.9.9".into());
-            // A staged update's restart sits in the sidebar while it's open; the preview keeps
-            // the titlebar slot showing, which is the geometry under test.
-            shell.app_update.dev_preview = true;
             shell
         }))
     });
@@ -137,38 +102,18 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
                         cx.notify();
                     });
                     cx.update(|window, cx| window.draw(cx).clear());
-                    let plus = cx
-                        .debug_bounds("titlebar-new-session")
-                        .expect("+ must remain available before and after the first prompt");
+                    let toggle = cx.debug_bounds("toggle-sidebar").unwrap();
                     let update = cx.debug_bounds("titlebar-update").unwrap();
-                    let controls = [
-                        cx.debug_bounds("toggle-sidebar").unwrap(),
-                        cx.debug_bounds("nav-back").unwrap(),
-                        cx.debug_bounds("nav-forward").unwrap(),
-                        plus,
-                        update,
-                    ];
-                    let gap = controls[1].left() - controls[0].right();
-                    assert!(gap >= px(TITLEBAR_CONTROL_GAP));
-                    for pair in controls.windows(2) {
-                        assert_eq!(
-                            pair[1].left() - pair[0].right(),
-                            gap,
-                            "every adjacent titlebar icon must have the same gap"
-                        );
-                    }
+                    assert_eq!(update.left() - toggle.right(), px(TITLEBAR_CONTROL_GAP));
+                    assert_eq!(toggle.size, gpui::size(px(24.0), px(24.0)));
+                    assert_eq!(update.size, toggle.size);
                     if !collapsed {
                         assert!(
                             update.right() < px(sidebar_width),
                             "the divider must not intersect update"
                         );
-                        assert!(
-                            px(sidebar_width) - update.right() <= px(TITLEBAR_CLUSTER_PAD),
-                            "fullscreen={fullscreen}, width={sidebar_width}: trailing gap {:?}, controls {controls:?}",
-                            px(sidebar_width) - update.right()
-                        );
                     }
-                    let bounds = (plus, update);
+                    let bounds = (toggle, update);
                     if let Some(draft) = draft_bounds {
                         assert_eq!(
                             bounds, draft,
@@ -181,23 +126,6 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
             }
         }
     }
-    // An empty active tab still offers a working +, rather than consuming it
-    // as the update control's slot.
-    shell.update(cx, |shell, cx| {
-        shell
-            .state
-            .update(cx, |state, cx| state.select_chat(None, cx));
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    let tabs_before = shell.read_with(cx, |shell, _| shell.chat_tabs.len());
-    let plus = cx.debug_bounds("titlebar-new-session").unwrap();
-    cx.simulate_click(plus.center(), Default::default());
-    cx.run_until_parked();
-    shell.read_with(cx, |shell, _| {
-        assert_eq!(shell.chat_tabs.len(), tabs_before + 1)
-    });
-
     for in_settings in [false, true] {
         let mut update_bounds = None;
         for mode in [
@@ -205,6 +133,7 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
             "available",
             "downloading",
             "ready",
+            "later",
             "failed",
             "advisory",
             "preview",
@@ -230,12 +159,10 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
                 };
                 shell.update_dismissed = None;
                 shell.app_update.dev_preview = mode == "preview";
-                // A staged update restarting on its own shows nothing; "Later"
-                // brings the control back.
-                shell.app_update.postponed = (mode == "ready").then(|| "9.9.9".into());
+                shell.app_update.postponed = (mode == "later").then(|| "9.9.9".into());
                 shell.update_flow = match mode {
                     "downloading" => UpdateFlow::Downloading,
-                    "ready" => UpdateFlow::Ready(StagedUpdate {
+                    "ready" | "later" => UpdateFlow::Ready(StagedUpdate {
                         path: PathBuf::from("/nonexistent/staged"),
                         version: "9.9.9".into(),
                     }),
@@ -255,33 +182,30 @@ fn titlebar_keeps_plus_and_update_inside_sidebar_across_first_prompt(
                 cx.notify();
             });
             cx.update(|window, cx| window.draw(cx).clear());
-            assert_eq!(
-                cx.debug_bounds("titlebar-new-session").is_none(),
-                in_settings
-            );
-            assert_eq!(cx.debug_bounds("nav-back").is_none(), in_settings);
-            assert_eq!(cx.debug_bounds("nav-forward").is_none(), in_settings);
+            let toggle = cx.debug_bounds("toggle-sidebar").unwrap();
             let update = cx.debug_bounds("titlebar-update");
-            // An automatic download shows nothing either.
-            if mode == "none" || mode == "downloading" {
-                assert!(update.is_none(), "mode={mode}");
+            if matches!(mode, "none" | "available" | "downloading") {
+                assert!(update.is_none());
+                shell.read_with(cx, |shell, cx| {
+                    assert_eq!(shell.titlebar_update_slot(cx), 0.0)
+                });
                 continue;
             }
-            // A staged update's restart is a row in the open chat sidebar's footer.
-            if mode == "ready" && !in_settings {
-                assert!(update.is_none(), "mode={mode}");
-                assert_eq!(
-                    shell.read_with(cx, |shell, _| shell.restart_place_now()),
-                    Some((app_update::RestartPlace::SidebarRow, "9.9.9".into()))
-                );
-                continue;
+            if mode == "ready" {
+                // Automatic restart may wait on active work. A staged update
+                // still offers manual restart in the compact titlebar slot.
+                shell.read_with(cx, |shell, cx| {
+                    assert!(settings::with_current(cx, |s| s.restart_to_install_updates));
+                    assert!(shell.app_update.postponed.is_none());
+                    assert!(shell.app_update.countdown_started.is_none());
+                });
             }
             let update = update.expect("every visible update state owns the same slot");
-            let right_gap = px(SIDEBAR_DEFAULT) - update.right();
-            assert!(
-                right_gap > px(0.0) && right_gap <= px(TITLEBAR_CLUSTER_PAD),
-                "route/settings={in_settings}, mode={mode}: keep a small right inset"
-            );
+            assert_eq!(update.left() - toggle.right(), px(TITLEBAR_CONTROL_GAP));
+            assert!(update.right() < px(SIDEBAR_DEFAULT));
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(shell.titlebar_update_slot(cx), TITLEBAR_ACTION_SLOT_WIDTH)
+            });
             if let Some(expected) = update_bounds {
                 assert_eq!(
                     update, expected,
@@ -384,57 +308,29 @@ fn assert_plus_opens_tab(cx: &mut gpui::TestAppContext, collapsed: bool, split: 
     let (layout, draft) = shell.read_with(cx, |shell, cx| {
         (shell.chat_split.clone(), shell.current_canvas_draft(cx))
     });
-    let plus = cx.debug_bounds("titlebar-new-session").unwrap();
+    let plus = cx.debug_bounds("top-new-tab").unwrap();
     cx.simulate_click(plus.center(), Default::default());
     cx.run_until_parked();
-    shell.update(cx, |shell, cx| {
-        let count = if split { 3 } else { 2 };
-        assert_eq!(
-            shell.chat_tabs.len(),
-            count,
-            "+ must append a tab, not replace the active session"
-        );
-        assert_eq!(shell.chat_tab, count - 1);
-        assert!(shell.state.read(cx).selected_chat.is_none());
-        assert!(
-            shell.chat_split.is_none(),
-            "the new tab starts with one pane"
-        );
-        assert_eq!(
-            shell.current_canvas_draft(cx),
-            draft,
-            "new-tab picks match Cmd+T inheritance"
-        );
-        let original = &shell.chat_tabs[0];
-        assert_eq!(original.selected.as_deref(), Some("current"));
-        assert_eq!(
-            original.split, layout,
-            "all original split panes stay in their tab"
-        );
-        if split {
-            assert_eq!(shell.chat_tabs[1].selected.as_deref(), Some("parked"));
-        }
-    });
-    cx.update_window_entity(&shell, |shell, window, cx| {
-        shell.switch_chat_tab(0, window, cx);
+    shell.read_with(cx, |shell, cx| {
+        assert!(shell.spaces_menu.is_open());
+        assert_eq!(shell.chat_split, layout);
+        assert_eq!(shell.current_canvas_draft(cx), draft);
         assert_eq!(
             shell.state.read(cx).selected_chat.as_deref(),
             Some("current")
         );
-        assert_eq!(shell.chat_split, layout);
-        assert_eq!(shell.current_canvas_draft(cx), draft);
     });
 }
 
 #[gpui::test]
-fn titlebar_plus_preserves_single_session_in_new_tab(cx: &mut gpui::TestAppContext) {
+fn titlebar_plus_opens_project_picker_preserving_single_session(cx: &mut gpui::TestAppContext) {
     for collapsed in [false, true] {
         assert_plus_opens_tab(cx, collapsed, false);
     }
 }
 
 #[gpui::test]
-fn titlebar_plus_preserves_split_tab_in_new_tab(cx: &mut gpui::TestAppContext) {
+fn titlebar_plus_opens_project_picker_preserving_split(cx: &mut gpui::TestAppContext) {
     for collapsed in [false, true] {
         assert_plus_opens_tab(cx, collapsed, true);
     }
@@ -553,11 +449,10 @@ fn graff_notice_card_shows_dismisses_and_resurfaces(cx: &mut gpui::TestAppContex
     assert!(cx.debug_bounds("graff-notice-whats-new").is_some());
 }
 
-/// #219: the titlebar arrows walk OPEN tabs, not NavHistory — the enabled
-/// state and the click both come from `chat_tabs`/`chat_tab`, gated by the
-/// Chat route.
+/// The sidebar control stays beside the tabs while collapsing, and removing
+/// the arrow buttons does not remove keyboard/command tab navigation.
 #[gpui::test]
-fn titlebar_arrows_walk_open_tabs_not_route_history(cx: &mut gpui::TestAppContext) {
+fn titlebar_groups_sidebar_toggle_with_tabs(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     cx.update(|cx| {
         gpui_base::init(cx);
@@ -625,53 +520,45 @@ fn titlebar_arrows_walk_open_tabs_not_route_history(cx: &mut gpui::TestAppContex
     });
     let shell = host.read_with(cx, |host, _| host.0.clone());
     cx.update(|window, cx| window.draw(cx).clear());
+    let toggle = cx.debug_bounds("toggle-sidebar").expect("sidebar toggle");
+    let tab = cx.debug_bounds("chat-tab-0").expect("active tab");
+    let plus = cx.debug_bounds("top-new-tab").expect("new tab action");
+    assert_eq!(toggle.center().y, tab.center().y);
+    assert_eq!(toggle.center().y, plus.center().y);
+    assert!(tab.left() >= toggle.right());
     assert!(
-        cx.debug_bounds("nav-back").is_none(),
-        "first tab: no back arrow"
+        tab.left() - toggle.right() <= px(16.0),
+        "no former arrow spacer"
     );
-    let forward = cx.debug_bounds("nav-forward").expect("next tab exists");
-    cx.simulate_click(forward.center(), Default::default());
-    shell.read_with(cx, |shell, cx| {
+    assert!(cx.debug_bounds("nav-back").is_none());
+    assert!(cx.debug_bounds("nav-forward").is_none());
+
+    for collapsed in [true, false] {
+        cx.simulate_click(toggle.center(), Default::default());
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.settings.sidebar_collapsed, collapsed);
+        });
+        assert_eq!(cx.debug_bounds("toggle-sidebar").unwrap(), toggle);
+        assert_eq!(cx.debug_bounds("chat-tab-0").unwrap(), tab);
+    }
+
+    cx.update_window_entity(&shell, |shell, window, cx| {
+        shell.cycle_chat_tab(true, window, cx);
         assert_eq!(shell.chat_tab, 1);
         assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("bravo"));
+        shell.cycle_chat_tab(false, window, cx);
+        assert_eq!(shell.chat_tab, 0);
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("alpha"));
     });
-
-    cx.update(|window, cx| window.draw(cx).clear());
-    // Tab 2 is an open new-session canvas — still a real tab.
-    let forward = cx.debug_bounds("nav-forward").unwrap();
-    cx.simulate_click(forward.center(), Default::default());
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.chat_tab, 2);
-        assert!(shell.state.read(cx).selected_chat.is_none());
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert!(
-        cx.debug_bounds("nav-forward").is_none(),
-        "last tab: no forward arrow"
-    );
-    let back = cx.debug_bounds("nav-back").unwrap();
-    cx.simulate_click(back.center(), Default::default());
-    shell.read_with(cx, |shell, _| assert_eq!(shell.chat_tab, 1));
-
-    // Settings hides the open tabs entirely — the arrows go with them.
     shell.update(cx, |shell, cx| {
         shell.route = Route::Settings(SettingsSection::Devices);
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear());
-    assert!(cx.debug_bounds("nav-back").is_none() && cx.debug_bounds("nav-forward").is_none());
-    shell.update(cx, |shell, cx| {
-        shell.route = Route::Chat;
-        // One tab: both disabled.
-        shell.chat_tabs.truncate(1);
-        shell.chat_tab = 0;
-        shell
-            .state
-            .update(cx, |state, cx| state.select_chat(Some("alpha".into()), cx));
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert!(cx.debug_bounds("nav-back").is_none() && cx.debug_bounds("nav-forward").is_none());
+    assert!(cx.debug_bounds("toggle-sidebar").is_some());
+    assert!(cx.debug_bounds("nav-back").is_none());
+    assert!(cx.debug_bounds("nav-forward").is_none());
 }
 
 #[gpui::test]
@@ -749,12 +636,7 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
         cx.notify();
     });
     cx.update(|window, cx| window.draw(cx).clear());
-    // It restarts into the update on its own: only the heads-up shows.
     assert!(cx.debug_bounds("titlebar-update").is_none());
-    assert_eq!(
-        shell.read_with(cx, |shell, _| shell.restart_place_now()),
-        None
-    );
     assert_eq!(
         shell.read_with(cx, |shell, cx| shell.titlebar_update_slot(cx)),
         0.0
@@ -774,25 +656,8 @@ fn update_control_lives_in_the_titlebar_and_later_stops_the_countdown(
     });
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("app-update-countdown").is_none());
-    // Postponed, it waits on the person: "Restart to update" comes back, in the sidebar's
-    // footer while the sidebar is open...
-    // (This window draws no chat sidebar, so check where it goes rather than its row.)
-    assert_eq!(
-        shell.read_with(cx, |shell, _| shell.restart_place_now()),
-        Some((app_update::RestartPlace::SidebarRow, "9.9.9".into()))
-    );
-    assert!(cx.debug_bounds("titlebar-update").is_none());
-    // ...and in the titlebar while it's collapsed.
-    shell.update(cx, |shell, cx| {
-        shell.settings.sidebar_collapsed = true;
-        cx.notify();
-    });
-    cx.update(|window, cx| window.draw(cx).clear());
+    // Postponed updates keep the compact titlebar control even with the sidebar open.
     assert!(cx.debug_bounds("titlebar-update").is_some());
-    shell.update(cx, |shell, cx| {
-        shell.settings.sidebar_collapsed = false;
-        cx.notify();
-    });
 
     // Settings → Devices sees the same flow, and its button does what the
     // titlebar click does: here, try the (nonexistent) staged install, which

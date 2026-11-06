@@ -317,19 +317,25 @@ fn main() -> anyhow::Result<()> {
             // seeding runs it again. The copy lands by atomic rename and the
             // engine falls back to the bundled binary meanwhile; the shims
             // still follow the install, as before.
-            std::thread::spawn(|| {
-                bundled_graff::prepare();
-                launch::install_path_shims_and_auto_update_graff();
-            });
-            // codedb for the agents, kept like graff but for every build.
-            std::thread::spawn(|| {
-                if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    runtime.block_on(harness_adapters::codedb_bundle::keep_current());
-                }
-            });
+            // An explicitly isolated debug preview must not replace tools or
+            // terminal links used by the reference app. Release/default startup
+            // retains the normal maintenance paths.
+            let preview = std::env::var("HARNESS_RECONCILIATION_PREVIEW").ok();
+            if should_run_startup_maintenance(cfg!(debug_assertions), preview.as_deref()) {
+                std::thread::spawn(|| {
+                    bundled_graff::prepare();
+                    launch::install_path_shims_and_auto_update_graff();
+                });
+                // codedb for the agents, kept like graff but for every build.
+                std::thread::spawn(|| {
+                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        runtime.block_on(harness_adapters::codedb_bundle::keep_current());
+                    }
+                });
+            }
             let edge_token = paths::var("HARNESS_EDGE_TOKEN").ok();
             // Headed: the UI probes HARNESS_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
@@ -347,6 +353,26 @@ fn main() -> anyhow::Result<()> {
                 initial_url,
             });
             Ok(())
+        }
+    }
+}
+
+fn should_run_startup_maintenance(is_debug_build: bool, preview: Option<&str>) -> bool {
+    !(is_debug_build && preview == Some("1"))
+}
+
+#[cfg(test)]
+mod startup_maintenance_tests {
+    use super::should_run_startup_maintenance;
+
+    #[test]
+    fn isolated_preview_skips_host_maintenance_only_with_explicit_debug_opt_in() {
+        assert!(!should_run_startup_maintenance(true, Some("1")));
+        for flag in [None, Some(""), Some("0"), Some("true"), Some("1")] {
+            assert!(should_run_startup_maintenance(false, flag));
+            if flag != Some("1") {
+                assert!(should_run_startup_maintenance(true, flag));
+            }
         }
     }
 }

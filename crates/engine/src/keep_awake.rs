@@ -9,7 +9,7 @@
 
 use harness_proto::{Session, SessionStatus};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 /// Whether this build can hold the assertion (macOS only for now). Clients
 /// hide the setting where it would do nothing.
@@ -25,16 +25,24 @@ pub fn agents_working(sessions: &[Session]) -> bool {
 /// Follow the session list and the setting, holding the assertion exactly
 /// while both say so. Aborting the task drops (releases) a held assertion.
 pub fn spawn(
+    sessions: watch::Receiver<Vec<Session>>,
+    enabled: watch::Receiver<bool>,
+) -> AbortOnDropHandle<()> {
+    spawn_with(sessions, enabled, platform::Assertion::acquire)
+}
+
+fn spawn_with<A: Send + 'static>(
     mut sessions: watch::Receiver<Vec<Session>>,
     mut enabled: watch::Receiver<bool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut held: Option<platform::Assertion> = None;
+    mut acquire: impl FnMut() -> Option<A> + Send + 'static,
+) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(async move {
+        let mut held: Option<A> = None;
         loop {
             let want =
                 *enabled.borrow_and_update() && agents_working(&sessions.borrow_and_update());
             if want && held.is_none() {
-                held = platform::Assertion::acquire();
+                held = acquire();
             } else if !want {
                 held = None;
             }
@@ -43,7 +51,7 @@ pub fn spawn(
                 changed = enabled.changed() => if changed.is_err() { break },
             }
         }
-    })
+    }))
 }
 
 #[cfg(target_os = "macos")]
@@ -115,6 +123,8 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn session(status: SessionStatus) -> Session {
         Session {
@@ -128,8 +138,33 @@ mod tests {
         }
     }
 
+    struct FakeAssertion(Arc<AtomicUsize>);
+
+    impl FakeAssertion {
+        fn acquire(held: &Arc<AtomicUsize>) -> Option<Self> {
+            held.fetch_add(1, Ordering::SeqCst);
+            Some(Self(held.clone()))
+        }
+    }
+
+    impl Drop for FakeAssertion {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn until(value: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while value.load(Ordering::SeqCst) != expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("watcher processes the transition");
+    }
+
     #[test]
-    fn only_a_working_chat_keeps_the_machine_awake() {
+    fn keep_awake_only_counts_working_chats() {
         assert!(!agents_working(&[]));
         assert!(!agents_working(&[
             session(SessionStatus::Idle),
@@ -139,6 +174,92 @@ mod tests {
             session(SessionStatus::Idle),
             session(SessionStatus::Working),
         ]));
+    }
+
+    // Exercise real watcher transitions with a fake power-assertion handle.
+    // These watcher tests never change sleep settings or acquire an IOKit assertion.
+    #[tokio::test]
+    async fn keep_awake_follows_work_setting_and_owner_lifetime() {
+        let held = Arc::new(AtomicUsize::new(0));
+        let acquisitions = Arc::new(AtomicUsize::new(0));
+        let (sessions_tx, sessions) = watch::channel(vec![session(SessionStatus::Working)]);
+        let (enabled_tx, enabled) = watch::channel(false);
+        let count = held.clone();
+        let attempts = acquisitions.clone();
+        let task = spawn_with(sessions, enabled, move || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            FakeAssertion::acquire(&count)
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(held.load(Ordering::SeqCst), 0, "off by default");
+        enabled_tx.send_replace(true);
+        until(&held, 1).await;
+        sessions_tx.send_replace(vec![
+            session(SessionStatus::Working),
+            session(SessionStatus::Working),
+        ]);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            acquisitions.load(Ordering::SeqCst),
+            1,
+            "one assertion covers concurrent work"
+        );
+        sessions_tx.send_replace(vec![session(SessionStatus::AwaitingInput)]);
+        until(&held, 0).await;
+        sessions_tx.send_replace(vec![session(SessionStatus::Working)]);
+        until(&held, 1).await;
+        enabled_tx.send_replace(false);
+        until(&held, 0).await;
+        enabled_tx.send_replace(true);
+        until(&held, 1).await;
+        drop(task);
+        until(&held, 0).await;
+    }
+
+    #[tokio::test]
+    async fn keep_awake_releases_when_either_source_closes() {
+        for close_sessions in [false, true] {
+            let held = Arc::new(AtomicUsize::new(0));
+            let (sessions_tx, sessions) = watch::channel(vec![session(SessionStatus::Working)]);
+            let (enabled_tx, enabled) = watch::channel(true);
+            let count = held.clone();
+            let task = spawn_with(sessions, enabled, move || FakeAssertion::acquire(&count));
+            until(&held, 1).await;
+            if close_sessions {
+                drop(sessions_tx);
+            } else {
+                drop(enabled_tx);
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("closed source ends task")
+                .expect("task exits cleanly");
+            assert_eq!(held.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn keep_awake_failed_acquisition_retries_on_the_next_state_change() {
+        let held = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (sessions_tx, sessions) = watch::channel(vec![session(SessionStatus::Working)]);
+        let (_enabled_tx, enabled) = watch::channel(true);
+        let count = held.clone();
+        let tried = attempts.clone();
+        let task = spawn_with(sessions, enabled, move || {
+            if tried.fetch_add(1, Ordering::SeqCst) == 0 {
+                None
+            } else {
+                FakeAssertion::acquire(&count)
+            }
+        });
+        until(&attempts, 1).await;
+        assert_eq!(held.load(Ordering::SeqCst), 0);
+        sessions_tx.send_replace(vec![session(SessionStatus::Working)]);
+        until(&held, 1).await;
+        task.abort();
+        let _ = task.await;
+        assert_eq!(held.load(Ordering::SeqCst), 0);
     }
 
     #[cfg(target_os = "macos")]

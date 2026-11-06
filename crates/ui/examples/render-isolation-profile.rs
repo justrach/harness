@@ -15,6 +15,13 @@
 //! ```
 //!
 //! `HARNESS_FRAME_STATS=1` turns on the render counters.
+//! `HARNESS_PROFILE_CHATS=300` adds sessions to the sidebar, and
+//! `HARNESS_PROFILE_SPLIT_PANES=3` restores a split, and
+//! `HARNESS_PROFILE_SIDEBAR_CLOSED=1` closes the sidebar. With either of the
+//! first two set, the run
+//! also moves the pointer across the window and measures frames left idle
+//! while an agent works. `HARNESS_PROFILE_STEPS=400` lengthens each phase, for
+//! sampling it with `sample`.
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use std::{
     cell::RefCell,
@@ -30,7 +37,14 @@ use harness_ui::*;
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const TURNS: usize = 40;
-const STEPS: usize = 20;
+const DEFAULT_STEPS: usize = 20;
+
+fn env_count(name: &str) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
 
 #[cfg(not(target_os = "macos"))]
 fn main() -> anyhow::Result<()> {
@@ -96,6 +110,8 @@ struct Phase {
     transcripts: u64,
     rows: u64,
     composers: u64,
+    shells: u64,
+    sidebars: u64,
 }
 
 impl Phase {
@@ -107,12 +123,15 @@ impl Phase {
         let p95 = sorted[(sorted.len() * 95 / 100).min(sorted.len() - 1)];
         println!(
             "{:<10} inputs={} transcript_renders={} rows_rendered={} composer_renders={} \
+             shell_renders={} sidebar_renders={} \
              ms_per_input mean={mean:.2} p50={p50:.2} p95={p95:.2}",
             self.name,
             self.ms.len(),
             self.transcripts,
             self.rows,
             self.composers,
+            self.shells,
+            self.sidebars,
         );
     }
 }
@@ -197,6 +216,18 @@ fn main() -> anyhow::Result<()> {
                     }))
                     .unwrap(),
                 ];
+                let extra = env_count("HARNESS_PROFILE_CHATS")
+                    .max(env_count("HARNESS_PROFILE_SPLIT_PANES"));
+                state.chats.extend((1..=extra).map(|i| {
+                    serde_json::from_value::<harness_proto::Chat>(serde_json::json!({
+                        "id": format!("chat-{i}"), "deviceId": "local", "spaceId": "project",
+                        "title": format!("Session number {i}"), "archived": false,
+                        "createdAt": "2026-09-05T00:00:00Z",
+                        "config": {"harness": "mock", "model": "fable-5", "reasoning": null,
+                                   "sandbox": "workspace-write"}
+                    }))
+                    .unwrap()
+                }));
                 state
             });
             let boot = EngineBootConfig {
@@ -268,6 +299,47 @@ fn main() -> anyhow::Result<()> {
     });
     settle(&app, Duration::from_secs(3));
 
+    // Open real panes the way a person does, each showing another session.
+    for i in 1..env_count("HARNESS_PROFILE_SPLIT_PANES") {
+        app.update(|cx| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_action(Box::new(shell::SplitChatRight), cx)
+            })
+            .unwrap();
+            state.update(cx, |state, cx| {
+                state.select_chat(Some(format!("chat-{i}")), cx);
+            });
+        });
+        settle(&app, Duration::from_millis(400));
+    }
+    if env_count("HARNESS_PROFILE_SPLIT_PANES") > 1 {
+        app.update(|cx| {
+            state.update(cx, |state, cx| {
+                state.select_chat(Some("profile".into()), cx)
+            });
+        });
+        settle(&app, Duration::from_secs(1));
+        if let Some(path) = std::env::var_os("HARNESS_PROFILE_SPLIT_SHOT") {
+            app.update(|cx| {
+                window
+                    .update(cx, |_, window, _| {
+                        window.render_to_image().unwrap().save(&path)
+                    })
+                    .unwrap()
+            })?;
+        }
+    }
+
+    if env_count("HARNESS_PROFILE_SIDEBAR_CLOSED") > 0 {
+        app.update(|cx| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_action(Box::new(shell::ToggleSidebar), cx)
+            })
+            .unwrap()
+        });
+        settle(&app, Duration::from_secs(1));
+    }
+
     // Focus the composer the way a person does (the Jump to the message box
     // command).
     app.update(|cx| {
@@ -292,12 +364,18 @@ fn main() -> anyhow::Result<()> {
             transcript::render_total("transcript"),
             transcript::render_total("transcript-row"),
             transcript::render_total("composer"),
+            transcript::render_total("shell"),
+            transcript::render_total("sidebar"),
         )
     };
     let mut run = |name: &'static str, step: &mut dyn FnMut(usize, &gpui::ApplicationHandle)| {
         let before = counts();
         let mut ms = Vec::new();
-        for i in 0..STEPS {
+        let steps = match env_count("HARNESS_PROFILE_STEPS") {
+            0 => DEFAULT_STEPS,
+            n => n,
+        };
+        for i in 0..steps {
             let start = Instant::now();
             step(i, &app);
             frame(&app);
@@ -314,6 +392,8 @@ fn main() -> anyhow::Result<()> {
             transcripts: after.0 - before.0,
             rows: after.1 - before.1,
             composers: after.2 - before.2,
+            shells: after.3 - before.3,
+            sidebars: after.4 - before.4,
         }
     };
     let mut type_keys = |app: &gpui::ApplicationHandle, i: usize| {
@@ -326,6 +406,30 @@ fn main() -> anyhow::Result<()> {
         });
     };
 
+    // A wheel over the transcript, up through the history and back. The first
+    // pass brings rows on screen for the first time; later ones reuse them.
+    let wheel = |app: &gpui::ApplicationHandle, i: usize| {
+        let direction = if (i / 40) % 2 == 0 { 1.0 } else { -1.0 };
+        app.update(|cx| {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                        position: gpui::point(px(700.), px(400.)),
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(
+                            px(0.),
+                            px(direction * 120.0),
+                        )),
+                        modifiers: gpui::Modifiers::default(),
+                        touch_phase: gpui::TouchPhase::Moved,
+                    }),
+                    cx,
+                );
+            })
+            .unwrap()
+        });
+    };
+
+    let scroll = run("scroll", &mut |i, app| wheel(app, i));
     let typing = run("typing", &mut |i, app| type_keys(app, i));
 
     // The last reply goes live: the agent is working and text streams in.
@@ -382,10 +486,38 @@ fn main() -> anyhow::Result<()> {
     });
     // Typing the next message while the reply is still live.
     let typing_live = run("typing-live", &mut |i, app| type_keys(app, i));
+    let scroll_live = run("scroll-live", &mut |i, app| wheel(app, i));
 
+    scroll.print();
     typing.print();
     streaming.print();
     typing_live.print();
+    scroll_live.print();
+    if env_count("HARNESS_PROFILE_CHATS") + env_count("HARNESS_PROFILE_SPLIT_PANES") > 0 {
+        // A pointer crossing the window: the transcript, then a pane boundary,
+        // then the sidebar's rows.
+        let mut pointer = |i: usize, app: &gpui::ApplicationHandle| {
+            let at = gpui::point(
+                px(40.0 + 90.0 * (i % 14) as f32),
+                px(120.0 + 30.0 * (i % 11) as f32),
+            );
+            app.update(|cx| {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                            position: at,
+                            ..Default::default()
+                        }),
+                        cx,
+                    );
+                })
+                .unwrap()
+            });
+        };
+        run("pointer", &mut |i, app| pointer(i, app)).print();
+        // Nothing happening but the running agent's own animations.
+        run("idle-work", &mut |_, _| {}).print();
+    }
 
     // HARNESS_VERIFY_CACHE=1: a frame that reused the cached transcript and
     // composer must match one drawn from scratch, after each change below.

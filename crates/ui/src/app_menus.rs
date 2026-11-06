@@ -16,6 +16,7 @@ use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, ac
 
 use crate::appearance::{self, AppearanceMode};
 use crate::composer;
+use crate::quit_hold;
 use crate::shell;
 
 actions!(
@@ -26,6 +27,7 @@ actions!(
         Hide,
         HideOthers,
         ShowAll,
+        NewWindow,
         Minimize,
         Zoom,
         CloseTab,
@@ -65,9 +67,15 @@ pub fn register_actions(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    // Window verbs route to the active window. harness is single-window, so a
-    // global handler suffices where zed registers these per-workspace
-    // (crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
+    cx.on_action(|_: &NewWindow, cx| {
+        // Native menu and key dispatch can hold the current window's lease.
+        cx.defer(|cx| {
+            if let Err(error) = crate::open_new_workspace_window(cx) {
+                tracing::error!(%error, "could not open a new workspace window");
+            }
+        });
+    });
+    // Window verbs route to the active window.
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(close_tab);
@@ -116,7 +124,15 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
 
 /// All app-owned quit paths must flush file buffers before GPUI destroys windows.
 fn quit(_: &Quit, cx: &mut App) {
-    request_quit(cx);
+    let running = quit_hold::chat_is_running(cx);
+    match quit_hold::quit_press(native_quit::key_press(), running, quit_hold::holding(cx)) {
+        quit_hold::QuitPress::Now => request_quit(cx),
+        quit_hold::QuitPress::Ignore => {}
+        quit_hold::QuitPress::StartHold(key) => {
+            native_quit::watch_key(key);
+            quit_hold::begin(cx, native_quit::key_still_down, request_quit);
+        }
+    }
 }
 
 pub(crate) fn request_quit(cx: &mut App) {
@@ -235,7 +251,10 @@ fn close_tab_in_with_archive(
             // The right pane's active surface (the tab the user just opened),
             // then the focused split pane or chat tab, Ghostty-style, then
             // the chat itself, back to a new session.
-            if shell.close_active_surface(window, cx) {
+            if archive && shell.close_focused_panel_chat_by_shortcut(window, cx) {
+                return;
+            }
+            if shell.workspace_close_focused(window, cx) || shell.close_active_surface(window, cx) {
                 return;
             }
             if archive {
@@ -289,11 +308,16 @@ fn app_key_bindings(macos: bool) -> Vec<KeyBinding> {
     )];
     let primary = if macos { "cmd" } else { "ctrl" };
     bindings.extend([
+        KeyBinding::new(&format!("{primary}-n"), NewWindow, None),
         KeyBinding::new(&format!("{primary}-="), IncreaseFontSize, None),
         KeyBinding::new(&format!("{primary}-+"), IncreaseFontSize, None),
         KeyBinding::new(&format!("{primary}--"), DecreaseFontSize, None),
         KeyBinding::new(&format!("{primary}-0"), ResetFontSize, None),
     ]);
+    // A shell needs Ctrl+N. On a Mac this is ⌘N, which never reaches one.
+    if !macos {
+        bindings.push(KeyBinding::new("ctrl-n", gpui::NoAction, Some("Terminal")));
+    }
     if macos {
         bindings.extend([
             KeyBinding::new("cmd-q", Quit, None),
@@ -343,6 +367,7 @@ pub fn app_menus() -> Vec<Menu> {
 
     let mut menus = vec![
         Menu::new("Harness").items(app_items),
+        Menu::new("File").items([MenuItem::action("New Window", NewWindow)]),
         // Standard clipboard verbs tied to the composer's existing actions via
         // their native selectors (`OsAction` → cut:/copy:/paste:/selectAll:),
         // so the OS Edit menu routes through the responder chain to the focused
@@ -375,6 +400,8 @@ pub fn app_menus() -> Vec<Menu> {
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
         menus.push(Menu::new("Window").items([
+            MenuItem::action("New Tab", shell::NewTab),
+            MenuItem::separator(),
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
             MenuItem::separator(),
@@ -402,6 +429,20 @@ mod tests {
     }
 
     #[test]
+    fn native_file_menu_offers_new_window() {
+        let menus = app_menus();
+        let file = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "File")
+            .expect("File menu must let people open a new window");
+        assert!(file.items.iter().any(|item| matches!(
+            item,
+            MenuItem::Action { name, .. }
+                if name.as_ref() == "New Window" && !item.is_disabled()
+        )));
+    }
+
+    #[test]
     fn app_menu_ends_with_quit() {
         let menus = app_menus();
         assert_eq!(menus[0].name.as_ref(), "Harness");
@@ -423,6 +464,23 @@ mod tests {
             )),
             "the application menu should expose Settings"
         );
+    }
+
+    #[test]
+    fn native_new_tab_menu_uses_the_panel_tab_action() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let menus = app_menus();
+        let window = menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == "Window")
+            .unwrap();
+        assert!(window.items.iter().any(|item| matches!(
+            item,
+            MenuItem::Action { name, action, .. }
+                if name.as_ref() == "New Tab" && action.name() == shell::NewTab.name()
+        )));
     }
 
     #[test]
@@ -516,6 +574,7 @@ mod tests {
         assert_eq!(find(&macos, CloseTab.name()), Some(combo("cmd-w")));
         assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));
+        assert_eq!(find(&macos, NewWindow.name()), Some(combo("cmd-n")));
 
         let other = app_key_bindings(false);
         assert_eq!(
@@ -525,6 +584,7 @@ mod tests {
         assert_eq!(find(&other, Quit.name()), None);
         // Off macOS the same close-the-innermost-thing action needs a key too.
         assert_eq!(find(&other, CloseTab.name()), Some(combo("ctrl-shift-w")));
+        assert_eq!(find(&other, NewWindow.name()), Some(combo("ctrl-n")));
 
         // Text size: the browser zoom keys, Cmd on macOS and Ctrl elsewhere.
         let all = |bindings: &[KeyBinding], name: &str| -> Vec<Keystroke> {
@@ -591,6 +651,22 @@ mod about_panel {
     }
 }
 
+/// Off macOS a Quit request is never held: nothing here reports a key press.
+#[cfg(not(target_os = "macos"))]
+mod native_quit {
+    use super::quit_hold;
+
+    pub(super) fn key_press() -> Option<quit_hold::KeyPress> {
+        None
+    }
+
+    pub(super) fn watch_key(_: u16) {}
+
+    pub(super) fn key_still_down() -> bool {
+        false
+    }
+}
+
 // GPUI's on_app_quit runs after AppKit has committed to termination. Catch
 // Dock / system Quit at the earlier delegate decision, just like our menu
 // action, so failed saves can still cancel termination. The pinned GPUI
@@ -598,12 +674,21 @@ mod about_panel {
 #[cfg(target_os = "macos")]
 mod native_quit {
     use super::*;
+    use block::ConcreteBlock;
     use objc::runtime::{Class, Object, Sel, class_addMethod};
     use objc::{class, msg_send, sel, sel_impl};
     use std::cell::{Cell, RefCell};
 
+    const NS_EVENT_TYPE_KEY_DOWN: u64 = 10;
+    const NS_EVENT_MASK_KEY_UP: u64 = 1 << 11;
+    const NS_EVENT_MASK_FLAGS_CHANGED: u64 = 1 << 12;
+    const NS_EVENT_TYPE_KEY_UP: u64 = 11;
+    const NS_EVENT_MODIFIER_COMMAND: u64 = 1 << 20;
+
     thread_local! {
         static ALLOWED: Cell<bool> = const { Cell::new(false) };
+        /// The key of a hold in progress, until it or Command is let go.
+        static HELD_KEY: Cell<Option<u16>> = const { Cell::new(None) };
         static REQUEST: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     }
 
@@ -623,7 +708,72 @@ mod native_quit {
         ALLOWED.set(true);
     }
 
+    /// The key press being handled right now, if a key press is what's being
+    /// handled: a menu click or a Dock quit has none.
+    pub(super) fn key_press() -> Option<quit_hold::KeyPress> {
+        unsafe {
+            let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+            let event: *mut Object = msg_send![app, currentEvent];
+            if event.is_null() {
+                return None;
+            }
+            let kind: u64 = msg_send![event, type];
+            if kind != NS_EVENT_TYPE_KEY_DOWN {
+                return None;
+            }
+            let code: u16 = msg_send![event, keyCode];
+            let repeat: objc::runtime::BOOL = msg_send![event, isARepeat];
+            Some(quit_hold::KeyPress {
+                code,
+                repeat: repeat == objc::runtime::YES,
+            })
+        }
+    }
+
+    pub(super) fn watch_key(code: u16) {
+        HELD_KEY.set(Some(code));
+    }
+
+    pub(super) fn key_still_down() -> bool {
+        HELD_KEY.get().is_some()
+    }
+
+    /// AppKit drops the key-up of a key pressed with Command before it reaches
+    /// a window, so watch for it ahead of that. If this ever saw nothing, the
+    /// hold would simply complete: quitting can't get stuck behind it.
+    fn watch_for_release() {
+        let monitor = ConcreteBlock::new(|event: *mut Object| -> *mut Object {
+            if HELD_KEY.get().is_some() {
+                unsafe {
+                    let kind: u64 = msg_send![event, type];
+                    let released = if kind == NS_EVENT_TYPE_KEY_UP {
+                        let code: u16 = msg_send![event, keyCode];
+                        HELD_KEY.get() == Some(code)
+                    } else {
+                        let flags: u64 = msg_send![event, modifierFlags];
+                        flags & NS_EVENT_MODIFIER_COMMAND == 0
+                    };
+                    if released {
+                        HELD_KEY.set(None);
+                    }
+                }
+            }
+            event
+        })
+        .copy();
+        unsafe {
+            let _: *mut Object = msg_send![
+                class!(NSEvent),
+                addLocalMonitorForEventsMatchingMask: NS_EVENT_MASK_KEY_UP | NS_EVENT_MASK_FLAGS_CHANGED
+                handler: &*monitor
+            ];
+        }
+        // AppKit copied it, and this watches for as long as the app runs.
+        std::mem::forget(monitor);
+    }
+
     pub(super) fn init(cx: &mut App) {
+        watch_for_release();
         let executor = cx.foreground_executor().clone();
         let app = cx.to_async();
         REQUEST.with_borrow_mut(|request| {
@@ -657,5 +807,21 @@ mod native_quit {
                 "GPUI termination delegate contract changed"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_n_stays_with_a_focused_terminal_off_macos() {
+        let keymap = gpui::Keymap::new(app_key_bindings(false));
+        let resolve = |contexts: &[&str]| {
+            let stack: Vec<gpui::KeyContext> = contexts
+                .iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap())
+                .collect();
+            let (matched, _) =
+                keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-n").unwrap()], &stack);
+            matched.first().map(|b| b.action().name())
+        };
+        assert_eq!(resolve(&["Shell", "Terminal"]), None);
+        assert_eq!(resolve(&["Shell"]), Some(gpui::Action::name(&NewWindow)));
     }
 }

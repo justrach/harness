@@ -1,6 +1,7 @@
 //! The Write page beside the composer it opens from, on synthetic chats with
 //! isolated settings and no engine connection.
-//! cargo run -p harness-ui --example write-fixture --features appshots-fixture -- OUT_DIR
+//! cargo run -p harness-ui --example write-fixture --features appshots-fixture -- OUT_DIR [light|dark] [WIDTH]
+//! Pass an appearance to capture each theme in a fresh native process.
 use gpui::{
     AppContext, Bounds, Context, Entity, Focusable, IntoElement, ParentElement, Render, Styled,
     Window, WindowBounds, WindowOptions, div, point, prelude::FluentBuilder, px, size,
@@ -73,6 +74,43 @@ impl Render for WriteFixture {
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
     std::fs::create_dir_all(&output)?;
+    let requested_mode = std::env::args().nth(2);
+    anyhow::ensure!(
+        requested_mode
+            .as_deref()
+            .is_none_or(|mode| matches!(mode, "light" | "dark")),
+        "appearance must be light or dark"
+    );
+    let requested_width = std::env::args()
+        .nth(3)
+        .map(|width| width.parse::<u32>())
+        .transpose()?;
+    let cases = [
+        ("warm-harp-light", theme::Appearance::Light, 960),
+        ("warm-harp-dark", theme::Appearance::Dark, 960),
+        ("warm-harp-light", theme::Appearance::Light, 560),
+        ("warm-harp-light", theme::Appearance::Light, 384),
+        ("warm-harp-dark", theme::Appearance::Dark, 384),
+        ("warm-harp-light", theme::Appearance::Light, 320),
+        ("warm-harp-dark", theme::Appearance::Dark, 320),
+    ]
+    .into_iter()
+    .filter(|(_, appearance, width)| {
+        let mode = if *appearance == theme::Appearance::Light {
+            "light"
+        } else {
+            "dark"
+        };
+        requested_mode
+            .as_deref()
+            .is_none_or(|requested| requested == mode)
+            && requested_width.is_none_or(|requested| requested == *width)
+    })
+    .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !cases.is_empty(),
+        "no fixture cases match the requested appearance and width"
+    );
     let data = tempfile::tempdir()?;
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
         gpui_base::init(cx);
@@ -91,11 +129,7 @@ fn main() -> anyhow::Result<()> {
         eprintln!("write page serif family: {serif}");
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
-                for (id, appearance, width) in [
-                    ("codegraff-light", theme::Appearance::Light, 960),
-                    ("codegraff-dark", theme::Appearance::Dark, 960),
-                    ("codegraff-light", theme::Appearance::Light, 560),
-                ] {
+                for (id, appearance, width) in cases {
                     let window = cx.update(|cx| {
                         theme::Theme::install_selection(appearance, id, AccentSelection::ThemeDefault, SurfacePreference::Opaque, cx);
                         let state = cx.new(|_| {
@@ -156,16 +190,28 @@ fn main() -> anyhow::Result<()> {
                             root.composer.update(cx, |composer, cx| composer.fixture_toggle_write_face(cx));
                         })?;
                         cx.background_executor().timer(Duration::from_millis(200)).await;
-                        capture(format!("after-{mode}-{width}-sans.png"), cx)?;
+                        capture(format!("after-{mode}-{width}-serif.png"), cx)?;
                         window.update(cx, |root, _, cx| {
                             root.composer.update(cx, |composer, cx| composer.fixture_toggle_write_face(cx));
                         })?;
-                        // Done: back in the composer with the same draft.
-                        window.update(cx, |root, _, cx| {
-                            root.composer.update(cx, |composer, cx| composer.close_write(cx));
-                        })?;
+                        // Use the real Save button to return the same draft to the composer.
+                        let native: gpui::AnyWindowHandle = window.into();
+                        native.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                            window.draw(cx).clear();
+                            let position = window.debug_bounds("write-save")
+                                .ok_or_else(|| anyhow::anyhow!("Save button is not visible"))?.center();
+                            window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                button: gpui::MouseButton::Left, position, click_count: 1,
+                                ..Default::default()
+                            }), cx);
+                            window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                button: gpui::MouseButton::Left, position, click_count: 1,
+                                ..Default::default()
+                            }), cx);
+                            Ok(())
+                        })??;
                         cx.background_executor().timer(Duration::from_millis(300)).await;
-                        capture(format!("done-{mode}-{width}.png"), cx)?;
+                        capture(format!("saved-{mode}-{width}.png"), cx)?;
                     }
                     window.update(cx, |_, window, _| window.remove_window())?;
                 }

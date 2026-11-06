@@ -300,7 +300,7 @@ impl ChatSplit {
     pub fn to_saved(&self) -> crate::settings::SavedChatLayout {
         crate::settings::SavedChatLayout {
             vertical: self.axis == SplitAxis::Vertical,
-            panes: self.panes.clone(),
+            panes: self.panes.iter().zip(&self.vanished).map(|(pane, vanished)| pane.clone().or_else(|| vanished.clone())).collect(),
             focus: self.focus,
             shares: self.shares.clone(),
             projects: self.projects.clone(),
@@ -383,10 +383,24 @@ pub(super) fn chat_split_bindings(mac: bool) -> Vec<KeyBinding> {
         // Jump to the message box from anywhere (the browser keeps ⌘L for
         // its address bar: its Browser-scoped binding is bound later).
         KeyBinding::new(&b("cmd-l", "ctrl-shift-l"), FocusComposer, None),
-        // Chat tabs (`chat_tabs.rs`): Safari/Terminal's keys on macOS.
+        KeyBinding::new(&b("cmd-o", "ctrl-o"), NewChatTab, None),
+        // Project tab navigation.
         KeyBinding::new(&b("cmd-shift-]", "ctrl-pagedown"), NextChatTab, None),
         KeyBinding::new(&b("cmd-shift-[", "ctrl-pageup"), PrevChatTab, None),
     ];
+    bindings.extend([
+        KeyBinding::new(&b("cmd-alt-1", "alt-shift-1"), FocusPanelSlot1, None),
+        KeyBinding::new(&b("cmd-alt-2", "alt-shift-2"), FocusPanelSlot2, None),
+        KeyBinding::new(&b("cmd-alt-3", "alt-shift-3"), FocusPanelSlot3, None),
+        KeyBinding::new(&b("cmd-alt-4", "alt-shift-4"), FocusPanelSlot4, None),
+        KeyBinding::new(&b("cmd-alt-5", "alt-shift-5"), FocusPanelSlot5, None),
+        KeyBinding::new(&b("cmd-alt-6", "alt-shift-6"), FocusPanelSlot6, None),
+        KeyBinding::new(&b("cmd-shift-j", "ctrl-shift-j"), FocusNextAttention, None),
+    ]);
+    // A shell needs its Ctrl+letter keys. On a Mac these are ⌘ combos anyway.
+    if !mac {
+        bindings.push(KeyBinding::new("ctrl-o", gpui::NoAction, Some("Terminal")));
+    }
     // ⌃1–⌃9 pick a tab on macOS, where ⌘1–⌘9 jump to sidebar sessions;
     // elsewhere Ctrl+digit is that jump, so tabs take Alt+digit.
     bindings.extend((0..=chat_tabs::LAST_TAB_SLOT).map(|slot| {
@@ -446,25 +460,6 @@ pub(super) struct ChatPanePress {
 /// The name screen readers give the pane that takes your typing while the column is split.
 pub(super) const FOCUS_CUE_LABEL: &str = "Typing here";
 
-/// The focused pane's cue: a solid 2px ring in the accent around the whole pane, its top edge
-/// along the titlebar's bottom. It takes no space and covers no text, the way editors and
-/// terminals mark the split that has the keyboard: one color that means focus, on every edge,
-/// strong enough to find at a glance. Never intercepts the mouse.
-fn focus_cue(theme: &Theme) -> AnyElement {
-    div()
-        .absolute()
-        .top(px(Theme::TITLEBAR_HEIGHT - FOCUS_RING_WIDTH))
-        .left_0()
-        .right_0()
-        .bottom_0()
-        .border(px(FOCUS_RING_WIDTH))
-        .border_color(theme.accent)
-        .into_any_element()
-}
-
-/// How thick the focused pane's ring is: WCAG 2.2's focus appearance asks for at least 2px.
-const FOCUS_RING_WIDTH: f32 = 2.0;
-
 /// A live read-only transcript for one unfocused pane's chat.
 pub(super) struct PeerChatView {
     pub transcript: Entity<Transcript>,
@@ -519,7 +514,16 @@ impl Shell {
         matches!(self.route, Route::Chat) && self.chat_split.is_some()
     }
 
-    pub(super) fn split_chat(&mut self, axis: SplitAxis, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn split_chat(
+        &mut self,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_split(axis, cx);
+            return;
+        }
         self.split_chat_opening(axis, None, window, cx);
     }
 
@@ -568,9 +572,11 @@ impl Shell {
             let transcript = cx.new(|cx| Transcript::new(self.state.clone(), cx));
             let links = Self::session_links(None, cx);
             let views = Self::view_opener(cx);
+            let labels = Self::model_labeler(&self.composer, cx);
             transcript.update(cx, |transcript, _| {
                 transcript.set_workspace_link_handler(links);
                 transcript.set_view_opener(views);
+                transcript.set_model_labeler(labels);
             });
             let events = cx.subscribe(&transcript, Self::on_transcript_event);
             PeerChatView { transcript, _events: events }
@@ -621,6 +627,10 @@ impl Shell {
     }
 
     pub(super) fn cycle_chat_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_cycle_panel(forward, window, cx);
+            return;
+        }
         if let Some(ix) = self.chat_split.as_ref().map(|split| split.cycled(forward)) {
             self.focus_chat_pane(ix, window, cx);
         }
@@ -632,12 +642,20 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_focus_direction(direction, window, cx);
+            return;
+        }
         if let Some(ix) = self.chat_split.as_ref().and_then(|s| s.toward(direction)) {
             self.focus_chat_pane(ix, window, cx);
         }
     }
 
     pub(super) fn resize_chat_pane(&mut self, direction: PaneDirection, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_resize(direction, cx);
+            return;
+        }
         if let Some(split) = self.chat_split.as_mut()
             && split.resize(direction)
         {
@@ -647,6 +665,10 @@ impl Shell {
     }
 
     pub(super) fn equalize_chat_panes(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_equalize(cx);
+            return;
+        }
         if let Some(split) = self.chat_split.as_mut() {
             split.equalize();
             self.persist_chat_layout(cx);
@@ -655,6 +677,10 @@ impl Shell {
     }
 
     pub(super) fn toggle_chat_pane_zoom(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.route, Route::Chat) {
+            self.workspace_zoom(cx);
+            return;
+        }
         if let Some(split) = self.chat_split.as_mut() {
             split.zoomed = !split.zoomed;
             self.chat_pane_press = None;
@@ -728,7 +754,10 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (bool, Option<super::chat_tabs::CloseArchive>) {
-        let closing = self.state.read(cx).selected_chat.clone();
+        let closing = self
+            .chat_split_active()
+            .then(|| self.state.read(cx).selected_chat.clone())
+            .flatten();
         let closed = self.close_focused_chat_view(window, cx);
         let archive = closing
             .filter(|_| closed)
@@ -849,11 +878,16 @@ impl Shell {
             self.chat_pane_press = None;
         }
         self.persist_chat_layout(cx);
-        let wanted: Vec<String> = self
+        let mut wanted: Vec<String> = self
             .chat_split
             .as_ref()
             .map(|split| split.peer_chats().map(str::to_owned).collect())
             .unwrap_or_default();
+        for id in self.overview_live_chats(cx) {
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
         let stale: Vec<String> = self
             .peer_chat_views
             .keys()
@@ -871,9 +905,11 @@ impl Shell {
             let transcript = cx.new(|cx| Transcript::for_peer_chat(self.state.clone(), id.clone(), cx));
             let links = Self::session_links(Some(id.clone()), cx);
             let views = Self::view_opener(cx);
+            let labels = Self::model_labeler(&self.composer, cx);
             transcript.update(cx, |transcript, _| {
                 transcript.set_workspace_link_handler(links);
                 transcript.set_view_opener(views);
+                transcript.set_model_labeler(labels);
             });
             let events = cx.subscribe(&transcript, Self::on_transcript_event);
             self.state
@@ -937,7 +973,6 @@ impl Shell {
                 children.push(
                     if horizontal { pane_track(slot, share).h_full() } else { slot.w_full().h(gpui::relative(share)) }
                         .child(body)
-                        .child(focus_cue(&theme))
                         .into_any_element(),
                 );
                 continue;
@@ -1128,8 +1163,12 @@ impl Shell {
             .relative()
             .flex()
             .flex_col()
-            // The window titlebar overlays the top of the content area.
-            .pt(px(Theme::TITLEBAR_HEIGHT))
+            // Harp already places the whole split surface below the header.
+            .pt(px(if theme.is_harp() {
+                Theme::SPACE_SM
+            } else {
+                Theme::TITLEBAR_HEIGHT
+            }))
             .child(
                 div()
                     .flex_none()
@@ -1160,7 +1199,7 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .cursor_pointer()
-                            .hover(|style| style.bg(theme.ink(0.08)))
+                            .hover(|style| style.bg(theme.element_hover))
                             .role(gpui::Role::Button)
                             .aria_label("Close this pane")
                             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
@@ -1177,9 +1216,8 @@ impl Shell {
                             ),
                     ),
             )
-            // Unfocused panes stay live and readable (no dimming); the
-            // focused one carries the accent rule and outline instead.
-            .child(div().flex_1().min_h_0().flex().flex_col().child(body))
+            // Ghostty dims unfocused splits.
+            .child(div().flex_1().min_h_0().flex().flex_col().opacity(0.8).child(body))
             // Every visible pane takes dropped files, not just the focused
             // one; the drop focuses the pane it lands on (#488).
             .child(attachment_drop_veil(("chat-peer-pane-drop", ix), theme))
@@ -1485,10 +1523,15 @@ impl Shell {
         let mut zones = Vec::new();
         let right = self.can_split(SplitAxis::Horizontal);
         let below = self.can_split(SplitAxis::Vertical);
+        let header_clearance = if theme.is_harp() {
+            0.0
+        } else {
+            Theme::TITLEBAR_HEIGHT
+        };
         if right {
             zones.push(
                 zone("chat-drop-right", SplitAxis::Horizontal, "Open to the right ◨")
-                    .top(px(Theme::TITLEBAR_HEIGHT + 8.0))
+                    .top(px(header_clearance + 8.0))
                     .bottom(px(8.0))
                     .right(px(8.0))
                     .w(gpui::relative(0.3))
@@ -1685,6 +1728,22 @@ mod chat_split_tests {
         assert_eq!(split.projects.len(), 1);
         assert!(!split.zoomed);
         assert_eq!(split.close_focused(), None);
+    }
+
+    #[test]
+    fn ctrl_o_stays_with_a_focused_terminal_off_macos() {
+        let keymap = gpui::Keymap::new(chat_split_bindings(false));
+        let resolve = |contexts: &[&str]| {
+            let stack: Vec<gpui::KeyContext> = contexts
+                .iter()
+                .map(|c| gpui::KeyContext::parse(c).unwrap())
+                .collect();
+            let (matched, _) =
+                keymap.bindings_for_input(&[gpui::Keystroke::parse("ctrl-o").unwrap()], &stack);
+            matched.first().map(|b| b.action().name())
+        };
+        assert_eq!(resolve(&["Shell", "Terminal"]), None);
+        assert_eq!(resolve(&["Shell"]), Some(NewChatTab.name()));
     }
 
     #[test]

@@ -111,12 +111,12 @@ fn sidebar_search_shortcut_refocuses_from_its_accessible_controls(cx: &mut gpui:
     press_keys(cx, &platform_combo("mod-f"));
     press_keys(cx, "q");
     let input = search_input(&shell, cx);
-    for control in ["trigger", "clear", "archive"] {
+    for control in ["project", "clear", "archive"] {
         cx.update(|window, cx| {
             let shell = shell.read(cx);
             let search = shell.sidebar_search.as_ref().unwrap();
             let focus = match control {
-                "trigger" => &shell.sidebar_search_trigger_focus,
+                "project" => &shell.session_switcher_focus,
                 "clear" => &search.clear_focus,
                 _ => &search.archive_focus,
             }

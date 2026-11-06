@@ -336,7 +336,7 @@ fn sync_ns_appearance(mode: AppearanceMode) {
 #[cfg(not(target_os = "macos"))]
 fn sync_ns_appearance(_mode: AppearanceMode) {}
 
-/// Push the theme's window background appearance onto every open window.
+/// Push the theme's window background appearance onto open Harness shells.
 pub fn reapply_window_background(cx: &mut App) {
     // The window handling a settings click is temporarily taken out of App.
     // Wait until it is returned before updating its native Windows backdrop.
@@ -354,6 +354,11 @@ fn apply_window_background(cx: &mut App) {
         return;
     };
     for window in cx.windows() {
+        // Auxiliary windows own their compositing mode. In particular, the
+        // pointer preview must stay transparent while a new Shell is created.
+        if window.downcast::<crate::shell::Shell>().is_none() {
+            continue;
+        }
         window
             .update(cx, |_, window, _| {
                 window.set_background_appearance(wanted);

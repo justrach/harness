@@ -116,7 +116,7 @@ impl Render for FilesSettingsPage {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                .hover(|style| style.bg(crate::theme::wash(0.08)))
+                .hover(|style| style.bg(theme.element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.autosave_delay_ms = delay;
                     cx.emit(FilesSettingsEvent::AutosaveDelayChanged(delay));

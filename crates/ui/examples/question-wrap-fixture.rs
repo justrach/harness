@@ -6,6 +6,7 @@ use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 
 fn main() -> anyhow::Result<()> {
     let output = PathBuf::from(std::env::args().nth(1).expect("output directory"));
+    let light = std::env::args().any(|arg| arg == "--light");
     std::fs::create_dir_all(&output)?;
     let data = tempfile::tempdir()?;
     let failure = Arc::new(Mutex::new(None));
@@ -20,7 +21,12 @@ fn main() -> anyhow::Result<()> {
             settings.terminal_font_family.clone(), settings.terminal_font_size,
             settings.code_font_family.clone(), settings.code_font_size, fonts, cx,
         );
-        cx.set_global(theme::Theme::dark());
+        cx.set_global(theme::Theme::for_selection(
+            if light { theme::Appearance::Light } else { theme::Appearance::Dark },
+            if light { "warm-harp-light" } else { "warm-harp-dark" },
+            settings.accent,
+            settings.surface,
+        ));
         history::init(Default::default(), Default::default(), Default::default(), Default::default(), cx);
         app_menus::init(cx);
         composer::init(cx, settings.composer_send_behavior);
@@ -52,7 +58,7 @@ fn main() -> anyhow::Result<()> {
                             "questions": [
                                 {
                                     "id": "approach", "header": "Agent question",
-                                    "question": "**Which approach** should keep the question readable when the pane is narrow? Today `QuestionPanel` does this:\n\n- wraps the **question** to the pane\n- keeps each option on its own line",
+                                    "question": "**Which approach should we use?**\n\n- Keep `report.md` readable in a narrow panel.\n- Preserve the **selected answer** when resizing.",
                                     "options": ["Wrap the question and its options to fit the session pane.", "Keep the existing behavior and review another approach."],
                                     "multiSelect": false
                                 },
