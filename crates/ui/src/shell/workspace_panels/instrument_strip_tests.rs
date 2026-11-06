@@ -897,6 +897,35 @@ fn pressing_a_slot_focuses_its_panel(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn a_new_tabs_slot_can_be_pressed_and_closed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let (_, second, _) = three_panels(&shell, cx);
+    shell.update_in(cx, |shell, _, cx| {
+        let panel = shell.panel_layout_mut(cx).panel_mut(second).unwrap();
+        panel.tabs = vec![PanelTab::New(77)];
+        panel.active = 0;
+    });
+    settle(cx);
+    // The title line: the folder chip under it opens its own menu.
+    let slot = at(cx, format!("instrument-slot-{second}")).unwrap();
+    let title = slot.origin + gpui::point(gpui::px(40.0), gpui::px(6.0));
+    cx.simulate_click(title, gpui::Modifiers::default());
+    settle(cx);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.panel_layout(cx).unwrap().focused, second);
+    });
+    let close = at(cx, format!("instrument-slot-close-{second}")).unwrap();
+    cx.simulate_click(close.center(), gpui::Modifiers::default());
+    settle(cx);
+    shell.read_with(cx, |shell, cx| {
+        let layout = shell.panel_layout(cx).unwrap();
+        assert_eq!(layout.panels.len(), 2);
+        assert!(layout.panel(second).is_none(), "one press and it's gone");
+    });
+}
+
+#[gpui::test]
 fn a_slot_switches_which_panel_is_expanded(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, cx) = shell_with_chats(cx, &dir);

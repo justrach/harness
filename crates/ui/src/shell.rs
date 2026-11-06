@@ -3442,11 +3442,10 @@ impl Shell {
         if self.right_tabs.get(panel_key).is_none_or(Vec::is_empty) {
             if panel_key == self.panel_key(cx) {
                 self.set_surfaces_open(false, cx);
-            } else {
-                // A background surface can close after its chat loses focus.
-                // Park the collapsed state without animating the current pane.
-                self.panels.update(panel_key, |p| p.changes_open = false);
             }
+            // A background surface can close after its chat loses focus, and a
+            // new chat has no pane to animate. Park the collapsed state anyway.
+            self.panels.update(panel_key, |p| p.changes_open = false);
         }
     }
 

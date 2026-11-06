@@ -251,6 +251,9 @@ fn close_tab_in_with_archive(
             // The right pane's active surface (the tab the user just opened),
             // then the focused split pane or chat tab, Ghostty-style, then
             // the chat itself, back to a new session.
+            if shell.close_side_surface_by_shortcut(window, cx) {
+                return;
+            }
             if archive && shell.close_focused_panel_chat_by_shortcut(window, cx) {
                 return;
             }
