@@ -161,19 +161,29 @@ impl Shell {
             .iter()
             .position(|row| row.1 == icons::CHECK)
             .unwrap_or(0);
-        rows.push((
-            "Don't work in a project".into(),
-            icons::CLOSE,
-            MenuAction::SetFolder(None),
-        ));
-        rows.push(("New project…".into(), icons::PLUS, MenuAction::NewFolder));
+        let items = rows.clone();
+        let actions: Vec<(SharedString, &'static str, MenuAction)> = vec![
+            (
+                "Don't work in a project".into(),
+                icons::CLOSE,
+                MenuAction::SetFolder(None),
+            ),
+            ("New project…".into(), icons::PLUS, MenuAction::NewFolder),
+        ];
+        rows.extend(actions.iter().cloned());
         let return_focus = self
             .workspace_panels
             .controls
             .get(&format!("instrument-slot-folder-{id}"))
             .cloned();
+        let input = cx.new(|cx| {
+            ComposerInput::with_context("Search folders…", "PaletteSearch", cx)
+                .with_accessibility_role(gpui::Role::SearchInput)
+        });
+        self.watch_menu_search(&input, window, cx);
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        // The list is long enough that the first thing to do is type.
+        window.focus(&input.focus_handle(cx), cx);
         self.workspace_panels.menu_scroll.scroll_to_item(selected);
         self.workspace_panels.menu = Some(PanelMenu {
             panel: id,
@@ -184,6 +194,11 @@ impl Shell {
             selected,
             focus,
             return_focus,
+            search: Some(MenuSearch {
+                input,
+                items,
+                actions,
+            }),
         });
         cx.notify();
     }
@@ -921,6 +936,7 @@ impl Shell {
             },
             focus,
             return_focus: None,
+            search: None,
         });
         cx.notify();
     }

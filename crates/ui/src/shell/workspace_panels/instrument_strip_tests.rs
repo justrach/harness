@@ -520,6 +520,143 @@ fn dismissing_cmd_d_s_menu_leaves_you_typing_in_the_new_chat(cx: &mut gpui::Test
     });
 }
 
+fn menu_titles(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |shell, _| {
+        let menu = shell
+            .workspace_panels
+            .menu
+            .as_ref()
+            .expect("the menu is open");
+        menu.rows.iter().map(|row| row.0.to_string()).collect()
+    })
+}
+
+fn highlighted(shell: &Entity<Shell>, cx: &mut gpui::VisualTestContext) -> String {
+    shell.read_with(cx, |shell, _| {
+        let menu = shell
+            .workspace_panels
+            .menu
+            .as_ref()
+            .expect("the menu is open");
+        menu.rows[menu.selected].0.to_string()
+    })
+}
+
+/// A long list of folders needs a text box: type to narrow it, Enter to pick.
+#[gpui::test]
+fn typing_in_the_folder_menu_narrows_it_and_enter_picks(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let panel = split_with_projects(&shell, cx);
+    assert!(menu_titles(&shell, cx).contains(&"alpha".to_string()));
+    cx.simulate_input("bet");
+    settle(cx);
+    assert_eq!(
+        menu_titles(&shell, cx),
+        ["beta", "Don't work in a project", "New project…"],
+        "the actions stay under whatever matches"
+    );
+    assert_eq!(highlighted(&shell, cx), "beta");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    shell.read_with(cx, |shell, _| {
+        assert!(shell.workspace_panels.menu.is_none())
+    });
+    assert_eq!(folder_of(&shell, panel, cx), "beta");
+}
+
+#[gpui::test]
+fn enter_with_no_matching_folder_changes_nothing_by_accident(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    let panel = split_with_projects(&shell, cx);
+    let before = folder_of(&shell, panel, cx);
+    cx.simulate_input("no such folder");
+    settle(cx);
+    assert_eq!(
+        menu_titles(&shell, cx),
+        ["Don't work in a project", "New project…"]
+    );
+    assert!(cx.debug_bounds("panel-menu-no-matches").is_some());
+    assert_eq!(
+        highlighted(&shell, cx),
+        "New project…",
+        "not the row that would drop the folder"
+    );
+    assert_eq!(folder_of(&shell, panel, cx), before);
+}
+
+/// A space is text here, not "activate the highlighted row" as in other menus.
+#[gpui::test]
+fn the_folder_menu_takes_spaces_and_arrows(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    split_with_projects(&shell, cx);
+    cx.simulate_keystrokes("space");
+    settle(cx);
+    shell.read_with(cx, |shell, _| {
+        assert!(
+            shell.workspace_panels.menu.is_some(),
+            "a space picked a row"
+        )
+    });
+    cx.update(|window, cx| {
+        let shell = shell.read(cx);
+        let menu = shell.workspace_panels.menu.as_ref().unwrap();
+        let input = menu.search.as_ref().unwrap().input.focus_handle(cx);
+        assert!(input.is_focused(window), "the text box has the keyboard");
+    });
+    let start = highlighted(&shell, cx);
+    cx.simulate_keystrokes("down");
+    settle(cx);
+    assert_ne!(highlighted(&shell, cx), start);
+    cx.simulate_keystrokes("up");
+    settle(cx);
+    assert_eq!(highlighted(&shell, cx), start);
+}
+
+/// The folder is on the chat box too, with the same searchable list.
+#[gpui::test]
+fn a_new_chats_box_has_a_folder_dropdown_with_search(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    settle(cx);
+    assert!(
+        cx.debug_bounds("draft-project-target").is_none(),
+        "a chat that has started can't move"
+    );
+    add_projects(&shell, cx);
+    cx.dispatch_action(crate::shell::NewTab);
+    settle(cx);
+    let chip = cx
+        .debug_bounds("draft-project-target")
+        .expect("the dropdown");
+    cx.simulate_mouse_down(chip.center(), MouseButton::Left, Default::default());
+    cx.simulate_mouse_up(chip.center(), MouseButton::Left, Default::default());
+    settle(cx);
+    let pickers = shell.read_with(cx, |shell, cx| shell.composer.read(cx).pickers().clone());
+    pickers.read_with(cx, |pickers, _| assert!(pickers.project_menu_open()));
+    assert!(
+        cx.debug_bounds("space-row-0").is_some(),
+        "its list is on screen"
+    );
+    cx.simulate_input("bet");
+    settle(cx);
+    assert!(
+        cx.debug_bounds("space-row-1").is_none(),
+        "typing narrows it"
+    );
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("beta"));
+    });
+    assert!(
+        cx.debug_bounds("draft-project-target").is_some(),
+        "it stays, now naming the folder"
+    );
+}
+
 /// With no projects there is nothing to ask.
 #[gpui::test]
 fn cmd_d_without_projects_goes_straight_to_the_chat(cx: &mut gpui::TestAppContext) {

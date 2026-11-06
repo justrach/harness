@@ -754,6 +754,10 @@ impl WorkspaceLayout {
     }
 }
 
+/// Seven folders' worth. A long list scrolls under the text box instead of
+/// running down the window.
+const MENU_SEARCH_LIST_HEIGHT: f32 = 224.0;
+
 const PANEL_SPLIT_MOTION: motion::MotionSpec = motion::MotionSpec::new(240, motion::EASE_OUT_QUINT);
 
 #[derive(Default)]
@@ -894,6 +898,37 @@ enum MenuAction {
     SetFolder(Option<String>),
     NewFolder,
 }
+type MenuRow = (SharedString, &'static str, MenuAction);
+
+/// A text box over a long menu. What's typed narrows `items`; `actions` stay
+/// under them whatever is typed.
+#[derive(Clone)]
+pub(super) struct MenuSearch {
+    input: Entity<ComposerInput>,
+    items: Vec<MenuRow>,
+    actions: Vec<MenuRow>,
+}
+
+impl MenuSearch {
+    /// The rows for a query, and which to highlight: the best match, or the last
+    /// action when nothing matches, so Enter can't pick something by accident.
+    fn rows_for(&self, query: &str) -> (Vec<MenuRow>, usize) {
+        let names: Vec<&str> = self.items.iter().map(|row| row.0.as_ref()).collect();
+        let mut rows: Vec<MenuRow> = popover::filter_indices(query, &names)
+            .into_iter()
+            .map(|ix| self.items[ix].clone())
+            .collect();
+        let matched = rows.len();
+        rows.extend(self.actions.iter().cloned());
+        let selected = if matched == 0 {
+            rows.len().saturating_sub(1)
+        } else {
+            0
+        };
+        (rows, selected)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PanelMenu {
     panel: u64,
@@ -905,6 +940,7 @@ pub(super) struct PanelMenu {
     focus: FocusHandle,
     /// Where Escape puts the keyboard, when that isn't the panel's own control.
     return_focus: Option<FocusHandle>,
+    search: Option<MenuSearch>,
 }
 
 #[derive(Default)]
@@ -919,6 +955,7 @@ pub(super) struct PanelWorkspaces {
     fixture_slot_bounds:
         std::rc::Rc<std::cell::RefCell<HashMap<(String, u64), gpui::Bounds<Pixels>>>>,
     pub(super) device_menu: Option<device_picker::PanelDeviceMenu>,
+    menu_search_events: Option<gpui::Subscription>,
     /// A panel ⌘D just made, whose folder menu opens once its slot has settled.
     pub(super) pending_folder_menu: Option<u64>,
     device_choices: HashMap<(String, u64), device_picker::PanelDeviceContext>,
@@ -2838,6 +2875,7 @@ impl Shell {
             selected: 0,
             focus,
             return_focus: None,
+            search: None,
         });
         cx.notify();
     }
@@ -2944,21 +2982,76 @@ impl Shell {
         cx.notify();
     }
 
+    /// Keep a searchable menu's rows in step with its text box.
+    pub(super) fn watch_menu_search(
+        &mut self,
+        input: &Entity<ComposerInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let events = cx.subscribe_in(input, window, Self::on_menu_search_event);
+        self.workspace_panels.menu_search_events = Some(events);
+    }
+
+    fn on_menu_search_event(
+        &mut self,
+        input: &Entity<ComposerInput>,
+        event: &ComposerInputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerInputEvent::Edited => {
+                let query = input.read(cx).text().to_string();
+                let Some(menu) = self.workspace_panels.menu.as_mut() else {
+                    return;
+                };
+                let Some(search) = menu.search.as_ref() else {
+                    return;
+                };
+                (menu.rows, menu.selected) = search.rows_for(&query);
+                self.workspace_panels.menu_scroll.scroll_to_item(0);
+                cx.notify();
+            }
+            ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
+                if let Some(ix) = self.workspace_panels.menu.as_ref().map(|m| m.selected) {
+                    self.activate_panel_menu(ix, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn render_panel_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.workspace_panels.menu.clone()?;
         let theme = Theme::of(cx).for_popup();
         let x = f32::from(menu.position.x)
             .min(self.viewport_width - 242.0)
             .max(8.0);
+        // A searchable menu's list scrolls, so only its rows on screen count.
+        let item_count = menu
+            .search
+            .as_ref()
+            .map(|search| menu.rows.len() - search.actions.len());
+        let height = match item_count {
+            Some(items) => {
+                (items as f32 * 32.0).min(MENU_SEARCH_LIST_HEIGHT)
+                    + (menu.rows.len() - items) as f32 * 32.0
+                    + 60.0
+            }
+            None => menu.rows.len() as f32 * 32.0 + 16.0,
+        };
         let y = f32::from(menu.position.y)
-            .min(self.viewport_height - (menu.rows.len() as f32 * 32.0 + 16.0))
+            .min(self.viewport_height - height)
             .max(8.0);
         let mut card = popover::popover_card(&theme)
             .id("workspace-panel-menu-card")
             .w(px(234.0))
             .max_h(px((self.viewport_height - 16.0).max(32.0)))
-            .overflow_y_scroll()
-            .track_scroll(&self.workspace_panels.menu_scroll)
+            .when(item_count.is_none(), |card| {
+                card.overflow_y_scroll()
+                    .track_scroll(&self.workspace_panels.menu_scroll)
+            })
             .track_focus(&menu.focus)
             .flex()
             .flex_col()
@@ -2993,8 +3086,17 @@ impl Shell {
                             }
                         }
                         let selected = menu.selected;
-                        this.workspace_panels.menu_scroll.scroll_to_item(selected);
+                        // Actions under a searchable list sit outside its scroller.
+                        let in_scroller = menu
+                            .search
+                            .as_ref()
+                            .is_none_or(|search| selected < menu.rows.len() - search.actions.len());
+                        if in_scroller {
+                            this.workspace_panels.menu_scroll.scroll_to_item(selected);
+                        }
                     }
+                    // A space goes in the text box, where there is one.
+                    "space" if menu.search.is_some() => return,
                     "enter" | "space" => {
                         let ix = menu.selected;
                         this.activate_panel_menu(ix, window, cx);
@@ -3024,12 +3126,13 @@ impl Shell {
                 cx.stop_propagation();
                 cx.notify();
             }));
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(menu.rows.len());
         for (ix, (title, glyph, action)) in menu.rows.iter().enumerate() {
             let enabled = !matches!(action, MenuAction::AddPanel(SplitAxis::Vertical))
                 || self
                     .panel_layout(cx)
                     .is_some_and(|layout| layout.can_add_panel(SplitAxis::Vertical));
-            card = card.child(
+            rows.push(
                 popover::menu_row(
                     &theme,
                     enabled && ix == menu.selected,
@@ -3061,8 +3164,51 @@ impl Shell {
                         .flex_none()
                         .text_color(theme.text_muted),
                 )
-                .child(div().flex_1().min_w_0().truncate().child(title.clone())),
+                .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                .into_any_element(),
             );
+        }
+        if let (Some(search), Some(items)) = (&menu.search, item_count) {
+            let actions = rows.split_off(items);
+            card = card
+                .child(popover::search_input_frame(
+                    &theme,
+                    search.input.clone().into_any_element(),
+                ))
+                .when(items == 0, |card| {
+                    card.child(
+                        div()
+                            .debug_selector(|| "panel-menu-no-matches".into())
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_faint)
+                            .child("No folders match"),
+                    )
+                })
+                .child(
+                    div()
+                        .id("workspace-panel-menu-list")
+                        .debug_selector(|| "panel-menu-list".into())
+                        .flex_none()
+                        .max_h(px(MENU_SEARCH_LIST_HEIGHT))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.workspace_panels.menu_scroll)
+                        .flex()
+                        .flex_col()
+                        .children(rows),
+                )
+                .child(
+                    div()
+                        .my(px(2.0))
+                        .mx(px(-popover::CARD_INSET))
+                        .h(px(1.0))
+                        .flex_none()
+                        .bg(theme.border.opacity(0.6)),
+                )
+                .children(actions);
+        } else {
+            card = card.children(rows);
         }
         #[cfg(feature = "browser-fixture")]
         let card = {
