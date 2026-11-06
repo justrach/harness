@@ -5183,26 +5183,35 @@ impl Render for ComposerInput {
             self.syntax_source = self.content.clone();
             self.syntax_spans.clear();
             let source = self.syntax_source.clone();
+            // Only fenced code gets colors. A draft without a fence has nothing
+            // to wait for, and this also drops a parse still running for the
+            // text before this edit.
+            self.syntax_task = None;
             // Keep grammar loading and parsing off the input/paint thread. A
             // dropped task and source check prevent stale edits recoloring text.
-            self.syntax_task = Some(cx.spawn(async move |input, cx| {
-                let (source, spans) = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let spans = composer_markdown::syntax_spans(&source);
-                        (source, spans)
-                    })
-                    .await;
-                input
-                    .update(cx, |input, cx| {
-                        if input.content == source {
-                            input.syntax_spans = spans;
-                            input.needs_measure = true;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-            }));
+            self.syntax_task = composer_markdown::may_have_code_fence(&source).then(|| {
+                cx.spawn(async move |input, cx| {
+                    let (source, spans) = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let spans = composer_markdown::syntax_spans(&source);
+                            (source, spans)
+                        })
+                        .await;
+                    input
+                        .update(cx, |input, cx| {
+                            // The colors were cleared when the text changed, so no
+                            // colors means this frame is already right. Asking for
+                            // another would redraw the window for nothing.
+                            if input.content == source && !spans.is_empty() {
+                                input.syntax_spans = spans;
+                                input.needs_measure = true;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+            });
         }
         let theme = Theme::of(cx);
         let popup_theme = theme.for_popup();

@@ -521,7 +521,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if matches!(self.route, Route::Chat) {
-            self.workspace_split(axis, cx);
+            self.workspace_split_choosing_folder(axis, cx);
             return;
         }
         self.split_chat_opening(axis, None, window, cx);

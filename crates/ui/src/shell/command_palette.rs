@@ -121,7 +121,7 @@ enum Entry {
 impl Entry {
     fn action(&self) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::NewChat => Some(("New tab", icons::PLUS)),
+            Self::NewChat => Some(("New chat", icons::PLUS)),
             Self::NewProject => Some(("New project", icons::FOLDER)),
             Self::Settings => Some(("Open settings", icons::SETTINGS_MINIMALISTIC)),
             Self::Theme(mode) => Some((
@@ -646,10 +646,7 @@ impl Shell {
             return;
         }
         match entry {
-            Entry::NewChat => {
-                self.workspace_new_tab(cx);
-                self.focus_workspace_new_tab(window, cx);
-            }
+            Entry::NewChat => self.workspace_new_session(window, cx),
             Entry::NewProject => self.open_add_space(cx),
             Entry::Settings => {
                 let section = self.remembered_settings_section();

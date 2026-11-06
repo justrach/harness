@@ -1821,16 +1821,11 @@ mod tests {
                 );
             })
             .unwrap();
-        // Close the split panel's tab, the emptied panel, then its neighbor's
-        // last chat. Repeating the shortcut on the final empty panel must leave
-        // the window and both sessions open. Selection is only pinned where the
+        // Close the split panel with its only tab, then its neighbor's last
+        // chat. Repeating the shortcut on the final empty panel must leave the
+        // window and both sessions open. Selection is only pinned where the
         // focused panel is empty.
-        for expected_panels in [
-            vec![vec!["closing"], vec![]],
-            vec![vec!["closing"]],
-            vec![vec![]],
-            vec![vec![]],
-        ] {
+        for expected_panels in [vec![vec!["closing"]], vec![vec![]], vec![vec![]]] {
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseTabWithoutArchiving));
             cx.run_until_parked();
             window

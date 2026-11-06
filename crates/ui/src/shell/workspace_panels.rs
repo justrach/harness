@@ -754,6 +754,10 @@ impl WorkspaceLayout {
     }
 }
 
+/// Seven folders' worth. A long list scrolls under the text box instead of
+/// running down the window.
+const MENU_SEARCH_LIST_HEIGHT: f32 = 224.0;
+
 const PANEL_SPLIT_MOTION: motion::MotionSpec = motion::MotionSpec::new(240, motion::EASE_OUT_QUINT);
 
 #[derive(Default)]
@@ -894,6 +898,37 @@ enum MenuAction {
     SetFolder(Option<String>),
     NewFolder,
 }
+type MenuRow = (SharedString, &'static str, MenuAction);
+
+/// A text box over a long menu. What's typed narrows `items`; `actions` stay
+/// under them whatever is typed.
+#[derive(Clone)]
+pub(super) struct MenuSearch {
+    input: Entity<ComposerInput>,
+    items: Vec<MenuRow>,
+    actions: Vec<MenuRow>,
+}
+
+impl MenuSearch {
+    /// The rows for a query, and which to highlight: the best match, or the last
+    /// action when nothing matches, so Enter can't pick something by accident.
+    fn rows_for(&self, query: &str) -> (Vec<MenuRow>, usize) {
+        let names: Vec<&str> = self.items.iter().map(|row| row.0.as_ref()).collect();
+        let mut rows: Vec<MenuRow> = popover::filter_indices(query, &names)
+            .into_iter()
+            .map(|ix| self.items[ix].clone())
+            .collect();
+        let matched = rows.len();
+        rows.extend(self.actions.iter().cloned());
+        let selected = if matched == 0 {
+            rows.len().saturating_sub(1)
+        } else {
+            0
+        };
+        (rows, selected)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PanelMenu {
     panel: u64,
@@ -905,6 +940,7 @@ pub(super) struct PanelMenu {
     focus: FocusHandle,
     /// Where Escape puts the keyboard, when that isn't the panel's own control.
     return_focus: Option<FocusHandle>,
+    search: Option<MenuSearch>,
 }
 
 #[derive(Default)]
@@ -919,6 +955,9 @@ pub(super) struct PanelWorkspaces {
     fixture_slot_bounds:
         std::rc::Rc<std::cell::RefCell<HashMap<(String, u64), gpui::Bounds<Pixels>>>>,
     pub(super) device_menu: Option<device_picker::PanelDeviceMenu>,
+    menu_search_events: Option<gpui::Subscription>,
+    /// A panel ⌘D just made, whose folder menu opens once its slot has settled.
+    pub(super) pending_folder_menu: Option<u64>,
     device_choices: HashMap<(String, u64), device_picker::PanelDeviceContext>,
     pub(super) pending_tools: HashMap<String, Vec<(u64, usize, crate::settings::SavedPanelTab)>>,
     target: Option<u64>,
@@ -1584,6 +1623,15 @@ impl Shell {
         cx.notify();
     }
 
+    /// ⌘T: a new chat, ready to type in. The choices page stays behind the +
+    /// buttons, and is where this lands if the panel's computer is unavailable.
+    pub(super) fn workspace_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_new_tab(cx);
+        self.focus_workspace_new_tab(window, cx);
+        let panel = self.panel_layout_mut(cx).focused;
+        self.activate_workspace_empty(panel, 0, window, cx);
+    }
+
     pub(super) fn workspace_new_tab_in_panel(&mut self, panel: u64, cx: &mut Context<Self>) {
         self.workspace_panels.target = Some(panel);
         self.workspace_new_tab(cx);
@@ -2063,10 +2111,58 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn workspace_split(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
+    /// ⌘D: split, then ask where the new chat should work.
+    pub(super) fn workspace_split_choosing_folder(
+        &mut self,
+        axis: SplitAxis,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = self.workspace_split(axis, cx) {
+            self.workspace_panels.pending_folder_menu = Some(panel);
+        }
+    }
+
+    /// The folder menu a split opens by itself. Dismissing it means "here is
+    /// fine", so it hands the keyboard to the new chat rather than the button.
+    pub(super) fn open_new_split_folder_menu(
+        &mut self,
+        panel: u64,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let still_there = self
+            .panel_layout(cx)
+            .is_some_and(|layout| layout.focused == panel);
+        if !still_there || self.workspace_panels.menu.is_some() {
+            return;
+        }
+        self.open_strip_folder_menu(panel, position, window, cx);
+        let composer = self.composer.focus_handle(cx);
+        let Some(menu) = self.workspace_panels.menu.as_mut() else {
+            return;
+        };
+        let has_folders = menu
+            .rows
+            .iter()
+            .any(|(_, _, action)| matches!(action, MenuAction::SetFolder(Some(_))));
+        if has_folders {
+            menu.return_focus = Some(composer);
+        } else {
+            // Nothing to choose between.
+            self.workspace_panels.menu = None;
+            window.focus(&composer, cx);
+        }
+    }
+
+    pub(super) fn workspace_split(
+        &mut self,
+        axis: SplitAxis,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
         self.sync_panel_workspace(cx);
         if !self.panel_layout_mut(cx).can_add_panel(axis) {
-            return;
+            return None;
         }
         self.park_workspace_draft(cx);
         let layout = self.panel_layout_mut(cx);
@@ -2076,6 +2172,7 @@ impl Shell {
         self.start_panel_insertion(id, beside, cx);
         self.workspace_panels.target = Some(id);
         self.workspace_new_chat(cx);
+        Some(id)
     }
 
     pub(crate) fn workspace_close_focused(
@@ -2558,11 +2655,56 @@ impl Shell {
             }
             self.chat_split_selected = self.state.read(cx).selected_chat.clone();
         }
+        self.collapse_emptied_panel(panel, window, cx);
         if recoverable {
             self.persist_chat_tabs(cx);
             settings::flush(cx);
         }
         cx.notify();
+    }
+
+    /// A split panel whose last tab just closed goes with it, or ⌘W would need
+    /// a second press to get past an empty panel. The one panel left in a
+    /// window stays, with its choices page.
+    fn collapse_emptied_panel(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = self.panel_layout_mut(cx);
+        let Some(index) = layout
+            .panels
+            .iter()
+            .position(|p| p.id == panel && p.tabs.is_empty())
+            .filter(|_| layout.panels.len() > 1)
+        else {
+            return;
+        };
+        let was_focused = layout.focused == panel;
+        layout.panels.remove(index);
+        if layout.expanded == Some(panel) {
+            layout.expanded = None;
+        }
+        layout.equalize();
+        if self
+            .workspace_panels
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.panel == panel)
+        {
+            self.workspace_panels.menu = None;
+        }
+        if self.workspace_panels.pending_folder_menu == Some(panel) {
+            self.workspace_panels.pending_folder_menu = None;
+        }
+        if !was_focused {
+            return;
+        }
+        // Back to the panel this one was split from. Its draft, if any, is
+        // already parked, so this activates instead of parking over it.
+        let layout = self.panel_layout_mut(cx);
+        let neighbor = layout.panels[index.saturating_sub(1)].id;
+        layout.focused = neighbor;
+        let next = layout.panel(neighbor).and_then(|p| p.selected()).cloned();
+        if let Some(next) = next {
+            self.activate_workspace_tab(neighbor, next, window, cx);
+        }
     }
 
     pub(super) fn close_workspace_panel(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -2631,9 +2773,9 @@ impl Shell {
                     menu.panel
                 ))
             };
-            if let Some(focus) =
+            if let Some(focus) = menu.return_focus.as_ref().or_else(|| {
                 control.and_then(|control| self.workspace_panels.controls.get(&control))
-            {
+            }) {
                 window.focus(focus, cx);
             }
             self.workspace_panels.target = None;
@@ -2733,6 +2875,7 @@ impl Shell {
             selected: 0,
             focus,
             return_focus: None,
+            search: None,
         });
         cx.notify();
     }
@@ -2839,21 +2982,76 @@ impl Shell {
         cx.notify();
     }
 
+    /// Keep a searchable menu's rows in step with its text box.
+    pub(super) fn watch_menu_search(
+        &mut self,
+        input: &Entity<ComposerInput>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let events = cx.subscribe_in(input, window, Self::on_menu_search_event);
+        self.workspace_panels.menu_search_events = Some(events);
+    }
+
+    fn on_menu_search_event(
+        &mut self,
+        input: &Entity<ComposerInput>,
+        event: &ComposerInputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ComposerInputEvent::Edited => {
+                let query = input.read(cx).text().to_string();
+                let Some(menu) = self.workspace_panels.menu.as_mut() else {
+                    return;
+                };
+                let Some(search) = menu.search.as_ref() else {
+                    return;
+                };
+                (menu.rows, menu.selected) = search.rows_for(&query);
+                self.workspace_panels.menu_scroll.scroll_to_item(0);
+                cx.notify();
+            }
+            ComposerInputEvent::Submitted | ComposerInputEvent::ModifiedSubmitted => {
+                if let Some(ix) = self.workspace_panels.menu.as_ref().map(|m| m.selected) {
+                    self.activate_panel_menu(ix, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn render_panel_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.workspace_panels.menu.clone()?;
         let theme = Theme::of(cx).for_popup();
         let x = f32::from(menu.position.x)
             .min(self.viewport_width - 242.0)
             .max(8.0);
+        // A searchable menu's list scrolls, so only its rows on screen count.
+        let item_count = menu
+            .search
+            .as_ref()
+            .map(|search| menu.rows.len() - search.actions.len());
+        let height = match item_count {
+            Some(items) => {
+                (items as f32 * 32.0).min(MENU_SEARCH_LIST_HEIGHT)
+                    + (menu.rows.len() - items) as f32 * 32.0
+                    + 60.0
+            }
+            None => menu.rows.len() as f32 * 32.0 + 16.0,
+        };
         let y = f32::from(menu.position.y)
-            .min(self.viewport_height - (menu.rows.len() as f32 * 32.0 + 16.0))
+            .min(self.viewport_height - height)
             .max(8.0);
         let mut card = popover::popover_card(&theme)
             .id("workspace-panel-menu-card")
             .w(px(234.0))
             .max_h(px((self.viewport_height - 16.0).max(32.0)))
-            .overflow_y_scroll()
-            .track_scroll(&self.workspace_panels.menu_scroll)
+            .when(item_count.is_none(), |card| {
+                card.overflow_y_scroll()
+                    .track_scroll(&self.workspace_panels.menu_scroll)
+            })
             .track_focus(&menu.focus)
             .flex()
             .flex_col()
@@ -2888,8 +3086,17 @@ impl Shell {
                             }
                         }
                         let selected = menu.selected;
-                        this.workspace_panels.menu_scroll.scroll_to_item(selected);
+                        // Actions under a searchable list sit outside its scroller.
+                        let in_scroller = menu
+                            .search
+                            .as_ref()
+                            .is_none_or(|search| selected < menu.rows.len() - search.actions.len());
+                        if in_scroller {
+                            this.workspace_panels.menu_scroll.scroll_to_item(selected);
+                        }
                     }
+                    // A space goes in the text box, where there is one.
+                    "space" if menu.search.is_some() => return,
                     "enter" | "space" => {
                         let ix = menu.selected;
                         this.activate_panel_menu(ix, window, cx);
@@ -2919,12 +3126,13 @@ impl Shell {
                 cx.stop_propagation();
                 cx.notify();
             }));
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(menu.rows.len());
         for (ix, (title, glyph, action)) in menu.rows.iter().enumerate() {
             let enabled = !matches!(action, MenuAction::AddPanel(SplitAxis::Vertical))
                 || self
                     .panel_layout(cx)
                     .is_some_and(|layout| layout.can_add_panel(SplitAxis::Vertical));
-            card = card.child(
+            rows.push(
                 popover::menu_row(
                     &theme,
                     enabled && ix == menu.selected,
@@ -2956,8 +3164,51 @@ impl Shell {
                         .flex_none()
                         .text_color(theme.text_muted),
                 )
-                .child(div().flex_1().min_w_0().truncate().child(title.clone())),
+                .child(div().flex_1().min_w_0().truncate().child(title.clone()))
+                .into_any_element(),
             );
+        }
+        if let (Some(search), Some(items)) = (&menu.search, item_count) {
+            let actions = rows.split_off(items);
+            card = card
+                .child(popover::search_input_frame(
+                    &theme,
+                    search.input.clone().into_any_element(),
+                ))
+                .when(items == 0, |card| {
+                    card.child(
+                        div()
+                            .debug_selector(|| "panel-menu-no-matches".into())
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_faint)
+                            .child("No folders match"),
+                    )
+                })
+                .child(
+                    div()
+                        .id("workspace-panel-menu-list")
+                        .debug_selector(|| "panel-menu-list".into())
+                        .flex_none()
+                        .max_h(px(MENU_SEARCH_LIST_HEIGHT))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.workspace_panels.menu_scroll)
+                        .flex()
+                        .flex_col()
+                        .children(rows),
+                )
+                .child(
+                    div()
+                        .my(px(2.0))
+                        .mx(px(-popover::CARD_INSET))
+                        .h(px(1.0))
+                        .flex_none()
+                        .bg(theme.border.opacity(0.6)),
+                )
+                .children(actions);
+        } else {
+            card = card.children(rows);
         }
         #[cfg(feature = "browser-fixture")]
         let card = {
@@ -6637,7 +6888,8 @@ mod interaction_tests {
             assert!(focus.is_focused(window));
             assert!(shell.workspace_close_focused(window, cx));
             let layout = shell.panel_layout(cx).unwrap();
-            assert!(layout.panel(0).unwrap().tabs.is_empty());
+            assert!(layout.panel(0).is_none(), "it went with its last tab");
+            assert_eq!(layout.focused, 1);
             assert_eq!(layout.panel(1).unwrap().tabs, [PanelTab::Terminal(2)]);
             window.remove_window();
         });
