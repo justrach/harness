@@ -112,6 +112,12 @@ pub const OVERDRAW_PX: f32 = 320.0;
 /// Show the scroll-to-bottom button beyond this distance from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
 
+const MESSAGE_COPY_BUTTON_SIZE: f32 = Theme::SPACE_MD * 2.0;
+const MESSAGE_COPY_ICON_SIZE: f32 = 14.0;
+// Eight points to the icon, not to the larger, centered click target.
+const MESSAGE_METADATA_GAP: f32 =
+    Theme::SPACE_SM - (MESSAGE_COPY_BUTTON_SIZE - MESSAGE_COPY_ICON_SIZE) / 2.0;
+
 fn jump_visibility(was_shown: bool, distance: f32) -> bool {
     // Once offered, keep the control until close to the end. A single 320px
     // threshold made it disappear halfway through a downward scroll gesture.
@@ -9140,7 +9146,7 @@ impl Transcript {
                 let fade_key = format!("copy-message-hover-{entry_id}");
                 div()
                     .id(SharedString::from(format!("copy-message-{entry_id}")))
-                    .size(px(Theme::SPACE_MD * 2.0))
+                    .size(px(MESSAGE_COPY_BUTTON_SIZE))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -9163,7 +9169,7 @@ impl Transcript {
                         } else {
                             crate::icons::COPY
                         })
-                        .size(px(14.0))
+                        .size(px(MESSAGE_COPY_ICON_SIZE))
                         .text_color(theme.text_muted),
                     )
             });
@@ -9171,7 +9177,7 @@ impl Transcript {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(Theme::SPACE_SM));
+                .gap(px(MESSAGE_METADATA_GAP));
             let metadata = metadata.child(timestamp).children(copy);
             div()
                 .h(px(Theme::SPACE_SM + Theme::SPACE_MD * 2.0))
@@ -20225,6 +20231,13 @@ mod tests {
                 tool_chip_content(&call)
             );
         }
+    }
+
+    #[test]
+    fn timestamp_copy_icon_gap_is_eight_points() {
+        let button_inset = (MESSAGE_COPY_BUTTON_SIZE - MESSAGE_COPY_ICON_SIZE) / 2.0;
+        assert_eq!(MESSAGE_METADATA_GAP + button_inset, 8.0);
+        assert_eq!(MESSAGE_COPY_BUTTON_SIZE, 24.0);
     }
 
     #[test]
