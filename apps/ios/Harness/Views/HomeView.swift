@@ -27,6 +27,16 @@ struct HomeView: View {
     /// What the "+" picker chose; acted on once it has closed.
     @State private var pendingNewSession: NewSessionTarget?
     @State private var showSettings = false
+    @State private var workspaceCommandPresentation: WorkspaceCommandPresentation?
+    @State private var sidePanePath: [Route] = []
+
+    /// Retain the originating pane's binding while its command sheet is open.
+    private struct WorkspaceCommandPresentation: Identifiable {
+        let id = UUID()
+        let command: ComposerWorkspaceCommand
+        let context: ComposerCommandContext
+        let stack: Binding<[Route]>
+    }
     /// Screenshot rig (`-sheet crashreports`): Settings opens on Crash reports.
     @State private var settingsOnCrashReports = false
     @State private var showProfile = false
@@ -268,9 +278,15 @@ struct HomeView: View {
         HStack(spacing: 0) {
             primaryStack
             Rectangle().fill(Theme.textFaint.opacity(0.25)).frame(width: 0.5)
-            NavigationStack {
-                SessionView(chatId: second).environment(\.splitScreen, controls(for: .secondary))
+            NavigationStack(path: $sidePanePath) {
+                destination(.chat(second), in: $sidePanePath)
+                    .environment(\.splitScreen, controls(for: .secondary))
+                    .navigationDestination(for: Route.self) { route in
+                        destination(route, in: $sidePanePath)
+                            .environment(\.splitScreen, controls(for: .secondary))
+                    }
             }
+            .onChange(of: second) { sidePanePath = [] }
         }
     }
 
@@ -399,6 +415,22 @@ struct HomeView: View {
         }
         .onChange(of: horizontalSizeClass) { noteFoldable() }
         .environment(\.switchToSession, switchTo)
+        .sheet(isPresented: $showSettings) {
+            SettingsView(openCrashReports: settingsOnCrashReports)
+        }
+        .sheet(item: $workspaceCommandPresentation) { presentation in
+            switch presentation.command {
+            case .resume:
+                ComposerWorkspaceSessionPicker { chatId in
+                    workspaceCommandPresentation = nil
+                    navigateWorkspaceCommand(to: .chat(chatId), in: presentation.stack)
+                }
+            case .help:
+                ComposerWorkspaceCommandHelp(context: presentation.context)
+            default:
+                EmptyView()
+            }
+        }
         .onChange(of: path) { _, _ in
             // A row picked from the list over the upper half opens there; the list gets out of the way.
             if laptopListShown { withAnimation(Motion.collapse) { laptopListShown = false } }
@@ -424,20 +456,74 @@ struct HomeView: View {
         }
     }
 
-    @ViewBuilder
     private func destination(_ route: Route) -> some View {
+        destination(route, in: $path)
+    }
+
+    @ViewBuilder
+    private func destination(_ route: Route, in stack: Binding<[Route]>) -> some View {
         Group {
             switch route {
-            case .space(let id): SpaceView(spaceId: id, path: $path)
+            case .space(let id): SpaceView(spaceId: id, path: stack)
             // Compact: a pager host, so the open session swipes to its
             // neighbours. The split layout keeps its own sidebar selection.
             case .chat(let id):
                 if splitLayout { SessionView(chatId: id) } else { SessionPagerHost(chatId: id) }
-            case .newSession(let destination): NewSessionView(destination: destination, path: $path)
+            case .newSession(let destination): NewSessionView(destination: destination, path: stack)
             }
+        }
+        .environment(\.composerWorkspaceCommandAction) { command, context in
+            handleWorkspaceCommand(command, context: context, source: route, in: stack)
         }
         // Tap to the page it opened.
         .onAppear { Perf.shared.finishInteraction(PerfSpan.navigationOpen) }
+    }
+
+    private func handleWorkspaceCommand(_ command: ComposerWorkspaceCommand,
+                                        context: ComposerCommandContext, source: Route,
+                                        in stack: Binding<[Route]>) {
+        switch command {
+        case .new:
+            // Open an unsent draft. Neither CreateSession nor a provider command
+            // is sent until the person submits the new composer's content.
+            let destination: NewSessionDestination
+            if let spaceId = context.spaceId {
+                destination = .project(spaceId: spaceId)
+            } else if case .newSession(let existing) = source {
+                destination = existing
+            } else if let chatId = context.chatId, model.chat(id: chatId)?.config?.isChatMode == true {
+                destination = .chat(deviceId: context.deviceId)
+            } else {
+                destination = .projectless(deviceId: context.deviceId)
+            }
+            navigateWorkspaceCommand(to: .newSession(destination), in: stack)
+        case .resume, .help:
+            workspaceCommandPresentation = WorkspaceCommandPresentation(command: command, context: context, stack: stack)
+        case .settings:
+            showSettings = true
+        case .model, .rename, .stop:
+            // Handled by the originating composer, which owns its local state.
+            break
+        case .diff, .files, .terminal:
+            // Visible for desktop parity, but unavailable on iOS. Never send
+            // these through the provider's command-invocation transport.
+            break
+        }
+    }
+
+    private func navigateWorkspaceCommand(to route: Route, in stack: Binding<[Route]>) {
+        var routes = stack.wrappedValue
+        if splitLayout {
+            routes = [route]
+        } else if let last = routes.last {
+            switch last {
+            case .chat, .newSession: routes[routes.count - 1] = route
+            case .space: routes.append(route)
+            }
+        } else {
+            routes.append(route)
+        }
+        stack.wrappedValue = routes
     }
 
     /// Open a route from the list. In the split layout the sidebar replaces
@@ -605,9 +691,6 @@ struct HomeView: View {
                 .accessibilityLabel("Profile")
                 .accessibilityIdentifier("home-profile")
             }
-        }
-        .sheet(isPresented: $showSettings) {
-            SettingsView(openCrashReports: settingsOnCrashReports)
         }
         .sheet(isPresented: $showProfile) {
             ProfileView()
