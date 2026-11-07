@@ -7,9 +7,17 @@ def emit(value):
 def update(text):
     emit({"method":"session/update","params":{"sessionId":"pi-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})
 loaded = False
+record_path = None
 for line in sys.stdin:
     req = json.loads(line)
     method, params = req["method"], req.get("params", {})
+    if "cwd" in params:
+        candidate = os.path.join(params["cwd"], "acp-requests.jsonl")
+        if os.path.isfile(candidate):
+            record_path = candidate
+    if record_path:
+        with open(record_path, "a") as record:
+            record.write(json.dumps(req) + "\n")
     result = {}
     if method == "initialize":
         result = {"protocolVersion":1,"agentCapabilities":{"loadSession":True}}
