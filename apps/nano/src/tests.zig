@@ -23,3 +23,7 @@ test {
     _ = @import("markdown_html.zig");
     _ = @import("highlight.zig");
 }
+
+test {
+    _ = @import("edit_history.zig");
+}

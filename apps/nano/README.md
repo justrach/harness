@@ -107,3 +107,52 @@ the interface icons are Solar Linear by 480 Design (CC BY 4.0).
 | `src/icons.zig`, `src/icons/` | Harness's icons and agent marks, tinted as drawn. |
 | `src/markdown.zig`, `markdown_html.zig`, `highlight.zig` | nanoterm's Markdown parser and code highlighting, unchanged. |
 | `src/release.zig` | The newest release, over HTTP/2. |
+
+## Recorded agent edit chart
+
+The chat's live tail now includes a compact native activity chart. The green
+and red stepped envelopes are **cumulative recorded tool-result additions and
+removals**; dots show their difference. These are editing churn, not the final
+working-tree patch. Repeated edits to the same lines count repeatedly.
+
+Hover the chart to inspect a result; click to pin its detail. **Details** (or
+**Alt+D**) opens the detail pane, **Previous/Next** or **Alt+[ / Alt+]** steps
+through results. File lanes mark recorded result positions, not editing
+durations. Navigation resets when changing chats. There is no chart animation,
+so reduced-motion users receive the same information without motion.
+
+Data is from the selected chat's `WatchDocMessages` transcript: resolved,
+successful tool `diffStats` (the engine's persisted line counts), with legacy
+inline `diff.oldText/newText` excerpts when present. New-file counts can also
+be counted directly from their recorded text. Other absent counts stay
+unknown. Failed/pending tools are not counted. Sidecar-only/binary/legacy text
+has an explicit unavailable preview; missing history/counts are marked partial.
+
+**Protocol limitation:** this branch records `createdAt` per message, not
+per tool. The x-axis is therefore **recorded edit order**, not a fabricated time
+axis. Detail labels the real message timestamp as **turn started**, in SGT,
+not as an edit timestamp. Parallel tools are shown in transcript order; the
+chart does not claim their execution/completion chronology. No durations or
+activity spans are inferred from final git totals or wall-clock observation.
+Precise timed playback requires an additive engine/protocol timestamp contract.
+
+### Offline native visual fixture
+
+This separate executable never starts or connects to an engine. Its embedded
+sample transcript and visible badge explicitly say **DEMO FIXTURE — NOT ACCOUNT
+DATA**. It is not installed by the normal production build.
+
+```sh
+zig build chart-fixture
+zig-out/bin/harness-chart-fixture                 # interactive native window
+zig-out/bin/harness-chart-fixture --nanoui-snapshot=/tmp/chart-dark.png
+HARNESS_CHART_LIGHT=1 zig-out/bin/harness-chart-fixture \
+  --nanoui-snapshot=/tmp/chart-detail-light.png --nanoui-script='click:Details'
+```
+
+Snapshots use nanoui's actual offscreen native renderer, not a web recreation.
+They verify fixture layout only, not a live engine editing session. Production
+still launches with `zig build run` against the normal engine. Unit regressions
+cover cumulative churn, distinct files, replay/reset, missing/empty history,
+out-of-order turn timestamps, failed/pending tools, new files and binary-style
+sidecar results (`zig build test`).

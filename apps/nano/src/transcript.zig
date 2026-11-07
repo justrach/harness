@@ -28,6 +28,17 @@ pub const Question = struct {
     prefill: ?[]const u8 = null,
 };
 
+/// Recorded tool result, not a working-tree snapshot. No edit timestamp exists
+/// in the current protocol; the chart must not turn createdAt into one.
+pub const Edit = struct {
+    path: []const u8,
+    additions: ?u64 = null,
+    deletions: ?u64 = null,
+    old_text: ?[]const u8 = null,
+    new_text: ?[]const u8 = null,
+    new_file: bool = false,
+};
+
 pub const Part = struct {
     id: []u8,
     kind: PartKind,
@@ -45,6 +56,7 @@ pub const Part = struct {
     /// An input part's request and its questions, in `arena`.
     request_id: []const u8 = "",
     questions: []const Question = &.{},
+    edits: []const Edit = &.{},
     arena: ?*std.heap.ArenaAllocator = null,
 
     fn deinit(p: *Part, gpa: Allocator) void {
@@ -62,6 +74,8 @@ pub const Entry = struct {
     id: []u8,
     role: Role,
     status: EntryStatus,
+    /// Message creation time only, epoch milliseconds; never an edit time.
+    created_at: ?u64 = null,
     parts: std.ArrayList(Part) = .empty,
 
     fn deinit(e: *Entry, gpa: Allocator) void {
@@ -176,7 +190,7 @@ fn parseEntry(gpa: Allocator, v: json.Value) !Entry {
     const o = v.object;
     const role = std.meta.stringToEnum(Role, string(o.get("role")) orelse "") orelse .system;
     const status = std.meta.stringToEnum(EntryStatus, string(o.get("status")) orelse "") orelse .complete;
-    var e: Entry = .{ .id = try gpa.dupe(u8, string(o.get("id")) orelse return error.Desync), .role = role, .status = status };
+    var e: Entry = .{ .id = try gpa.dupe(u8, string(o.get("id")) orelse return error.Desync), .role = role, .status = status, .created_at = uint(o.get("createdAt")) };
     errdefer e.deinit(gpa);
     for (array(o.get("parts"))) |p| if (p == .object) try e.parts.append(gpa, try parsePart(gpa, p.object));
     return e;
@@ -193,6 +207,7 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
             p.resolved = if (o.get("resolved")) |r| r == .bool and r.bool else false;
             p.is_error = if (o.get("isError")) |r| r == .bool and r.bool else false;
             try toolCall(gpa, &p, o.get("call"));
+            try parseEdits(gpa, &p, o);
         },
         .input => {
             p.resolved = if (o.get("resolved")) |r| r == .bool and r.bool else false;
@@ -203,6 +218,58 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
         .delegation, .other => {},
     }
     return p;
+}
+
+fn parseEdits(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
+    if (!p.resolved or p.is_error) return;
+    const stats = array(o.get("diffStats"));
+    const inline_diff = o.get("diff");
+    if (stats.len == 0 and (inline_diff == null or inline_diff.? != .object)) return;
+    const arena = try gpa.create(std.heap.ArenaAllocator);
+    arena.* = .init(gpa);
+    p.arena = arena;
+    const a = arena.allocator();
+    var edits: std.ArrayList(Edit) = .empty;
+    for (stats) |stat| {
+        if (stat != .object) continue;
+        const so = stat.object;
+        const path = string(so.get("path")) orelse continue;
+        if (path.len == 0) continue;
+        try edits.append(a, .{ .path = try a.dupe(u8, path), .additions = uint(so.get("additions")), .deletions = uint(so.get("deletions")) });
+    }
+    if (inline_diff) |d| if (d == .object) {
+        const path = string(d.object.get("path")) orelse {
+            p.edits = try edits.toOwnedSlice(a);
+            return;
+        };
+        if (path.len == 0) {
+            p.edits = try edits.toOwnedSlice(a);
+            return;
+        }
+        var match: ?usize = null;
+        for (edits.items, 0..) |edit, i| if (std.mem.eql(u8, edit.path, path)) {
+            match = i;
+            break;
+        };
+        if (match == null) {
+            try edits.append(a, .{ .path = try a.dupe(u8, path) });
+            match = edits.items.len - 1;
+        }
+        const edit = &edits.items[match.?];
+        if (string(d.object.get("oldText"))) |text| edit.old_text = try a.dupe(u8, text);
+        if (string(d.object.get("newText"))) |text| edit.new_text = try a.dupe(u8, text);
+        edit.new_file = edit.old_text == null;
+        // Only new-file line counts are unambiguous without a diff algorithm.
+        if (edit.new_file and edit.additions == null) if (edit.new_text) |text| {
+            if (std.mem.indexOfScalar(u8, text, 0) != null or !std.unicode.utf8ValidateSlice(text)) {
+                p.edits = try edits.toOwnedSlice(a);
+                return;
+            }
+            edit.additions = if (text.len == 0) 0 else std.mem.count(u8, text, "\n") + @as(u64, if (text[text.len - 1] == '\n') 0 else 1);
+            edit.deletions = 0;
+        };
+    };
+    p.edits = try edits.toOwnedSlice(a);
 }
 
 fn parseQuestions(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {

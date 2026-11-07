@@ -36,6 +36,15 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addOptions("parity_options", opts);
     b.step("test", "Run harness-nano tests").dependOn(&b.addRunArtifact(tests).step);
 
+    // An explicit offline fixture build, not shipped with the production app.
+    const fixture = b.addExecutable(.{ .name = "harness-chart-fixture", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/chart_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = imports,
+    }) });
+    b.step("chart-fixture", "Build offline native chart visual fixture").dependOn(&b.addInstallArtifact(fixture, .{}).step);
+
     // `zig build vectors`: rewrite protocol/desktop/requests.json from the
     // request builders, after changing one on purpose.
     const vectors = b.addExecutable(.{ .name = "parity-vectors", .root_module = b.createModule(.{

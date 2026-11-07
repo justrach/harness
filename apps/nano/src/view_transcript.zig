@@ -55,6 +55,7 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
             .system => system(c, k, e),
         }
     }
+    @import("view_edit_history.zig").chart(c, a, k, col);
 }
 
 fn user(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, col: f32) void {

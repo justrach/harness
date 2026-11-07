@@ -22,6 +22,8 @@ pub const uuid = @import("ids.zig").uuid;
 /// The window's own state, apart from the engine's.
 pub const View = struct {
     sidebar_open: bool = true,
+    edit_selected: ?usize = null,
+    edit_details: bool = false,
     /// The project filter: a space's id (owned), or all projects.
     filter: ?[]u8 = null,
     filter_menu: bool = false,
@@ -489,6 +491,8 @@ pub const App = struct {
         if (a.w_doc.id) |id| a.engine.cancel(id);
         a.w_doc = .{};
         a.transcript.clear();
+        a.view.edit_selected = null;
+        a.view.edit_details = false;
         a.notice_len = 0;
         queue_mod.stop(a);
         if (a.selected) |s| a.gpa.free(s);
