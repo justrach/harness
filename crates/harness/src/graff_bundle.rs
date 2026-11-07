@@ -579,6 +579,13 @@ async fn install_release(
                 });
             }
             install_file(&binary, &managed)?;
+            // The computer-use app graff ships beside itself. It has its own
+            // uses, so failing to place it doesn't undo graff's update.
+            if let (Some(home), Some(dir)) = (crate::executable::home_dir(), binary.parent()) {
+                if let Err(error) = crate::nanocua_bundle::install(dir, &home.join("Applications")) {
+                    tracing::warn!(%error, "could not install nanocua");
+                }
+            }
             Ok(UpdateOutcome::Updated {
                 from: current.as_deref().map(display_version),
                 to: if beta {

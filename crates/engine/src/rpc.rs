@@ -586,6 +586,12 @@ struct McpServerActionParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ComputerUseActionParams {
+    action: harness_proto::ComputerUseAction,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LoginIdParams {
     login_id: String,
 }
@@ -1515,6 +1521,8 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // A reconnect handshakes every server; a login waits on a browser page.
         methods::LIST_MCP_SERVERS => Duration::from_secs(70),
         methods::MCP_SERVER_ACTION => Duration::from_secs(6 * 60),
+        // Turning something on waits for a click in nanocua's window.
+        methods::COMPUTER_USE_ACTION => Duration::from_secs(100),
         // A relayed sign-in finishes on the host after graff exchanges the code.
         methods::COMPLETE_AGENT_LOGIN => Duration::from_secs(120),
         _ => Duration::from_secs(30),
@@ -1632,6 +1640,9 @@ fn forwardable(method: &str) -> bool {
             // graff's MCP config, caches and sign-ins are per device.
             | methods::LIST_MCP_SERVERS
             | methods::MCP_SERVER_ACTION
+            // nanocua and what macOS has granted it are per device.
+            | methods::GET_COMPUTER_USE
+            | methods::COMPUTER_USE_ACTION
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -3789,6 +3800,19 @@ impl RpcService for EngineRpc {
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&rows)
+            }
+            methods::GET_COMPUTER_USE => {
+                let status = crate::computer_use::status(&crate::repos::home_dir())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&status)
+            }
+            methods::COMPUTER_USE_ACTION => {
+                let p: ComputerUseActionParams = parse_params(params)?;
+                let status = crate::computer_use::act(&crate::repos::home_dir(), p.action)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&status)
             }
             methods::SIGN_OUT_GRAFF_LOGIN => {
                 let p: SignOutGraffLoginParams = parse_params(params)?;

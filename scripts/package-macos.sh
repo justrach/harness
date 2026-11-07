@@ -49,6 +49,9 @@ sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info
 # ~/.harness/bin/graff from it and links `graff` onto the PATH. GRAFF_BINARY
 # overrides; otherwise the latest codegraff release, checked against its
 # SHA256SUMS. Release builds are already Developer ID signed and notarized.
+# nanocua.app, graff's computer use, comes from the same tarball when it has one
+# (NANOCUA_APP overrides) and goes in Contents/Resources: the app places it in
+# ~/Applications, since macOS's grants belong to that app and not to Harness.
 GRAFF_ARCH="$ARCH"
 [[ "$GRAFF_ARCH" == "arm64" ]] && GRAFF_ARCH=aarch64
 mkdir -p "$APP/Contents/Resources/bin"
@@ -65,7 +68,13 @@ else
   GRAFF_SRC="$GRAFF_TMP/graff-$GRAFF_ARCH-macos/graff"
   [[ -f "$GRAFF_SRC" ]] || GRAFF_SRC="$GRAFF_TMP/graff"
   install -m 755 "$GRAFF_SRC" "$APP/Contents/Resources/bin/graff"
+  NANOCUA_APP="${NANOCUA_APP:-$(find "$GRAFF_TMP" -maxdepth 2 -type d -name nanocua.app | head -1)}"
+  [[ -n "$NANOCUA_APP" ]] && ditto "$NANOCUA_APP" "$APP/Contents/Resources/nanocua.app"
   rm -rf "$GRAFF_TMP"
+  NANOCUA_APP=""
+fi
+if [[ -n "${NANOCUA_APP:-}" ]]; then
+  ditto "$NANOCUA_APP" "$APP/Contents/Resources/nanocua.app"
 fi
 echo "bundled $("$APP/Contents/Resources/bin/graff" --version | head -1)"
 # codedb ships beside it (Contents/Resources/bin/codedb): the app seeds
@@ -122,6 +131,13 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   codesign --verify --strict "$APP/Contents/Resources/bin/codedb" 2>/dev/null &&
     codesign -dv "$APP/Contents/Resources/bin/codedb" 2>&1 | grep -q "Authority=Developer ID Application" ||
     codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/bin/codedb"
+  # nanocua likewise, as a whole app: re-signing it under another identity would
+  # lose the grants people have given it.
+  if [[ -d "$APP/Contents/Resources/nanocua.app" ]]; then
+    codesign --verify --strict "$APP/Contents/Resources/nanocua.app" 2>/dev/null &&
+      codesign -dv "$APP/Contents/Resources/nanocua.app" 2>&1 | grep -q "Authority=Developer ID Application" ||
+      codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP/Contents/Resources/nanocua.app"
+  fi
   # The entitlements let dictation reach the microphone, and dropped or
   # picked files from any folder stay readable, under the hardened runtime
   # (dist/macos/Harness.entitlements).

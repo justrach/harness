@@ -73,6 +73,9 @@ jobs:
           GRAFF_BINARY: ${{ steps.graff.outputs.binary }}
         run: |
           rustup show active-toolchain || rustup toolchain install
+          # nanocua.app, when the release carries it, ships beside graff.
+          app="$(dirname "$GRAFF_BINARY")/nanocua.app"
+          if [ -d "$app" ]; then export NANOCUA_APP="$app"; fi
           scripts/package-macos.sh
           test -f target/package/*-macos-arm64-app.tar.gz
       - name: Record included revisions

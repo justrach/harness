@@ -5,7 +5,9 @@
 //! selected project (`ListMcpServers`), so project `.mcp.json` servers show
 //! beside the user-level ones. graff runs fresh for every turn, so Reconnect
 //! is a real handshake that refreshes the tools the next turn sees
-//! (`McpServerAction`).
+//! (`McpServerAction`). Computer use has its own section above them (`computer`).
+
+mod computer;
 
 use std::collections::HashSet;
 
@@ -100,6 +102,7 @@ pub struct McpPage {
     expanded: HashSet<String>,
     load_task: Option<Task<()>>,
     action_tasks: Vec<Task<()>>,
+    computer: computer::ComputerSection,
     _observe: Subscription,
 }
 
@@ -123,6 +126,7 @@ impl McpPage {
             expanded: HashSet::new(),
             load_task: None,
             action_tasks: Vec::new(),
+            computer: Default::default(),
             _observe: observe,
         };
         page.load(cx);
@@ -142,6 +146,7 @@ impl McpPage {
         self.target = McpTarget::of(self.state.read(cx));
         self.rows = Loadable::Loading;
         self.expanded.clear();
+        self.load_computer(cx);
         let params = self.request(cx, serde_json::json!({}));
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = engine
@@ -548,6 +553,7 @@ impl Render for McpPage {
             }
         };
 
+        let computer = self.render_computer(&theme, cx);
         let scrollbar = popover::rail(self, "mcp-page-scrollbar", &theme, cx);
         div()
             .id("mcp-page-host")
@@ -587,6 +593,7 @@ impl Render for McpPage {
                                         })),
                                 )
                             })
+                            .children(computer)
                             .child(body),
                     ),
             )
