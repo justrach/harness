@@ -244,6 +244,9 @@ pub(super) struct WorkspaceLayout {
     pub(super) imported: HashSet<PanelTab>,
     pub(super) hidden_tools: Vec<(usize, u64, usize, PanelTab)>,
     pub(super) stack_limit: usize,
+    /// The tabs each panel has shown, latest first. Not saved: after a restart
+    /// a close falls back to the neighbouring tab.
+    shown: HashMap<u64, Vec<PanelTab>>,
 }
 impl Default for WorkspaceLayout {
     fn default() -> Self {
@@ -260,6 +263,7 @@ impl Default for WorkspaceLayout {
             next_id: 1,
             last_selected: None,
             imported: HashSet::new(),
+            shown: HashMap::new(),
             hidden_tools: Vec::new(),
             stack_limit: 2,
         }
@@ -744,14 +748,87 @@ impl WorkspaceLayout {
     }
 
     fn remove_tab(&mut self, panel: u64, tab: &PanelTab) {
+        self.note_shown_tabs();
+        let shown = self.shown.get(&panel).cloned().unwrap_or_default();
         if let Some(p) = self.panel_mut(panel) {
             let selected = p.selected().cloned();
             p.tabs.retain(|t| t != tab);
-            p.active = selected
-                .and_then(|s| p.tabs.iter().position(|t| *t == s))
-                .unwrap_or(p.active.min(p.tabs.len().saturating_sub(1)));
+            p.active = active_after_close(&p.tabs, selected.as_ref(), p.active, &shown);
         }
     }
+    /// Runs every frame, so it only does work when a panel's tab has changed.
+    fn note_shown_tabs(&mut self) {
+        for p in &self.panels {
+            let Some(selected) = p.selected() else {
+                continue;
+            };
+            let shown = self.shown.entry(p.id).or_default();
+            if shown.first() != Some(selected) {
+                shown.retain(|t| t != selected && p.tabs.contains(t));
+                shown.insert(0, selected.clone());
+            }
+        }
+    }
+    /// A panel opened for a link, file or diff: as wide as the side pane was,
+    /// taken from the panels already open in proportion, so it isn't squeezed
+    /// to an equal share of a split.
+    fn add_side_panel(&mut self, after: u64, width: f32, preferred: f32) -> u64 {
+        let before: HashMap<u64, f32> = self.panels.iter().map(|p| (p.id, p.share)).collect();
+        let id = self.add_panel(after);
+        if self.axis != SplitAxis::Horizontal {
+            return id;
+        }
+        let total: f32 = before.values().sum();
+        let share = side_panel_share(width, before.len(), preferred);
+        for p in &mut self.panels {
+            p.share = match before.get(&p.id) {
+                Some(old) if total > 0.0 => old / total * (1.0 - share),
+                Some(_) => (1.0 - share) / before.len() as f32,
+                None => share,
+            };
+        }
+        id
+    }
+    /// The closed panel's room goes back to the others, keeping their sizes
+    /// relative to each other.
+    fn share_out_freed_room(&mut self) {
+        let total: f32 = self.panels.iter().map(|p| p.share).sum();
+        if total > 0.0 {
+            for p in &mut self.panels {
+                p.share /= total;
+            }
+        } else {
+            self.equalize();
+        }
+    }
+}
+
+/// A new side panel's share of a row `width` wide with `others` panels already
+/// in it: `preferred` wide if they can each keep [`PANEL_MIN`], and never less
+/// than an equal share.
+pub(super) fn side_panel_share(width: f32, others: usize, preferred: f32) -> f32 {
+    let equal = 1.0 / (others + 1) as f32;
+    let available = width - GUTTER * others as f32;
+    if available <= 0.0 {
+        return equal;
+    }
+    let room = available - others as f32 * PANEL_MIN;
+    (preferred.min(room) / available).clamp(equal, 1.0)
+}
+
+/// The tab a panel shows after a close: the one already on screen if that
+/// wasn't the one closed, then the one you were on before, then its neighbour.
+fn active_after_close(
+    tabs: &[PanelTab],
+    selected: Option<&PanelTab>,
+    active: usize,
+    shown: &[PanelTab],
+) -> usize {
+    selected
+        .into_iter()
+        .chain(shown)
+        .find_map(|tab| tabs.iter().position(|t| t == tab))
+        .unwrap_or(active.min(tabs.len().saturating_sub(1)))
 }
 
 /// Seven folders' worth. A long list scrolls under the text box instead of
@@ -1134,6 +1211,8 @@ impl Shell {
             changed = true;
             layout.imported.insert(tab.clone());
             let focused = layout.focused;
+            let row_width = (self.viewport_width - self.sidebar_now() - GUTTER).max(1.0);
+            let side_width = self.settings.right_pane_width;
             let target = self
                 .workspace_panels
                 .target
@@ -1145,7 +1224,7 @@ impl Shell {
                         .iter()
                         .find(|p| p.tabs.iter().any(|t| matches!(t, PanelTab::Surface { .. })))
                         .map(|p| p.id)
-                        .unwrap_or_else(|| layout.add_panel(focused))
+                        .unwrap_or_else(|| layout.add_side_panel(focused, row_width, side_width))
                 });
             layout.insert(target, tab);
             layout.focused = focused;
@@ -1192,6 +1271,7 @@ impl Shell {
                 })
                 .collect::<Vec<_>>();
         self.workspace_panels.needs_persist |= changed;
+        layout.note_shown_tabs();
         let visible_peers: HashSet<String> = layout
             .panels
             .iter()
@@ -2190,6 +2270,14 @@ impl Shell {
         };
         let id = layout.focused;
         let tab = layout.panel(id).and_then(|p| p.selected()).cloned();
+        // The only tab is already a blank new chat, so there is nothing to
+        // close, and a held key must not wipe what's been typed into it.
+        if matches!(tab, Some(PanelTab::Draft(_)))
+            && layout.panels.len() == 1
+            && layout.panels[0].tabs.len() == 1
+        {
+            return true;
+        }
         if let Some(tab) = tab {
             self.close_workspace_tab(id, tab, window, cx);
             return true;
@@ -2206,6 +2294,43 @@ impl Shell {
         // This workspace owns the close even when its final panel is empty.
         // Falling through would close the project view and select another
         // project's tabs on the next key repeat.
+        self.workspace_new_chat(cx);
+        true
+    }
+
+    /// ⌘W with a chat focused and a page, file or diff showing beside it: the
+    /// page goes first, and the chat you're reading stays. False when nothing
+    /// is showing beside the focused panel.
+    pub(crate) fn close_side_surface_by_shortcut(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !matches!(self.route, Route::Chat) {
+            return false;
+        }
+        let Some(layout) = self.panel_layout(cx) else {
+            return false;
+        };
+        let surface = |p: &WorkspacePanel| {
+            p.selected()
+                .filter(|tab| matches!(tab, PanelTab::Surface { .. }))
+                .cloned()
+        };
+        if layout.panel(layout.focused).and_then(surface).is_some() {
+            return false;
+        }
+        let Some((panel, tab)) = layout
+            .panels
+            .iter()
+            .rev()
+            .filter(|p| layout.expanded.is_none_or(|id| id == p.id))
+            .find_map(|p| surface(p).map(|tab| (p.id, tab)))
+        else {
+            return false;
+        };
+        self.archive_choice_prompt = false;
+        self.close_workspace_tab(panel, tab, window, cx);
         true
     }
 
@@ -2601,6 +2726,9 @@ impl Shell {
             if let Some(tabs) = self.right_tabs.get_mut(owner) {
                 tabs.retain(|s| s != surface);
             }
+            // Left set, the next frame reads it as a request for a new tab and
+            // opens an empty panel the user has to close as well.
+            self.collapse_surfaces_if_empty(owner, cx);
         }
         if let PanelTab::Terminal(id) = tab {
             if let (Some(t), Some(key)) = (
@@ -2665,23 +2793,28 @@ impl Shell {
 
     /// A split panel whose last tab just closed goes with it, or ⌘W would need
     /// a second press to get past an empty panel. The one panel left in a
-    /// window stays, with its choices page.
+    /// window can't go, so it moves on to a new chat.
     fn collapse_emptied_panel(&mut self, panel: u64, window: &mut Window, cx: &mut Context<Self>) {
         let layout = self.panel_layout_mut(cx);
         let Some(index) = layout
             .panels
             .iter()
             .position(|p| p.id == panel && p.tabs.is_empty())
-            .filter(|_| layout.panels.len() > 1)
         else {
             return;
         };
+        if layout.panels.len() == 1 {
+            self.workspace_new_chat(cx);
+            window.focus(&self.composer.focus_handle(cx), cx);
+            return;
+        }
         let was_focused = layout.focused == panel;
         layout.panels.remove(index);
+        layout.shown.remove(&panel);
         if layout.expanded == Some(panel) {
             layout.expanded = None;
         }
-        layout.equalize();
+        layout.share_out_freed_room();
         if self
             .workspace_panels
             .menu
@@ -6759,7 +6892,7 @@ mod interaction_tests {
                     .update(cx, |shell, window, cx| {
                         let layout = shell.panel_layout(cx).unwrap();
                         assert_eq!(layout.panels.len(), 1);
-                        assert!(layout.panels[0].tabs.is_empty());
+                        assert!(matches!(layout.panels[0].tabs[..], [PanelTab::Draft(_)]));
                         window.remove_window();
                     })
                     .unwrap();
@@ -6850,7 +6983,10 @@ mod interaction_tests {
             // still close the original focused panel's tab.
             assert!(shell.workspace_close_focused(window, cx));
             let layout = shell.panel_layout(cx).unwrap();
-            assert!(layout.panel(0).unwrap().tabs.is_empty());
+            assert!(matches!(
+                layout.panel(0).unwrap().tabs[..],
+                [PanelTab::Draft(_)]
+            ));
             window.remove_window();
         });
     }

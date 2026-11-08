@@ -32,6 +32,12 @@ pub fn faces(text: &str) -> Vec<(Range<usize>, Face)> {
     .collect()
 }
 
+/// Whether [`syntax_spans`] could find anything: only fenced code gets colors,
+/// and a fence needs one of these markers.
+pub fn may_have_code_fence(text: &str) -> bool {
+    text.contains("```") || text.contains("~~~")
+}
+
 /// Highlight fenced code with its own grammar. Running the Markdown grammar
 /// over the whole draft colors fence bodies as strings, including identifiers.
 /// Keep prose and fence markers neutral, and retain exact source byte offsets.
@@ -498,6 +504,25 @@ pub fn decorations(text: &str, active: Range<usize>) -> Vec<(Range<usize>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_without_a_fence_marker_never_has_colors() {
+        for text in [
+            "",
+            "plain words",
+            "`inline code` and ``two ticks``",
+            "    indented code",
+            "> quoted\n\n- list",
+            "# heading\n\n**bold**",
+        ] {
+            assert!(!may_have_code_fence(text));
+            assert!(syntax_spans(text).is_empty(), "{text:?}");
+        }
+        for text in ["```rust\nfn a() {}\n```", "~~~rust\nfn a() {}\n~~~"] {
+            assert!(may_have_code_fence(text));
+            assert!(!syntax_spans(text).is_empty(), "{text:?}");
+        }
+    }
     #[test]
     fn decorations_preserve_rules_code_and_nested_emphasis() {
         for rule in ["- - -", "* * *", "___"] {

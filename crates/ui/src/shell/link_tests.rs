@@ -2334,3 +2334,227 @@ fn alternating_peer_links_preserve_each_owners_active_browser_and_transcript(
         }
     });
 }
+
+/// One panel holding `chats`, with the first one on screen, as a window looks
+/// before any split.
+fn with_one_panel(
+    cx: &mut TestAppContext,
+    chats: &'static [&'static str],
+    run: impl FnOnce(&mut Shell, &mut Window, &mut Context<Shell>),
+) {
+    with_link_panes(cx, Some("owner"), |shell, window, cx| {
+        shell.chat_split = None;
+        shell.sync_chat_panes(cx);
+        shell.boot_restored = true;
+        shell.ensure_workspace_sessions(cx);
+        shell.sync_panel_workspace(cx);
+        let layout = shell.panel_layout_mut(cx);
+        layout.panels.truncate(1);
+        let panel = &mut layout.panels[0];
+        layout.focused = panel.id;
+        panel.share = 1.0;
+        panel.tabs = chats
+            .iter()
+            .map(|id| PanelTab::Chat((*id).into()))
+            .collect();
+        panel.active = 0;
+        shell.sync_panel_workspace(cx);
+        run(shell, window, cx);
+    });
+}
+
+fn panel_shapes(shell: &Shell, cx: &App) -> Vec<(usize, Vec<PanelTab>)> {
+    shell
+        .panel_layout(cx)
+        .unwrap()
+        .panels
+        .iter()
+        .map(|p| (p.active, p.tabs.clone()))
+        .collect()
+}
+
+fn browser_tab(shell: &Shell, id: u64) -> PanelTab {
+    PanelTab::Surface {
+        owner: workspace_owner(shell),
+        surface: RightSurface::Browser(id),
+    }
+}
+
+#[gpui::test]
+fn a_link_opens_beside_the_chat_at_the_side_panes_width(cx: &mut TestAppContext) {
+    with_one_panel(cx, &["owner", "peer-a"], |shell, window, cx| {
+        shell.viewport_width = 1400.0;
+        let id = open_panel_browser(shell, "owner", window, cx);
+        assert_eq!(
+            panel_shapes(shell, cx),
+            vec![
+                (
+                    0,
+                    vec![
+                        PanelTab::Chat("owner".into()),
+                        PanelTab::Chat("peer-a".into()),
+                    ]
+                ),
+                (0, vec![browser_tab(shell, id)]),
+            ]
+        );
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("owner"));
+    });
+}
+
+#[gpui::test]
+fn a_link_in_a_split_is_not_squeezed_to_an_equal_share(cx: &mut TestAppContext) {
+    with_panel_links(cx, |shell, window, cx| {
+        shell.viewport_width = 1500.0;
+        let layout = shell.panel_layout_mut(cx);
+        layout.panels.truncate(3);
+        for panel in &mut layout.panels {
+            panel.share = 1.0 / 3.0;
+        }
+        focus_panel_chat(shell, "peer-a", window, cx);
+        let id = open_panel_browser(shell, "peer-a", window, cx);
+        let layout = shell.panel_layout(cx).unwrap();
+        assert_eq!(layout.panels.len(), 4);
+        let (page, _) = layout.location(&browser_tab(shell, id)).unwrap();
+        for panel in &layout.panels {
+            if panel.id == page {
+                assert!(panel.share > 0.25, "{}", panel.share);
+            } else {
+                assert!(panel.share < 0.25, "{}", panel.share);
+            }
+        }
+        let total: f32 = layout.panels.iter().map(|p| p.share).sum();
+        assert!((total - 1.0).abs() < 0.001, "{total}");
+    });
+}
+
+#[test]
+fn a_side_panel_gets_the_old_width_when_the_others_can_spare_it() {
+    use super::workspace_panels::side_panel_share as share;
+    // Beside one chat it never drops under half.
+    assert_eq!(share(1200.0, 1, 520.0), 0.5);
+    // Beside three, 520 wide while each of them keeps its minimum.
+    let available = 2000.0 - 8.0 * 3.0;
+    assert!((share(2000.0, 3, 520.0) - 520.0 / available).abs() < 0.001);
+    // No room to spare: what the others can give, down to an equal share.
+    let available = 1136.0 - 8.0 * 3.0;
+    assert!((share(1136.0, 3, 520.0) - (available - 660.0) / available).abs() < 0.001);
+    assert_eq!(share(600.0, 3, 520.0), 0.25);
+}
+
+#[gpui::test]
+fn a_second_link_joins_the_panel_already_holding_a_page(cx: &mut TestAppContext) {
+    with_panel_links(cx, |shell, window, cx| {
+        focus_panel_chat(shell, "peer-a", window, cx);
+        let first = open_panel_browser(shell, "peer-a", window, cx);
+        focus_panel_chat(shell, "owner", window, cx);
+        let second = open_panel_browser(shell, "owner", window, cx);
+        let layout = shell.panel_layout(cx).unwrap();
+        assert_eq!(
+            layout.location(&browser_tab(shell, second)).unwrap().0,
+            layout.location(&browser_tab(shell, first)).unwrap().0,
+        );
+        let (chat, ix) = layout.location(&PanelTab::Chat("owner".into())).unwrap();
+        let shapes = panel_shapes(shell, cx);
+        let chat = layout.panels.iter().position(|p| p.id == chat).unwrap();
+        assert_eq!(
+            shapes[chat].0, ix,
+            "the chat you were reading stays on screen"
+        );
+    });
+}
+
+#[gpui::test]
+fn closing_a_linked_page_once_gives_the_chat_its_room_back(cx: &mut TestAppContext) {
+    with_one_panel(cx, &["owner", "peer-a", "peer-b"], |shell, window, cx| {
+        let id = open_panel_browser(shell, "owner", window, cx);
+        let tab = browser_tab(shell, id);
+        let (panel, _) = shell.panel_layout(cx).unwrap().location(&tab).unwrap();
+        shell.close_workspace_tab_by_button(panel, tab, window, cx);
+        shell.sync_panel_workspace(cx);
+        assert_eq!(
+            panel_shapes(shell, cx),
+            vec![(
+                0,
+                vec![
+                    PanelTab::Chat("owner".into()),
+                    PanelTab::Chat("peer-a".into()),
+                    PanelTab::Chat("peer-b".into()),
+                ]
+            )],
+            "one close, no empty panel left behind, and back on the first tab"
+        );
+        assert_eq!(shell.panel_layout(cx).unwrap().panels[0].share, 1.0);
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("owner"));
+    });
+}
+
+#[gpui::test]
+fn command_w_closes_the_page_beside_the_chat_before_the_chat(cx: &mut TestAppContext) {
+    with_one_panel(cx, &["owner", "peer-a"], |shell, window, cx| {
+        assert!(!shell.close_side_surface_by_shortcut(window, cx));
+        let id = open_panel_browser(shell, "owner", window, cx);
+        // Back in the chat, as after clicking it to keep reading.
+        focus_panel_chat(shell, "owner", window, cx);
+        assert!(shell.close_side_surface_by_shortcut(window, cx));
+        shell.sync_panel_workspace(cx);
+        assert!(!shell.browsers.contains_key(&id));
+        assert_eq!(panel_shapes(shell, cx).len(), 1);
+        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("owner"));
+        assert!(!shell.close_side_surface_by_shortcut(window, cx));
+    });
+}
+
+#[gpui::test]
+fn closing_the_only_tab_moves_on_to_a_new_chat(cx: &mut TestAppContext) {
+    with_one_panel(cx, &["owner"], |shell, window, cx| {
+        let tab = PanelTab::Chat("owner".into());
+        let panel = shell.panel_layout(cx).unwrap().panels[0].id;
+        shell.close_workspace_tab_by_button(panel, tab, window, cx);
+        shell.sync_panel_workspace(cx);
+        let shapes = panel_shapes(shell, cx);
+        assert!(
+            matches!(shapes.as_slice(), [(0, tabs)] if matches!(tabs.as_slice(), [PanelTab::Draft(_)])),
+            "{shapes:?}"
+        );
+        assert_eq!(shell.state.read(cx).selected_chat, None);
+        // Nothing more to close, and a held key leaves the new chat alone.
+        assert!(shell.workspace_close_focused(window, cx));
+        shell.sync_panel_workspace(cx);
+        assert_eq!(panel_shapes(shell, cx), shapes);
+    });
+}
+
+#[gpui::test]
+fn closing_a_split_page_leaves_no_empty_panel_to_close_again(cx: &mut TestAppContext) {
+    with_panel_links(cx, |shell, window, cx| {
+        focus_panel_chat(shell, "peer-a", window, cx);
+        let before = panel_shapes(shell, cx);
+        let id = open_panel_browser(shell, "peer-a", window, cx);
+        let tab = browser_tab(shell, id);
+        let (panel, _) = shell.panel_layout(cx).unwrap().location(&tab).unwrap();
+        shell.close_workspace_tab_by_button(panel, tab, window, cx);
+        shell.sync_panel_workspace(cx);
+        assert_eq!(panel_shapes(shell, cx), before);
+        assert!(!shell.panels.get(&workspace_owner(shell)).changes_open);
+    });
+}
+
+#[gpui::test]
+fn closing_the_tab_you_are_on_goes_back_to_the_one_before_it(cx: &mut TestAppContext) {
+    with_one_panel(cx, &["owner", "peer-a", "peer-b"], |shell, window, cx| {
+        let panel = shell.panel_layout(cx).unwrap().panels[0].id;
+        for chat in ["peer-b", "owner", "peer-a"] {
+            let tab = PanelTab::Chat(chat.into());
+            shell.focus_workspace_tab(panel, tab, window, cx);
+            shell.on_state_changed(&shell.state.clone(), cx);
+            shell.sync_panel_workspace(cx);
+        }
+        shell.close_workspace_tab(panel, PanelTab::Chat("peer-a".into()), window, cx);
+        assert_eq!(
+            shell.panel_layout(cx).unwrap().panels[0].selected(),
+            Some(&PanelTab::Chat("owner".into())),
+            "the last one you looked at, not the neighbour that slid into place"
+        );
+    });
+}

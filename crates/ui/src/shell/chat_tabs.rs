@@ -1822,10 +1822,13 @@ mod tests {
             })
             .unwrap();
         // Close the split panel with its only tab, then its neighbor's last
-        // chat. Repeating the shortcut on the final empty panel must leave the
-        // window and both sessions open. Selection is only pinned where the
-        // focused panel is empty.
-        for expected_panels in [vec![vec!["closing"]], vec![vec![]], vec![vec![]]] {
+        // chat, which moves on to a new one. Repeating the shortcut there must
+        // leave the window and both sessions open.
+        for expected_panels in [
+            vec![vec!["closing"]],
+            vec![vec!["new chat"]],
+            vec![vec!["new chat"]],
+        ] {
             cx.update(|cx| cx.dispatch_action(&crate::app_menus::CloseTabWithoutArchiving));
             cx.run_until_parked();
             window
@@ -1840,13 +1843,14 @@ mod tests {
                                 .iter()
                                 .map(|tab| match tab {
                                     workspace_panels::PanelTab::Chat(id) => id.as_str(),
+                                    workspace_panels::PanelTab::Draft(_) => "new chat",
                                     other => panic!("unexpected tab {other:?}"),
                                 })
                                 .collect()
                         })
                         .collect();
                     assert_eq!(panels, expected_panels);
-                    if panels.last().unwrap().is_empty() {
+                    if panels.last().unwrap() == &["new chat"] {
                         assert_eq!(shell.state.read(cx).selected_chat, None);
                     }
                     assert_eq!(shell.chat_tabs.len(), 2);

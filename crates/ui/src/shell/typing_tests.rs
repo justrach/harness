@@ -113,6 +113,47 @@ fn typing_in_the_composer_leaves_the_shell_and_sidebar_alone(cx: &mut gpui::Test
     );
 }
 
+/// Each key drew the window a second time when the background parse for syntax
+/// colors came back, even with no colors to show. A draw re-renders the shell.
+#[gpui::test]
+fn plain_typing_does_not_draw_again_for_syntax_colors(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, cx) = shell_with_chats(cx, &dir);
+    cx.update(|window, cx| {
+        let focus = shell.read(cx).composer.focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    cx.simulate_keystrokes("right");
+    cx.run_until_parked();
+    let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let count = notified.clone();
+    let _sub = cx.update(|_, cx| cx.observe(&input, move |_, _| count.set(count.get() + 1)));
+    // Counted across the whole key: a test frame draws while the key is handled,
+    // so the parse is already on its way back by the time the key returns.
+    let text = "hello world";
+    for ch in text.chars() {
+        cx.simulate_input(&ch.to_string());
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        notified.get(),
+        text.len(),
+        "one draw per key, and none for colors plain text doesn't have"
+    );
+    // Code still gets its colors, which does take that second draw.
+    input.update(cx, |input, cx| {
+        input.set_text("```rust\nfn main() {}\n```", cx)
+    });
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    notified.set(0);
+    cx.run_until_parked();
+    assert!(notified.get() > 0, "fenced code never got its colors");
+}
+
 /// An old engine is only worth noticing if the person can see it was noticed.
 #[gpui::test]
 fn an_older_engine_shows_in_the_sidebar(cx: &mut gpui::TestAppContext) {
