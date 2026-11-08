@@ -49,6 +49,7 @@ pub fn open(a: *App) void {
 
 pub fn close(a: *App) void {
     const d = a.view.theme_import orelse return;
+    @import("text_buffer.zig").deinit(&d.source);
     d.arena.deinit();
     d.err.deinit(a.gpa);
     a.gpa.destroy(d);

@@ -1077,6 +1077,9 @@ pub struct Window {
     pub(crate) platform_window: Box<dyn PlatformWindow>,
     display_id: Option<DisplayId>,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    /// The atlas retirement generation these cached views were painted at.
+    /// A changed generation invalidates cached paint before the next frame.
+    atlas_eviction_revision: u64,
     text_system: Arc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -1489,6 +1492,7 @@ impl Window {
 
         let display_id = platform_window.display().map(|display| display.id());
         let sprite_atlas = platform_window.sprite_atlas();
+        let atlas_eviction_revision = sprite_atlas.eviction_revision();
         let mouse_position = platform_window.mouse_position();
         let modifiers = platform_window.modifiers();
         let capslock = platform_window.capslock();
@@ -1909,6 +1913,7 @@ impl Window {
             platform_window,
             display_id,
             sprite_atlas,
+            atlas_eviction_revision,
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -4867,7 +4872,27 @@ impl Window {
             self.sprite_atlas.remove(&params.clone().into());
         }
 
+        let eviction_revision = self.sprite_atlas.eviction_revision();
+        if eviction_revision != self.atlas_eviction_revision {
+            self.atlas_eviction_revision = eviction_revision;
+            // Cached sibling views may still replay this image's tiles. Drop
+            // their cached paint and ask for the frame that rebuilds it; the
+            // atlas generation check rejects any stale batch in the meantime.
+            self.invalidator.set_dirty(true);
+        }
+
         Ok(())
+    }
+
+    pub(crate) fn atlas_eviction_revision(&self) -> u64 {
+        self.atlas_eviction_revision
+    }
+
+    /// Test seam for the cache generation normally advanced by `drop_image`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_atlas_evicted(&mut self) {
+        self.atlas_eviction_revision = self.atlas_eviction_revision.wrapping_add(1);
+        self.invalidator.set_dirty(true);
     }
 
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which

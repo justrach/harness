@@ -2,7 +2,7 @@
 //! pickers.rs): one rounded pill with attach and dictate on the left, the
 //! input ("Do anything…") and a round accent send button that becomes Stop
 //! while a run goes with nothing typed. It expands with a line break, and
-//! always on a new chat. The model chip (the agent's mark, the model, the
+//! for multiline drafts. New chats share the dock. The model chip (the agent's mark, the model, the
 //! reasoning level) leads the footer under the pill.
 const std = @import("std");
 const nanoui = @import("nanoui");
@@ -43,7 +43,7 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     const expanded = attachments.count(a) > 0 or composerFlip(
         a.view.composer_expanded,
         c.text.width(a.composer.text(), .{ .size = 14, .line_height = 22.75 }),
-        compactCapacity(a, w),
+        compactCapacity(w, dictate.shown(a)),
         std.mem.indexOfScalar(u8, a.composer.text(), '\n') != null,
     );
     a.view.composer_expanded = expanded;
@@ -53,11 +53,15 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The session footer, in the slot the 40 points under the pill keep
     // for it (`SESSION_FOOTER_HEIGHT`, 8 under the pill); drawn over that
     // padding so the queue tray's tuck needn't move it.
-    const pill_h: f32 = if (!expanded) 49 else if (a.view.composer_anchor) |r| r.h else 49;
     {
-        const f = ui.div(c).row().absolute().offset(0, pill_h + footer_view.gap);
+        // This zero-height flow anchor follows THIS frame's pill bottom.
+        // Offsetting from composer_anchor used its previous height, making
+        // the footer jump into the text for one frame on every line change.
+        const anchor = ui.div(c).column().w(w).h(0);
+        defer anchor.end();
+        const f = ui.div(c).row().absolute().offset(0, footer_view.gap);
         defer f.end();
-        footer_view.footer(c, a, k, w);
+        if (a.selected == null) @import("view_newchat.zig").footer(c, a, k, w) else footer_view.footer(c, a, k, w);
     }
     // The finished turn's "N files changed" card floats over the
     // transcript's foot, 8 clear of the pill and 8 wider either side,
@@ -94,13 +98,18 @@ pub fn composerFlip(expanded: bool, text_width: f32, capacity: f32, newline: boo
 }
 
 /// The compact input's width less 8 (`compact_capacity`): the pill less
-/// its edges, attach (and the mic), Send and their insets. The model chip
-/// no longer shares the line.
-fn compactCapacity(a: *App, w: f32) f32 {
-    return @max(0, w - 100 - (if (dictate.shown(a)) @as(f32, 30) else 0));
+/// its edges (2), side insets (16), attach (28), input insets (16),
+/// Send's gap (8) and button (28), then the 8-point expansion reserve.
+/// The mic adds its 28-point button and 2-point utility gap.
+fn compactCapacity(w: f32, dictation: bool) f32 {
+    return @max(0, w - 106 - (if (dictation) @as(f32, 30) else 0));
 }
 
 test "composer expansion uses GPUI's width threshold and collapse hysteresis" {
+    try std.testing.expectEqual(@as(f32, 204), compactCapacity(340, true));
+    try std.testing.expectEqual(@as(f32, 198), compactCapacity(334, true));
+    try std.testing.expectEqual(@as(f32, 234), compactCapacity(340, false));
+    try std.testing.expectEqual(@as(f32, 0), compactCapacity(0, true));
     try std.testing.expect(!composerFlip(false, 300, 300, false));
     try std.testing.expect(composerFlip(false, 301, 300, false));
     try std.testing.expect(composerFlip(true, 280, 300, false));
@@ -127,29 +136,41 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     // field's id is last frame's, which `keepFocus` keeps current.
     const focused = a.view.composer_id != 0 and c.focus == a.view.composer_id;
     const edge = if (focused) k.accent.alpha(0.55) else k.border;
-    const p = kit.shadowLg(ui.div(c).w(w).bg(k.pill()).border(edge).borderW(1).rounded(corner).p(1)).bg(k.pill()).clip();
-    const box = if (shape == .compact) p.row().h(49).px(8 + 1).itemsCenter() else p.column();
+    ui.key(c, "composer-surface");
+    //0.2.172 keeps the writing plane opaque over a glass shell. Use the
+    // selected theme before the shell's translucent material is applied.
+    const fill = if (k.frosted) theme.colors(k.dark).pill() else k.pill();
+    const p = kit.shadowLg(ui.div(c).w(w).bg(fill).border(edge).borderW(1).rounded(corner).p(1)).bg(fill).clip();
+    const box = if (shape == .compact) p.column().h(49) else p.column();
     defer box.end();
+    // The whole writing plane focuses the input, including its padding.
+    // Picker controls keep their own focus when they open.
+    if (box.clicked() and a.picker == .none) a.view.focus_composer = true;
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r;
-    if (shape == .compact) {
-        attachButtons(c, a, k);
-        input(c, a, k, .compact);
-        send(c, a, k);
-        return;
-    }
-    attachmentStrip(c, a, k, w);
+    if (shape == .expanded) attachmentStrip(c, a, k, w);
     {
-        // At least 60 tall, as GPUI's text area (`TEXTAREA_MIN`), growing
-        // with its lines.
-        const area = ui.div(c).row().wFull();
+        // Keep the field's keyed ancestry in both shapes. Only styles and
+        // neighboring controls change: focus, selection, undo and caret do
+        // not need to be recreated when the first newline expands the pill.
+        ui.key(c, "composer-text-area");
+        const area = if (shape == .compact)
+            ui.div(c).row().wFull().h(47).px(8).itemsCenter()
+        else
+            ui.div(c).row().wFull();
+        if (shape == .expanded) c.node(area.index).style.min_height = textarea_min;
         defer area.end();
-        _ = c.leaf(.{ .width = .{ .px = 0 }, .height = .{ .px = textarea_min } }, .none, null);
-        // `pt(16)`, less the point and a half GPUI's input draws its first
-        // line above nano's (measured: parity/scenes/settings-*.json).
-        const inner = ui.div(c).column().grow().w(0).px(16).pt(16 - 1.5).pb(4 + 1.5);
-        defer inner.end();
-        input(c, a, k, .expanded);
+        if (shape == .compact) attachButtons(c, a, k);
+        {
+            ui.key(c, "composer-text-inner");
+            const base = ui.div(c).column().grow().w(0);
+            // Preserve GPUI's expanded baseline and bare-field padding.
+            const inner = if (shape == .compact) base else base.px(16).pt(16 - 1.5).pb(4 + 1.5 - 4);
+            defer inner.end();
+            input(c, a, k, shape);
+        }
+        if (shape == .compact) send(c, a, k);
     }
+    if (shape == .compact) return;
     // Expanded: attach (and the mic) at the start, Send at the end.
     const actions = ui.div(c).row().wFull().h(42).px(12).pt(2).pb(8).itemsCenter();
     defer actions.end();
@@ -212,7 +233,7 @@ pub fn dictationStatus(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
 
 fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     // Compact, GPUI's line sits half a point lower than nano's centred one.
-    const box = if (shape == .compact) ui.div(c).row().grow().w(0).px(8).pt(1).itemsCenter() else ui.div(c).column().wFull();
+    const box = if (shape == .compact) ui.div(c).row().wFull().px(8).pt(1).itemsCenter() else ui.div(c).column().wFull();
     defer box.end();
     const placeholder = if (a.engine.state != .connected)
         @import("engine_start.zig").waiting(a)
@@ -243,7 +264,12 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     a.view.composer_caret = r.caret;
     const on_enter = @import("view_settings_shortcuts.zig").sendsOnEnter(a);
     if (r.submitted) {
-        if (on_enter) a.send() else {
+        // Shift-Return is always a newline. The field owns this translation,
+        // but keep the app boundary safe if a native submit arrives with the
+        // modifier still set: it must never send the draft.
+        if (on_enter and !c.input.shift) {
+            a.send();
+        } else {
             _ = a.composer.insert(r.caret, "\n");
             a.composer.want_caret = r.caret + 1;
         }
@@ -257,7 +283,9 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     if (has_content and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) {
         if (on_enter and a.queues() and a.queue_edit == null) a.sendFollowUp(other) else a.send();
     }
-    if (has_content and a.queues() and a.queue_edit == null and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true, .alt = true })) a.sendFollowUp(other);
+    if (has_content and a.queues() and a.queue_edit == null and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true, .alt = true })) {
+        a.sendFollowUp(other);
+    }
     recall(c, a, c.node(@intCast(at)).id);
     keepFocus(c, a, c.node(@intCast(at)).id);
     // ⌘↩ with nothing typed sends the newest queued message now.
@@ -318,7 +346,8 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
 /// leading edge (`PickerKind::HarnessModel`'s trigger).
 pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     const t = a.target();
-    const base = ui.div(c).row().h(24).maxW(248).px(6).gap(6).itemsCenter().rounded(8).clip();
+    const room = @max(80, transcript_view.paneWidth(c, a) - 32 - 100);
+    const base = ui.div(c).row().h(24).maxW(@min(248, room)).px(6).gap(6).itemsCenter().rounded(8).clip();
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -356,8 +385,8 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
         return;
     }
     // `hover_blend`: the label brightens under the pointer.
-    ui.text(c, a.modelLabel(t.model), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
-    if (t.reasoning) |level| ui.text(c, rules.reasoningLabel(level), .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.muted.alpha(0.7) });
+    ui.text(c, a.modelLabel(t.model), .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
+    if (t.reasoning) |level| ui.text(c, rules.reasoningLabel(level), .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
 }
 
 /// The selected model's maker mark, or the catalog's first model's when
@@ -375,7 +404,7 @@ fn chipMaker(a: *App) ?icons.Name {
 /// 0.35 and 0.75 every 2.4 s (popover.rs `skeleton_bar`).
 fn skeleton(c: *ui.Context) void {
     const phase = @sin(@as(f32, @floatCast(c.time)) * std.math.tau / 2.4) * 0.5 + 0.5;
-    c.frameIn(1.0 / 30.0);
+    kit.loaderFrame(c, 1.0 / 30.0);
     _ = c.leaf(.{ .width = .{ .px = 56 }, .height = .{ .px = 11 }, .radius = 5.5, .background = .{ .r = 1, .g = 1, .b = 1, .a = 0.08 * (0.35 + 0.4 * phase) } }, .none, null);
 }
 

@@ -25,7 +25,7 @@ const phi: f32 = 1.618;
 
 /// Whether a pick keeps the tabs (⌘K) or replaces the current one
 /// (`/resume`) (`PaletteNavigation`).
-pub const Navigation = enum { preserve_tabs, replace_current };
+pub const Navigation = enum { preserve_tabs, replace_current, chat_history };
 
 /// Other tools' conversations are asked for again on opening only after
 /// this long (`EXTERNAL_REFRESH_AFTER`).
@@ -51,6 +51,7 @@ pub const State = struct {
     importing_all: bool = false,
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
+        @import("text_buffer.zig").deinit(&s.query);
         s.external.deinit(gpa);
         if (s.external_arena) |*x| x.deinit();
     }
@@ -61,7 +62,7 @@ pub const State = struct {
 /// tab (`toggle_resume_palette`).
 pub fn toggle(a: *App, navigation: Navigation) void {
     const p = &a.view.palette;
-    if (p.open) return close(a);
+    if (p.open and p.navigation == navigation) return close(a);
     // The session search and the header's menus give way.
     @import("view_sidebar_search.zig").close(a);
     @import("view_sidebar_menus.zig").close(a);
@@ -73,7 +74,7 @@ pub fn toggle(a: *App, navigation: Navigation) void {
     p.enter = .{};
     p.reveal = false;
     const stale = if (p.external_loaded_ms) |at| a.nowMs() - at >= external_refresh_ms else true;
-    if (stale) loadExternal(a);
+    if (stale and navigation != .chat_history) loadExternal(a);
     a.redraw();
 }
 
@@ -118,7 +119,8 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
     errdefer out.deinit(gpa);
     var in_panes: std.ArrayList([]const u8) = .empty;
     defer in_panes.deinit(gpa);
-    if (!a.view.settings_open) if (a.tabs.layout()) |s| for (s.panes.items, 0..) |pane, ix| {
+    const history = a.view.palette.navigation == .chat_history;
+    if (!history and !a.view.settings_open) if (a.tabs.layout()) |s| for (s.panes.items, 0..) |pane, ix| {
         if (ix == s.focus) continue;
         if (pane) |id| try in_panes.append(gpa, id);
         const l = paneLabel(a, ix);
@@ -126,10 +128,12 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
         const text = std.fmt.bufPrint(&buf, "{s} {s}", .{ l.title, l.project }) catch l.title;
         if (pal.matchesQuery(query, text)) try out.append(gpa, .{ .pane = ix });
     };
-    const actions = pal.actionsFor(query, isDark(a));
-    try out.appendSlice(gpa, actions.slice());
+    if (!history) {
+        const actions = pal.actionsFor(query, isDark(a));
+        try out.appendSlice(gpa, actions.slice());
+    }
     const p = &a.view.palette;
-    if (p.external.items.len > 0 and pal.matchesQuery(query, "import conversations from other tools")) try out.append(gpa, .import_all);
+    if (!history and p.external.items.len > 0 and pal.matchesQuery(query, "import conversations from other tools")) try out.append(gpa, .import_all);
     var chats: std.ArrayList(@import("workspace.zig").Chat) = .empty;
     defer chats.deinit(gpa);
     for (a.chats.items) |ch| {
@@ -150,6 +154,7 @@ pub fn entries(a: *const App, gpa: std.mem.Allocator, query: []const u8) ![]Entr
     }
     @import("workspace.zig").sortChatsBy(chats.items, a.settings.sort() == .created);
     for (chats.items[0..@min(chats.items.len, pal.history_limit)]) |ch| try out.append(gpa, .{ .chat = ch.id });
+    if (history) return out.toOwnedSlice(gpa);
     const limit: usize = if (query.len == 0) pal.external_idle_limit else pal.history_limit;
     var shown: usize = 0;
     for (p.external.items, 0..) |x, i| {
@@ -185,7 +190,7 @@ pub fn activate(a: *App, e: Entry) void {
     close(a);
     switch (e) {
         .new_chat => if (replace) a.replaceCurrent(null) else a.newTab(),
-        .new_project => a.addFolder(),
+        .new_project => @import("app_open_chooser.zig").open(a, .new_project),
         .settings => @import("view_settings.zig").open(a),
         .theme => unreachable,
         .external => |i| if (i < p.external.items.len) {
@@ -199,6 +204,7 @@ pub fn activate(a: *App, e: Entry) void {
             var buf: [256]u8 = undefined;
             const own = buf[0..@min(id.len, buf.len)];
             @memcpy(own, id[0..own.len]);
+            @import("view_sessions.zig").close(a);
             if (replace) a.replaceCurrent(own) else a.openChatInTab(own);
         },
     }
@@ -245,15 +251,38 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     const query = queryOf(c, a);
     const list = entries(a, c.alloc(), query) catch return;
     p.active = @min(p.active, list.len -| 1);
+    const history = p.navigation == .chat_history;
+    const footer = history and a.view.sidebar_open and !a.view.settings_open and !a.view.menus.overview.open;
+    const w = @min(if (history) @as(f32, 420) else 560, c.size.w - 32);
     ui.key(c, "command-palette-scrim");
-    const scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(8).bg(scrimColor(k)).center();
+    var scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(8);
+    if (history) {
+        const left = std.math.clamp(if (footer) a.settings.sidebarWidth() - 44 else 16, 16, @max(16, c.size.w - w - 16));
+        scrim = scrim.column().itemsStart().pl(left);
+        scrim = if (footer) scrim.justifyEnd().pb(52) else scrim.pt(50);
+    } else scrim = scrim.bg(scrimColor(k)).center();
     defer scrim.end();
     if (scrim.clicked()) return close(a);
-    const w = @min(560, c.size.w - 32);
     // Its children inside its 1-point border, as GPUI lays them out.
-    const card = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).w(w).column().p(1).rounded(16)
-        .bg(k.composer).border(k.border).borderW(1).clip()));
+    var card = @import("view_sidebar_menus.zig").held(ui.div(c).w(w).column().p(1).rounded(16)
+        .bg(if (k.frosted) .transparent else k.composer).border(k.border).borderW(1).clip());
+    if (!k.frosted) card = kit.shadowLg(card);
     defer card.end();
+    if (k.frosted) frostedBackdrop(c, k);
+    if (history) {
+        const title = ui.div(c).row().wFull().px(16).pt(12).pb(4).gap(8).itemsCenter();
+        defer title.end();
+        icons.icon(c, .@"clock-circle", 16, k.muted, 0);
+        {
+            const label = ui.div(c).row().grow().w(0);
+            defer label.end();
+            ui.text(c, "Chat history", .{ .size = 14, .line_height = 14 * phi, .weight = theme.ui_medium_weight, .color = k.text });
+        }
+        const dismiss = ui.div(c).size(20, 20).center().rounded(5).hover(k.hover);
+        defer dismiss.end();
+        icons.icon(c, .close, 12, k.muted, 0);
+        if (dismiss.clicked()) close(a);
+    }
     header(c, a, k, w);
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = hairline(k) }, .none, null);
     var picked: ?Entry = null;
@@ -272,6 +301,11 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (ix == 0) wrap = wrap.pt(8);
             if (ix + 1 == list.len) wrap = wrap.pb(8);
             defer wrap.end();
+            if (history and ix == 0) {
+                const section = ui.div(c).row().wFull().px(16).pt(6).pb(5);
+                defer section.end();
+                ui.text(c, "All chats", .{ .size = 11, .line_height = 11 * phi, .color = k.muted });
+            }
             if (ix > 0 and list[ix - 1].section() != e.section()) {
                 const sep = ui.div(c).column().wFull().py(8);
                 defer sep.end();
@@ -279,7 +313,9 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
             }
             const content = ui.div(c).column().wFull().px(8);
             defer content.end();
-            if (row(c, a, k, e, ix == p.active, query_text, w - 2 - 16)) picked = e;
+            if (history) {
+                if (historyRow(c, a, k, e, ix == p.active, query_text, w - 18)) picked = e;
+            } else if (row(c, a, k, e, ix == p.active, query_text, w - 18)) picked = e;
             if (ix == p.active and p.reveal) reveal(c, id, wrap);
         }
         p.reveal = false;
@@ -287,11 +323,11 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
             const empty = ui.div(c).column().wFull().py(24).px(16).gap(6).itemsCenter();
             defer empty.end();
             ui.text(c, "No results", .{ .size = 13, .line_height = 13 * phi, .color = k.text });
-            ui.text(c, "Try a pane, command, chat title, project, or device.", .{ .size = 13, .line_height = 13 * phi, .color = k.muted });
+            ui.text(c, if (p.navigation == .chat_history) "Try a chat title, project, or device." else "Try a pane, command, chat title, project, or device.", .{ .size = 13, .line_height = 13 * phi, .color = k.muted });
         }
     }
-    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = hairline(k) }, .none, null);
-    {
+    if (!history) {
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = hairline(k) }, .none, null);
         const f = ui.div(c).row().wFull().h(32).px(16).gap(12).itemsCenter();
         defer f.end();
         keyHint(c, k, "↑ ↓", "Navigate");
@@ -299,6 +335,71 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         keyHint(c, k, "Esc", "Close");
     }
     if (picked) |e| activate(a, e);
+}
+
+/// Desktop's MENU_BLUR and composer_sidebar_tint, without Liquid Glass's
+/// lens, rim or tone mapping. A plain translucent fill leaves text behind
+/// the history card legible instead of blurring its backdrop.
+fn frostedBackdrop(c: *ui.Context, k: theme.Colors) void {
+    const surfaces = @import("surface_palette.zig");
+    const canvas = surfaces.flatten(k.shell, k.background);
+    const target = if (k.shell.a < 1) surfaces.flatten(k.background.alpha(0.4), canvas) else k.background;
+    const base = [_]f32{ canvas.r, canvas.g, canvas.b };
+    const desired = [_]f32{ target.r, target.g, target.b };
+    var alpha: f32 = 0.6;
+    for (base, desired) |b, t| alpha = @max(alpha, if (t > b) (t - b) / @max(1 - b, std.math.floatEps(f32)) else (b - t) / @max(b, std.math.floatEps(f32)));
+    var tint: [4]f32 = .{ 0, 0, 0, 0.15 };
+    for (base, desired, 0..) |b, t, i| tint[i] = std.math.clamp((t - b * (1 - alpha)) / alpha, 0, 1);
+    const cv = ui.canvas(c, .{ .absolute = true, .width = .fill, .height = .fill });
+    // Canvas exposes the renderer's Instance format (Kind.glass = 4).
+    cv.shapes.append(c.alloc(), .{
+        .rect = .{ 0, 0, cv.size.w, cv.size.h },
+        .color = tint,
+        .uv = .{ 0, 0, 1, 0 },
+        .border_color = .{ 0, 1, 1, 1 },
+        .border_width = 16,
+        .radius = 15,
+        .kind = 4,
+    }) catch {};
+}
+
+fn historyRow(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, selected: bool, query: []const u8, width: f32) bool {
+    if (e != .chat) return false;
+    const ch = a.findChat(e.chat) orelse return false;
+    var row_ = ui.div(c).row().wFull().px(8).py(7).gap(10).itemsCenter().rounded(10);
+    row_ = if (selected) row_.bg(if (k.is_harp) k.active else k.selected) else row_.hover(k.hover);
+    defer row_.end();
+    icons.icon(c, .@"chat-round-line", 16, k.muted, 0);
+    {
+        const text = ui.div(c).column().grow().w(0).gap(2);
+        defer text.end();
+        kit.highlightText(c, k, firstLine(ch.title orelse "New session"), .{ .size = 13, .line_height = 13 * phi, .color = if (selected or row_.hovered()) k.text else k.text.alpha(0.9) }, width - 112, query);
+        const project = if (a.findSpace(ch.space_id)) |sp| sp.name else "No project";
+        var time_buf: [32]u8 = undefined;
+        const when = rules.relativeTime(&time_buf, a.nowMs(), ch.timeMs());
+        kit.ellipsisText(c, c.print("{s} · {s}", .{ project, when }), .{ .size = 11, .line_height = 11 * phi, .color = k.muted }, width - 112);
+    }
+    var restore = false;
+    var discard = false;
+    {
+        const actions = ui.div(c).row().gap(2);
+        defer actions.end();
+        for ([_]icons.Name{ .restart, .@"trash-bin-minimalistic" }, 0..) |glyph, ix| {
+            ui.key(c, if (ix == 0) "history-restore" else "history-discard");
+            const b = @import("view_tooltip.zig").on(ui.div(c).size(26, 26).center().rounded(6).hover(k.hover), k, .{ .text = if (ix == 0) "Restore conversation" else "Discard conversation" });
+            defer b.end();
+            icons.icon(c, glyph, 16, k.muted, 0);
+            if (b.clicked()) {
+                if (ix == 0) restore = true else discard = true;
+            }
+        }
+    }
+    if (discard) {
+        close(a);
+        @import("view_chat_menu.zig").deleteChat(a, ch.id);
+        return false;
+    }
+    return restore or row_.clicked();
 }
 
 /// The highlighted row brought into the results' view (`scroll_to_item`),
@@ -323,7 +424,7 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         const f = ui.div(c).row().grow().w(0).itemsCenter();
         defer f.end();
         const splits = if (a.tabs.layout()) |s| s.panes.items.len > 1 else false;
-        const placeholder = if (splits) "Search open panes, commands and chats…" else "Search commands and chats…";
+        const placeholder = if (p.navigation == .chat_history) "Search chats across projects…" else if (splits) "Search open panes, commands and chats…" else "Search commands and chats…";
         ui.key(c, "command-palette-search");
         const at = c.nodes.items.len;
         const res = ui.textField(c, &p.query, .{ .placeholder = placeholder, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
@@ -351,8 +452,10 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         }
     }
     _ = w;
-    var buf: [32]u8 = undefined;
-    kit.kbdHint(c, k, shortcuts.badge(&buf, "mod-k"));
+    if (p.navigation != .chat_history) {
+        var buf: [32]u8 = undefined;
+        kit.kbdHint(c, k, shortcuts.badge(&buf, "mod-k"));
+    }
 }
 
 /// A legend entry: the key's cap and what it does (`command_key_hint`).
@@ -379,7 +482,7 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
         else => {},
     }
     var r = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(10);
-    r = if (lit) r.bg(k.selected) else r.hover(k.selected);
+    r = if (lit) r.bg(if (k.is_harp) k.active else k.selected) else r.hover(k.hover);
     defer r.end();
     const hot = lit or r.hovered();
     const tc = if (hot) k.text else k.text.alpha(0.9);

@@ -71,7 +71,7 @@ pub fn space(c: *ui.Context, h: f32) void {
 /// In the sidebar's place: "Settings", the search, the sections under their
 /// groups, and Back at the foot.
 pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const side = ui.div(c).column().w(sidebar.width).hFull().bg(k.sidebar).pt(sidebar.titlebar_h);
+    const side = ui.div(c).column().w(sidebar.widthOf(a)).hFull().bg(k.sidebar).pt(sidebar.titlebar_h);
     defer side.end();
     {
         const list = ui.div(c).column().wFull().grow().h(0).px(8).clip();

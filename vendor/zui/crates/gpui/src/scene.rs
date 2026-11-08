@@ -1306,6 +1306,7 @@ mod tests {
                 tile: AtlasTile {
                     texture_id: AtlasTextureId {
                         index,
+                        generation: 0,
                         kind: crate::AtlasTextureKind::Monochrome,
                     },
                     tile_id: crate::TileId(0),

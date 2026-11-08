@@ -14,8 +14,8 @@ const highlight = @import("highlight.zig");
 const kit = @import("view_kit.zig");
 const icons = @import("icons.zig");
 
-/// Prose: 14 points on 22-point lines (`render.rs`), set per frame.
-var body: ui.TextStyle = .{ .size = 14, .leading = 1.5, .wrap = true };
+/// Prose: 15 points on 22.5-point lines (`typography.rs`), set per frame.
+var body: ui.TextStyle = .{ .size = 15, .leading = 1.5, .wrap = true };
 
 /// The colors of the Markdown being drawn (the UI thread draws one at a time).
 var k: theme.Colors = undefined;
@@ -34,7 +34,7 @@ pub fn withLinks(c: *ui.Context, colors: theme.Colors, src: []const u8, a: *@imp
 /// Draws the Markdown `src`.
 pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     k = colors;
-    body = kit.style(c, 14, 22, .{ .wrap = true });
+    body = kit.style(c, 15, 22.5, .{ .wrap = true });
     const blocks = md.parse(c.alloc(), src, .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted });
     const col = ui.div(c).column().wFull();
     defer col.end();

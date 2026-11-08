@@ -19,16 +19,16 @@ pub const width: f32 = 520;
 const band_h: f32 = 38;
 
 pub fn host(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const col = ui.div(c).column().w(width).hFull().bg(if (k.frosted) k.panel else k.shell).clip();
+    const col = ui.div(c).column().wFull().hFull().bg(k.background).clip();
     defer col.end();
-    band(c, a, k);
     const t = a.panels.activeTab() orelse return picker(c, a, k);
     switch (t.kind) {
         .diffs => @import("view_diffs.zig").diffs(c, a, k),
         .file => file(c, a, k, t.path),
         .browser => if (t.browser) |b| @import("view_browser.zig").draw(c, a, k, b),
+        .tool_access => @import("view_tool_access.zig").draw(c, a, k),
         .subagent => if (t.agent) |s| {
-            _ = @import("view_transcript.zig").entries(c, a, k, &s.transcript, width, !s.transcript.complete, 16);
+            _ = @import("view_transcript.zig").entries(c, a, k, &s.transcript, @max(0, a.view.chrome.host_width - 2), !s.transcript.complete, 16);
         },
     }
 }

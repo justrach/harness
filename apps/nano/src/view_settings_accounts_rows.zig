@@ -188,7 +188,7 @@ pub fn warningStrip(c: *ui.Context, k: theme.Colors, message: []const u8) bool {
 
 /// The pulse a skeleton breathes with (`HARNESS_PULSE`, 2.4 s), 0 to 1.
 fn pulse(c: *ui.Context) f32 {
-    c.frameIn(1.0 / 15.0);
+    kit.loaderFrame(c, 1.0 / 15.0);
     const t: f32 = @floatCast(@mod(c.time / 2.4, 1.0));
     return (1 - @cos(2 * std.math.pi * t)) / 2;
 }

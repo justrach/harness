@@ -49,10 +49,14 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
     const f = cw.fraction(a.transcript.tokens, a.transcript.window);
     const color = if (f) |v| (if (v >= 0.9) k.danger else if (v >= 0.75) k.warning else k.muted) else k.faint;
     ui.key(c, "context-usage");
-    // A hit target at least 32 wide, the row's full height.
+    // A hit target at least 32 wide, the row's full height. The footer
+    // slop GPUI adds around this chip is checked against the measured pill
+    // below, so it widens the pointer target without moving any footer item.
     const hit = ui.div(c).row().minW(32).hFull().center();
     defer hit.end();
-    const hot = hit.hovered() or s.open;
+    // GPUI's `HitSlop::RING` reaches 2 points left and 4 right of the pill.
+    const near = if (s.anchor) |r| c.input.mouse.x >= r.x - 2 and c.input.mouse.x < r.x + r.w + 4 and c.input.mouse.y >= r.y and c.input.mouse.y < r.y + r.h else false;
+    const hot = hit.hovered() or near or s.open;
     var pill = ui.div(c).row().h(24).px(6).gap(5).itemsCenter().rounded(6);
     if (hot) pill = pill.bg(k.ink(0.05));
     defer pill.end();
@@ -63,7 +67,7 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
     // Open after a rest; the card keeps itself open while the pointer is
     // over it (`hoverable`), so its meter's parts can be hovered.
     const over_card = if (s.card) |r| inside(c.input.mouse, r) else false;
-    if (hit.hovered()) {
+    if (hit.hovered() or near) {
         s.leave_since = null;
         if (s.hover_since == null) s.hover_since = c.time;
         const waited = c.time - s.hover_since.?;
@@ -228,7 +232,7 @@ fn legend(c: *ui.Context, k: theme.Colors, b: cw.Breakdown) void {
     var row: ?ui.Div = null;
     var n: usize = 0;
     for (cw.Slot.all) |slot| {
-        const tokens = b.items[@intFromEnum(slot)];
+        const tokens = b.items[@backingInt(slot)];
         if (tokens == 0) continue;
         if (n % 2 == 0) {
             if (row) |r| r.end();

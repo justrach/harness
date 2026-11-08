@@ -96,7 +96,7 @@ fn label(c: *ui.Context, k: theme.Colors, icon: icons.Name, text: []const u8) vo
     const b = ui.div(c).row().h(20).px(8).gap(6).itemsCenter().minW(label_min_w);
     defer b.end();
     icons.icon(c, icon, 12, color, 0);
-    kit.ellipsisText(c, text, .{ .size = 12, .line_height = 12 * phi, .weight = .medium, .color = color }, label_max_w - label_min_w);
+    kit.ellipsisText(c, text, .{ .size = 12, .line_height = 12 * phi, .weight = theme.ui_medium_weight, .color = color }, label_max_w - label_min_w);
 }
 
 /// `render_graff_worktree_actions`: after a hairline, Merge back, Archive
@@ -148,7 +148,7 @@ fn button(c: *ui.Context, k: theme.Colors, text: []const u8, danger: bool, busy:
     const color = if (danger)
         (if (hot) k.danger else k.danger.alpha(0.7))
     else if (hot) k.text.alpha(0.85) else k.muted.alpha(0.7);
-    ui.text(c, text, .{ .size = 12, .line_height = 12 * phi, .weight = .medium, .color = color });
+    ui.text(c, text, .{ .size = 12, .line_height = 12 * phi, .weight = theme.ui_medium_weight, .color = color });
     return !busy and b.clicked();
 }
 

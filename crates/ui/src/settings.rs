@@ -258,6 +258,8 @@ pub enum SavePolicy {
 /// before flushing synchronously.
 pub struct SettingsStore {
     current: UiSettings,
+    /// Last observed or successfully committed settings, before pending edits.
+    baseline: UiSettings,
     data_dir: PathBuf,
     revision: u64,
     saved_revision: u64,
@@ -271,6 +273,29 @@ pub struct SettingsStore {
 impl Global for SettingsStore {}
 
 impl SettingsStore {
+    /// Reconcile sequential writes by another viewport before committing. The
+    /// read/rename pair is not a cross-process transaction; simultaneous writers
+    /// still need shared locking or a single authoritative owner.
+    fn persist(&mut self, local: UiSettings) -> io::Result<bool> {
+        let document = match std::fs::read(UiSettings::path(&self.data_dir)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(settings_json_error)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                serde_json::to_value(&self.baseline).map_err(settings_json_error)?
+            }
+            Err(error) => return Err(error),
+        };
+        let (settings, document) = merge_settings_document(&self.baseline, &local, document)
+            .map_err(settings_json_error)?;
+        save_settings_document(&document, &self.data_dir)?;
+        // Adopt disk-only changes too: advancing just the baseline would make
+        // stale current values look like new local edits on the next save.
+        let changed = self.update_current(|current| *current = settings.clone());
+        self.baseline = settings;
+        let current = self.mark_saved(self.revision);
+        debug_assert!(current, "foreground settings write cannot be overtaken");
+        Ok(changed)
+    }
+
     fn snapshot(&self) -> (UiSettings, u64) {
         (self.current.clone(), self.revision)
     }
@@ -297,6 +322,7 @@ impl SettingsStore {
 
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     cx.set_global(SettingsStore {
+        baseline: settings.clone(),
         current: settings,
         data_dir: data_dir.into(),
         revision: 0,
@@ -392,13 +418,12 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     // Persist the pointer before retiring the old file. `update(Immediate)`
     // updates memory first and only logs an I/O failure; for a file-backed
     // setting that order can leave disk pointing at an image we just deleted.
-    if next.save(&data_dir).is_err() {
+    if persist_settings(next, cx).is_err() {
         let _ = std::fs::remove_file(&destination);
         return Err(
             "Unable to save the image. Check folder permissions and try again.".to_string(),
         );
     }
-    replace(next, SavePolicy::Immediate, cx);
     remove_managed_new_thread_background(previous.as_ref(), &backgrounds_dir);
     cx.refresh_windows();
     Ok(())
@@ -414,12 +439,11 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     if previous.is_none() {
         return Ok(());
     }
-    if next.save(&data_dir).is_err() {
+    if persist_settings(next, cx).is_err() {
         return Err(
             "Unable to remove the image. Check folder permissions and try again.".to_string(),
         );
     }
-    replace(next, SavePolicy::Immediate, cx);
     remove_managed_new_thread_background(
         previous.as_ref(),
         &data_dir.join(NEW_THREAD_BACKGROUND_DIR),
@@ -621,14 +645,21 @@ fn flush_latest(cx: &mut App) {
         return;
     }
     let (settings, revision) = store.snapshot();
-    let data_dir = store.data_dir.clone();
-    match settings.save(&data_dir) {
-        Ok(()) => {
-            let current = cx.global_mut::<SettingsStore>().mark_saved(revision);
-            debug_assert!(current, "foreground settings write cannot be overtaken");
-        }
-        Err(err) => tracing::warn!(error = %err, revision, "failed to persist ui settings"),
+    if let Err(err) = persist_settings(settings, cx) {
+        tracing::warn!(error = %err, revision, "failed to persist ui settings");
     }
+}
+
+/// Fallible commits keep file-backed settings in memory only after their
+/// pointer is safe on disk. Normal updates already changed memory before here.
+fn persist_settings(settings: UiSettings, cx: &mut App) -> io::Result<()> {
+    let changed = cx.global_mut::<SettingsStore>().persist(settings)?;
+    let pending = cx.global_mut::<SettingsStore>().save_task.take();
+    drop(pending);
+    if changed {
+        cx.refresh_windows();
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2134,168 +2165,165 @@ impl UiSettings {
 
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
-            Ok(text) => {
-                match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
-                    if let Some(settings) = value.as_object_mut() {
-                        // Existing upstream files inherited Geist; the local
-                        // workspace format inherited System UI. Preserve that
-                        // effective choice when a legacy file omitted the font.
-                        // A new installation still uses the platform default.
-                        if !settings.contains_key("uiFontFamily") {
-                            let local_workspace_format = settings.contains_key("workspaceWindows")
-                                || settings
-                                    .get("projectTabsVersion")
-                                    .and_then(serde_json::Value::as_u64)
-                                    .is_some_and(|version| version >= 2)
-                                || settings
-                                    .get("chatTabs")
-                                    .and_then(serde_json::Value::as_array)
-                                    .is_some_and(|tabs| {
-                                        tabs.iter().any(|tab| {
-                                            tab.get("id")
-                                                .and_then(serde_json::Value::as_str)
-                                                .is_some_and(|id| !id.is_empty())
-                                        })
-                                    });
-                            settings.insert(
-                                "uiFontFamily".into(),
-                                serde_json::json!(if local_workspace_format {
-                                    "system"
-                                } else {
-                                    "geist"
-                                }),
-                            );
-                        }
-                        let previous_sound = settings
-                            .get("soundEnabled")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(true);
-                        settings
-                            .entry("appshotSoundEnabled")
-                            .or_insert(serde_json::Value::Bool(previous_sound));
-                        // The files-editor size was the first user-facing code
-                        // size; it now drives every code surface.
-                        if let Some(legacy) = settings.remove("filesEditorFontSize") {
-                            settings.entry("codeFontSize").or_insert(legacy);
-                        }
-                    }
-                    // Replace the retired new-session default with the unified
-                    // new-tab shortcut, without changing custom bindings.
-                    if let Some(keymap) = value
-                        .get_mut("keymap")
-                        .and_then(serde_json::Value::as_object_mut)
-                        && keymap.get("newSession").and_then(serde_json::Value::as_str)
-                            == Some("mod-n")
-                    {
-                        keymap.insert(
-                            "newSession".into(),
-                            serde_json::json!(ShortcutId::NewSession.default_combo()),
-                        );
-                    }
-                    if let Some(keymap) = value
-                        .get_mut("keymap")
-                        .and_then(serde_json::Value::as_object_mut)
-                        && !keymap.contains_key("saveFile")
-                    {
-                        // Reserve customized chords before assigning any new defaults.
-                        // An older map may already use Cmd+S/B/R for another action.
-                        let mut migrating =
-                            vec![(ShortcutId::SaveFile, "saveFile", "", "mod-shift-s")];
-                        for (id, field, old, fallback) in [
-                            (
-                                ShortcutId::ToggleSidebar,
-                                "toggleSidebar",
-                                "mod-s",
-                                "mod-shift-b",
-                            ),
-                            (
-                                ShortcutId::ToggleChanges,
-                                "toggleChanges",
-                                "mod-b",
-                                "mod-shift-r",
-                            ),
-                        ] {
-                            if keymap
-                                .get(field)
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or(old)
-                                == old
-                            {
-                                migrating.push((id, field, old, fallback));
-                            }
-                        }
-                        for (_, field, _, _) in &migrating {
-                            keymap.insert((*field).into(), serde_json::json!(""));
-                        }
-                        let mut resolved: KeymapConfig =
-                            serde_json::from_value(serde_json::Value::Object(keymap.clone()))?;
-                        for (id, field, old, fallback) in migrating {
-                            let combo = [id.default_combo(), old, fallback]
-                                .into_iter()
-                                .find(|candidate| {
-                                    !candidate.is_empty()
-                                        && !ShortcutId::ALL.iter().any(|other| {
-                                            let existing = resolved.get(*other);
-                                            !existing.is_empty()
-                                                && platform_combo(existing)
-                                                    == platform_combo(candidate)
-                                        })
-                                })
-                                .unwrap_or("");
-                            resolved.set(id, combo.into());
-                            keymap.insert(field.into(), serde_json::json!(combo));
-                        }
-                    }
-                    // A shortcut added after the file was written takes its
-                    // default only when that combo is free: a user who had
-                    // already bound the same chord elsewhere keeps their
-                    // binding and the new row arrives unbound.
-                    if let Some(keymap) = value
-                        .get_mut("keymap")
-                        .and_then(serde_json::Value::as_object_mut)
-                    {
-                        for (id, field) in [(ShortcutId::ToggleFiles, "toggleFiles")] {
-                            let default = platform_combo(id.default_combo());
-                            let taken = !keymap.contains_key(field)
-                                && keymap.values().any(|existing| {
-                                    existing
-                                        .as_str()
-                                        .is_some_and(|combo| platform_combo(combo) == default)
-                                });
-                            if taken {
-                                keymap.insert(field.into(), serde_json::json!(""));
-                            }
-                        }
-                    }
-                    // A malformed `settingsSection` must not cost the rest of
-                    // the file: drop it and the default section applies.
-                    if let Some(map) = value.as_object_mut()
-                        && map.get("settingsSection").is_some_and(|v| !v.is_string())
-                    {
-                        map.remove("settingsSection");
-                    }
-                    serde_json::from_value::<UiSettings>(value)
-                }) {
-                    Ok(settings) => settings.migrated().clamped(),
-                    Err(err) => {
-                        tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
-                        Self::default()
-                    }
+            Ok(text) => match serde_json::from_str(&text)
+                .and_then(|mut value| Self::decode_document(&mut value))
+            {
+                Ok(settings) => settings,
+                Err(err) => {
+                    tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
+                    Self::default()
                 }
-            }
+            },
             Err(_) => Self::default(),
         }
     }
 
-    /// Write atomically (temp file + rename) so a crash mid-write never corrupts.
+    /// Unlike startup's defaults-on-error wrapper, persistence must propagate
+    /// decode failures rather than overwrite an existing malformed document.
+    fn decode_document(value: &mut serde_json::Value) -> serde_json::Result<Self> {
+        if let Some(settings) = value.as_object_mut() {
+            // Existing upstream files inherited Geist; the local
+            // workspace format inherited System UI. Preserve that
+            // effective choice when a legacy file omitted the font.
+            // A new installation still uses the platform default.
+            if !settings.contains_key("uiFontFamily") {
+                let local_workspace_format = settings.contains_key("workspaceWindows")
+                    || settings
+                        .get("projectTabsVersion")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|version| version >= 2)
+                    || settings
+                        .get("chatTabs")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|tabs| {
+                            tabs.iter().any(|tab| {
+                                tab.get("id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|id| !id.is_empty())
+                            })
+                        });
+                settings.insert(
+                    "uiFontFamily".into(),
+                    serde_json::json!(if local_workspace_format {
+                        "system"
+                    } else {
+                        "geist"
+                    }),
+                );
+            }
+            let previous_sound = settings
+                .get("soundEnabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            settings
+                .entry("appshotSoundEnabled")
+                .or_insert(serde_json::Value::Bool(previous_sound));
+            // The files-editor size was the first user-facing code
+            // size; it now drives every code surface.
+            if let Some(legacy) = settings.remove("filesEditorFontSize") {
+                settings.entry("codeFontSize").or_insert(legacy);
+            }
+        }
+        // Replace the retired new-session default with the unified
+        // new-tab shortcut, without changing custom bindings.
+        if let Some(keymap) = value
+            .get_mut("keymap")
+            .and_then(serde_json::Value::as_object_mut)
+            && keymap.get("newSession").and_then(serde_json::Value::as_str) == Some("mod-n")
+        {
+            keymap.insert(
+                "newSession".into(),
+                serde_json::json!(ShortcutId::NewSession.default_combo()),
+            );
+        }
+        if let Some(keymap) = value
+            .get_mut("keymap")
+            .and_then(serde_json::Value::as_object_mut)
+            && !keymap.contains_key("saveFile")
+        {
+            // Reserve customized chords before assigning any new defaults.
+            // An older map may already use Cmd+S/B/R for another action.
+            let mut migrating = vec![(ShortcutId::SaveFile, "saveFile", "", "mod-shift-s")];
+            for (id, field, old, fallback) in [
+                (
+                    ShortcutId::ToggleSidebar,
+                    "toggleSidebar",
+                    "mod-s",
+                    "mod-shift-b",
+                ),
+                (
+                    ShortcutId::ToggleChanges,
+                    "toggleChanges",
+                    "mod-b",
+                    "mod-shift-r",
+                ),
+            ] {
+                if keymap
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(old)
+                    == old
+                {
+                    migrating.push((id, field, old, fallback));
+                }
+            }
+            for (_, field, _, _) in &migrating {
+                keymap.insert((*field).into(), serde_json::json!(""));
+            }
+            let mut resolved: KeymapConfig =
+                serde_json::from_value(serde_json::Value::Object(keymap.clone()))?;
+            for (id, field, old, fallback) in migrating {
+                let combo = [id.default_combo(), old, fallback]
+                    .into_iter()
+                    .find(|candidate| {
+                        !candidate.is_empty()
+                            && !ShortcutId::ALL.iter().any(|other| {
+                                let existing = resolved.get(*other);
+                                !existing.is_empty()
+                                    && platform_combo(existing) == platform_combo(candidate)
+                            })
+                    })
+                    .unwrap_or("");
+                resolved.set(id, combo.into());
+                keymap.insert(field.into(), serde_json::json!(combo));
+            }
+        }
+        // A shortcut added after the file was written takes its
+        // default only when that combo is free: a user who had
+        // already bound the same chord elsewhere keeps their
+        // binding and the new row arrives unbound.
+        if let Some(keymap) = value
+            .get_mut("keymap")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for (id, field) in [(ShortcutId::ToggleFiles, "toggleFiles")] {
+                let default = platform_combo(id.default_combo());
+                let taken = !keymap.contains_key(field)
+                    && keymap.values().any(|existing| {
+                        existing
+                            .as_str()
+                            .is_some_and(|combo| platform_combo(combo) == default)
+                    });
+                if taken {
+                    keymap.insert(field.into(), serde_json::json!(""));
+                }
+            }
+        }
+        // A malformed `settingsSection` must not cost the rest of
+        // the file: drop it and the default section applies.
+        if let Some(map) = value.as_object_mut()
+            && map.get("settingsSection").is_some_and(|v| !v.is_string())
+        {
+            map.remove("settingsSection");
+        }
+        serde_json::from_value::<UiSettings>(value.clone())
+            .map(|settings| settings.migrated().clamped())
+    }
+
+    /// Write a complete snapshot. Production stores reconcile first; fixtures
+    /// may use this directly to seed an isolated settings file.
     pub fn save(&self, data_dir: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(data_dir)?;
-        let path = Self::path(data_dir);
-        let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
+        save_settings_document(self, data_dir)
     }
 
     fn migrated(mut self) -> Self {
@@ -2321,6 +2349,77 @@ impl UiSettings {
     }
 }
 
+/// Apply only the store's local delta to the latest disk document. Settings
+/// are top-level conflict units, as in the existing window preference merge;
+/// omitted values participate so explicit resets remove the old key.
+fn merge_settings_document(
+    baseline: &UiSettings,
+    local: &UiSettings,
+    mut document: serde_json::Value,
+) -> serde_json::Result<(UiSettings, serde_json::Value)> {
+    if !document.is_object() {
+        return Err(serde::de::Error::custom(
+            "ui settings must be a JSON object",
+        ));
+    }
+    let latest = UiSettings::decode_document(&mut document)?;
+    let baseline = serde_json::to_value(baseline)?;
+    let local = serde_json::to_value(local)?;
+    let latest = serde_json::to_value(latest)?;
+    let baseline = baseline
+        .as_object()
+        .expect("settings serialize as an object");
+    let local = local.as_object().expect("settings serialize as an object");
+    // Materialize migrated/defaulted fields (including compact mode's marker)
+    // without dropping unknown keys, even inside an unchanged known object.
+    overlay_normalized_settings(&mut document, latest);
+    let output = document
+        .as_object_mut()
+        .expect("settings decode from an object");
+    output.remove("accentColor");
+    let keys: std::collections::HashSet<_> = baseline.keys().chain(local.keys()).collect();
+    for key in keys {
+        if baseline.get(key) == local.get(key) {
+            continue;
+        }
+        if let Some(value) = local.get(key) {
+            output.insert(key.clone(), value.clone());
+        } else {
+            output.remove(key);
+        }
+    }
+    let settings = serde_json::from_value::<UiSettings>(document.clone())?.clamped();
+    Ok((settings, document))
+}
+
+fn overlay_normalized_settings(target: &mut serde_json::Value, normalized: serde_json::Value) {
+    match (target, normalized) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(normalized)) => {
+            for (key, value) in normalized {
+                if let Some(existing) = target.get_mut(&key) {
+                    overlay_normalized_settings(existing, value);
+                } else {
+                    target.insert(key, value);
+                }
+            }
+        }
+        (target, normalized) => *target = normalized,
+    }
+}
+
+fn settings_json_error(error: serde_json::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn save_settings_document(settings: &impl Serialize, data_dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let path = UiSettings::path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(settings).map_err(settings_json_error)?;
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, &path)
+}
+
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
@@ -2340,6 +2439,182 @@ fn min_or(value: f32, min: f32, default: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn settings_store_unrelated_save_preserves_external_sidebar_choice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = UiSettings {
+            sidebar_organization: SidebarOrganization::InOneList,
+            ..Default::default()
+        };
+        initial.save(dir.path()).unwrap();
+        cx.update(|cx| {
+            init(UiSettings::load(dir.path()), dir.path(), cx);
+            let path = UiSettings::path(dir.path());
+            let mut external: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            external["sidebarOrganization"] = serde_json::json!("byProject");
+            external["futureSetting"] = serde_json::json!({"preserve": [1, 2]});
+            std::fs::write(&path, serde_json::to_vec(&external).unwrap()).unwrap();
+
+            assert!(update(SavePolicy::Immediate, cx, |settings| {
+                settings.sidebar_width = 300.0;
+            }));
+            let saved = UiSettings::load(dir.path());
+            assert_eq!(saved.sidebar_organization, SidebarOrganization::ByProject);
+            assert_eq!(saved.sidebar_width, 300.0);
+            assert_eq!(current(cx), saved);
+            assert!(update(SavePolicy::Debounced, cx, |settings| {
+                settings.sound_enabled = false;
+            }));
+            external = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            external["sidebarOrganization"] = serde_json::json!("byDevice");
+            std::fs::write(&path, serde_json::to_vec(&external).unwrap()).unwrap();
+            flush(cx);
+            let saved = UiSettings::load(dir.path());
+            assert_eq!(saved.sidebar_organization, SidebarOrganization::ByDevice);
+            assert!(!saved.sound_enabled);
+            assert_eq!(current(cx), saved);
+            assert!(update(SavePolicy::Immediate, cx, |settings| {
+                settings.sidebar_width = 310.0;
+            }));
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["sidebarOrganization"], "byDevice");
+            assert_eq!(
+                saved["futureSetting"],
+                serde_json::json!({"preserve": [1, 2]})
+            );
+        });
+    }
+
+    #[test]
+    fn settings_document_merge_preserves_choices_resets_and_disk_deletions() {
+        let baseline = UiSettings {
+            sidebar_organization: SidebarOrganization::ByProject,
+            new_thread_composer_background: Some(NewThreadComposerBackground {
+                path: "synthetic.png".into(),
+                name: "synthetic.png".into(),
+            }),
+            graff_notice_dismissed: Some("old".into()),
+            last_project_action_by_space_id: HashMap::from([("synthetic".into(), "build".into())]),
+            ..Default::default()
+        };
+        let mut local = baseline.clone();
+        local.sidebar_organization = SidebarOrganization::InOneList;
+        local.new_thread_composer_background = None;
+        local.last_project_action_by_space_id.clear();
+        let mut disk = serde_json::to_value(&baseline).unwrap();
+        disk["sidebarOrganization"] = serde_json::json!("byDevice");
+        disk["soundEnabled"] = serde_json::json!(false);
+        disk["futureSetting"] = serde_json::json!({"keep": 17});
+        disk["keymap"]["futureAction"] = serde_json::json!("mod-future");
+        disk.as_object_mut().unwrap().remove("graffNoticeDismissed");
+        let (merged, document) = merge_settings_document(&baseline, &local, disk).unwrap();
+        assert_eq!(merged.sidebar_organization, SidebarOrganization::InOneList);
+        assert!(!merged.sound_enabled);
+        assert!(merged.new_thread_composer_background.is_none());
+        assert!(document.get("newThreadComposerBackground").is_none());
+        assert!(merged.last_project_action_by_space_id.is_empty());
+        assert!(document.get("lastProjectActionBySpaceId").is_none());
+        assert!(merged.graff_notice_dismissed.is_none());
+        assert!(document.get("graffNoticeDismissed").is_none());
+        assert_eq!(document["futureSetting"], serde_json::json!({"keep": 17}));
+        assert_eq!(document["keymap"]["futureAction"], "mod-future");
+
+        let mut local = baseline.clone();
+        local.transcript_compact_mode = false;
+        let (merged, document) = merge_settings_document(
+            &baseline,
+            &local,
+            serde_json::json!({"transcriptCompactMode": false, "accentColor": "cyan"}),
+        )
+        .unwrap();
+        assert!(!merged.transcript_compact_mode);
+        assert_eq!(document["transcriptCompactDefaultApplied"], true);
+        assert!(document.get("accentColor").is_none());
+        let mut document = document;
+        let loaded = UiSettings::decode_document(&mut document).unwrap();
+        assert!(!loaded.transcript_compact_mode);
+        assert_eq!(loaded.accent, merged.accent);
+    }
+
+    #[gpui::test]
+    fn settings_store_failed_save_keeps_baseline_and_retries_external_choices(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = UiSettings {
+            sidebar_organization: SidebarOrganization::InOneList,
+            ..Default::default()
+        };
+        initial.save(dir.path()).unwrap();
+        cx.update(|cx| {
+            init(initial.clone(), dir.path(), cx);
+            assert!(update(SavePolicy::Debounced, cx, |settings| {
+                settings.sidebar_width = 300.0;
+            }));
+            let path = UiSettings::path(dir.path());
+            let mut external = initial.clone();
+            external.sidebar_organization = SidebarOrganization::ByProject;
+            external.code_fences_fit_content = true;
+            external.save(dir.path()).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let temporary = path.with_extension("json.tmp");
+            std::fs::create_dir(&temporary).unwrap();
+            flush(cx);
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(store.baseline, initial);
+            assert_eq!(store.saved_revision, 0);
+            assert_ne!(store.revision, store.saved_revision);
+            assert_eq!(store.current.sidebar_width, 300.0);
+            assert_eq!(
+                store.current.sidebar_organization,
+                SidebarOrganization::InOneList
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            std::fs::remove_dir(&temporary).unwrap();
+            flush(cx);
+            let store = cx.global::<SettingsStore>();
+            assert_eq!(
+                store.current.sidebar_organization,
+                SidebarOrganization::ByProject
+            );
+            assert_eq!(store.current.sidebar_width, 300.0);
+            assert_eq!(store.current, store.baseline);
+            assert_eq!(store.revision, store.saved_revision);
+            assert_eq!(store.code_fences_generation, 1);
+            assert_eq!(UiSettings::load(dir.path()), store.current);
+        });
+    }
+
+    #[gpui::test]
+    fn settings_store_rejects_corrupt_disk_without_losing_pending_edits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            let initial = UiSettings::default();
+            init(initial.clone(), dir.path(), cx);
+            for corrupt in ["not JSON", "[]", r#"{"sidebarOrganization":17}"#] {
+                std::fs::write(UiSettings::path(dir.path()), corrupt).unwrap();
+                update(SavePolicy::Debounced, cx, |settings| {
+                    settings.sidebar_width = 300.0;
+                });
+                flush(cx);
+                let store = cx.global::<SettingsStore>();
+                assert_eq!(store.baseline, initial);
+                assert_ne!(store.revision, store.saved_revision);
+                assert_eq!(store.current.sidebar_width, 300.0);
+                assert_eq!(
+                    std::fs::read_to_string(UiSettings::path(dir.path())).unwrap(),
+                    corrupt
+                );
+            }
+        });
+    }
 
     #[test]
     fn skill_completion_defaults_overrides_and_persistence_are_per_harness() {
@@ -3286,16 +3561,24 @@ mod tests {
             .unwrap();
         cx.update(|cx| {
             let initial = UiSettings {
+                sidebar_organization: SidebarOrganization::InOneList,
                 new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
                 ..Default::default()
             };
             init(initial, dir.path(), cx);
             install_new_thread_composer_background(&first, cx).unwrap();
             let old_path = current(cx).new_thread_composer_background.unwrap().path;
+            let mut external = UiSettings::load(dir.path());
+            external.sidebar_organization = SidebarOrganization::ByProject;
+            external.save(dir.path()).unwrap();
             install_new_thread_composer_background(&second, cx).unwrap();
             let settings = current(cx);
             let replacement = settings.new_thread_composer_background.as_ref().unwrap();
             assert_ne!(replacement.path, old_path);
+            assert_eq!(
+                settings.sidebar_organization,
+                SidebarOrganization::ByProject
+            );
             let saved_image = std::fs::read(&replacement.path).unwrap();
             assert_eq!(saved_image, std::fs::read(&second).unwrap());
             let decoded = crate::new_thread_background_image::decode(&saved_image).unwrap();
@@ -3313,6 +3596,51 @@ mod tests {
                     .count(),
                 1
             );
+            let mut external = settings.clone();
+            external.sidebar_organization = SidebarOrganization::ByDevice;
+            external.save(dir.path()).unwrap();
+            remove_new_thread_composer_background(cx).unwrap();
+            assert_eq!(
+                current(cx).sidebar_organization,
+                SidebarOrganization::ByDevice
+            );
+            assert!(current(cx).new_thread_composer_background.is_none());
+            assert_eq!(UiSettings::load(dir.path()), current(cx));
+            assert!(!Path::new(&replacement.path).exists());
+        });
+    }
+
+    #[gpui::test]
+    fn background_commit_failure_preserves_previous_pointer_and_image(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("synthetic.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 100, 200, 255]))
+            .save(&image)
+            .unwrap();
+        cx.update(|cx| {
+            init(UiSettings::default(), dir.path(), cx);
+            install_new_thread_composer_background(&image, cx).unwrap();
+            let before = current(cx);
+            let path = UiSettings::path(dir.path());
+            let saved = std::fs::read(&path).unwrap();
+            let previous = &before.new_thread_composer_background.as_ref().unwrap().path;
+            let temporary = path.with_extension("json.tmp");
+            std::fs::create_dir(&temporary).unwrap();
+            assert!(install_new_thread_composer_background(&image, cx).is_err());
+            assert!(remove_new_thread_composer_background(cx).is_err());
+            assert_eq!(current(cx), before);
+            assert_eq!(cx.global::<SettingsStore>().baseline, before);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            assert!(Path::new(previous).exists());
+            assert_eq!(
+                std::fs::read_dir(dir.path().join(NEW_THREAD_BACKGROUND_DIR))
+                    .unwrap()
+                    .count(),
+                1
+            );
+            std::fs::remove_dir(&temporary).unwrap();
         });
     }
 
@@ -3541,6 +3869,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SettingsStore {
             current: UiSettings::default(),
+            baseline: UiSettings::default(),
             data_dir: dir.path().to_path_buf(),
             revision: 0,
             saved_revision: 0,
@@ -3599,6 +3928,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SettingsStore {
             current: UiSettings::default(),
+            baseline: UiSettings::default(),
             data_dir: dir.path().to_path_buf(),
             revision: 0,
             saved_revision: 0,

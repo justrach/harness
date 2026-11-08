@@ -70,7 +70,9 @@ pub const Action = enum { enable_sync, sign_out };
 pub const Menu = struct {
     /// The badge's line: its first letter is the badge's.
     line: []const u8,
-    /// The menu's first line, muted.
+    /// The signed-in person's full name, when the engine knows one.
+    name: ?[]const u8,
+    /// The menu's identity line: the email, or where the workspace lives.
     identity: []const u8,
     codegraff: CodegraffRow,
     action: ?Action,
@@ -80,13 +82,15 @@ pub const Menu = struct {
 /// `account_menu_action` with the sync flow idle).
 pub fn menu(scope: ?Scope, user: ?User, cg: Codegraff) Menu {
     const row: CodegraffRow = if (cg.signed_in) .{ .account = cg.who orelse "Signed in" } else if (cg.pending) .pending else .sign_in;
+    const name: ?[]const u8 = if (user) |u| u.name orelse u.email else null;
     return switch (scope orelse .synced) {
-        .local => .{ .line = "Local only", .identity = "Stored on this device", .codegraff = row, .action = .enable_sync },
-        .development => .{ .line = "Development", .identity = "Authentication disabled", .codegraff = row, .action = null },
+        .local => .{ .line = "Local only", .name = name, .identity = "Stored on this device", .codegraff = row, .action = .enable_sync },
+        .development => .{ .line = "Development", .name = name, .identity = "Authentication disabled", .codegraff = row, .action = null },
         .synced => blk: {
-            const line: []const u8 = if (user) |u| (u.name orelse u.email) else "Not signed in";
+            const line: []const u8 = name orelse "Not signed in";
             break :blk .{
                 .line = line,
+                .name = name,
                 .identity = if (user) |u| u.email else line,
                 .codegraff = row,
                 // A runtime that isn't known yet offers nothing.
@@ -258,7 +262,11 @@ test "the menu as the GPUI app's for each workspace scope" {
     var name = "Ada".*;
     const synced = menu(.synced, .{ .name = &name, .email = &email }, .{ .signed_in = true, .who = &email });
     try testing.expectEqualStrings("Ada", synced.line);
+    try testing.expectEqualStrings("Ada", synced.name.?);
     try testing.expectEqualStrings("ada@example.com", synced.identity);
+    const local_user = menu(.local, .{ .name = &name, .email = &email }, .{});
+    try testing.expectEqualStrings("Local only", local_user.line);
+    try testing.expectEqualStrings("Ada", local_user.name.?);
     try testing.expectEqual(@as(?Action, .sign_out), synced.action);
     try testing.expectEqualStrings("ada@example.com", synced.codegraff.account);
 

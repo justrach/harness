@@ -1,7 +1,7 @@
-//! Above the composer once the latest turn is done (shell.rs
-//! `render_turn_work_cue`): a solid "N files changed" card that opens the
-//! Changes pane. Nothing while the turn works: the transcript shows the
-//! command and the composer has Stop.
+//! Legacy composer cue helpers. Current desktop removed this separate
+//! card (e941a1f0d): per-file changes now live in the task-tree footer.
+//! Keep the drawing API while shared layout callers migrate, but never
+//! offer a second summary above the composer.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -48,11 +48,11 @@ const shadow_sm = [_]ui.Shadow{
     .{ .color = .{ .a = 0.1 }, .blur = 2, .y = 1, .spread = -1 },
 };
 
-/// The latest turn's edits, when the card should show them.
+/// No detached cue in current desktop; the tree owns its file summaries.
 pub fn changes(c: *ui.Context, a: *App) ?turn_work.TurnChanges {
-    if (a.selected == null or a.wizard != null) return null;
-    if (a.selectedStatus() == .working) return null;
-    return turn_work.latestTurnChanges(c.alloc(), a.transcript.entries.items);
+    _ = c;
+    _ = a;
+    return null;
 }
 
 /// Whether the right pane shows the working tree's diff now.

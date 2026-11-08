@@ -17,9 +17,13 @@ client codegraff uses. For now it fetches the newest release's manifest.
   device.
 - Chat: the transcript as it streams in, with Markdown replies (code
   highlighted, with a Copy button), reasoning, and each tool call with how it
-  went.
+  went. In Compact mode, progress stays visible while a turn runs and
+  folds when it finishes; the final reply stays visible and the work can
+  be reopened.
 - Composer: Return sends, Shift-Return starts a new line, **Stop** interrupts a
-  running turn. A new chat picks its agent and model.
+  running turn. A new chat picks its agent, model, and execution computer
+  through **Run on**. Choosing another computer clears an incompatible
+  project; an existing conversation stays on its original host.
 - Agent rows stay visible and open their live transcript in a side tab without
   leaving the parent chat. Finished agents use their saved transcript, falling
   back to the document feed if the snapshot is unavailable.
@@ -33,6 +37,20 @@ dictation, pins and settings.
 
 Not there yet: typing into the dock, split diffs, editing files,
 dragging queued messages, Linux and Windows.
+
+## Release status
+
+This is a macOS preview, not a feature-complete replacement for the GPUI app.
+A passing screenshot comparison covers the scenes and GPUI revision in this
+checkout; it does not prove parity with newer desktop changes or the missing
+interactions above. Bring the GPUI reference up to date before a release
+parity run.
+
+The local bundler uses the workspace version for both macOS bundle version
+fields and ad-hoc signs the completed app. Public distribution still needs
+Developer ID signing and notarization, passing unit and shared protocol
+tests, and a strict visual run (`--max-changed 0.0005`). An ad-hoc signature
+check alone is not a public-distribution gate.
 
 ## Build and run
 
@@ -101,6 +119,16 @@ in Rust), and the Rust runner sends each request to a real engine. See `protocol
 After changing a request on purpose: `zig build vectors`, then `cargo test -p harness-engine --test desktop_requests`.
 
 ## Matching the desktop app
+
+Nano embeds the **desktop** theme catalog, not the mobile catalog (desktop
+Codegraff has its own palette). Regenerate it after desktop palette changes:
+
+```sh
+cargo run -p harness-theme --bin harness-theme-export -- --desktop --output apps/nano/themes.json
+```
+
+`desktop_catalog_matches_nano_bundle` checks that export. Desktop color-vector
+changes also update `protocol/desktop/theme.json`, consumed by Rust and Nano.
 
 Sizes, spacing, colours and rules come from the GPUI source and are checked
 side by side against the real app on the same throwaway engine: the title

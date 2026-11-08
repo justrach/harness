@@ -6,6 +6,7 @@ const testing = std.testing;
 
 const catalog =
     \\[{"id":"openai/synthetic-fast","label":"Synthetic Fast","description":"128k context","maker":"openai","billing":"credits","reasoningLevels":["low","high"]},
+    \\ {"id":"openai/synthetic-max","label":"Synthetic Max","description":"256k context","maker":"openai","billing":"credits","reasoningLevels":["high","max"]},
     \\ {"id":"chatgpt-new/synthetic-plan","label":"Synthetic Plan","description":"500k context","maker":"openai","billing":"plan","reasoningLevels":["high","ultra"]},
     \\ {"id":"anthropic/synthetic-thought","label":"Synthetic Thought","description":"200k context","maker":"anthropic","billing":"credits","reasoningLevels":["low","high"]}]
 ;
@@ -67,7 +68,7 @@ test "the picker: agent tabs, a search, and the models in a section per route" {
         try testing.expect(openai.y < fast.y and fast.y < plan_head.y);
         const tab = h.t.findText("Starred") orelse return error.MissingTabs;
         const chip = h.a.view.chip_anchor orelse return error.MissingChip;
-        try testing.expect(tab.y >= chip.y + chip.h);
+        try testing.expect(tab.y + tab.h < chip.y);
     }
 }
 
@@ -88,11 +89,11 @@ test "model picker search uses GPUI's rendered text metrics" {
 }
 
 /// `label` in the picker, not the composer chip's (which names the model
-/// too): the picker opens under the chip on a new chat.
+/// too): the docked new-chat picker opens above its footer chip.
 fn inPicker(h: *Harness, label: []const u8) ?ui.Rect {
     const chip = h.a.view.chip_anchor orelse return null;
     for (h.t.ctx.nodes.items) |n| switch (n.content) {
-        .text => |t| if (std.mem.eql(u8, t.str, label) and n.rect.y > chip.y + chip.h) return n.rect,
+        .text => |t| if (std.mem.eql(u8, t.str, label) and n.rect.y + n.rect.h < chip.y) return n.rect,
         else => {},
     };
     return null;
@@ -206,6 +207,71 @@ test "a model's page: its reasoning on a slider, the keys and a drag move it, Us
     try testing.expectEqualStrings("openai/synthetic-fast", h.a.new_model.?);
     try testing.expectEqualStrings("high", h.a.new_reasoning.?);
     try testing.expect(h.a.picker == .none);
+}
+
+test "the model picker fades and lifts in, then settles its animation frames" {
+    var h: Harness = undefined;
+    try h.init(false);
+    defer h.deinit();
+    h.a.togglePicker();
+    h.t.settle(1);
+    h.a.togglePicker();
+    h.t.frame();
+    try testing.expect(h.a.view.model_picker.opened_at != null);
+    try testing.expect(h.t.ctx.animating);
+    var translucent = false;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.style.radius == 12 and node.style.opacity < 0.99) translucent = true;
+    }
+    try testing.expect(translucent);
+    h.t.settle(1);
+    try testing.expect(!h.t.ctx.animating);
+}
+
+test "choosing Max commits one config and updates the open chat immediately" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.picker = .none;
+    h.t.settle(1);
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"max-chat","deviceId":"d","title":"Max chat","archived":false,
+        \\  "config":{"harness":"graff","model":"openai/synthetic-max","reasoning":"high"}}]
+    , .{});
+    defer chats.deinit();
+    try h.a.chats.replace(chats.value);
+    h.a.openChat("max-chat", null);
+    h.a.picker = .none;
+    h.a.engine.state = .connected;
+    h.a.engine.scene = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Mutate":{}}
+    , .{});
+    h.t.settle(1);
+    try testing.expectEqualStrings("high", h.a.target().reasoning.?);
+    h.a.togglePicker();
+    h.t.settle(1);
+    try clickRow(&h, "Synthetic Max");
+    _ = h.t.shortcut(.{ .key = ui.Shortcut.right });
+    h.t.settle(1);
+    try h.t.clickText("Use model");
+    h.t.settle(1);
+    try testing.expect(h.a.picker == .none);
+    try testing.expectEqualStrings("max", h.a.findChat("max-chat").?.reasoning.?);
+    try testing.expectEqualStrings("max", h.a.target().reasoning.?);
+    var configs: usize = 0;
+    for (h.a.engine.sent.items) |frame| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, frame, .{});
+        defer parsed.deinit();
+        const params = parsed.value.object.get("params") orelse continue;
+        if (params != .object) continue;
+        const op = params.object.get("op") orelse continue;
+        if (op != .string or !std.mem.eql(u8, op.string, "setChatConfig")) continue;
+        configs += 1;
+        const config = params.object.get("config") orelse return error.MissingConfig;
+        try testing.expectEqualStrings("openai/synthetic-max", config.object.get("model").?.string);
+        try testing.expectEqualStrings("max", config.object.get("reasoning").?.string);
+    }
+    try testing.expectEqual(@as(usize, 1), configs);
 }
 
 test "agent tabs cycle both ways while an existing chat stays locked to its own agent" {
@@ -371,6 +437,90 @@ test "a late model catalog never overwrites the agent tab selected after it" {
     try testing.expectEqualStrings("codex", a.models_for);
     try testing.expectEqualStrings("codex/current", a.models.items[0].id);
     try testing.expectEqualStrings("graff/slow", a.view.model_picker.catalogs.get("graff").?.models.items[0].id);
+}
+
+test "model picker remembers a new chat's agent model and reasoning across launches" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const relative = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer testing.allocator.free(relative);
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, relative, testing.allocator);
+    defer testing.allocator.free(base);
+    const settings_path = try std.fs.path.join(testing.allocator, &.{ base, "ui-settings.json" });
+    defer testing.allocator.free(settings_path);
+    const defaults_path = try std.fs.path.join(testing.allocator, &.{ base, "composer-defaults.json" });
+    defer testing.allocator.free(defaults_path);
+
+    var first: App = .init(testing.allocator, testing.io, 1);
+    defer first.deinit();
+    first.settings.path = try testing.allocator.dupe(u8, settings_path);
+    first.new_harness = try testing.allocator.dupe(u8, "graff");
+    first.setHarness("claude-code");
+    first.setModel("anthropic/synthetic-thought");
+    first.pickReasoning("high");
+
+    const body = try std.Io.Dir.cwd().readFileAlloc(testing.io, defaults_path, testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(body);
+    var saved_arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer saved_arena.deinit();
+    const saved = try std.json.parseFromSliceLeaky(std.json.Value, saved_arena.allocator(), body, .{});
+    try testing.expectEqualStrings("claude-code", saved.object.get("harness").?.string);
+    try testing.expectEqualStrings("anthropic/synthetic-thought", saved.object.get("modelByHarness").?.object.get("claude-code").?.object.get("id").?.string);
+    try testing.expectEqualStrings("high", saved.object.get("reasoning").?.string);
+
+    var second: App = .init(testing.allocator, testing.io, 1);
+    defer second.deinit();
+    second.settings.path = try testing.allocator.dupe(u8, settings_path);
+    second.new_harness = try testing.allocator.dupe(u8, "graff");
+    @import("composer_defaults.zig").apply(&second);
+    try testing.expectEqualStrings("claude-code", second.new_harness);
+    try testing.expectEqualStrings("anthropic/synthetic-thought", second.new_model.?);
+    try testing.expectEqualStrings("high", second.new_reasoning.?);
+}
+
+test "model picker memory keeps GPUI's favorites options other agents and unknown keys" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const relative = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer testing.allocator.free(relative);
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, relative, testing.allocator);
+    defer testing.allocator.free(base);
+    const settings_path = try std.fs.path.join(testing.allocator, &.{ base, "ui-settings.json" });
+    defer testing.allocator.free(settings_path);
+    const defaults_path = try std.fs.path.join(testing.allocator, &.{ base, "composer-defaults.json" });
+    defer testing.allocator.free(defaults_path);
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = defaults_path, .data =
+        \\{"harness":"graff",
+        \\ "modelByHarness":{"graff":{"id":"anthropic/remembered","label":"Remembered"},
+        \\                   "codex":{"id":"codex/unchanged","label":"Unchanged"}},
+        \\ "reasoning":"low",
+        \\ "favorites":[{"harness":"codex","model":"codex/unchanged"}],
+        \\ "modelOptionsByModel":{"graff":{"anthropic/remembered":{"fastMode":"on"}}},
+        \\ "syntheticKeep":{"nested":[1,2]}}
+    });
+
+    var app: App = .init(testing.allocator, testing.io, 1);
+    defer app.deinit();
+    app.settings.path = try testing.allocator.dupe(u8, settings_path);
+    app.new_harness = try testing.allocator.dupe(u8, "graff");
+    app.setHarness("codex");
+    app.setModel("openai/synthetic-fresh");
+    app.pickReasoning("high");
+
+    const body = try std.Io.Dir.cwd().readFileAlloc(testing.io, defaults_path, testing.allocator, .limited(1 << 20));
+    defer testing.allocator.free(body);
+    var saved_arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer saved_arena.deinit();
+    const saved = try std.json.parseFromSliceLeaky(std.json.Value, saved_arena.allocator(), body, .{});
+    const root = saved.object;
+    try testing.expectEqualStrings("codex", root.get("harness").?.string);
+    try testing.expectEqualStrings("high", root.get("reasoning").?.string);
+    const by_harness = root.get("modelByHarness").?.object;
+    try testing.expectEqualStrings("openai/synthetic-fresh", by_harness.get("codex").?.object.get("id").?.string);
+    try testing.expectEqualStrings("anthropic/remembered", by_harness.get("graff").?.object.get("id").?.string);
+    try testing.expectEqualStrings("codex/unchanged", root.get("favorites").?.array.items[0].object.get("model").?.string);
+    try testing.expectEqualStrings("on", root.get("modelOptionsByModel").?.object.get("graff").?.object.get("anthropic/remembered").?.object.get("fastMode").?.string);
+    try testing.expectEqual(@as(i64, 2), root.get("syntheticKeep").?.object.get("nested").?.array.items[1].integer);
 }
 
 test "large model catalogs only build the rows in view" {

@@ -123,6 +123,45 @@ fn a_working_chat_spinner_animates_without_re_rendering_the_sidebar(cx: &mut gpu
     );
 }
 
+/// A wheel over the sidebar moves its session list. The programmatic-offset
+/// test above covers virtualization; this one covers the actual event route
+/// from the pointer to the scroller people use.
+#[gpui::test]
+fn wheel_over_the_sidebar_scrolls_the_session_list(cx: &mut gpui::TestAppContext) {
+    use gpui::{ScrollDelta, ScrollWheelEvent};
+    let (_dir, shell, cx) = sidebar_shell(cx, 200, None, 700.0);
+    shell.update(cx, |shell, cx| {
+        shell
+            .sidebar_unfolded_groups
+            .insert("project:home:local".into());
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    let scroll = shell.read_with(cx, |shell, _| shell.sidebar_scroll.clone());
+    let bounds = scroll.bounds();
+    assert!(!bounds.is_empty(), "the sidebar scroller is on screen");
+    assert!(
+        scroll.max_offset().y > px(0.0),
+        "two hundred sessions overflow one screen"
+    );
+    let before = scroll.offset().y;
+    cx.simulate_event(ScrollWheelEvent {
+        position: bounds.center(),
+        delta: ScrollDelta::Pixels(gpui::point(px(0.0), px(-240.0))),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    assert!(
+        scroll.offset().y < before,
+        "a wheel over the sidebar must move its sessions: {:?} -> {:?}",
+        before,
+        scroll.offset().y
+    );
+}
+
 /// `debug_bounds` takes a `'static` selector.
 fn selector(name: String) -> &'static str {
     Box::leak(name.into_boxed_str())

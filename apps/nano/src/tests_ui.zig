@@ -58,6 +58,20 @@ const Harness = struct {
     }
 };
 
+test "the new-chat canvas keeps the project sidebar and its sessions" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.settings.setText("sidebarOrganization", "byProject");
+    h.a.offscreen = true;
+    h.a.select(null, null);
+    h.t.settle(1);
+    h.snap("new-chat-sidebar");
+    try testing.expect(h.t.hasText("All projects"));
+    try testing.expect(h.t.hasText("Alpha"));
+    try testing.expect(h.t.hasText("Beta"));
+}
+
 fn sidebarChats(h: *Harness, count: usize) !void {
     try sidebarRows(h, count, false, false);
 }
@@ -103,6 +117,12 @@ test "a live ACP thought remains visible before the empty answer receives text" 
     defer parsed.deinit();
     try h.a.transcript.apply(parsed.value);
     h.t.settle(1);
+    try testing.expect(h.t.hasText("Thought process"));
+    // macOS deliberately keeps live work behind its disclosure.
+    if (@import("builtin").os.tag == .macos) {
+        try h.t.clickText("Thought process");
+        h.t.settle(1);
+    }
     try testing.expect(h.t.hasText("A synthetic live thought"));
 }
 
@@ -248,6 +268,61 @@ test "a working chat shows a trailer even before the agent publishes any parts" 
     try testing.expect(!h.t.hasText(label));
 }
 
+test "a quiet active turn says it is waiting for the model" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic slow request"}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"a","status":"working","startedAt":"2026-10-26T00:00:00Z","updatedAt":"2026-10-26T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.sessions.items[0].started_ms = h.a.nowMs() - 90_000;
+    h.a.sessions.items[0].updated_ms = h.a.nowMs() - 90_000;
+    h.t.settle(1);
+    try testing.expect(h.t.containsText("Waiting for the model"));
+    try testing.expect(h.t.containsText("no update for 1m 30s"));
+
+    // A stale row after a finished reply is not a running turn.
+    var finished = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"a","role":"assistant","status":"complete","parts":[{"id":"p","kind":"text","text":"Synthetic answer"}]}]}
+    , .{});
+    defer finished.deinit();
+    try h.a.transcript.apply(finished.value);
+    h.t.settle(1);
+    try testing.expect(!h.t.containsText("Waiting for the model"));
+}
+
+test "a working trailer names the current plan step and action" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"live","role":"assistant","status":"streaming","parts":[
+        \\ {"id":"plan","kind":"tool","resolved":true,"call":{"kind":"todo","items":[
+        \\   {"text":"Inspect the saved choice","done":true},
+        \\   {"text":"Verify the project grouping","done":false}]}},
+        \\ {"id":"run","kind":"tool","resolved":false,"call":{"kind":"exec","command":"zig build test"}}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    var sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"a","status":"working","startedAt":"2026-10-26T00:00:00Z","updatedAt":"2026-10-26T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try h.a.sessions.replace(sessions.value);
+    h.a.sessions.items[0].started_ms = h.a.nowMs();
+    h.a.sessions.items[0].updated_ms = h.a.nowMs();
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("Verify the project grouping"));
+    try testing.expect(h.t.hasText("Run · zig build test"));
+}
+
 test "an ACP reply with more than 256 runs does not lose its final answer" {
     var h: Harness = undefined;
     try h.init();
@@ -325,17 +400,19 @@ test "sidebar culls whole offscreen groups without changing their extent" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
+    // Keep four-digit fixture titles complete; row lookup is not testing fade.
+    h.a.settings.setNumber("sidebarWidth", 360);
     h.a.settings.setText("sidebarOrganization", "byDevice");
     try sidebarRows(&h, 50, false, true);
     const small_nodes = h.t.ctx.stats.nodes;
     try sidebarRows(&h, 2000, false, true);
     try testing.expect(h.t.ctx.stats.nodes <= small_nodes * 2);
     const first = h.t.findText("Synthetic session 0") orelse return error.FirstGroupMissing;
-    // Each group: 12 above, 28 header, 4 body inset, 29 row, 2 gap.
-    h.t.scroll(100, 300, -75 * 1000);
+    // Each group:14 above,28 header,4 body inset,38 row,2 gap.
+    h.t.scroll(100, 300, -86 * 1000);
     const middle = h.t.findText("Synthetic session 1000") orelse return error.JumpGroupMissing;
     try testing.expectApproxEqAbs(first.y, middle.y, 1);
-    h.t.scroll(100, 300, -75 * 2000);
+    h.t.scroll(100, 300, -86 * 2000);
     const last = h.t.findText("Synthetic session 1999") orelse return error.LastGroupMissing;
     try testing.expect(last.y >= 0 and last.y < 780);
     try testing.expect(h.t.ctx.stats.nodes <= small_nodes * 2);
@@ -346,8 +423,15 @@ test "sidebar large wheel jumps and resizes retain mixed-height rows and exact s
         var h: Harness = undefined;
         try h.init();
         defer h.deinit();
+        // Isolate row virtualization from grouping and title fading.
+        h.a.settings.setNumber("sidebarWidth", 360);
+        h.a.settings.setText("sidebarOrganization", "inOneList");
         h.a.settings.set(.sidebar_compact, mode == 0);
-        h.a.settings.set(.sidebar_show_project_label, mode != 2);
+        h.a.settings.set(.sidebar_show_project_label, mode == 1);
+        h.a.settings.set(.sidebar_show_updated, mode != 2);
+        h.a.settings.set(.sidebar_show_harness, mode != 2);
+        h.a.settings.set(.sidebar_show_project_icon, false);
+        h.a.settings.set(.sidebar_show_branch, true);
         try sidebarRows(&h, 2000, true, false);
         const first = h.t.findText("Synthetic session 0") orelse return error.FirstRowMissing;
         try testing.expect(first.y >= 0 and first.y < 780);
@@ -356,15 +440,14 @@ test "sidebar large wheel jumps and resizes retain mixed-height rows and exact s
         var extent: f32 = 0;
         while (rects.next()) |entry| {
             const r = entry.value_ptr.*;
-            if (r.w == 240 and r.h > extent) {
+            if (r.w == @import("view_sidebar.zig").widthOf(&h.a) - 16 and r.h > extent) {
                 body = entry.key_ptr.*;
                 extent = r.h;
             }
         }
         const stride: f32 = switch (mode) {
-            0 => 31,
-            1 => 55, // Alternating 45- and 61-point rows, plus gaps.
-            else => 39, // Without the 16-point project labels.
+            0, 1 => 40, //38px navigation rows plus2px gaps.
+            else => 36, // Branch-only context alternates30/38px rows.
         };
         try testing.expectApproxEqAbs(stride * 2000 - 2, extent, 1);
         // No settle: the input frame itself must build the destination rows,
@@ -464,17 +547,22 @@ test "a new pane starts with an empty prompt; each pane and tab keeps its own" {
     // ⌘W: the left pane's prompt comes back with it.
     h.press(.{ .key = 'w', .cmd = true });
     try testing.expectEqualStrings("hey there", h.a.composer.text());
-    // Alpha's own tab, with its own prompt; the new chat's tab keeps its.
-    h.showTab(0);
+    // The original folder tabs now belong to the surviving panel; choosing
+    // one must restore its draft without reverting to a separate workspace.
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
+    h.a.showPaneTab(0);
+    h.t.settle(1);
     try testing.expectEqualStrings("", h.a.composer.text());
     h.a.composer.set("about alpha");
-    h.showTab(1);
+    h.a.showPaneTab(1);
+    h.t.settle(1);
     try testing.expectEqualStrings("hey there", h.a.composer.text());
-    h.showTab(0);
+    h.a.showPaneTab(0);
+    h.t.settle(1);
     try testing.expectEqualStrings("about alpha", h.a.composer.text());
 }
 
-test "in a narrow pane the starter tiles stay inside it, each with its icon's room" {
+test "in a narrow pane the starter chips stay inside it above the dock, with room for their icons" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -486,21 +574,18 @@ test "in a narrow pane the starter tiles stay inside it, each with its icon's ro
     try h.a.spaces.replace(parsed.value);
     h.a.select(null, "s");
     for (0..3) |_| h.press(.{ .key = 'd', .cmd = true });
-    h.snap("narrow-tiles");
-    // Titles are cut short with an ellipsis in a tile this narrow: find
-    // each by its first letter, under the focused pane's pill.
+    h.snap("narrow-chips");
+    // Current starters are28px wrapped chips ABOVE the input. Their
+    // truncated titles must still leave11px padding,13px icon,6px gap.
     const titles = [_][]const u8{ "B", "R", "P", "T" };
-    const pane_left = 1100 - h.a.tabs.layout().?.shares.items[3] * @import("view_transcript.zig").mainWidth(&h.t.ctx, &h.a);
     const pill = h.a.view.composer_anchor orelse return error.NoComposer;
     for (titles) |title| {
         const r = for (h.t.ctx.nodes.items) |node| switch (node.content) {
-            .text => |t| if (std.mem.startsWith(u8, t.str, title) and node.rect.y > pill.y + pill.h and node.rect.x > pill.x) break node.rect,
+            .text => |t| if (std.mem.startsWith(u8, t.str, title) and node.rect.y + node.rect.h <= pill.y and node.rect.x > pill.x) break node.rect,
             else => {},
-        } else return error.TileMissing;
-        // The tile's edge and 14 of padding, the 15-point icon and 8 between,
-        // inside the pane.
-        try testing.expect(r.x - 38 >= pane_left);
-        try testing.expect(r.x + r.w + 15 <= 1100);
+        } else return error.StarterChipMissing;
+        try testing.expect(r.x - 30 >= pill.x);
+        try testing.expect(r.x + r.w + 11 <= pill.x + pill.w);
     }
 }
 
@@ -528,7 +613,9 @@ test "the composer has the keys after ⌘D, ⌘[ and ⌘]: nothing typed is lost
     h.press(.{ .key = ']', .cmd = true });
     typeKeys(&h, "s");
     try testing.expectEqualStrings("rights", h.a.composer.text());
-    h.showTab(0);
+    h.press(.{ .key = '[', .cmd = true });
+    h.a.showPaneTab(0);
+    h.t.settle(1);
     typeKeys(&h, "on alpha");
     try testing.expectEqualStrings("on alpha", h.a.composer.text());
 }
@@ -961,8 +1048,10 @@ test "the project menu: All projects, then by name with the away device's last; 
     try testing.expect(h.t.hasText("Beta"));
     try testing.expect(h.t.findText("Alpha").?.y < 80);
     try testing.expectEqualStrings("s2", h.a.settings.spaceFilter().?);
-    // Back to all, by the keys from the filter's own row.
-    try h.t.clickText("Ledger");
+    // The narrow sidebar fades the selected name beside its device label.
+    // Activate the actual trigger, not an assumed untruncated text node.
+    const selected_trigger = h.a.view.filter_anchor.?;
+    h.t.click(selected_trigger.x + selected_trigger.w / 2, selected_trigger.y + selected_trigger.h / 2);
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 3), h.a.view.menus.active);
     h.press(.{ .key = ui.Shortcut.up });
@@ -990,7 +1079,7 @@ test "the project menu closes on Escape, and on a press outside; New project is 
     try testing.expect(h.t.findText("New project") == null);
 }
 
-test "the view menu: Sort › Created reorders the sessions; Show › Archived and Compact switch and are kept" {
+test "the view menu sorts sessions and keeps flat Archived and Compact display choices" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -1014,17 +1103,19 @@ test "the view menu: Sort › Created reorders the sessions; Show › Archived a
     // Beta was made last: first now; the menu stays, its value updated.
     try testing.expect(h.a.view.more_menu);
     try testing.expectEqualStrings("b", h.a.chats.items[0].id);
-    const show = h.t.findText("Show").?;
-    h.t.moveTo(show.x + 4, show.y + show.h / 2);
-    h.t.settle(1);
+    try testing.expect(!h.t.hasText("Show"));
+    try testing.expect(!h.t.hasText("Project icon"));
     try h.t.clickText("Archived");
     h.t.settle(1);
     try testing.expect(!h.a.settings.get(.sidebar_show_archived));
-    // Show's menu stays open for the next switch.
-    try testing.expect(h.t.hasText("Project icon"));
+    // Display switches stay open, and expanded mode reveals detail choices.
+    try testing.expect(h.a.view.more_menu);
     try h.t.clickText("Compact");
     h.t.settle(1);
     try testing.expect(!h.a.settings.get(.sidebar_compact));
+    try testing.expect(h.t.hasText("Project icon"));
+    try testing.expect(h.t.hasText("Agent icon"));
+    try testing.expect(!h.a.settings.get(.sidebar_show_archived));
     h.press(.{ .key = ui.Shortcut.escape });
     h.press(.{ .key = ui.Shortcut.escape });
     try testing.expect(!h.a.view.more_menu);
@@ -1107,13 +1198,16 @@ test "Organize › By project heads each project's sessions; Compact off shows w
     try testing.expect(h.t.hasText("Studio"));
     h.a.settings.setText("sidebarOrganization", "inOneList");
     h.a.settings.set(.sidebar_compact, false);
+    // The current default hides project names independently of Compact.
+    h.a.settings.set(.sidebar_show_project_label, true);
     h.t.settle(1);
-    // (The open chat's header says "fieldnotes @ Studio" too.)
-    try testing.expect(h.t.hasText("Ledger @ Studio"));
+    try testing.expect(h.t.hasText("Ledger"));
+    // A local project's name no longer repeats the local device suffix.
+    try testing.expect(!h.t.hasText("Ledger @ Studio"));
     h.snap("expanded-rows");
     h.a.settings.set(.sidebar_show_project_label, false);
     h.t.settle(1);
-    try testing.expect(!h.t.hasText("Ledger @ Studio"));
+    try testing.expect(!h.t.hasText("Ledger"));
 }
 
 /// Settings › GitHub CI open, on no engine.
@@ -1760,7 +1854,7 @@ test "a live snapshot asking for Settings draws it in that frame alone: the wind
     try testing.expect(!h.t.hasText("Search settings"));
 }
 
-test "a finished turn's edits show as a changes card over the composer; it opens the Changes pane" {
+test "a finished turn keeps edit results in its tree while Changes retains review actions" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -1775,19 +1869,22 @@ test "a finished turn's edits show as a changes card over the composer; it opens
     defer parsed.deinit();
     try h.a.transcript.apply(parsed.value);
     h.t.settle(1);
-    h.snap("turn-changes-card");
-    try testing.expect(h.t.hasText("2 files changed"));
-    try testing.expect(h.t.hasText("parser.rs, CHANGELOG.md"));
-    try testing.expect(h.t.hasText("+5"));
-    try testing.expect(h.t.hasText("-1"));
-    // Over the composer, clear of the pill.
-    const pill = h.a.view.composer_anchor.?;
-    try testing.expect(h.t.findText("2 files changed").?.y + 30 < pill.y);
-    try h.t.clickText("Review");
+    h.snap("turn-edit-summary");
+    try testing.expect(!h.t.hasText("2 files changed"));
+    try testing.expect(!h.t.hasText("Review"));
+    try h.t.clickText("Ran 1 command · edited 2 files");
+    h.t.settle(1);
+    try testing.expect(h.t.hasText("parser.rs"));
+    try testing.expect(h.t.hasText("CHANGELOG.md"));
+    try testing.expect(h.t.hasText("+3"));
+    try testing.expect(h.t.hasText("−1"));
+    // Changes is still independently available; the removed composer card
+    // must not be restored merely to reach its existing review actions.
+    @import("app_panels.zig").addDiffsTab(&h.a);
     h.t.settle(1);
     try testing.expect(h.a.panels.host_open);
     try testing.expect(h.a.panels.activeTab().?.kind == .diffs);
-    try testing.expect(h.t.hasText("Showing"));
+    try testing.expect(!h.t.hasText("Showing"));
     // The working tree's diff ends on GPUI's review footer: Undo asks
     // first, Keep changes closes the pane.
     var d: @import("app_panels.zig").Diff = .{ .arena = .init(testing.allocator), .additions = 1, .deletions = 1 };
@@ -1806,7 +1903,10 @@ test "a finished turn's edits show as a changes card over the composer; it opens
     h.a.panels.diff_loading = false;
     h.t.settle(1);
     h.snap("changes-review-footer");
-    try testing.expect(h.t.containsText("new();"));
+    testing.expect(h.t.containsText("new();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
     try testing.expect(h.t.hasText("Undo reverts every uncommitted file."));
     try h.t.clickText("Undo all changes");
     h.t.settle(1);
@@ -1818,7 +1918,8 @@ test "a finished turn's edits show as a changes card over the composer; it opens
     try h.t.clickText("Keep changes");
     h.t.settle(1);
     try testing.expect(!h.a.panels.host_open);
-    try testing.expect(h.t.hasText("Review"));
+    try testing.expect(!h.t.hasText("Review"));
+    try testing.expect(h.t.hasText("Ran 1 command · edited 2 files"));
 }
 
 test "an opened edit step shows its code as a diff, and a thinned one its files" {
@@ -1837,15 +1938,27 @@ test "an opened edit step shows its code as a diff, and a thinned one its files"
     h.a.settings.set(.transcript_compact_mode, false);
     // The run of steps open, the steps themselves closed: no code yet.
     h.a.view.toggleGroup(h.a.gpa, "r/e1", false);
+    // Tool folds schedule bounded 30Hz frames rather than a continuous
+    // animation. Advance that clock before clicking the moving row.
+    h.t.advance(0.3);
     h.t.settle(1);
     try testing.expect(h.t.hasText("lexer.rs"));
-    try testing.expect(!h.t.containsText("new_token();"));
+    testing.expect(!h.t.containsText("new_token();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
     try h.t.clickText("lexer.rs");
     h.t.settle(1);
     h.snap("edit-step-diff");
     try testing.expect(h.t.hasText("@@ -1,3 +1,3 @@"));
-    try testing.expect(h.t.containsText("old_token();"));
-    try testing.expect(h.t.containsText("new_token();"));
+    testing.expect(h.t.containsText("old_token();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
+    testing.expect(h.t.containsText("new_token();")) catch |err| {
+        std.debug.print("assertion at {s}:{d}\n", .{ @src().file, @src().line });
+        return err;
+    };
     try h.t.clickText("parser.rs");
     h.t.settle(1);
     try testing.expect(h.t.hasText("src/parser.rs"));
@@ -1894,6 +2007,10 @@ test "the context ring sits at the footer's right; resting on it opens the card 
     try testing.expect(h.t.hasText("saved by graff"));
     h.t.advance(0.4);
     try testing.expect(!h.t.hasText("saved by graff"));
+    // GPUI's footer hit area reaches 4 points past the pill's right edge.
+    h.t.moveTo(1068, 760);
+    h.t.advance(0.7);
+    try testing.expect(h.t.hasText("Context"));
 }
 
 test "answering a question keeps its text alive through the frame that drew it" {

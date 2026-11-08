@@ -2017,6 +2017,11 @@ impl MetalRenderer {
         if sprites.is_empty() {
             return true;
         }
+        // Eviction can retire an atlas texture after a scene captured its
+        // tile. Drop that stale batch instead of panicking during paint.
+        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+            return true;
+        };
         align_offset(instance_offset);
 
         let sprite_bytes_len = mem::size_of_val(sprites);
@@ -2028,7 +2033,6 @@ impl MetalRenderer {
             return false;
         }
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
         let texture_size = size(
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
@@ -2091,9 +2095,13 @@ impl MetalRenderer {
         if sprites.is_empty() {
             return true;
         }
+        // See `draw_monochrome_sprites`: a retired texture leaves its last
+        // scene batch stale for one frame, which must not abort the app.
+        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+            return true;
+        };
         align_offset(instance_offset);
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
         let texture_size = size(
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
@@ -2832,6 +2840,58 @@ mod backdrop_blur_tests {
             baseline,
             "disabling mask must restore ordinary image exactly"
         );
+    }
+
+    #[test]
+    fn removed_atlas_texture_skips_a_stale_sprite_batch_instead_of_panicking() {
+        use gpui::{
+            AtlasKey, MonochromeSprite, PlatformAtlas, RenderSvgParams, TransformationMatrix,
+        };
+        use std::borrow::Cow;
+        if metal::Device::system_default().is_none() {
+            return;
+        }
+        let mut renderer =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())));
+        let tile_size = size(DevicePixels(32), DevicePixels(16));
+        let key: AtlasKey = RenderSvgParams {
+            path: "evicted-before-paint".into(),
+            size: tile_size,
+        }
+        .into();
+        let tile = renderer
+            .sprite_atlas()
+            .get_or_insert_with(&key, &mut || {
+                Ok(Some((tile_size, Cow::Owned(vec![255; 32 * 16]))))
+            })
+            .unwrap()
+            .unwrap();
+        let mut scene = Scene::default();
+        push_quad(&mut scene, viewport(), 0.0);
+        scene.insert_primitive(MonochromeSprite {
+            order: 0,
+            pad: 0,
+            bounds: bounds(20., 20., 32., 16.),
+            content_mask: ContentMask { bounds: viewport() },
+            color: Hsla {
+                h: 0.,
+                s: 0.,
+                l: 1.,
+                a: 1.,
+            },
+            tile,
+            transformation: TransformationMatrix::unit(),
+            fade: Default::default(),
+        });
+        scene.finish();
+
+        // The scene still carries this tile after an image cache eviction.
+        renderer.sprite_atlas().remove(&key);
+        let image = renderer
+            .render_scene_to_image(&scene, size(DevicePixels(VIEW_W), DevicePixels(VIEW_H)))
+            .expect("a retired atlas tile must not abort the frame");
+        assert_eq!(image.width(), VIEW_W as u32);
+        assert_eq!(image.height(), VIEW_H as u32);
     }
 
     #[test]

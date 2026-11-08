@@ -30,6 +30,9 @@ pub const Browser = struct {
     }
 
     pub fn destroy(b: *Browser) void {
+        @import("text_buffer.zig").deinit(&b.address);
+        @import("text_buffer.zig").deinit(&b.title);
+        @import("text_buffer.zig").deinit(&b.notice);
         if (comptime builtin.os.tag == .macos) if (b.native) |n| n.destroy();
         const gpa = b.app.gpa;
         gpa.free(b.parent);
@@ -133,7 +136,7 @@ pub fn syncNative(a: *App, c: *nanoui.ui.Context) void {
     if (comptime builtin.os.tag != .macos) return;
     const window = a.window orelse return;
     const active = if (a.panels.activeTab()) |t| t.browser else null;
-    const modal = a.view.settings_open or a.picker != .none or a.view.palette.open or a.view.theme_import != null or
+    const modal = a.view.project_setup.open or a.view.settings_open or a.picker != .none or a.view.palette.open or a.view.theme_import != null or
         a.view.account_menu or a.view.more_menu or a.view.filter_menu or a.view.space_menu or a.view.checkout_menu;
     for (a.panels.tabs.items) |t| if (t.browser) |b| {
         const visible = active == b and a.panels.host_open and b.belongsTo(a.selected) and !modal;

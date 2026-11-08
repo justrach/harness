@@ -21,11 +21,16 @@ impl MetalAtlas {
             polychrome_textures: Default::default(),
             tiles_by_key: Default::default(),
             revision: 0,
+            eviction_revision: 0,
+            next_texture_generation: 0,
         }))
     }
 
-    pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> metal::Texture {
-        self.0.lock().texture(id).metal_texture.clone()
+    pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> Option<metal::Texture> {
+        self.0
+            .lock()
+            .texture(id)
+            .map(|texture| texture.metal_texture.clone())
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -60,6 +65,10 @@ struct MetalAtlasState {
     polychrome_textures: AtlasTextureList<MetalAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
     revision: u64,
+    /// Incremented only when a tile retires, so cached view paint can identify
+    /// scenes whose image allocation may already be gone.
+    eviction_revision: u64,
+    next_texture_generation: u32,
 }
 
 impl PlatformAtlas for MetalAtlas {
@@ -78,7 +87,9 @@ impl PlatformAtlas for MetalAtlas {
             let tile = lock
                 .allocate(size, key.texture_kind())
                 .context("failed to allocate")?;
-            let texture = lock.texture(tile.texture_id);
+            let texture = lock
+                .texture(tile.texture_id)
+                .context("allocated atlas texture disappeared")?;
             texture.upload(tile.bounds, &bytes);
             lock.revision = lock.revision.wrapping_add(1);
             lock.tiles_by_key.insert(key.clone(), tile);
@@ -92,6 +103,7 @@ impl PlatformAtlas for MetalAtlas {
             return;
         };
         lock.revision = lock.revision.wrapping_add(1);
+        lock.eviction_revision = lock.eviction_revision.wrapping_add(1);
         let id = tile.texture_id;
 
         let textures = match id.kind {
@@ -117,6 +129,10 @@ impl PlatformAtlas for MetalAtlas {
                 *texture_slot = Some(texture);
             }
         }
+    }
+
+    fn eviction_revision(&self) -> u64 {
+        self.0.lock().eviction_revision
     }
 }
 
@@ -194,6 +210,8 @@ impl MetalAtlasState {
         });
         let metal_texture = self.device.new_texture(&texture_descriptor);
 
+        let generation = self.next_texture_generation;
+        self.next_texture_generation = self.next_texture_generation.wrapping_add(1);
         let texture_list = match kind {
             AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
             AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
@@ -205,6 +223,7 @@ impl MetalAtlasState {
         let atlas_texture = MetalAtlasTexture {
             id: AtlasTextureId {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
+                generation,
                 kind,
             },
             allocator: etagere::BucketedAtlasAllocator::new(size_to_etagere(size)),
@@ -224,13 +243,13 @@ impl MetalAtlasState {
         .unwrap()
     }
 
-    fn texture(&self, id: AtlasTextureId) -> &MetalAtlasTexture {
+    fn texture(&self, id: AtlasTextureId) -> Option<&MetalAtlasTexture> {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
-        textures[id.index as usize].as_ref().unwrap()
+        textures.textures.get(id.index as usize)?.as_ref().filter(|texture| texture.id == id)
     }
 }
 
@@ -371,7 +390,30 @@ mod tests {
         let tile_a2 = insert_tile(&atlas, &key_a, small);
 
         // The texture must actually exist — this would panic before the fix.
-        let _texture = atlas.metal_texture(tile_a2.texture_id);
+        let _texture = atlas
+            .metal_texture(tile_a2.texture_id)
+            .expect("reinserted tile owns a live texture");
+        assert!(
+            atlas.metal_texture(tile_a.texture_id).is_none(),
+            "the retired generation must not resolve after a slot is reused"
+        );
+        assert_ne!(tile_a.texture_id, tile_a2.texture_id);
+    }
+
+    #[test]
+    fn removed_texture_lookup_reports_missing_instead_of_panicking() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+        let size = Size {
+            width: DevicePixels(64),
+            height: DevicePixels(64),
+        };
+        let key = make_image_key(4, 0);
+        let tile = insert_tile(&atlas, &key, size);
+        assert!(atlas.metal_texture(tile.texture_id).is_some());
+        atlas.remove(&key);
+        assert!(atlas.metal_texture(tile.texture_id).is_none());
     }
 
     #[test]

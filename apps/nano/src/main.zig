@@ -19,8 +19,12 @@ pub fn main(init: std.process.Init) !void {
     defer app.destroy();
     var a: App = .init(init.gpa, init.io, Engine.portFrom(init.environ_map));
     defer a.deinit();
-    a.new_harness = try init.gpa.dupe(u8, init.environ_map.get("HARNESS_NANO_HARNESS") orelse "graff");
+    const harness_override = init.environ_map.get("HARNESS_NANO_HARNESS");
+    a.new_harness = try init.gpa.dupe(u8, harness_override orelse "graff");
     a.settings = .open(init.gpa, init.io, init.environ_map);
+    // The new chat opens on the last explicit picks, unless a scene or test
+    // pinned its agent for this run.
+    if (harness_override == null) @import("composer_defaults.zig").apply(&a);
     a.env = init.environ_map;
     // Panics, fatal signals and hangs leave their stacks in ~/.harness/logs.
     if (a.settings.dataDir()) |dir| crash_log.start(init.io, dir);
@@ -34,10 +38,13 @@ pub fn main(init: std.process.Init) !void {
         .dark => true,
     };
     try @import("native_menu.zig").install(app, &a);
+    // The same window size the desktop reopens with, rather than a one-off
+    // Nano size that visibly jumps when moving between the two apps.
+    const window_size = a.settings.windowSize();
     a.window = try app.newWindow(.{
         .title = "Harness",
-        .width = 1200,
-        .height = 780,
+        .width = window_size.width,
+        .height = window_size.height,
         .min_width = 760,
         .min_height = 480,
         .title_bar = .hidden,

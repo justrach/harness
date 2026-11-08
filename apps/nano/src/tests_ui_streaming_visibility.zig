@@ -40,6 +40,10 @@ test "a short live turn stays visible when its expanded reasoning shrinks to too
     defer t.deinit();
     t.settle(1);
     try visible(&t, "Synthetic second prompt");
+    if (@import("builtin").os.tag == .macos) {
+        try t.clickText("Thought process");
+        t.settle(1);
+    }
     try visible(&t, "Synthetic live thought");
 
     // A long live thought moves the viewport to its end. Replacing that
@@ -75,4 +79,78 @@ test "a short live turn stays visible when its expanded reasoning shrinks to too
     );
     t.settle(1);
     try visible(&t, "Synthetic final reply");
+}
+
+
+test "an unfocused window slows loader redraws and an off-screen spinner schedules none" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic", null);
+    const agents = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"graff","name":"graff","enabled":true}]
+    , .{});
+    defer agents.deinit();
+    try a.harnesses.replace(agents.value);
+    const models = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic","label":"Synthetic","maker":"openai"}]
+    , .{});
+    defer models.deinit();
+    try a.models.replace(models.value);
+    a.new_harness = try testing.allocator.dupe(u8, "graff");
+    a.new_model = try testing.allocator.dupe(u8, "synthetic");
+    const sessions = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"chatId":"synthetic","status":"working","startedAt":"2026-10-03T00:00:00Z","updatedAt":"2026-10-03T00:00:00Z"}]
+    , .{});
+    defer sessions.deinit();
+    try a.sessions.replace(sessions.value);
+    var history: std.ArrayList(u8) = .empty;
+    defer history.deinit(testing.allocator);
+    try history.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..40) |i| {
+        if (i > 0) try history.appendSlice(testing.allocator, ",");
+        try history.print(testing.allocator, "{{\"id\":\"u{d}\",\"role\":\"user\",\"parts\":[{{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic prompt {d}\"}}]}}", .{ i, i });
+    }
+    try history.appendSlice(testing.allocator, ",{\"id\":\"live\",\"role\":\"assistant\",\"status\":\"streaming\",\"parts\":[]}]}");
+    try apply(&a, history.items);
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 420, .dark = true });
+    defer t.deinit();
+    t.frame();
+    const focused = t.ctx.frame_in orelse return error.LoaderNotScheduled;
+    try testing.expect(focused <= 1.0 / 15.0 + 0.001);
+
+    t.ctx.input.window_active = false;
+    t.frame();
+    const unfocused = t.ctx.frame_in orelse return error.BackgroundLoaderNotScheduled;
+    try testing.expectApproxEqAbs(focused * @import("view_kit.zig").background_tick_divisor, unfocused, 0.001);
+
+    // Leave the working trailer below the window. GPUI never mounts that
+    // row; Nano must not keep redrawing a spinner the reader cannot see.
+    const box = for (t.ctx.nodes.items) |n| {
+        if (n.style.scroll and n.rect.h > 200) break n.id;
+    } else return error.NoTranscriptScroll;
+    try t.ctx.scroll.put(t.ctx.gpa, box, 0);
+    try t.ctx.scroll_follow.put(t.ctx.gpa, box, false);
+    // The frame that applies the scroll still sees the previous on-screen
+    // rect. The next one must not paint or schedule the hidden loader.
+    t.frame();
+    t.frame();
+    if (t.containsText("Working out the next step")) {
+        var on_screen = false;
+        for (t.ctx.nodes.items) |n| switch (n.content) {
+            .text => |tx| if (std.mem.indexOf(u8, tx.str, "Working out the next step") != null and n.rect.y + n.rect.h > 0 and n.rect.y < t.size.h) {
+                on_screen = true;
+            },
+            else => {},
+        };
+        if (on_screen) return error.TrailerStillVisible;
+    }
+    // The overlay scrollbar lingers after the jump. Once that fade is gone,
+    // an off-screen working trailer must not keep a loader tick alive.
+    t.advance(1.7);
+    try testing.expect(t.ctx.frame_in == null);
 }

@@ -147,6 +147,7 @@ struct Background {
 
 struct AtlasTextureId {
     index: u32,
+    generation: u32,
     kind: u32,
 }
 

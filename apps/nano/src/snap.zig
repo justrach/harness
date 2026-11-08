@@ -59,6 +59,13 @@ pub fn main(init: std.process.Init) !void {
         if (scene.get(l[0])) |v| try l[1].replace(v);
     }
     @import("workspace.zig").sortChats(a.chats.items);
+    // Optional synthetic RPC replies, as in parity scenes. Never connect a
+    // fixture to the user's engine just to exercise project setup.
+    if (scene.get("replies")) |v| {
+        a.engine.scene = try json.parseFromSlice(json.Value, gpa, try json.Stringify.valueAlloc(init.arena.allocator(), v, .{}), .{});
+        a.engine.state = .connected;
+        a.device_id = try gpa.dupe(u8, first(scene, "spaces", "deviceId") orelse first(scene, "devices", "id") orelse "local");
+    }
     // The account badge's: "workspaceScope", "auth" (an AuthStatus item),
     // "codegraff" (a CodegraffAuthStatus reply).
     const acct = @import("app_account.zig");

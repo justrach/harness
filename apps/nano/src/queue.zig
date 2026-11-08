@@ -17,6 +17,7 @@ pub const Row = struct {
     id: []const u8,
     text: []const u8,
     attachments: usize = 0,
+    paths: []const []const u8 = &.{},
     gate: Gate = .none,
     /// Sent by an agent (a peer chat), not typed here.
     agent: bool = false,
@@ -28,6 +29,12 @@ fn parseRow(a: Allocator, o: json.ObjectMap) ?Row {
     var r: Row = .{ .id = ws.str(a, o, "id") orelse return null, .text = ws.str(a, o, "text") orelse "" };
     if (o.get("attachments")) |v| if (v == .array) {
         r.attachments = v.array.items.len;
+        var paths: std.ArrayList([]const u8) = .empty;
+        for (v.array.items) |path| if (path == .string) {
+            const copy = a.dupe(u8, path.string) catch return null;
+            paths.append(a, copy) catch return null;
+        };
+        r.paths = paths.toOwnedSlice(a) catch return null;
     };
     if (ws.str(a, o, "turnOrigin")) |origin| r.agent = !std.mem.eql(u8, origin, "human");
     if (o.get("deliveryGate")) |g| if (g == .object) {
@@ -48,7 +55,12 @@ pub fn items(v: json.Value) json.Value {
 pub fn oneLine(buf: []u8, text: []const u8) []const u8 {
     var n: usize = 0;
     var space = false;
-    for (std.mem.trim(u8, text, " \t\r\n")) |ch| {
+    const refs = @import("attachment_refs.zig");
+    var scratch: [1024]u8 = undefined;
+    var temp: std.heap.BufferFirstAllocator = .init(&scratch, std.heap.page_allocator);
+    const parsed = refs.parse(temp.allocator(), text) catch refs.Parsed{ .text = text };
+    defer refs.deinit(temp.allocator(), parsed);
+    for (std.mem.trim(u8, parsed.text, " \t\r\n")) |ch| {
         if (n == buf.len) break;
         if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
             space = true;
@@ -81,6 +93,7 @@ test "rows read their gates, origin and attachments" {
     try testing.expectEqual(@as(usize, 3), rows.items.len);
     try testing.expectEqualStrings("Laptop", rows.items[1].gate.editing);
     try testing.expectEqual(@as(usize, 1), rows.items[1].attachments);
+    try testing.expectEqualStrings("p.png", rows.items[1].paths[0]);
     try testing.expect(rows.items[2].gate == .review and rows.items[2].agent);
     var b: [64]u8 = undefined;
     try testing.expectEqualStrings("fix the tests", oneLine(&b, rows.items[0].text));

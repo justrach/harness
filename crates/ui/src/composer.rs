@@ -14966,6 +14966,131 @@ mod tests {
     }
 
     #[gpui::test]
+    fn gpui_attachment_regression_queue_edit_enter_saves_and_shift_enter_keeps_images(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (_dir, handle) = composer_focus_window(cx);
+        cx.update(|cx| crate::composer::init(cx, ComposerSendBehavior::Enter));
+        let (out, mut requests) = tokio::sync::mpsc::channel::<String>(32);
+        let (replies, inbound) = tokio::sync::mpsc::channel::<String>(32);
+        let png = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1cAAAAASUVORK5CYII=",
+        ).unwrap();
+        let retained = attachments::stage_png_bytes("keep shot.png".into(), png.clone());
+        let retained_id = retained.id.clone();
+        let removed = attachments::stage_png_bytes("remove.png".into(), png);
+        handle
+            .update(cx, |composer, window, cx| {
+                composer.state.update(cx, |state, _| {
+                    state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                        harness_rpc::RpcClient::new(out, inbound),
+                    ));
+                });
+                composer.editing_queued = Some("queued-row".into());
+                composer.queue_edit_lease_id = Some("lease".into());
+                composer.queue_edit_chat_id = Some("chat".into());
+                composer.queue_edit_host_device_id = Some("synthetic-host".into());
+                composer.attachments.insert(
+                    composer.current_key.clone(),
+                    vec![retained, removed.clone()],
+                );
+                composer
+                    .input
+                    .update(cx, |input, cx| input.set_text("Keep prompt", cx));
+                composer.remove_attachment(&removed.id, cx);
+                window.focus(&composer.input.focus_handle(cx), cx);
+            })
+            .unwrap();
+
+        cx.simulate_keystrokes(handle.into(), "shift-enter");
+        handle
+            .read_with(cx, |composer, cx| {
+                assert_eq!(composer.input.read(cx).text(), "Keep prompt\n");
+                assert_eq!(composer.staged().len(), 1);
+                assert_eq!(composer.staged()[0].id, retained_id);
+                assert!(!composer.queue_edit_finishing);
+            })
+            .unwrap();
+        while let Ok(raw) = requests.try_recv() {
+            let frame: harness_rpc::ClientFrame = serde_json::from_str(&raw).unwrap();
+            assert!(
+                !matches!(
+                    frame.method.as_deref(),
+                    Some(
+                        methods::UPLOAD_CHUNK
+                            | methods::UPLOAD_COMMIT
+                            | methods::FINISH_QUEUED_MESSAGE_EDIT
+                            | methods::QUEUE_COMMAND
+                    )
+                ),
+                "Shift+Enter must not save or send: {:?}",
+                frame.method,
+            );
+        }
+
+        cx.simulate_keystrokes(handle.into(), "enter");
+        // Drive the existing upload and lease RPCs with synthetic host replies.
+        // The save must retain the selected image, omit the removed image,
+        // and use the chat host rather than reading a client-local path.
+        for method in [
+            methods::UPLOAD_CHUNK,
+            methods::UPLOAD_COMMIT,
+            methods::FINISH_QUEUED_MESSAGE_EDIT,
+        ] {
+            cx.run_until_parked();
+            runtime.block_on(async { tokio::task::yield_now().await });
+            cx.run_until_parked();
+            let frame: harness_rpc::ClientFrame = serde_json::from_str(
+                &requests
+                    .try_recv()
+                    .expect("queue save must reach the existing attachment RPC"),
+            )
+            .unwrap();
+            assert_eq!(frame.method.as_deref(), Some(method));
+            assert_eq!(frame.params["targetDeviceId"], "synthetic-host");
+            let reply = match method {
+                methods::UPLOAD_COMMIT => {
+                    assert_eq!(frame.params["fileName"], "keep shot.png");
+                    serde_json::json!({ "path": "/synthetic/uploads/kept shot.png" })
+                }
+                methods::FINISH_QUEUED_MESSAGE_EDIT => {
+                    assert_eq!(frame.params["id"], "queued-row");
+                    assert_eq!(frame.params["action"], "commit");
+                    assert_eq!(frame.params["text"], "Keep prompt\n");
+                    assert_eq!(
+                        frame.params["attachments"],
+                        serde_json::json!(["/synthetic/uploads/kept shot.png"])
+                    );
+                    serde_json::json!({ "outcome": "committed" })
+                }
+                _ => serde_json::json!({}),
+            };
+            replies
+                .try_send(
+                    serde_json::to_string(&harness_rpc::ServerFrame {
+                        id: frame.id,
+                        ok: Some(reply),
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        runtime.block_on(async { tokio::task::yield_now().await });
+        cx.run_until_parked();
+        assert!(
+            requests.try_recv().is_err(),
+            "queue edit must not dispatch a new run"
+        );
+    }
+
+    #[gpui::test]
     fn queued_image_picker_never_attaches_to_another_draft(cx: &mut gpui::TestAppContext) {
         let (dir, handle) = composer_focus_window(cx);
         let path = dir.path().join("image.png");

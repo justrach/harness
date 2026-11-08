@@ -197,6 +197,7 @@ test "generated-page chips open only their local host's validated page and lock 
     h.a.device_id = try testing.allocator.dupe(u8, "synthetic-local");
     try h.t.clickText("render_html");
     h.t.settle(0.1);
+    try testing.expectEqual(@as(usize, 1), h.a.panels.tabs.items.len);
     const b = h.a.panels.tabs.items[0].browser.?;
     try testing.expectEqualStrings("graff-view://html/0123456789abcdef0123456789abcdef", b.url);
     b.navigate("https://example.com/");

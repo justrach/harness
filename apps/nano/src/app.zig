@@ -23,6 +23,24 @@ const account = @import("app_account.zig");
 const change_requests = @import("app_change_requests.zig");
 pub const uuid = @import("ids.zig").uuid;
 
+/// The sidebar seam's own tween. Keeping its start/end here means a resize
+/// or a reversed Cmd+B cannot restart it from a stale motion-store sample.
+pub const SidebarTween = struct {
+    from: f32,
+    to: f32,
+    started: ?f64 = null,
+};
+
+/// A split's insertion tween. The old pane widths are captured before the
+/// split, so the new pane grows into place while its neighbors give way.
+pub const SplitReveal = struct {
+    tab: usize,
+    new_index: usize,
+    old_count: usize,
+    from_shares: [tabs_mod.max_panes]f32 = @splat(0),
+    started: ?f64 = null,
+};
+
 /// The window's own state, apart from the engine's.
 pub const View = struct {
     sidebar_open: bool = true,
@@ -31,6 +49,14 @@ pub const View = struct {
     stick_end: bool = false,
     /// Effective slot width this frame, shared by chat, header and drop zones.
     sidebar_width: f32 = 256,
+    /// The seam's current 200ms tween, and whether the first frame has
+    /// adopted the saved width instead of animating from the default.
+    sidebar_tween: ?SidebarTween = null,
+    sidebar_ready: bool = false,
+    /// Actual workspace content bounds, shared by strip and transcript layout.
+    chrome: @import("panel_chrome.zig").Frame = .{},
+    strip: @import("view_tab_strip.zig").State = .{},
+    tool_ui: @import("tool_ui_state.zig").State = .{},
     /// Focus before a pointer press blurs a control in the sliding sidebar.
     sidebar_press_frame: u64 = 0,
     sidebar_press_focus: bool = false,
@@ -56,6 +82,12 @@ pub const View = struct {
     /// Archived rows shown: 10, then 25 more at a time.
     archived_limit: usize = 10,
     space_menu: bool = false,
+    /// Name-first New project form and internal folder navigator.
+    project_setup: @import("app_project_setup.zig").State = .{},
+    /// Shared computer-and-folder start sheet for tabs, splits and projects.
+    open_chooser: @import("app_open_chooser.zig").State = .{},
+    /// The split last made, while its new pane grows into place.
+    split_reveal: ?SplitReveal = null,
     /// The new chat's checkout menu (`PickerKind::Checkout`) and its chip.
     checkout_menu: bool = false,
     checkout_anchor: ?nanoui.ui.Rect = null,
@@ -155,6 +187,12 @@ pub const View = struct {
     hovers: std.AutoHashMapUnmanaged(u64, bool) = .empty,
 
     pub fn deinit(v: *View, gpa: Allocator) void {
+        @import("text_buffer.zig").deinit(&v.settings_search);
+        v.project_setup.deinit();
+        v.open_chooser.deinit();
+        @import("text_buffer.zig").deinit(&v.search.query);
+        @import("text_buffer.zig").deinit(&v.strip.query);
+        v.tool_ui.deinit(gpa);
         v.github_ci.deinit(gpa);
         v.palette.deinit(gpa);
         v.model_picker.deinit(gpa);
@@ -166,6 +204,7 @@ pub const View = struct {
         v.theme_review.deinit(gpa);
         v.library_error.deinit(gpa);
         if (v.theme_import) |d| {
+            @import("text_buffer.zig").deinit(&d.source);
             d.arena.deinit();
             d.err.deinit(gpa);
             gpa.destroy(d);
@@ -316,6 +355,10 @@ pub const App = struct {
     new_checkout_local: bool = false,
     /// The new chat is a plain chat (chat_mode.zig), not a coding session.
     new_chat_mode: bool = false,
+    /// An explicit projectless draft, unlike an uninitialized folder pick.
+    new_no_project: bool = false,
+    /// A draft's execution target; never changes this machine's identity.
+    new_device: ?[]u8 = null,
     new_reasoning: ?[]u8 = null,
     /// The agent `models` lists models for (owned).
     models_for: []u8 = &.{},
@@ -345,11 +388,14 @@ pub const App = struct {
     /// The project's actions, their editor, and the dock their runs show in.
     actions: @import("app_actions.zig").Actions,
     /// The terminal palette of the theme last drawn.
-    ansi: [16]nanoui.ui.Color = @import("theme.zig").builtin(true).ansi,
+    ansi: [16]nanoui.ui.Color = @import("theme.zig").fallback(true).ansi,
     /// The surface pane and the file explorer beside the chat.
     panels: @import("app_panels.zig").Panels,
     /// The open chats, one per tab, and their split panes.
     tabs: Tabs,
+    /// The saved GPUI `openTabs` were applied (or there were none): this
+    /// window may now publish its own tabs back to the shared settings.
+    tabs_ready: bool = false,
     /// The active tab's other panes' chats, each watched.
     peers: std.ArrayList(Peer) = .empty,
     /// A split's divider being dragged.
@@ -411,6 +457,7 @@ pub const App = struct {
     }
 
     pub fn deinit(a: *App) void {
+        @import("text_buffer.zig").deinit(&a.composer);
         @import("app_surface.zig").deinit(a);
         // An engine started from here stays up: others may be on it now.
         a.engine.deinit();
@@ -428,6 +475,7 @@ pub const App = struct {
         a.chats.deinit();
         a.sessions.deinit();
         a.devices.deinit();
+        a.rememberTabs();
         a.tabs.deinit();
         for (a.peers.items) |*p| {
             p.transcript.deinit();
@@ -455,6 +503,7 @@ pub const App = struct {
         if (a.device_id) |d| a.gpa.free(d);
         if (a.new_model) |m| a.gpa.free(m);
         if (a.new_reasoning) |m| a.gpa.free(m);
+        if (a.new_device) |id| a.gpa.free(id);
         a.gpa.free(a.models_for);
         a.gpa.free(a.new_harness);
         a.harnesses.deinit();
@@ -473,6 +522,7 @@ pub const App = struct {
     pub const togglePicker = agent.togglePicker;
     pub const pickModel = agent.pickModel;
     pub const pickReasoning = agent.pickReasoning;
+    pub const pickModelAndReasoning = agent.pickModelAndReasoning;
     pub const ensureModels = agent.ensureModels;
     pub const newChatSpace = agent.newChatSpace;
     pub const setArchived = agent.setArchived;
@@ -498,23 +548,8 @@ pub const App = struct {
         return buf;
     }
 
-    /// Asks for a folder and adds it as a space on this device, as the
-    /// GPUI app's "Add folder" does (`createSpace`).
-    pub fn addFolder(a: *App) void {
-        const device = a.device_id orelse return a.setNotice("The engine hasn't said which device it is yet.");
-        const picked = nanoui.dialog.open(a.gpa, .{ .title = "Add a folder", .button = "Add", .files = false, .directories = true }) catch return;
-        const paths = picked orelse return;
-        defer nanoui.dialog.freePaths(a.gpa, paths);
-        if (paths.len == 0) return;
-        var buf: [36]u8 = undefined;
-        const id = uuid(a.io, &buf);
-        var git_buf: [4096]u8 = undefined;
-        const git_path = std.fmt.bufPrint(&git_buf, "{s}/.git", .{paths[0]}) catch "";
-        const git = std.Io.Dir.cwd().access(a.io, git_path, .{}) != error.FileNotFound;
-        a.request(requests.createSpace(id, device, paths[0], git), .of(App, a, onNotice));
-        a.newTab();
-        a.select(null, id);
-    }
+    /// v0.2.173 pickers::new_project dispatches AddSpacePalette, not an OS dialog.
+    pub const addFolder = @import("app_project_setup.zig").open;
 
     pub fn releaseCame(ctx: *anyopaque) void {
         const a: *App = @ptrCast(@alignCast(ctx));
@@ -685,21 +720,116 @@ pub const App = struct {
         return "Unknown device";
     }
 
+    /// The selected project owns its host; a projectless draft keeps its
+    /// explicit computer, falling back to the local device only if unpicked.
+    pub fn draftDevice(a: *const App) ?[]const u8 {
+        if (a.newChatSpace()) |space| if (space.device_id) |id| return id;
+        return a.new_device orelse a.device_id;
+    }
+
+    fn storeDraftDevice(a: *App, id: ?[]const u8) bool {
+        const copy = if (id) |dev| a.gpa.dupe(u8, dev) catch return false else null;
+        if (a.new_device) |old| a.gpa.free(old);
+        a.new_device = copy;
+        return true;
+    }
+
+    /// A computer pick cannot move an established conversation. A draft keeps
+    /// its folder only on the same computer; otherwise it becomes projectless,
+    /// rather than silently choosing a different folder on the new machine.
+    pub fn pickDraftDevice(a: *App, id: ?[]const u8) void {
+        if (a.selected != null) return;
+        const space = a.newChatSpace();
+        const effective = id orelse a.device_id;
+        const keep_folder = if (space) |sp| (if (sp.device_id) |host| (if (effective) |dev| std.mem.eql(u8, host, dev) else false) else false) else false;
+        if (!a.storeDraftDevice(id)) return;
+        if (!keep_folder) {
+            if (a.space) |old| a.gpa.free(old);
+            a.space = null;
+            a.new_no_project = true;
+        }
+        a.view.focus_composer = true;
+        a.redraw();
+    }
+
+    /// Reopens the chat tabs the GPUI app saved (`openTabs`), in their
+    /// order, with `lastChatId` active. Missing chats are skipped; a tab
+    /// that is already open, a test scene, or an explicit launch chat keeps
+    /// the current tabs.
+    pub fn restoreTabs(a: *App) void {
+        if (a.tabs_ready) return;
+        if (a.selected != null or a.tabs.items.items.len != 1 or a.tabs.current() != null) {
+            a.tabs_ready = true;
+            return;
+        }
+        if (@import("app_tab_layout.zig").restore(a)) return;
+        a.tabs_ready = true;
+        const active = a.settings.text("lastChatId");
+        // A pre-tabs GPUI file has only the last chat. Reopen that one rather
+        // than starting blank; an explicitly empty `openTabs` has no active
+        // chat and stays empty.
+        if (a.settings.open_tabs.items.len == 0) {
+            const only = active orelse return;
+            if (a.findChat(only) == null) return;
+            a.tabs.setCurrent(only);
+            a.select(only, null);
+            return;
+        }
+        var wanted: usize = 0;
+        var active_ix: ?usize = null;
+        for (a.settings.open_tabs.items) |id| {
+            if (a.findChat(id) == null or a.tabs.find(id) != null) continue;
+            if (wanted == 0) a.tabs.setCurrent(id) else {
+                a.tabs.newTab();
+                a.tabs.setCurrent(id);
+            }
+            if (active) |last| {
+                if (std.mem.eql(u8, last, id)) active_ix = wanted;
+            }
+            wanted += 1;
+        }
+        if (wanted == 0) return;
+        a.tabs.active = active_ix orelse 0;
+        a.select(a.tabs.current(), null);
+    }
+
+    /// Publishes every open chat tab, and the active one, into the GPUI
+    /// app's shared `openTabs`; Nano's versioned record beside it keeps the
+    /// pane arrangement, shares, focus, zoom and panel tabs for its own reopen.
+    pub fn rememberTabs(a: *App) void {
+        if (!a.tabs_ready) return;
+        var ids: std.ArrayList([]const u8) = .empty;
+        defer ids.deinit(a.gpa);
+        for (a.tabs.items.items) |id| addTabId(a, &ids, id);
+        for (a.tabs.splits.items) |layout_state| if (layout_state) |s| {
+            for (s.panes.items) |id| addTabId(a, &ids, id);
+            for (s.groups[0..s.panes.items.len]) |group| for (group.items.items) |tab| addTabId(a, &ids, tab.chat);
+        };
+        a.settings.setOpenTabs(ids.items, a.tabs.current());
+        @import("app_tab_layout.zig").remember(a);
+    }
+
+    fn addTabId(a: *App, ids: *std.ArrayList([]const u8), id: ?[]const u8) void {
+        const chat = id orelse return;
+        for (ids.items) |have| if (std.mem.eql(u8, have, chat)) return;
+        ids.append(a.gpa, chat) catch {};
+    }
+
     /// Shows `chat_id` from the sidebar: in its tab, else the current one.
     pub fn openChat(a: *App, chat_id: []const u8, space_id: ?[]const u8) void {
         if (a.tabs.find(chat_id)) |at| {
             if (at.tab != a.tabs.active) a.showTab(at.tab);
             if (at.pane) |ix| a.focusPane(ix);
+            if (at.panel_tab) |ix| a.showPaneTab(ix);
             return;
         }
         a.tabs.setCurrent(chat_id);
         a.select(chat_id, space_id);
     }
 
-    /// Shows `chat_id` keeping the tabs as they are, as the command palette
-    /// and the session search do (`open_chat_in_tab`): the open chat stays
-    /// (the composer takes the keys), a chat in another pane or tab is shown
-    /// there, and any other gets a new tab of its own at the end.
+    /// Navigation reuses an open conversation, then its project's workspace.
+    /// Conversations in that workspace share panel tabs; another project's
+    /// workspace keeps its own panels and drafts (`open_chat_preserving_tabs`).
     pub fn openChatInTab(a: *App, chat_id: []const u8) void {
         if (a.findChat(chat_id) == null) return;
         a.view.settings_open = false;
@@ -710,12 +840,39 @@ pub const App = struct {
         if (a.tabs.find(chat_id)) |at| {
             if (at.tab != a.tabs.active) a.showTab(at.tab);
             if (at.pane) |ix| a.focusPane(ix);
+            if (at.panel_tab) |ix| a.showPaneTab(ix);
             return;
         }
-        a.park();
-        a.tabs.appendTab();
+        const project = a.findChat(chat_id).?.space_id;
+        const destination: ?usize = if (sameProject(a.workspaceProject(a.tabs.active), project))
+            a.tabs.active
+        else for (0..a.tabs.items.items.len) |ix| {
+            if (sameProject(a.workspaceProject(ix), project)) break ix;
+        } else null;
+        if (destination) |ix| {
+            a.showTab(ix);
+            a.tabs.isolateWorkspace() catch return;
+            a.addChatTab(true);
+        } else {
+            a.newWorkspaceSession();
+            a.tabs.isolateWorkspace() catch return;
+        }
         a.tabs.setCurrent(chat_id);
-        a.select(chat_id, null);
+        a.select(chat_id, project);
+    }
+
+    /// The workspace's selected conversation or parked draft owns its project.
+    /// Never use the currently focused workspace's draft for an inactive one.
+    pub fn workspaceProject(a: *const App, ix: usize) ?[]const u8 {
+        if (ix >= a.tabs.items.items.len) return null;
+        if (a.tabs.items.items[ix]) |id| if (a.findChat(id)) |chat| return chat.space_id;
+        if (a.tabs.drafts.items[ix]) |d| return if (d.no_project) null else d.space;
+        if (ix == a.tabs.active) if (a.newChatSpace()) |space| return space.id;
+        return null;
+    }
+
+    fn sameProject(left: ?[]const u8, right: ?[]const u8) bool {
+        return if (left) |id| (if (right) |other| std.mem.eql(u8, id, other) else false) else right == null;
     }
 
     /// `/resume`'s choice: `chat_id` in the current tab (or pane), wherever
@@ -732,15 +889,72 @@ pub const App = struct {
         a.tabs.park(a.tabs.active, null, d);
     }
 
+    fn freshPanelDraft(a: *App, draft: tabs_mod.Draft) !tabs_mod.Draft {
+        var fresh = try draft.fresh(a.gpa);
+        errdefer fresh.deinit(a.gpa);
+        // The new tab runs in its panel's folder, not whichever project's
+        // canvas happened to be used before opening this established chat.
+        if (a.selected) |id| if (a.findChat(id)) |chat| {
+            const space = if (chat.space_id) |sp| try a.gpa.dupe(u8, sp) else null;
+            if (fresh.space) |old| a.gpa.free(old);
+            fresh.space = space;
+            fresh.no_project = chat.space_id == null;
+            const device = if (chat.device_id) |dev| try a.gpa.dupe(u8, dev) else null;
+            if (fresh.device) |old| a.gpa.free(old);
+            fresh.device = device;
+        };
+        return fresh;
+    }
+
     /// "+", ⌘T: a new chat in a tab of its own, with the picks of the one
     /// left and an empty prompt.
     pub fn newTab(a: *App) void {
+        a.addChatTab(false);
+    }
+
+    fn addChatTab(a: *App, append: bool) void {
         var d = drafts.canvas(a) catch return;
-        const fresh = d.fresh(a.gpa) catch return d.deinit(a.gpa);
-        a.tabs.park(a.tabs.active, null, d);
-        a.tabs.newTab();
+        const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
+        if (a.tabs.layout() != null) {
+            const inserted = if (append) a.tabs.appendPaneTab(d) else a.tabs.newPaneTab(d);
+            inserted catch {
+                d.deinit(a.gpa);
+                var unused = fresh;
+                unused.deinit(a.gpa);
+                return;
+            };
+        } else {
+            a.tabs.park(a.tabs.active, null, d);
+            a.tabs.newTab();
+        }
         a.select(null, null);
         drafts.adopt(a, fresh);
+    }
+
+    /// Sidebar / All sessions "+": an independent workspace, not another
+    /// tab inside the focused panel. Keep the entire old split and its
+    /// focused draft parked together for when that workspace is reopened.
+    pub fn newWorkspaceSession(a: *App) void {
+        a.tabs.isolateWorkspace() catch return;
+        var d = drafts.canvas(a) catch return;
+        const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
+        a.tabs.park(a.tabs.active, null, d);
+        a.tabs.newTab();
+        a.view.strip.focused = .{ .chat = 0 };
+        a.view.strip.expanded = null;
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
+        a.select(null, null);
+        drafts.adopt(a, fresh);
+    }
+
+    /// Switch tabs inside the focused split panel; its neighbors stay put.
+    pub fn showPaneTab(a: *App, ix: usize) void {
+        var outgoing = drafts.canvas(a) catch return;
+        const back = a.tabs.selectPaneTab(ix, outgoing) catch return outgoing.deinit(a.gpa);
+        a.select(a.tabs.current(), null);
+        if (back) |d| drafts.adopt(a, d);
+        a.redraw();
     }
 
     /// Back and forward, and the tab list's rows: show another tab, its
@@ -755,7 +969,11 @@ pub const App = struct {
 
     pub fn closeTab(a: *App, i: usize) void {
         // Another tab: the one shown stays as it is.
-        if (i != a.tabs.active) return a.tabs.close(i);
+        if (i != a.tabs.active) {
+            a.tabs.close(i);
+            a.rememberTabs();
+            return a.redraw();
+        }
         a.tabs.close(i);
         a.select(a.tabs.current(), null);
         if (a.tabs.unpark(a.tabs.active, null)) |d| drafts.adopt(a, d);
@@ -765,12 +983,20 @@ pub const App = struct {
     /// with the picks of the pane left and an empty prompt (`split_chat`).
     pub fn splitPane(a: *App, axis: tabs_mod.Axis) void {
         var d = drafts.canvas(a) catch return;
-        var fresh = d.fresh(a.gpa) catch return d.deinit(a.gpa);
+        var fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
+        var reveal: SplitReveal = .{ .tab = a.tabs.active, .new_index = 0, .old_count = 1 };
+        reveal.from_shares[0] = 1;
+        if (a.tabs.layout()) |old| {
+            reveal.old_count = old.panes.items.len;
+            for (old.shares.items, 0..) |share, ix| reveal.from_shares[ix] = share;
+        }
         if (!(a.tabs.split(axis) catch false)) {
             d.deinit(a.gpa);
             return fresh.deinit(a.gpa);
         }
         a.tabs.park(a.tabs.active, a.tabs.layout().?.focus - 1, d);
+        reveal.new_index = a.tabs.layout().?.focus;
+        a.view.split_reveal = reveal;
         a.select(null, null);
         drafts.adopt(a, fresh);
     }
@@ -821,6 +1047,23 @@ pub const App = struct {
     /// ⌘W (`close_chat_view_by_shortcut`): asks first until a choice is
     /// made, then closes, archiving per Settings › Archived.
     pub fn closeByShortcut(a: *App) void {
+        // AppKit consumes Cmd+W before view.keys; both entry points must
+        // close the focused workspace surface, not its underlying chat.
+        switch (@import("view_tab_strip.zig").active(a)) {
+            .host => {
+                if (a.panels.active < a.panels.tabs.items.len) @import("app_panels.zig").closeTab(a, a.panels.active) else a.panels.host_open = false;
+                a.view.strip.menu = null;
+                a.redraw();
+                return;
+            },
+            .files => {
+                a.panels.files_open = false;
+                a.view.strip.menu = null;
+                a.redraw();
+                return;
+            },
+            .chat => {},
+        }
         const ac = @import("archive_close.zig");
         if (ac.asks(a.settings.get(.archive_on_close_chosen), a.settings.get(.archive_sessions_on_close), a.selected != null)) {
             a.view.close_choice = true;
@@ -882,7 +1125,21 @@ pub const App = struct {
     /// ⌘W: the focused pane in a split, the next one's draft back; else
     /// the tab.
     pub fn closeFocused(a: *App) void {
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
+        if (!a.tabs.closePaneTab()) return a.closePanel();
+        a.restorePanelDraft();
+    }
+
+    /// Explicit Close panel is different from closing its selected tab.
+    pub fn closePanel(a: *App) void {
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
         if (!a.tabs.closePane()) return a.closeTab(a.tabs.active);
+        a.restorePanelDraft();
+    }
+
+    fn restorePanelDraft(a: *App) void {
         const back = a.tabs.unpark(a.tabs.active, if (a.tabs.layout()) |s| s.focus else null);
         a.select(a.tabs.current(), null);
         if (back) |b| {
@@ -970,6 +1227,7 @@ pub const App = struct {
             .item => |v| {
                 a.chats.replace(v) catch {};
                 a.resort();
+                a.restoreTabs();
                 // The open chat's agent and folder are known now: list its
                 // models, and fill panels that waited for them.
                 a.ensureModels(a.target().harness);
@@ -1086,8 +1344,14 @@ pub const App = struct {
         if (space_id) |s| {
             if (a.space) |old| a.gpa.free(old);
             a.space = a.gpa.dupe(u8, s) catch null;
+            a.new_no_project = false;
+            if (a.findSpace(s)) |space| _ = a.storeDraftDevice(space.device_id);
         }
-        const chat = a.selected orelse return a.redraw();
+        a.rememberTabs();
+        const chat = a.selected orelse {
+            @import("app_panels.zig").chatChanged(a);
+            return a.redraw();
+        };
         a.request(requests.focusChat(chat), .of(App, a, onNotice));
         a.markSeen(chat);
         if (a.w_doc.id == null and a.w_doc.retry_at == null) a.watchDoc(true);
@@ -1218,7 +1482,7 @@ pub const App = struct {
             if (space) |s|
                 a.request(requests.createChat(id, s.id, config), .of(App, a, onNotice))
             else
-                a.request(requests.createChatOn(id, a.device_id, config), .of(App, a, onNotice));
+                a.request(requests.createChatOn(id, a.draftDevice(), config), .of(App, a, onNotice));
             break :blk id;
         };
         const feedback = @import("app_send_feedback.zig");

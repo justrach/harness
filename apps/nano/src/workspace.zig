@@ -165,6 +165,18 @@ pub const Harnesses = List(Harness, parseHarness);
 pub const Models = List(Model, parseModel);
 pub const Chats = List(Chat, parseChat);
 pub const Sessions = List(Session, parseSession);
+
+/// Reflect a just-queued config edit while the engine's watch catches up.
+/// The strings live in the list's arena until its next whole replacement.
+pub fn setChatConfig(l: *Chats, id: []const u8, model: ?[]const u8, reasoning: ?[]const u8) bool {
+    const alloc = l.arena.allocator();
+    for (l.items) |*chat| if (std.mem.eql(u8, chat.id, id)) {
+        chat.model = if (model) |v| alloc.dupe(u8, v) catch chat.model else null;
+        chat.reasoning = if (reasoning) |v| alloc.dupe(u8, v) catch chat.reasoning else null;
+        return true;
+    };
+    return false;
+}
 pub const Devices = List(Device, parseDevice);
 
 fn ms(a: Allocator, o: json.ObjectMap, k: []const u8) i64 {
@@ -440,8 +452,8 @@ test "status groups put needs-you first, then today, then earlier (status_groups
     const before = midnight - std.time.ms_per_hour;
     try testing.expectEqual(StatusGroup.earlier, statusGroup(.idle, before, midnight + std.time.ms_per_hour, 0));
     try testing.expectEqual(StatusGroup.today, statusGroup(.idle, before, midnight + std.time.ms_per_hour, 2 * 3600));
-    try testing.expect(@intFromEnum(StatusGroup.needs) < @intFromEnum(StatusGroup.today));
-    try testing.expect(@intFromEnum(StatusGroup.today) < @intFromEnum(StatusGroup.earlier));
+    try testing.expect(@backingInt(StatusGroup.needs) < @backingInt(StatusGroup.today));
+    try testing.expect(@backingInt(StatusGroup.today) < @backingInt(StatusGroup.earlier));
     try testing.expectEqual(@as(?StatusGroup, .today), StatusGroup.fromKey("today"));
 }
 
@@ -523,16 +535,31 @@ test "a chat's branch is its source context's while that says where it runs" {
     defer arena.deinit();
     const a = arena.allocator();
     const cases = [_]struct { []const u8, ?[]const u8 }{
-        .{ \\{"id":"a","cwd":"/w/x/","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
-        , "feat/one" },
-        .{ \\{"id":"a","cwd":"/w/y","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
-        , null },
-        .{ \\{"id":"a","cwd":"/w/x","sourceContextUnavailableAt":"2026-10-01T00:00:00Z","sourceContext":{"cwd":"/w/x","branch":"main"}}
-        , null },
-        .{ \\{"id":"a","cwd":"/w/x","sourceContext":{"cwd":"/w/x","branch":"  "}}
-        , null },
-        .{ \\{"id":"a","cwd":"/w/x"}
-        , null },
+        .{
+            \\{"id":"a","cwd":"/w/x/","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
+            ,
+            "feat/one",
+        },
+        .{
+            \\{"id":"a","cwd":"/w/y","sourceContext":{"cwd":"/w/x","branch":"feat/one"}}
+            ,
+            null,
+        },
+        .{
+            \\{"id":"a","cwd":"/w/x","sourceContextUnavailableAt":"2026-10-01T00:00:00Z","sourceContext":{"cwd":"/w/x","branch":"main"}}
+            ,
+            null,
+        },
+        .{
+            \\{"id":"a","cwd":"/w/x","sourceContext":{"cwd":"/w/x","branch":"  "}}
+            ,
+            null,
+        },
+        .{
+            \\{"id":"a","cwd":"/w/x"}
+            ,
+            null,
+        },
     };
     for (cases) |case| {
         const v = try json.parseFromSliceLeaky(json.Value, a, case[0], .{});

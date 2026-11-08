@@ -4028,6 +4028,9 @@ pub struct Transcript {
     /// Running subagents' latest step lines ([`live_step_lines`]), shown
     /// under the working trailer. Live-only; never in the doc.
     live_steps: Vec<SharedString>,
+    /// The running turn's latest thought and next unfinished plan step,
+    /// shown under the working trailer. Live-only; never in the doc.
+    live_detail: WorkingDetail,
     /// When a compact work group first settled this session, so "Worked for"
     /// can fade in without replaying on later paints.
     compact_worked_fade_at: HashMap<SharedString, Instant>,
@@ -4480,6 +4483,7 @@ impl Transcript {
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
             live_steps: Vec::new(),
+            live_detail: WorkingDetail::default(),
             compact_worked_fade_at: HashMap::new(),
             compact_fold_heights: HashMap::new(),
             compact_fold_settle: None,
@@ -5682,6 +5686,25 @@ impl Transcript {
             let steps = live_step_lines(&self.state.read(cx).tool_progress);
             if steps != self.live_steps {
                 self.live_steps = steps;
+                self.remeasure_last_row();
+            }
+        }
+        let detail = {
+            let state = self.state.read(cx);
+            let entries = match &self.doc_override {
+                Some(doc_id) => state.sub_transcript(doc_id),
+                None => &state.transcript,
+            };
+            live_working_detail(entries)
+        };
+        if detail != self.live_detail {
+            // Each detail row is one truncated line, so streamed text changes
+            // the content but not the last row's height. Re-measure only when
+            // a row appears or disappears, not once per reasoning token.
+            let layout_changed = detail.thought.is_some() != self.live_detail.thought.is_some()
+                || detail.plan.is_some() != self.live_detail.plan.is_some();
+            self.live_detail = detail;
+            if layout_changed {
                 self.remeasure_last_row();
             }
         }
@@ -8655,6 +8678,44 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         // Running subagents' latest steps, under the line (live-only).
+        let detail: Option<AnyElement> = {
+            let row = |label: &'static str, text: SharedString| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(Theme::SPACE_SM))
+                    .child(
+                        div()
+                            .w(px(52.0))
+                            .flex_none()
+                            .text_color(theme.text_faint)
+                            .child(label),
+                    )
+                    .child(div().flex_1().truncate().child(text))
+                    .into_any_element()
+            };
+            let mut rows = Vec::new();
+            if let Some(thought) = self.live_detail.thought.clone() {
+                rows.push(row("Thinking", thought));
+            }
+            if let Some(plan) = self.live_detail.plan.clone() {
+                rows.push(row("Next", plan));
+            }
+            (!rows.is_empty()).then(|| {
+                div()
+                    .debug_selector(|| "working-detail".into())
+                    .pt(px(6.0))
+                    .pl(px(Theme::SPACE_LG + 2.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_muted)
+                    .children(rows)
+                    .into_any_element()
+            })
+        };
         let steps: Option<AnyElement> = (!self.live_steps.is_empty() && self.doc_override.is_none())
             .then(|| {
                 div()
@@ -8729,6 +8790,7 @@ impl Transcript {
                 .flex()
                 .flex_col()
                 .child(line)
+                .children(detail)
                 .children(steps)
                 .into_any_element(),
         )
@@ -10463,6 +10525,63 @@ pub(crate) fn live_step_lines(items: &[harness_proto::ToolProgressItem]) -> Vec<
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// The running turn's own explanation of where it is going. Only the newest
+/// streaming assistant entry contributes, so a settled reply or an earlier
+/// turn's plan never masquerades as live progress.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct WorkingDetail {
+    thought: Option<SharedString>,
+    plan: Option<SharedString>,
+}
+
+/// One line is enough under the trailer; keep the context readable without
+/// letting a long reasoning paragraph crowd out the reply.
+const WORKING_DETAIL_MAX_CHARS: usize = 160;
+
+fn working_detail_line(text: &str) -> Option<SharedString> {
+    // The live trailer wants what the model is thinking now. Scan from the
+    // end instead of normalizing an ever-growing reasoning buffer per token.
+    let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    let mut chars = line.chars();
+    let mut out: String = chars.by_ref().take(WORKING_DETAIL_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    Some(out.into())
+}
+
+fn live_working_detail(entries: &[SessionMessageEntry]) -> WorkingDetail {
+    let Some(entry) = entries.iter().rev().find(|entry| {
+        entry.role == MessageRole::Assistant && entry.status == Some(MessageStatus::Streaming)
+    }) else {
+        return WorkingDetail::default();
+    };
+    let mut detail = WorkingDetail::default();
+    let mut newest_plan_seen = false;
+    for part in entry.parts.iter().rev() {
+        match part {
+            MessagePart::Reasoning { text, .. } if detail.thought.is_none() => {
+                detail.thought = working_detail_line(text);
+            }
+            MessagePart::Tool {
+                call: ToolCall::Todo { items },
+                ..
+            } if !newest_plan_seen => {
+                newest_plan_seen = true;
+                detail.plan = items
+                    .iter()
+                    .find(|item| !item.done)
+                    .and_then(|item| working_detail_line(&item.text));
+            }
+            _ => {}
+        }
+        if newest_plan_seen && detail.thought.is_some() {
+            break;
+        }
+    }
+    detail
 }
 
 /// The plan's usage limit stopped the run. The card leads with Manage usage
@@ -16118,6 +16237,55 @@ mod tests {
     }
 
     #[test]
+    fn working_detail_shows_latest_thought_and_next_unfinished_plan_step() {
+        let todo = |id: &str, items: &[(&str, bool)]| -> MessagePart {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "kind": "tool",
+                "resolved": true,
+                "call": {
+                    "kind": "todo",
+                    "items": items.iter().map(|(text, done)| serde_json::json!({
+                        "text": text,
+                        "done": done,
+                    })).collect::<Vec<_>>(),
+                },
+            }))
+            .unwrap()
+        };
+        let entry = assistant(
+            "a1",
+            MessageStatus::Streaming,
+            vec![
+                todo("stale-plan", &[("Old step", false)]),
+                reasoning_part(
+                    "thought",
+                    "Checking the stale writer\nand the shared preference",
+                ),
+                todo(
+                    "plan",
+                    &[
+                        ("Restore the grouping", true),
+                        ("Verify the expandable sidebar", false),
+                    ],
+                ),
+            ],
+        );
+        let detail = live_working_detail(&[entry]);
+        assert_eq!(
+            detail.thought.as_deref(),
+            Some("and the shared preference")
+        );
+        assert_eq!(
+            detail.plan.as_deref(),
+            Some("Verify the expandable sidebar")
+        );
+
+        let completed = assistant("a2", MessageStatus::Complete, Vec::new());
+        assert_eq!(live_working_detail(&[completed]), WorkingDetail::default());
+    }
+
+    #[test]
     fn plan_usage_limit_renders_as_a_manage_usage_card() {
         let limit = "chatgpt-new api error [subscription_sharing_usage_limit_exceeded]: \
                      Usage limit reached. — ChatGPT plan usage limit; manage usage at \
@@ -19127,6 +19295,32 @@ mod tests {
         assert_eq!(text.as_ref(), "");
         assert!(rows[0].copy_text.is_none());
         assert_eq!(attachments.len(), 1);
+    }
+
+    #[test]
+    fn gpui_attachment_regression_user_rows_preview_images_without_losing_follow_up_text() {
+        let content = concat!(
+            "Inspect the layout\nAttached images (local files — open them to view):\n",
+            "- /synthetic/uploads/first shot.png\n",
+            "Also fix Enter to send.\n\nAttached images (local files — open them to view):\n",
+            "- /synthetic/uploads/second.png",
+        );
+        let mut entry = assistant("synthetic-images", MessageStatus::Complete, vec![]);
+        entry.role = MessageRole::User;
+        entry.status = None;
+        entry.parts = vec![text_part("t0", content)];
+        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let RowKind::User {
+            text, attachments, ..
+        } = &rows[0].kind
+        else {
+            panic!("expected a user row");
+        };
+        assert_eq!(text.as_ref(), "Inspect the layout\nAlso fix Enter to send.");
+        assert_eq!(rows[0].copy_text.as_deref(), Some(text.as_ref()));
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].path, "/synthetic/uploads/first shot.png");
+        assert_eq!(attachments[1].path, "/synthetic/uploads/second.png");
     }
 
     /// A sent prompt's file mentions render as chips in the transcript: the

@@ -189,6 +189,15 @@ test "completed historical tools never display active loading cells" {
     try h.t.clickText("Read 1 file");
     h.t.settle(0.3);
     const file = h.t.findText("synthetic.rs") orelse return error.MissingHistoricalTool;
+    // Legacy complete snapshots omit resolved. They must not reserve a
+    // running clock slot or scramble their path, even after reopening.
+    try testing.expectEqual(@as(usize, 0), h.a.view.tool_ui.rows.count());
+    try h.t.clickText("Read 1 file");
+    h.t.settle(0.3);
+    try h.t.clickText("Read 1 file");
+    h.t.settle(0.3);
+    try testing.expect(h.t.hasText("synthetic.rs"));
+    try testing.expectEqual(@as(usize, 0), h.a.view.tool_ui.rows.count());
     for (h.t.ctx.nodes.items) |node| {
         // The fixture's unlisted composer model has its own legitimate
         // catalog loader. Check the tool row, not unrelated window regions.

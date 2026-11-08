@@ -29,6 +29,7 @@ test {
     _ = @import("tests_ui_prompt_history.zig");
     _ = @import("tests_ui_caret.zig");
     _ = @import("app_drafts.zig");
+    _ = @import("composer_defaults.zig");
     _ = @import("snap.zig");
     _ = @import("app_account.zig");
     _ = @import("settings.zig");
@@ -109,4 +110,13 @@ test {
     _ = @import("tool_diff.zig");
     _ = @import("context_window.zig");
     _ = @import("view_context.zig");
+    _ = @import("tests_ui_desktop_sidebar_composer.zig");
+    _ = @import("tests_ui_tool_tree.zig");
+    _ = @import("tests_ui_actions_toolbar.zig");
+    _ = @import("tests_ui_sessions.zig");
+    _ = @import("tests_ui_project_setup.zig");
+    _ = @import("tests_ui_open_chooser.zig");
+    _ = @import("tests_ui_resize.zig");
+    _ = @import("tests_tab_layout.zig");
+    _ = @import("project_paths.zig");
 }

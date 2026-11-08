@@ -655,7 +655,7 @@ pub fn errorStrip(c: *ui.Context, k: theme.Colors, message: []const u8, w: f32) 
 /// `skeleton_rows`: bars whose washes breathe one after another.
 fn skeleton(c: *ui.Context, k: theme.Colors, count: usize) void {
     const delta: f32 = @floatCast(@mod(c.time / 2.4, 1.0));
-    c.frameIn(1.0 / 30.0);
+    kit.loaderFrame(c, 1.0 / 30.0);
     const col = ui.div(c).column().wFull().gap(6).py(4);
     defer col.end();
     for (0..count) |i| {

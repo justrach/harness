@@ -316,9 +316,10 @@ struct ViewElementState {
     layout_element_states: Vec<(GlobalElementId, TypeId)>,
 }
 
-/// A measured view's style and the size its content was laid out at.
+/// A measured view's style, the size its content was laid out at, and the
+/// atlas retirement generation that size was painted against.
 #[derive(Default)]
-struct MeasuredViewSize(Option<(StyleRefinement, Size<Pixels>)>);
+struct MeasuredViewSize(Option<(StyleRefinement, Size<Pixels>, u64)>);
 
 /// Whether a reused measured view's size still holds: only for a fixed width.
 fn has_definite_width(style: &StyleRefinement) -> bool {
@@ -332,6 +333,9 @@ struct ViewElementCacheKey {
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
+    /// Cached paint carries atlas tiles; a retirement generation change means
+    /// those tiles may have been freed or reused for another image.
+    atlas_eviction_revision: u64,
 }
 
 /// What [`ViewElement::request_layout`] hands to prepaint: the element when
@@ -379,13 +383,16 @@ impl<V: View> Element for ViewElement<V> {
                         root_style.refine(style);
                         let measured = window.with_element_state::<MeasuredViewSize, _>(
                             id.unwrap(),
-                            |state, _| {
+                            |state, window| {
                                 let state = state.unwrap_or_default();
+                                let atlas_revision = window.atlas_eviction_revision();
                                 let size = state
                                     .0
                                     .as_ref()
-                                    .filter(|(measured_style, _)| measured_style == style)
-                                    .map(|(_, size)| *size);
+                                    .filter(|(measured_style, _, revision)| {
+                                        measured_style == style && *revision == atlas_revision
+                                    })
+                                    .map(|(_, size, _)| *size);
                                 (size, state)
                             },
                         );
@@ -477,9 +484,19 @@ impl<V: View> Element for ViewElement<V> {
                     // keep the result for the frames that reuse it.
                     let mut element = element.take().unwrap();
                     let style = self.cached_style.clone().unwrap_or_default();
-                    window.with_element_state::<MeasuredViewSize, _>(global_id.unwrap(), |_, _| {
-                        ((), MeasuredViewSize(Some((style, bounds.size))))
-                    });
+                    window.with_element_state::<MeasuredViewSize, _>(
+                        global_id.unwrap(),
+                        |_, window| {
+                            (
+                                (),
+                                MeasuredViewSize(Some((
+                                    style,
+                                    bounds.size,
+                                    window.atlas_eviction_revision(),
+                                ))),
+                            )
+                        },
+                    );
                     return window.with_element_state::<ViewElementState, _>(
                         global_id.unwrap(),
                         |_, window| {
@@ -502,6 +519,7 @@ impl<V: View> Element for ViewElement<V> {
                                         bounds,
                                         content_mask,
                                         text_style,
+                                        atlas_eviction_revision: window.atlas_eviction_revision(),
                                     },
                                     recorded_in: window.drawing_frame_serial(),
                                     layout_element_states: render.element_states,
@@ -530,6 +548,8 @@ impl<V: View> Element for ViewElement<V> {
                             && element_state.cache_key.bounds == bounds
                             && element_state.cache_key.content_mask == content_mask
                             && element_state.cache_key.text_style == text_style
+                            && element_state.cache_key.atlas_eviction_revision
+                                == window.atlas_eviction_revision()
                             && !notified
                             && !window.dirty_views.contains(&entity_id)
                             && !window.refreshing
@@ -575,6 +595,7 @@ impl<V: View> Element for ViewElement<V> {
                                     bounds,
                                     content_mask,
                                     text_style,
+                                    atlas_eviction_revision: window.atlas_eviction_revision(),
                                 },
                                 recorded_in: window.drawing_frame_serial(),
                                 layout_element_states: Vec::new(),

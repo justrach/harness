@@ -75,6 +75,8 @@ pub fn canvas(a: *App) !Draft {
     d.model = try dupe(a, a.new_model);
     d.reasoning = try dupe(a, a.new_reasoning);
     d.space = try dupe(a, a.space);
+    d.device = try dupe(a, a.new_device);
+    d.no_project = a.new_no_project;
     return d;
 }
 
@@ -84,7 +86,8 @@ pub fn adopt(a: *App, d: Draft) void {
     a.gpa.free(d.text);
     a.gpa.free(a.new_harness);
     a.new_harness = d.harness;
-    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "space", "space" } }) |f| {
+    a.new_no_project = d.no_project;
+    inline for (.{ .{ "new_model", "model" }, .{ "new_reasoning", "reasoning" }, .{ "space", "space" }, .{ "new_device", "device" } }) |f| {
         if (@field(a, f[0])) |old| a.gpa.free(old);
         @field(a, f[0]) = @field(d, f[1]);
     }
@@ -92,6 +95,31 @@ pub fn adopt(a: *App, d: Draft) void {
 }
 
 const testing = std.testing;
+
+test "a projectless draft stays projectless when parked and restored" {
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    const spaces = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"project","deviceId":"local","path":"/work/example","gitDetected":true},
+        \\ {"id":"remote-project","deviceId":"remote","path":"/work/remote-example","gitDetected":true}]
+    , .{});
+    defer spaces.deinit();
+    try a.spaces.replace(spaces.value);
+    try testing.expect(@import("app_agent.zig").newChatSpace(&a) != null);
+    a.new_device = try testing.allocator.dupe(u8, "remote");
+    try testing.expectEqualStrings("remote-project", @import("app_agent.zig").newChatSpace(&a).?.id);
+    a.new_no_project = true;
+    a.composer.set("Build something new");
+    const draft = try canvas(&a);
+    a.new_no_project = false;
+    testing.allocator.free(a.new_device.?);
+    a.new_device = null;
+    adopt(&a, draft);
+    try testing.expect(a.new_no_project);
+    try testing.expectEqualStrings("remote", a.new_device.?);
+    try testing.expect(@import("app_agent.zig").newChatSpace(&a) == null);
+    try testing.expectEqualStrings("Build something new", a.composer.text());
+}
 
 test "each chat keeps its own prompt; the new chat's is kept while a chat shows" {
     var a: App = .init(testing.allocator, testing.io, 1);

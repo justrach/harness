@@ -14,12 +14,20 @@ fn hasTint(t: *ui.Tester, tint: ui.Color) bool {
     return false;
 }
 
-test "Frosted glass changes the composer material live and opaque removes it" {
+test "Frosted glass changes the shell live but keeps the writing plane opaque" {
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);
     defer a.deinit();
     a.offscreen = true;
     a.dark = true;
+    // The desktop palette recommends glass; start explicitly opaque so
+    // this test exercises a real material transition in both directions.
+    a.settings.setText("surface", "opaque");
+    const chats = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"synthetic-glass","deviceId":"synthetic-device","title":"Synthetic glass conversation","archived":false}]
+    , .{});
+    defer chats.deinit();
+    try a.chats.replace(chats.value);
     a.openChat("synthetic-glass", null);
     var t: ui.Tester = undefined;
     try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1200, .height = 780, .dark = true });
@@ -30,27 +38,30 @@ test "Frosted glass changes the composer material live and opaque removes it" {
     a.settings.setText("surface", "frosted");
     t.frame();
     try testing.expectEqual(@as(f32, 0), t.ctx.theme.background.a);
-    try testing.expect(t.ctx.theme.surface.a < 1);
-    try testing.expect(hasTint(&t, t.ctx.theme.surface));
+    // Desktop's dark input role stays opaque even when the shell is glass.
+    try testing.expectEqual(@as(f32, 1), t.ctx.theme.surface.a);
+    if (!hasTint(&t, @import("theme.zig").colors(true).pill())) std.debug.print("\nglass: missing opaque writing-plane tint {any}\n", .{@import("theme.zig").colors(true).pill()});
+    try testing.expect(hasTint(&t, @import("theme.zig").colors(true).pill()));
     const p = try t.render(testing.allocator);
     defer p.deinit(testing.allocator);
-    // An empty part of the page must let the native material through;
-    // checking styles alone missed the renderer's opaque alpha clear.
-    const x: usize = @intFromFloat(900 * t.scale);
+    //0.2.172's conversation panel is opaque. Probe the actual shell in
+    // the sidebar's empty left gutter, not the panel over that material.
+    const x: usize = @intFromFloat(6 * t.scale);
     const y: usize = @intFromFloat(200 * t.scale);
     const alpha = p.bytes[(y * p.width + x) * 4 + 3];
+    if (!(alpha > 0 and alpha < 255)) std.debug.print("\nglass: shell alpha={d} at ({d},{d}), tester background={any}, live background={any}\n", .{ alpha, x, y, t.theme.background, t.ctx.theme.background });
     try testing.expect(alpha > 0 and alpha < 255);
     // Empty space below the header must not gain a darker/tinted stripe.
     const fade_y: usize = @intFromFloat(50 * t.scale);
+    if (alpha != p.bytes[(fade_y * p.width + x) * 4 + 3]) std.debug.print("\nglass: shell alpha={d}, header-gutter alpha={d} at ({d},{d})\n", .{ alpha, p.bytes[(fade_y * p.width + x) * 4 + 3], x, fade_y });
     try testing.expectEqual(alpha, p.bytes[(fade_y * p.width + x) * 4 + 3]);
-    // The translucent input must not expose its own two shadow layers.
+    // The opaque writing plane never exposes the transcript or its own
+    // shadow layers, even though the surrounding shell remains translucent.
     const input = a.view.composer_anchor.?;
     const ix: usize = @intFromFloat((input.x + input.w / 2) * t.scale);
     const iy: usize = @intFromFloat((input.y + input.h / 2) * t.scale);
-    const tint = t.ctx.theme.surface;
-    const shell = @import("surface_palette.zig").apply(@import("theme.zig").colors(true), true).shell;
-    const expected_alpha = tint.a + shell.a * (1 - tint.a);
-    try testing.expectApproxEqAbs(expected_alpha * 255, @as(f32, @floatFromInt(p.bytes[(iy * p.width + ix) * 4 + 3])), 2);
+    if (p.bytes[(iy * p.width + ix) * 4 + 3] != 255) std.debug.print("\nglass: writing-plane alpha={d} at ({d},{d}), pill={any}\n", .{ p.bytes[(iy * p.width + ix) * 4 + 3], ix, iy, input });
+    try testing.expectEqual(@as(u8, 255), p.bytes[(iy * p.width + ix) * 4 + 3]);
     a.settings.setText("surface", "opaque");
     t.frame();
     try testing.expectEqual(@as(f32, 1), t.ctx.theme.background.a);

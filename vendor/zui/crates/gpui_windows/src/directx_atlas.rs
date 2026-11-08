@@ -228,6 +228,7 @@ impl DirectXAtlasState {
         let atlas_texture = DirectXAtlasTexture {
             id: AtlasTextureId {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
+                generation: 0,
                 kind,
             },
             bytes_per_pixel,

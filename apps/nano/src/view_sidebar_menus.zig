@@ -1,8 +1,8 @@
 //! The sidebar header's two menus, as the GPUI app's (shell/spaces.rs):
 //! the project filter's (`render_spaces_menu`: a search, All projects and
 //! each project with its device, New project pinned under them) and the
-//! view options' (`render_sidebar_view_menu`: Organize, Sort and Show, each
-//! a menu of its own beside it, and Compact).
+//! view options' (`render_sidebar_view_menu`: Organize and Sort submenus,
+//! Compact, then the visible detail switches).
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -22,12 +22,13 @@ const inset: f32 = 4;
 
 /// What the open menus remember between frames.
 pub const State = struct {
+    overview: @import("view_sessions.zig").State = .{},
     query: ui.TextBuffer = .{},
     /// The project menu's highlighted row: its rows, then New project.
     active: usize = 0,
     focus: bool = false,
     /// The view menu's group under the pointer or keys, and the one whose
-    /// menu is open beside it (Organize, Sort, Show; 3 is Compact).
+    /// menu is open beside it (Organize, Sort; 2 is Compact, then fields).
     group: ?usize = null,
     open: ?usize = null,
     sub_active: ?usize = null,
@@ -39,6 +40,7 @@ pub const State = struct {
     ctx_h: ?f32 = null,
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
+        @import("text_buffer.zig").deinit(&s.query);
         s.ctx_id.deinit(gpa);
     }
 };
@@ -113,11 +115,15 @@ pub fn keys(c: *ui.Context, a: *App) void {
             if (c.shortcut(.{ .key = S.enter })) if (m.sub_active) |i| choose(a, groups[g].rows[i]);
             return;
         }
-        if (c.shortcut(.{ .key = S.down })) m.group = rules.menuStep(m.group, groups.len + 1, 1);
-        if (c.shortcut(.{ .key = S.up })) m.group = rules.menuStep(m.group, groups.len + 1, -1);
+        const fields = displayRows(a.settings.get(.sidebar_compact));
+        const count = viewItemCount(a.settings.get(.sidebar_compact));
+        if (c.shortcut(.{ .key = S.down })) m.group = rules.menuStep(m.group, count, 1);
+        if (c.shortcut(.{ .key = S.up })) m.group = rules.menuStep(m.group, count, -1);
         if (m.group) |g| {
-            if (g == groups.len) {
-                if (c.shortcut(.{ .key = S.enter }) or c.shortcut(.{ .key = ' ' })) a.settings.toggle(.sidebar_compact);
+            if (g >= groups.len) {
+                if (c.shortcut(.{ .key = S.enter }) or c.shortcut(.{ .key = ' ' })) {
+                    if (g == groups.len) a.settings.toggle(.sidebar_compact) else if (g - groups.len - 1 < fields.len) choose(a, fields[g - groups.len - 1]);
+                }
             } else if (c.shortcut(.{ .key = S.right }) or c.shortcut(.{ .key = S.enter })) {
                 m.open = g;
                 m.sub_active = 0;
@@ -210,7 +216,7 @@ fn activate(a: *App, r: Row) void {
         .space => |id| a.setSpaceFilter(id),
         .add => {
             close(a);
-            a.addFolder();
+            @import("app_open_chooser.zig").open(a, .new_project);
         },
     }
     close(a);
@@ -219,7 +225,7 @@ fn activate(a: *App, r: Row) void {
 fn projects(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     const m = &a.view.menus;
     // Under the trigger, 6 below, across the header row (`anchored_menu_below`).
-    const w = sidebar.width - 2 * 8;
+    const w = sidebar.widthOf(a) - 2 * 8;
     const h = m.h orelse 160;
     const x = rules.snapToWindow(r.x, w, c.size.w, 8);
     const y = rules.snapToWindow(r.y + r.h + 6, h, c.size.h, 8);
@@ -411,6 +417,7 @@ pub const Choice = enum {
     created,
     branch,
     harness,
+    updated,
     project_icon,
     location,
     archived,
@@ -424,9 +431,10 @@ pub const Choice = enum {
             .last_called => "Last called",
             .created => "Created",
             .branch => "Branch",
-            .harness => "Harness",
+            .harness => "Agent icon",
+            .updated => "Last updated",
             .project_icon => "Project icon",
-            .location => "Location",
+            .location => "Project name",
             .archived => "Archived",
         };
     }
@@ -441,6 +449,7 @@ pub const Choice = enum {
             .created => .calendar,
             .branch => .@"git-branch",
             .harness => .bot,
+            .updated => .@"clock-circle",
             .project_icon => .@"project-default",
             .archived => .@"archive-minimalistic",
         };
@@ -450,10 +459,20 @@ pub const Choice = enum {
 const Group = struct { label: []const u8, rows: []const Choice };
 
 const groups = [_]Group{
-    .{ .label = "Organize", .rows = &.{ .by_status, .by_device, .by_project, .in_one_list } },
+    .{ .label = "Organize", .rows = &.{ .by_device, .by_project, .in_one_list, .by_status } },
     .{ .label = "Sort", .rows = &.{ .last_called, .created } },
-    .{ .label = "Show", .rows = &.{ .branch, .harness, .project_icon, .location, .archived } },
 };
+
+const display_rows = [_]Choice{ .branch, .harness, .updated, .project_icon, .location, .archived };
+
+/// Keyboard positions follow only controls currently visible, like desktop.
+pub fn displayRows(compact: bool) []const Choice {
+    return if (compact) display_rows[display_rows.len - 1 ..] else &display_rows;
+}
+
+pub fn viewItemCount(compact: bool) usize {
+    return groups.len + 1 + displayRows(compact).len;
+}
 
 pub fn chosen(a: *const App, ch: Choice) bool {
     const s = &a.settings;
@@ -466,6 +485,7 @@ pub fn chosen(a: *const App, ch: Choice) bool {
         .created => s.sort() == .created,
         .branch => s.get(.sidebar_show_branch),
         .harness => s.get(.sidebar_show_harness),
+        .updated => s.get(.sidebar_show_updated),
         .project_icon => s.get(.sidebar_show_project_icon),
         .location => s.get(.sidebar_show_project_label),
         .archived => s.get(.sidebar_show_archived),
@@ -484,6 +504,7 @@ pub fn choose(a: *App, ch: Choice) void {
         .created => s.setText("sidebarSort", settings.Sort.created.key()),
         .branch => s.toggle(.sidebar_show_branch),
         .harness => s.toggle(.sidebar_show_harness),
+        .updated => s.toggle(.sidebar_show_updated),
         .project_icon => s.toggle(.sidebar_show_project_icon),
         .location => s.toggle(.sidebar_show_project_label),
         .archived => s.toggle(.sidebar_show_archived),
@@ -503,14 +524,13 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     const m = &a.view.menus;
     // Right of the ⋯, 6 along, level with it (`anchored_menu_right`),
     // from inside the ⋯'s 1-point clear border, where GPUI hangs it.
-    const w = sidebar.width - 2 * 8;
+    const w = sidebar.widthOf(a) - 2 * 8;
     const x = rules.snapToWindow(r.x + r.w - 1 + 6, w, c.size.w, 8);
     const y = @max(8, r.y + 1);
     ui.key(c, "sidebar-view-menu");
     const card = card_(c, k, x, y, w);
     defer card.end();
     for (groups, 0..) |g, gi| {
-        if (gi == 2) separator(c, k, w);
         ui.key(c, c.print("sidebar-view-group-{d}", .{gi}));
         const open = m.open == gi;
         var row = ui.div(c).row().wFull().h(30).px(8).gap(10).itemsCenter().rounded(7);
@@ -552,6 +572,23 @@ fn view(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
         if (row.clicked()) a.settings.toggle(.sidebar_compact);
         label(c, k, "Compact", row.hovered());
         toggle(c, k, a.settings.get(.sidebar_compact));
+    }
+    for (displayRows(a.settings.get(.sidebar_compact)), 0..) |ch, ix| {
+        const index = groups.len + 1 + ix;
+        ui.key(c, c.print("sidebar-display-{s}", .{@tagName(ch)}));
+        const on = chosen(a, ch);
+        const row = menuRow(c, k, on, m.group == index);
+        defer row.end();
+        if (row.hovered()) {
+            m.group = index;
+            m.open = null;
+        }
+        if (row.clicked()) choose(a, ch);
+        icons.icon(c, ch.icon(), 15, k.muted, 0);
+        label(c, k, ch.label(), row.hovered() or on);
+        const check = ui.div(c).row().w(14);
+        defer check.end();
+        if (on) icons.icon(c, .check, 14, k.muted, 0);
     }
 }
 

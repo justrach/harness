@@ -46,10 +46,10 @@ pub fn build(b: *std.Build) void {
     );
     const icons_svg = b.createModule(.{ .root_source_file = icons_root });
     const file_icons_data = @import("file_icons_build.zig").module(b);
-    // The built-in themes, the catalog the phones bundle (crates/theme keeps
-    // it in lockstep with the GPUI app's registry).
+    // The desktop catalog: GPUI deliberately recolors its Codegraff themes
+    // without changing the mobile palette. crates/theme checks this export.
     const theme_files = b.addWriteFiles();
-    _ = theme_files.addCopyFile(b.path("../ios/Harness/Theme/themes.json"), "themes.json");
+    _ = theme_files.addCopyFile(b.path("themes.json"), "themes.json");
     const themes_root = theme_files.add("themes_json.zig",
         \\//! The built-in theme catalog, as JSON.
         \\pub const json = @embedFile("themes.json");
@@ -80,7 +80,8 @@ pub fn build(b: *std.Build) void {
     run.addPassthruArgs();
     b.step("run", "Run harness-nano").dependOn(&run.step);
 
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
+    const test_filter = b.option([]const u8, "test-filter", "Run only tests whose names contain this text");
+    const tests = b.addTest(.{ .filters = if (test_filter) |filter| &.{filter} else &.{}, .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
@@ -129,6 +130,8 @@ pub fn build(b: *std.Build) void {
     const write_vectors = b.addRunArtifact(vectors);
     write_vectors.addArg(b.pathJoin(&.{ protocol, "requests.json" }));
     b.step("vectors", "Write protocol/desktop/requests.json").dependOn(&write_vectors.step);
+    // Large UI artifacts must never use Zig's self-hosted backend.
+    inline for (.{ exe, tests, snap, profile, vectors }) |artifact| artifact.use_llvm = true;
 }
 
 /// `version` under `[workspace.package]` in the repository's Cargo.toml.

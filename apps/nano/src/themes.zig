@@ -1,7 +1,7 @@
-//! The themes, as the GPUI app offers them: the built-in catalog the phones
-//! bundle (apps/ios/Harness/Theme/themes.json, which crates/theme's
-//! `builtin_catalog_matches_ios_bundle` keeps in lockstep with the Rust
-//! registry), then the custom ones the theme library holds
+//! The themes, as the GPUI app offers them: the desktop catalog exported to
+//! apps/nano/themes.json, which crates/theme's
+//! `desktop_catalog_matches_nano_bundle` keeps in lockstep with the Rust
+//! desktop registry, then the custom ones the theme library holds
 //! (`theme-library.json` in Harness's data folder, which either app's Add
 //! theme writes). Each variant is made nano's `theme.Colors` as
 //! crates/ui/src/theme.rs derives its roles, a custom one's words made
@@ -187,9 +187,12 @@ fn derive(o: json.ObjectMap, dark: bool, curated: bool) ?theme.Colors {
     };
     // The Markdown hues come from the appearance's own palette
     // (`SyntaxPalette::dark`/`light`), which a variant's roles leave be.
-    const base = theme.builtin(dark).syntax;
+    const base = theme.fallback(dark).syntax;
     return .{
         .dark = dark,
+        .is_harp = curated and (std.mem.eql(u8, str(o, "id"), "harp-light") or std.mem.eql(u8, str(o, "id"), "harp-dark") or std.mem.eql(u8, str(o, "id"), "warm-harp-light") or std.mem.eql(u8, str(o, "id"), "warm-harp-dark") or std.mem.eql(u8, str(o, "id"), "codegraff-light") or std.mem.eql(u8, str(o, "id"), "codegraff-dark")),
+        .is_warm_harp = curated and (std.mem.eql(u8, str(o, "id"), "warm-harp-light") or std.mem.eql(u8, str(o, "id"), "warm-harp-dark") or std.mem.eql(u8, str(o, "id"), "codegraff-light") or std.mem.eql(u8, str(o, "id"), "codegraff-dark")),
+        .active = col.get(cs, "active"),
         .recommended_frosted = std.mem.eql(u8, str(o, "recommendedSurfaceTreatment"), "frosted"),
         .input_tint = col.get(cs, "input"),
         .overlay = col.get(cs, "overlay"),
@@ -197,7 +200,7 @@ fn derive(o: json.ObjectMap, dark: bool, curated: bool) ?theme.Colors {
         .panel = shell,
         .background = background,
         .shell = shell,
-        .sidebar = over(shell, wash.alpha(0.05)),
+        .sidebar = shell,
         .raised = col.get(cs, "raised"),
         .text = text,
         .muted = muted,
@@ -215,7 +218,7 @@ fn derive(o: json.ObjectMap, dark: bool, curated: bool) ?theme.Colors {
         .border_strong = col.get(cs, "borderStrong"),
         .hover = col.get(cs, "hover"),
         .selected = wash.alpha(if (dark) 0.11 else 0.06),
-        .user_bubble = over(shell, wash.alpha(if (dark) 0.08 else 0.04)),
+        .user_bubble = wash.alpha(if (dark) 0.08 else 0.04),
         .composer = over(background, col.get(cs, "input")),
         .code_bg = (if (dark) white else black).alpha(0.035),
         .code_header = (if (dark) white else black).alpha(0.02),
@@ -259,27 +262,15 @@ fn same(a: Color, b: Color) bool {
     return near.f(a.r, b.r) and near.f(a.g, b.g) and near.f(a.b, b.b) and near.f(a.a, b.a);
 }
 
-test "the catalog's Codegraff derives the palette nano draws Codegraff in" {
-    inline for (.{ .{ "codegraff-dark", true }, .{ "codegraff-light", false } }) |t| {
-        const v = find(t[0]) orelse return error.Missing;
-        const want = theme.builtin(t[1]);
-        const info = @typeInfo(theme.Colors).@"struct";
-        inline for (info.field_names, info.field_types) |name, T| {
-            const got = @field(v.colors, name);
-            const exp = @field(want, name);
-            switch (T) {
-                Color => if (!same(got, exp)) {
-                    std.debug.print("{s}.{s}: {any} != {any}\n", .{ t[0], name, got, exp });
-                    return error.Differs;
-                },
-                [3]Color, [16]Color => for (got, exp) |g, e| if (!same(g, e)) {
-                    std.debug.print("{s}.{s}\n", .{ t[0], name });
-                    return error.Differs;
-                },
-                else => {},
-            }
-        }
-    }
+test "Codegraff uses the desktop palette rather than the mobile palette" {
+    const dark = (find("codegraff-dark") orelse return error.Missing).colors;
+    const light = (find("codegraff-light") orelse return error.Missing).colors;
+    try testing.expect(same(dark.background, .hex(0x1c1a17)));
+    try testing.expect(same(dark.accent, .hex(0xd3a464)));
+    try testing.expect(same(light.shell, .hex(0xeae5dc)));
+    try testing.expect(same(light.accent, .hex(0xb57931)));
+    try testing.expectEqual(dark.shell, dark.sidebar);
+    try testing.expectEqual(light.shell, light.sidebar);
 }
 
 test "every built-in variant is offered, Codegraff among them" {
@@ -310,7 +301,7 @@ test "a custom theme from the library joins the built-ins, its words made readab
     for ([_][2][]const u8{
         .{ "\"id\":\"codegraff-dark\"", "\"id\":\"custom-dim-dark\"" },
         .{ "\"name\":\"Codegraff Dark\"", "\"name\":\"Dim Dark\"" },
-        .{ "\"text\":\"#edeae2\"", "\"text\":\"#3a3a3a\"" },
+        .{ "\"text\":\"#f2ece2\"", "\"text\":\"#3a3a3a\"" },
     }) |r| {
         const at = std.mem.indexOf(u8, edited.items, r[0]) orelse return error.NoField;
         try edited.replaceRange(testing.allocator, at, r[0].len, r[1]);
@@ -334,7 +325,7 @@ test "a custom theme from the library joins the built-ins, its words made readab
     // Its #3a3a3a text was lifted to read at 4.5:1 on its grounds.
     const mc = @import("model_color.zig");
     const text8: mc.Rgba = .{ .r = @intFromFloat(@round(dim.colors.text.r * 255)), .g = @intFromFloat(@round(dim.colors.text.g * 255)), .b = @intFromFloat(@round(dim.colors.text.b * 255)) };
-    try testing.expect(text8.contrast(mc.Rgba.parse("#16140f").?) >= 4.5);
+    try testing.expect(text8.contrast(mc.Rgba.parse("#1c1a17").?) >= 4.5);
     // A library gone, only the built-ins.
     loadLibrary(testing.io, "/nonexistent");
     try testing.expect(find("custom-dim-dark") == null);

@@ -16,6 +16,8 @@ const kit = @import("view_kit.zig");
 const tools = @import("tools.zig");
 const compact = @import("compact.zig");
 const tr = @import("transcript.zig");
+const attachment_refs = @import("attachment_refs.zig");
+const attachment_images = @import("app_attachment_images.zig");
 const sidebar = @import("view_sidebar.zig");
 const App = @import("app.zig").App;
 const rows_st = @import("view_settings_accounts_rows.zig").st;
@@ -30,12 +32,11 @@ pub fn columnWidth(w: f32) f32 {
     return @max(@min(column_w, w - 2 * gutter), 200);
 }
 
-/// The chat column's width: the window less the sidebar and the panels.
+/// The shared shell frame owns the actual chat allocation, including the
+/// dynamic host/explorer widths; never subtract their old fixed widths.
 pub fn mainWidth(c: *ui.Context, a: *const App) f32 {
-    var w = c.size.w - a.view.sidebar_width;
-    if (a.selected != null and a.panels.host_open) w -= @import("view_host.zig").width + 1;
-    if (a.selected != null and a.panels.files_open) w -= @import("view_files.zig").width + 1;
-    return @max(w, 300);
+    _ = c;
+    return a.view.chrome.chat_width;
 }
 
 /// What lays out inside the column: GPUI's card takes the rounded seam's
@@ -51,7 +52,7 @@ pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
     const w = contentWidth(c, a);
     const s = a.tabs.layout() orelse return w;
     if (s.zoomed or s.axis != .horizontal) return w;
-    return @max(w * s.shares.items[s.focus] - 1, 200);
+    return @max(0, @import("panel_chrome.zig").paneSpan(a.view.chrome.chat_width, s.shares.items[s.focus], s.panes.items.len, true) - a.view.seam_inset);
 }
 
 /// The focused pane's height under the title bar, in a split down the
@@ -59,7 +60,8 @@ pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
 pub fn paneHeight(c: *ui.Context, a: *const App) ?f32 {
     const s = a.tabs.layout() orelse return null;
     if (s.zoomed or s.axis != .vertical) return null;
-    return (c.size.h - sidebar.titlebar_h) * s.shares.items[s.focus] - 1;
+    _ = c;
+    return @max(0, @import("panel_chrome.zig").paneSpan(a.view.chrome.height, s.shares.items[s.focus], s.panes.items.len, false) - a.view.seam_inset);
 }
 
 /// The open chat's transcript, and over its left edge the prompt rail
@@ -97,7 +99,7 @@ fn topFade(c: *ui.Context, k: theme.Colors) void {
     const band: f32 = 24;
     var y: f32 = 0;
     while (y < band) : (y += 1) {
-        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.shell.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
+        _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.background.alpha(1 - (y + 0.5) / band), .absolute = true, .offset = .{ .x = 0, .y = y } }, .none, null);
     }
 }
 
@@ -144,7 +146,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         switch (e.role) {
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
-                const r = user(c, k, e, col);
+                const r = user(c, a, k, e, col, chat_id);
                 ticks.append(c.alloc(), .{ .entry = i, .top = if (r) |x| x.y - (if (i > 0) @as(f32, 16) else 0) else null }) catch {};
             },
             .assistant => assistant(c, a, k, e, at),
@@ -156,7 +158,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
             ui.key(c, c.print("pending-{s}", .{pending.message}));
             if (entries_.len > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
             const entry = pending.entry();
-            _ = user(c, k, &entry, col);
+            _ = user(c, a, k, &entry, col, chat_id);
         };
         @import("view_working.zig").trailer(c, a, k, chat_id, t);
     }
@@ -165,7 +167,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
 }
 
 /// A prompt's bubble; where it was last laid out.
-fn user(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, col: f32) ?ui.Rect {
+fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, chat_id: ?[]const u8) ?ui.Rect {
     const wrap = ui.div(c).column().wFull().itemsEnd();
     defer wrap.end();
     const hovered = wrap.hovered();
@@ -174,13 +176,35 @@ fn user(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, col: f32) ?ui.Rect 
         defer bubble.end();
         const st = kit.style(c, 14, 22, .{ .wrap = true, .color = k.text });
         for (e.parts.items) |*p| switch (p.kind) {
-            .text => ui.text(c, p.text.items, st),
+            .text => {
+                const parsed = attachment_refs.parse(c.alloc(), p.text.items) catch attachment_refs.Parsed{ .text = p.text.items };
+                if (parsed.text.len > 0) ui.text(c, parsed.text, st);
+                for (parsed.paths, 0..) |path, index| {
+                    ui.key(c, c.print("user-attachment-{s}-{d}", .{ p.id, index }));
+                    sentAttachment(c, a, k, chat_id, path);
+                }
+            },
             .image => attachment(c, k, .document, p.text.items),
             else => {},
         };
     }
     lane(c, k, e, hovered, true);
     return c.rects.get(c.node(wrap.index).id);
+}
+
+fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, path: []const u8) void {
+    const tiles = @import("view_composer_attachments.zig");
+    const name = @import("app_attachments.zig").displayName(path);
+    const image = attachment_images.get(a, chat_id, path);
+    const bytes: []const u8 = if (image) |loaded| (if (loaded.status == .ready) loaded.bytes.items else "") else "";
+    const tile = ui.div(c).column().w(56).gap(2);
+    defer tile.end();
+    {
+        const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(k.border).bg(k.hover).clip();
+        defer thumb.end();
+        tiles.picture(c, k, c.print("{s}:{s}", .{ chat_id orelse "", path }), name, bytes);
+    }
+    kit.ellipsisText(c, name, .{ .size = 10, .line_height = 12, .color = k.muted }, 56);
 }
 
 /// `format_timestamp`: "Jul 1, 3:45 PM", `offset_s` from UTC.
@@ -336,9 +360,9 @@ fn answerHeading(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, label: boo
 }
 
 /// Compact mode (GPUI's `compact_shell`): the turn's thinking, tool calls
-/// and the narration between them under one closed line where the first
-/// of them was; it opens to the rows they'd be without compact mode, and
-/// never on its own. Saved views stay rows after it; questions, errors and
+/// and the narration between them stay visible while the turn runs, then
+/// fold behind one line. Finished work can be opened again. Saved views
+/// stay rows after it; questions, errors and
 /// the reply keep their places.
 fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At, answer_in: Answer) void {
     const items = e.parts.items;
@@ -371,18 +395,33 @@ fn compactParts(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at
 /// The compact work line: a group's header that says what's running while
 /// the turn works, then "Worked for …" once it has.
 fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: []const tr.Part, at: At) void {
-    const key = c.print("{s}#work", .{e.id});
-    const open = a.view.groupOpen(key, false);
-    const box = ui.div(c).column().wFull().gap(12);
+    const legacy = c.print("{s}#work", .{e.id});
+    const key = c.print("{s}/{s}", .{ at.chat_id orelse "", legacy });
+    const live = e.status == .streaming;
+    const live_key = c.print("{s}/live", .{key});
+    const settled_key = c.print("{s}/settled", .{key});
+    // A resumed turn starts a fresh live phase. Choices made while running
+    // must not pin the completed work open; reopening it afterwards is local
+    // to the settled phase. Legacy keys still work for loaded history.
+    if (live) {
+        for ([_][]const u8{ key, legacy, settled_key }) |old_key| {
+            if (a.view.groups.fetchRemove(old_key)) |kv| a.gpa.free(kv.key);
+        }
+    } else {
+        if (a.view.groups.fetchRemove(live_key)) |kv| a.gpa.free(kv.key);
+    }
+    const override = if (live) live_key else settled_key;
+    const open = a.view.groups.get(override) orelse if (live) true else (a.view.groups.get(key) orelse a.view.groups.get(legacy) orelse false);
+    const box = ui.div(c).column().wFull();
     defer box.end();
     {
         const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
         defer h.end();
-        if (h.clicked()) a.view.toggleGroup(a.gpa, key, false);
+        if (h.clicked()) a.view.toggleGroup(a.gpa, override, open);
         const slot = ui.div(c).row().size(22, 18).center();
-        icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 14, k.muted, 0);
+        @import("view_tool_rows.zig").chevron(c, k, open, 14);
         slot.end();
-        const st = kit.style(c, 12, 18, .{ .color = if (h.hovered()) k.text else k.muted });
+        const st = kit.style(c, 15, 18, .{ .color = if (h.hovered()) k.text else k.muted });
         const settled = if (e.status != .streaming) compact.workedSecs(e) else null;
         if (settled) |s| {
             const lb = c.alloc().alloc(u8, 48) catch return;
@@ -392,135 +431,48 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
             const active = e.status == .streaming and for (work) |p| {
                 if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
             } else false;
-            kit.activityText(c, k, tools.label(lb, work), st, active);
+            @import("view_tool_rows.zig").title(c, k, tools.label(lb, work), active, h.hovered());
         }
     }
-    if (!open) return;
-    const reveal = ui.motion.frame(c, (ui.motion.MotionSpec{ .duration_ms = 140, .curve = ui.motion.Easing.css_ease_out }).animate(.{ .opacity = 0.65, .y = -2 }, .{ .opacity = 1, .y = 0 }));
-    const body = ui.div(c).column().wFull().gap(12).motion(reveal);
+    const state = @import("tool_ui_state.zig");
+    const fold_id = state.key(at.chat_id, key, "compact-fold");
+    const estimate = 12 + @as(f32, @floatFromInt(work.len)) * 32;
+    const fold = a.view.tool_ui.fold(a.gpa, fold_id, open, if (a.view.tool_ui.folds.contains(fold_id)) 0 else estimate, c.time, c.reduced_motion);
+    if (!open and !fold.animating(c.time, c.reduced_motion)) return;
+    var viewport = ui.div(c).column().wFull().clip();
+    if (fold.natural > 0) viewport = viewport.h(fold.height(c.time, c.reduced_motion));
+    defer viewport.end();
+    const body = ui.div(c).column().wFull().pt(12).gap(12);
     defer body.end();
+    @import("view_tool_tree.zig").rememberHeight(c, a, fold_id, body.index);
+    if (fold.animating(c.time, c.reduced_motion)) c.frameIn(1.0 / 30.0);
     partRows(c, a, k, e, work, at, false, .{ .part = null });
 }
 
-const row_h: f32 = 32;
-const tree_w: f32 = 48;
-
-/// A run of tool calls and reasoning, folded under one line; it opens on
-/// its own while it is the tail of a streaming reply.
+/// The current desktop renders expanded results in the task tree itself.
 fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts: []const tr.Part, tail: bool, parent: ?[]const u8) void {
-    const key = c.print("{s}/{s}", .{ e.id, parts[0].id });
-    const open = a.view.groupOpen(key, tail);
-    const box = ui.div(c).column().wFull();
-    defer box.end();
-    {
-        const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
-        defer h.end();
-        if (h.clicked()) a.view.toggleGroup(a.gpa, key, tail);
-        const slot = ui.div(c).row().size(22, 18).center();
-        icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 14, k.muted, 0);
-        slot.end();
-        const lb = c.alloc().alloc(u8, 160) catch return;
-        const active = e.status == .streaming and for (parts) |p| {
-            if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
-        } else false;
-        kit.activityText(c, k, tools.label(lb, parts), kit.style(c, 12, 18, .{ .color = if (h.hovered()) k.text else k.muted }), active);
-    }
-    if (!open) return;
-    const reveal = ui.motion.frame(c, (ui.motion.MotionSpec{ .duration_ms = 120, .curve = ui.motion.Easing.css_ease_out }).animate(.{ .opacity = 0.65, .y = -2 }, .{ .opacity = 1, .y = 0 }));
-    const children = ui.div(c).column().wFull().motion(reveal);
-    defer children.end();
-    for (parts, 0..) |*p, i| {
-        ui.key(c, c.print("tool-{s}", .{p.id}));
-        treeRow(c, a, k, e, p, i + 1 == parts.len, parent);
-    }
+    @import("view_tool_tree.zig").group(c, a, k, e, parts, tail, parent);
 }
 
-/// One call in an open group: the tree's trunk and elbow, its icon, its
-/// chip and what it ran.
 fn treeRow(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, last: bool, parent: ?[]const u8) void {
-    const line = k.wash(0.12);
-    const agent_linked = p.agent and p.subagent_ref.len > 0 and p.subagent_title.len > 0 and parent != null;
-    const view_linked = p.saved_view != null and parent != null;
-    const linked = agent_linked or view_linked;
-    const base_row = ui.div(c).row().wFull().gap(8).itemsStart().rounded(5);
-    const r = if (linked) kit.pressFeedback(base_row.control().hover(k.wash(0.06))) else base_row;
-    defer r.end();
-    if (linked and r.clicked()) {
-        if (agent_linked) @import("app_subagents.zig").open(a, parent.?, p) else @import("app_browser.zig").openSaved(a, parent.?, p.saved_view.?);
-    }
-    {
-        const g = ui.div(c).column().w(tree_w).h(row_h);
-        defer g.end();
-        // Trunk down from the header (to the elbow on the last row), then
-        // the branch out to the icon.
-        _ = c.leaf(.{ .width = .{ .px = 1 }, .height = .{ .px = if (last) row_h / 2 else row_h }, .background = line, .absolute = true, .offset = .{ .x = 12, .y = 0 } }, .none, null);
-        _ = c.leaf(.{ .width = .{ .px = 15 }, .height = .{ .px = 1 }, .background = line, .absolute = true, .offset = .{ .x = 13, .y = row_h / 2 } }, .none, null);
-        const ic = ui.div(c).row().absolute().offset(30, (row_h - 18) / 2);
-        defer ic.end();
-        icons.icon(c, toolIcon(p), 16, if (p.is_error) k.danger else k.muted, 18);
-    }
-    // Fill the row's remaining width before measuring wrapped reasoning
-    // and output. A fixed zero width measures them one glyph per line,
-    // leaving phantom height that follow-end scrolls the messages past.
-    // A 22-point file badge still fits GPUI's 32-point tool row.
-    const body = ui.div(c).column().wFull().justifyCenter().gap(4).py(if (p.path.len > 0) 5 else 7);
-    defer body.end();
-    const detail_key = c.print("detail/{s}/{s}", .{ e.id, p.id });
-    const has_output = p.output.len > 0 or p.output_ref.len > 0;
-    // A diff wins over output, as the more structured record of the same
-    // action, then the per-file stats a thinned document keeps
-    // (`tool_detail`).
-    const has_detail = has_output or p.diff_new != null or p.stats.len > 0;
-    const base = ui.div(c).row().gap(8).itemsCenter().pr(4).rounded(4);
-    const head = if (!linked and has_detail) kit.pressFeedback(base.control().hover(k.wash(0.04))) else base;
-    {
-        defer head.end();
-        if (!linked and has_detail and head.clicked()) a.view.toggleGroup(a.gpa, detail_key, false);
-        const chip = if (p.kind == .reasoning) "Thought process" else p.chip;
-        const active = !p.is_error and (if (p.agent) p.subagent_status == .running else e.status == .streaming and !p.resolved);
-        kit.activityText(c, k, chip, kit.style(c, 12, 18, .{ .weight = if (toolIcon(p) == .bot) .medium else .regular, .color = if (p.is_error) k.danger else k.muted }), active);
-        if (p.kind == .tool) {
-            const d = firstLine(if (p.agent and p.text.items.len == 0) p.subagent_title else p.text.items);
-            if (p.path.len > 0) fileBadge(c, k, p.path, p.is_error) else kit.fadeText(c, d, .{ .size = 12, .mono = p.tool == .exec, .color = if (p.is_error) k.danger else k.muted }, 560);
-            if (linked) icons.icon(c, .@"arrow-up-right", 12, k.faint, 0);
-        }
-    }
-    if (p.kind == .reasoning) {
-        @import("view_markdown.zig").withLinks(c, k, p.text.items, a, parent);
-    }
-    if (!linked and has_detail and a.view.groupOpen(detail_key, false)) {
-        if (p.diff_new) |new| return editDiff(c, k, p, new);
-        if (p.stats.len > 0) return statRows(c, k, p.stats);
-        const output = ui.div(c).column().wFull().p(8).rounded(6).bg(k.wash(0.04));
-        defer output.end();
-        const blob = a.tool_blobs.get(p.output_ref);
-        const text = if (blob) |b| (if (b.status == .ready) b.text else p.output) else p.output;
-        if (text.len > 0) ui.text(c, text, kit.style(c, 12, 18, .{ .wrap = true, .mono = true, .color = if (p.is_error) k.danger else k.muted }));
-        if (p.output_ref.len > 0 and (blob == null or blob.?.status != .ready)) {
-            const loading = blob != null and blob.?.status == .loading;
-            const action = ui.div(c).row().py(4);
-            defer action.end();
-            ui.text(c, if (loading) "Loading full output…" else if (blob != null and blob.?.status == .failed) "Retry full output" else "Show full output", .{ .size = 12, .color = k.muted });
-            if (!loading and action.clicked()) a.fetchToolBlob(p.output_ref);
-        }
-    }
+    @import("view_tool_tree.zig").row(c, a, k, e, p, last, parent);
 }
 
 /// An opened edit: its hunks as the Changes pane draws them, numbers,
 /// markers and syntax colors (`ToolDetail::Diff`).
-fn editDiff(c: *ui.Context, k: theme.Colors, p: *const tr.Part, new: []const u8) void {
+pub fn editDiff(c: *ui.Context, k: theme.Colors, p: *const tr.Part, new: []const u8) void {
     const f = @import("tool_diff.zig").file(c.alloc(), p.path, p.diff_old, new) catch return;
     if (f.hunks.len == 0) return;
     ui.key(c, c.print("edit-diff-{s}", .{p.id}));
-    const box = ui.div(c).column().wFull().py(4).rounded(6).bg(k.wash(0.04)).clip();
+    const box = ui.div(c).column().wFull().py(4).clip();
     defer box.end();
     @import("view_diffs.zig").body(c, k, &f);
 }
 
 /// A thinned edit's files, one row each: its icon, path and counts
 /// (`ToolDetail::Stats`).
-fn statRows(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
-    const box = ui.div(c).column().wFull().px(8).py(6).rounded(6).bg(k.wash(0.04));
+pub fn statRows(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
+    const box = ui.div(c).column().wFull().py(4);
     defer box.end();
     const mono: ui.TextStyle = .{ .size = 12, .mono = true, .color = k.faint };
     for (stats) |s| {
@@ -540,33 +492,8 @@ fn statRows(c: *ui.Context, k: theme.Colors, stats: []const tr.Stat) void {
     }
 }
 
-/// The GPUI tool header's filename badge, including its untinted identity.
-fn fileBadge(c: *ui.Context, k: theme.Colors, path: []const u8, failed: bool) void {
-    const badge = ui.div(c).row().h(22).pl(1).pr(6).gap(6).itemsCenter().rounded(5).bg(k.ink(0.06));
-    defer badge.end();
-    {
-        const well = ui.div(c).row().size(20, 20).center().rounded(4).bg(ui.Color.hex(if (k.dark) 0x000000 else 0xffffff).alpha(0.16));
-        defer well.end();
-        file_icons.icon(c, path, false, k.dark, 14);
-    }
-    kit.fadeText(c, file_icons.basename(path), kit.style(c, 12, 18, .{ .color = if (failed) k.danger else k.text.alpha(0.85) }), 520);
-}
-
 fn toolIcon(p: *const tr.Part) icons.Name {
-    if (p.kind == .reasoning) return .@"magic-stick-3";
-    if (p.agent or std.mem.eql(u8, p.chip, "Agent") or std.mem.eql(u8, p.chip, "Waiting on")) return .bot;
-    return switch (p.tool) {
-        .exec => .terminal,
-        .readFile, .applyPatch => .document,
-        .writeFile => .@"document-add",
-        .editFile => .pen,
-        .search => .magnifer,
-        .glob => .@"folder-with-files",
-        .webFetch, .webSearch => .global,
-        .todo => .checklist,
-        .unknown => icons.namedTool(p.text.items),
-        .mcp => .widget,
-    };
+    return @import("view_tool_tree.zig").toolIcon(p);
 }
 
 test "tool rows use the GPUI transcript's original Harness SVGs" {

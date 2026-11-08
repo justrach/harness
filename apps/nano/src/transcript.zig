@@ -73,11 +73,15 @@ pub const Part = struct {
     /// Text and reasoning: their text. A tool: what it ran (the command,
     /// path, pattern, URL or tool name). An error: its message.
     text: std.ArrayList(u8) = .empty,
+    /// A todo call's first unfinished item, as the working trailer's plan step.
+    todo_step: []u8 = &.{},
     tool: ToolKind = .unknown,
     /// A tool's chip, as the desktop labels it ("Run", "Agent", "Waiting on").
     chip: []const u8 = "Tool",
     /// The file a tool read or changed, for counting distinct files.
     path: []u8 = &.{},
+    /// The full call, retained for the tool access map's input inspector.
+    invocation: []u8 = &.{},
     /// The engine's tool-result summary, owned independently of the RPC frame.
     output: []u8 = &.{},
     /// Lazy full output's owned sidecar reference and optional byte count.
@@ -116,7 +120,9 @@ pub const Part = struct {
 
     pub fn deinit(p: *Part, gpa: Allocator) void {
         gpa.free(p.id);
+        gpa.free(p.todo_step);
         gpa.free(p.path);
+        gpa.free(p.invocation);
         gpa.free(p.output);
         gpa.free(p.output_ref);
         gpa.free(p.subagent_ref);
@@ -424,8 +430,10 @@ fn parseQuestions(gpa: Allocator, p: *Part, o: json.ObjectMap) !void {
 fn toolCall(gpa: Allocator, p: *Part, call: ?json.Value) !void {
     const c = call orelse return;
     if (c != .object) return;
+    p.invocation = try json.Stringify.valueAlloc(gpa, c, .{ .whitespace = .indent_2 });
     const o = c.object;
     p.tool = std.meta.stringToEnum(ToolKind, string(o.get("kind")) orelse "") orelse .unknown;
+    if (p.tool == .todo) p.todo_step = try todoStep(gpa, o);
     if (p.tool == .unknown and std.mem.eql(u8, string(o.get("name")) orelse "", compaction_tool)) {
         var m: Compaction = .{};
         if (o.get("input")) |i| if (i == .object) {
@@ -447,6 +455,20 @@ fn toolCall(gpa: Allocator, p: *Part, call: ?json.Value) !void {
     const c_ = @import("tools.zig").chipContent(arena.allocator(), o);
     p.chip = c_.label;
     try p.text.appendSlice(gpa, c_.detail);
+}
+
+/// A todo call's first unfinished item. The todo payload is the canonical
+/// `[{text, done}]`; an absent or malformed list simply has no plan step.
+fn todoStep(gpa: Allocator, o: json.ObjectMap) ![]u8 {
+    for (array(o.get("items"))) |item| {
+        if (item != .object) continue;
+        const done = if (item.object.get("done")) |v| v == .bool and v.bool else false;
+        if (done) continue;
+        const text = string(item.object.get("text")) orelse continue;
+        if (std.mem.trim(u8, text, " \t\r\n").len == 0) continue;
+        return gpa.dupe(u8, text);
+    }
+    return &.{};
 }
 
 const testing = std.testing;
@@ -527,6 +549,10 @@ test "remove, a tool's summary, and replacing an entry by id" {
     try testing.expectEqualStrings("zig build test", t.entries.items[0].parts.items[0].text.items);
     try testing.expectEqualStrings("Run", t.entries.items[0].parts.items[0].chip);
     try testing.expectEqual(ToolKind.exec, t.entries.items[0].parts.items[0].tool);
+    // The RPC frame was freed by applyText: the inspector owns its input.
+    const call = try json.parseFromSlice(json.Value, testing.allocator, t.entries.items[0].parts.items[0].invocation, .{});
+    defer call.deinit();
+    try testing.expectEqualStrings("zig build test", call.value.object.get("command").?.string);
     try applyText(&t,
         \\{"remove":["b"],"upsert":[{"after":null,"entry":{"id":"a","role":"assistant","status":"complete","parts":[]}}],"count":1}
     );

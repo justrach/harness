@@ -1,0 +1,193 @@
+{
+  "width": 1440,
+  "height": 1000,
+  "dark": true,
+  "spaces": [
+    {
+      "id": "synthetic-space",
+      "deviceId": "synthetic-device",
+      "path": "/synthetic",
+      "gitDetected": true,
+      "createdAt": "2026-11-01T00:00:00Z"
+    }
+  ],
+  "chats": [
+    {
+      "id": "synthetic",
+      "deviceId": "synthetic-device",
+      "title": "Synthetic parser",
+      "cwd": "/synthetic",
+      "spaceId": "synthetic-space",
+      "archived": false,
+      "config": {
+        "harness": "graff",
+        "model": "synthetic-model",
+        "reasoning": null,
+        "modelOptions": {},
+        "sandbox": "workspace-write"
+      },
+      "createdAt": "2026-11-01T00:00:00Z",
+      "lastMessageAt": "2026-11-01T00:00:00Z"
+    }
+  ],
+  "open": "synthetic",
+  "transcripts": {
+    "synthetic": [
+      {
+        "id": "prompt",
+        "role": "user",
+        "createdAt": 1793491200000,
+        "deviceId": "synthetic-device",
+        "parts": [
+          {
+            "id": "text",
+            "kind": "text",
+            "text": "Check the synthetic parser"
+          }
+        ]
+      },
+      {
+        "id": "reply",
+        "role": "assistant",
+        "status": "complete",
+        "durationMs": 2000,
+        "createdAt": 1793491202000,
+        "deviceId": "synthetic-device",
+        "parts": [
+          {
+            "id": "tests",
+            "kind": "tool",
+            "call": {
+              "kind": "exec",
+              "command": "zig build test"
+            },
+            "resolved": true,
+            "output": "48 passed; 0 failed"
+          },
+          {
+            "id": "probe",
+            "kind": "tool",
+            "call": {
+              "kind": "exec",
+              "command": "zig build check"
+            },
+            "resolved": true,
+            "isError": true,
+            "output": "1 failed"
+          },
+          {
+            "id": "search",
+            "kind": "tool",
+            "call": {
+              "kind": "search",
+              "pattern": "parse",
+              "path": "src"
+            },
+            "resolved": true,
+            "output": "src/parser.zig:3:parse\nsrc/lexer.zig:8:parse"
+          },
+          {
+            "id": "glob",
+            "kind": "tool",
+            "call": {
+              "kind": "glob",
+              "pattern": "src/*.zig"
+            },
+            "resolved": true,
+            "output": "src/parser.zig\nsrc/lexer.zig"
+          },
+          {
+            "id": "read",
+            "kind": "tool",
+            "call": {
+              "kind": "readFile",
+              "path": "src/parser.zig"
+            },
+            "resolved": true,
+            "output": "fn parse() void {}"
+          },
+          {
+            "id": "edit",
+            "kind": "tool",
+            "call": {
+              "kind": "editFile",
+              "path": "src/parser.zig"
+            },
+            "resolved": true,
+            "diffStats": [
+              {
+                "path": "src/parser.zig",
+                "additions": 8,
+                "deletions": 3
+              }
+            ]
+          },
+          {
+            "id": "answer",
+            "kind": "text",
+            "text": "The synthetic parser is ready."
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "click": "Worked for 2s"
+    },
+    {
+      "click": "Ran 2 commands \u00b7 edited 1 file \u00b7 read 1 file \u00b7 searched 2 times \u00b7 1 failed"
+    },
+    {
+      "snap": "expanded-tool-tree"
+    },
+    {
+      "expect": "48 passed"
+    },
+    {
+      "expect": "1 failed"
+    },
+    {
+      "expect": "2 matches"
+    },
+    {
+      "expect": "2 files"
+    },
+    {
+      "expect": "Tool access"
+    },
+    {
+      "click": "Tool access"
+    },
+    {
+      "snap": "tool-access-map"
+    },
+    {
+      "expect": "3/5 tools \u00b7 6 calls"
+    },
+    {
+      "click": "Terminal"
+    },
+    {
+      "snap": "tool-access-latest-call"
+    },
+    {
+      "expect": "1 failed"
+    },
+    {
+      "click": "Run zig build test"
+    },
+    {
+      "snap": "tool-access-history"
+    },
+    {
+      "expect": "INPUT"
+    },
+    {
+      "expect": "OUTPUT"
+    },
+    {
+      "expect": "48 passed; 0 failed"
+    }
+  ]
+}

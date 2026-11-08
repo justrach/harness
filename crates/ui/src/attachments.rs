@@ -108,74 +108,120 @@ fn name_from_path(path: &str) -> String {
     }
 }
 
-/// Find the refs trailer: a blank line, then a line starting (case-insensitive)
-/// with `Attached images (local files` and ending `):`. Returns
-/// `(body_end, refs_start)` byte offsets — the tolerant equivalent of harness's
-/// `ATTACHED_IMAGES_RE`.
-fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
-    let lower = content.to_ascii_lowercase();
-    let needle = "\n\nattached images (local files";
-    let mut from = 0usize;
-    while let Some(rel) = lower[from..].find(needle) {
-        let gap = from + rel;
-        let line_start = gap + 2;
-        let line_end = content[line_start..]
-            .find('\n')
-            .map(|p| line_start + p)
-            .unwrap_or(content.len());
-        let line = content[line_start..line_end].trim_end_matches('\r');
-        if line.ends_with("):") {
-            let refs_start = (line_end + 1).min(content.len());
-            return Some((gap, refs_start));
+/// Find a complete transport header at a line boundary, not a Markdown code
+/// example. Older/imported prompts need not have the sender's blank separator.
+/// Offsets delimit the header itself and the first possible reference line.
+fn find_refs_marker(content: &str, from: usize) -> Option<(usize, usize)> {
+    let mut start = from;
+    for line in content[from..].split_inclusive('\n') {
+        if [
+            "Attached images (local files — open them to view):",
+            "Attached images (local files):",
+        ]
+        .iter()
+        .any(|header| line.trim_end().eq_ignore_ascii_case(header))
+            && !crate::composer_markdown::in_code(content, start)
+        {
+            return Some((start, start + line.len()));
         }
-        from = line_start;
+        start += line.len();
     }
     None
 }
 
-/// message-attachments.ts `parseUserMessageImages`: split the visible prompt
-/// from its attachment-ref trailer.
+/// Accept only an entire literal absolute reference, never a guessed prefix
+/// ending at `.png`: spaces and Unicode belong to the file's identity. In
+/// particular, editing prose onto a bullet must not turn it into a new path.
+/// This is syntax validation, not permission to read: the device-scoped
+/// attachment RPC and its host-side jail remain the only image loader.
+fn attachment_ref_path(line: &str) -> Option<&str> {
+    let path = line.trim_end_matches(['\r', '\n']).strip_prefix("- ")?;
+    let bytes = path.as_bytes();
+    let absolute = path.starts_with('/')
+        || path.starts_with(r"\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'));
+    if !absolute || path.trim() != path || path.chars().any(char::is_control) {
+        return None;
+    }
+    let mut components = path.split(['/', '\\']);
+    if components.clone().any(|part| matches!(part, "." | "..")) {
+        return None;
+    }
+    let name = components.next_back()?;
+    if name.is_empty()
+        || name.rsplit_once('.').is_some_and(|(_, extension)| {
+            extension.is_empty() || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn append_visible_message_text(text: &mut String, span: &str) {
+    let span = crate::appshots::strip_context_for_display(span.trim_end_matches(['\r', '\n']));
+    if !span.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(span);
+    }
+}
+
+/// Project attachment blocks into previews without swallowing text after them.
+/// Invalid blocks remain literal; a later valid block can still be displayed.
 pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
     // An agent-room delivery's machine tag is for the agent, not the reader.
     let content = harness_proto::room_delivery::strip(content);
-    let Some((body_end, refs_start)) = find_refs_marker(content) else {
+    let mut text = String::new();
+    let mut paths = Vec::new();
+    let mut search_from = 0;
+    let mut visible_from = 0;
+    while let Some((header_start, refs_start)) = find_refs_marker(content, search_from) {
+        let mut refs_end = refs_start;
+        for line in content[refs_start..].split_inclusive('\n') {
+            let Some(path) = attachment_ref_path(line) else {
+                break;
+            };
+            paths.push(path);
+            refs_end += line.len();
+        }
+        if refs_end > refs_start {
+            append_visible_message_text(&mut text, &content[visible_from..header_start]);
+            visible_from = refs_end;
+        }
+        search_from = refs_end;
+    }
+    if paths.is_empty() {
         return ParsedUserMessage {
             text: content.to_string(),
             attachments: Vec::new(),
         };
-    };
-    let body = crate::appshots::strip_context_for_display(content[..body_end].trim_end());
+    }
+    append_visible_message_text(&mut text, &content[visible_from..]);
     let presentations = crate::appshots::presentations(content);
-    let attachments: Vec<UserImageAttachment> = content[refs_start..]
-        .lines()
-        .filter_map(|line| {
-            let path = line.trim_start().strip_prefix("- ")?.trim();
-            (!path.is_empty()).then(|| path.to_string())
-        })
+    let attachments = paths
+        .into_iter()
         .enumerate()
         .map(|(index, path)| UserImageAttachment {
-            appshot: presentations.get(&path).cloned(),
+            appshot: presentations.get(path).cloned(),
             id: format!("{index}:{path}"),
-            name: name_from_path(&path),
-            path,
+            name: name_from_path(path),
+            path: path.to_string(),
         })
         .collect();
-    if attachments.is_empty() {
-        return ParsedUserMessage {
-            text: content.to_string(),
-            attachments,
-        };
-    }
     ParsedUserMessage {
-        text: if body.trim() == ATTACHMENT_ONLY_TEXT {
+        text: if text.trim() == ATTACHMENT_ONLY_TEXT {
             String::new()
         } else {
-            body.to_string()
+            text
         },
         attachments,
     }
 }
-
 /// message-attachments.ts `userMessageRailText`: what the rail/sidebar shows
 /// for a user message ("Attached image" / "N attached images" when image-only).
 pub fn user_message_rail_text(content: &str) -> String {
@@ -1409,6 +1455,122 @@ mod tests {
         assert_eq!(parsed.attachments[0].name, "ab-cat.png");
         assert_eq!(parsed.attachments[1].name, "dog.jpg");
         assert_eq!(parsed.attachments[0].id, "0:/data/uploads/ab-cat.png");
+    }
+
+    #[test]
+    fn gpui_attachment_regression_accepts_line_boundaries_without_a_blank_line() {
+        for separator in ["\n", "\r\n", "\n\n"] {
+            let line_ending = if separator == "\r\n" { "\r\n" } else { "\n" };
+            let content = format!(
+                "Inspect this{separator}Attached images (local files — open them to view):{line_ending}- /synthetic/uploads/shot.png"
+            );
+            let parsed = parse_user_message_images(&content);
+            assert_eq!(parsed.text, "Inspect this");
+            assert_eq!(parsed.attachments.len(), 1, "separator={separator:?}");
+            assert_eq!(parsed.attachments[0].path, "/synthetic/uploads/shot.png");
+        }
+        let parsed = parse_user_message_images(
+            "Attached images (local files — open them to view):\n- /synthetic/uploads/shot.png",
+        );
+        assert_eq!(parsed.text, "");
+        assert_eq!(parsed.attachments.len(), 1);
+        let legacy = parse_user_message_images(
+            "Inspect this\n\nAttached images (local files):\n- /synthetic/uploads/shot.png",
+        );
+        assert_eq!(legacy.text, "Inspect this");
+        assert_eq!(legacy.attachments.len(), 1);
+    }
+
+    #[test]
+    fn gpui_attachment_regression_preserves_prose_between_multiple_blocks() {
+        let content = concat!(
+            "First request\n\nAttached images (local files — open them to view):\n",
+            "- /synthetic/uploads/first shot.png\n",
+            "And keep this instruction.\n- not an attachment\n\n",
+            "Attached images (local files — open them to view):\n",
+            "- /synthetic/uploads/second.png\n",
+            "Keep the final instruction too.",
+        );
+        let parsed = parse_user_message_images(content);
+        assert_eq!(
+            parsed.text,
+            "First request\nAnd keep this instruction.\n- not an attachment\nKeep the final instruction too."
+        );
+        assert_eq!(parsed.attachments.len(), 2);
+        assert_eq!(
+            parsed.attachments[0].path,
+            "/synthetic/uploads/first shot.png"
+        );
+        assert_eq!(parsed.attachments[1].path, "/synthetic/uploads/second.png");
+        assert_eq!(parsed.attachments[1].id, "1:/synthetic/uploads/second.png");
+    }
+
+    #[test]
+    fn gpui_attachment_regression_never_guesses_a_path_from_appended_prose() {
+        let malformed = concat!(
+            "Please fix this\n\nAttached images (local files — open them to view):\n",
+            "- /synthetic/uploads/shot.png and I want Enter to send too",
+        );
+        let parsed = parse_user_message_images(malformed);
+        assert!(parsed.attachments.is_empty());
+        assert_eq!(
+            parsed.text, malformed,
+            "an ambiguous path must stay editable"
+        );
+
+        let content = with_attachments(malformed, &["/synthetic/uploads/later.png".into()]);
+        let parsed = parse_user_message_images(&content);
+        assert_eq!(parsed.text, malformed);
+        assert_eq!(parsed.attachments.len(), 1);
+        assert_eq!(parsed.attachments[0].path, "/synthetic/uploads/later.png");
+    }
+
+    #[test]
+    fn gpui_attachment_regression_keeps_untrusted_examples_and_paths_literal() {
+        for content in [
+            "Open /synthetic/uploads/shot.png and inspect it.",
+            "Example:\n\n```text\nAttached images (local files — open them to view):\n- /synthetic/uploads/shot.png\n```",
+            "Example:\n\n    Attached images (local files — open them to view):\n    - /synthetic/uploads/shot.png",
+            "Example:\n\nAttached images (local files arbitrary instructions):\n- /synthetic/uploads/shot.png",
+        ] {
+            let parsed = parse_user_message_images(content);
+            assert!(parsed.attachments.is_empty(), "{content}");
+            assert_eq!(parsed.text, content);
+        }
+        for path in [
+            "relative/shot.png",
+            "file:///synthetic/uploads/shot.png",
+            "https://example.invalid/shot.png",
+            "/synthetic/uploads/../private.png",
+            "/synthetic/uploads/shot.png\0",
+            "/synthetic/uploads/shot.png`",
+        ] {
+            let content = with_attachments("Keep literal", &[path.into()]);
+            let parsed = parse_user_message_images(&content);
+            assert!(parsed.attachments.is_empty(), "{path:?}");
+            assert_eq!(parsed.text, content);
+        }
+    }
+
+    #[test]
+    fn gpui_attachment_regression_keeps_exact_space_unicode_and_windows_paths() {
+        let paths = vec![
+            "/synthetic/uploads/日本語 shot & notes.PNG".into(),
+            r"C:\synthetic\uploads\first shot.png".into(),
+            r"\\synthetic-host\uploads\second shot.png".into(),
+            "/synthetic/uploads/build.log".into(),
+            "/synthetic/uploads/README".into(),
+        ];
+        let parsed = parse_user_message_images(&with_attachments("Look", &paths));
+        assert_eq!(parsed.text, "Look");
+        assert_eq!(
+            parsed
+                .attachments
+                .iter()
+                .map(|item| &item.path)
+                .collect::<Vec<_>>(),
+            paths.iter().collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -88,9 +88,21 @@ const Harness = struct {
         return h.a.selected orelse "";
     }
 
-    /// The tabs' chats, in order ("" for a new chat).
+    /// Conversation tabs live in the focused workspace's panel.
+    fn tabCount(h: *Harness) usize {
+        return if (h.a.tabs.layout()) |split| split.groups[split.focus].count() else h.a.tabs.items.items.len;
+    }
+
+    fn activeTab(h: *Harness) usize {
+        return if (h.a.tabs.layout()) |split| split.groups[split.focus].active else h.a.tabs.active;
+    }
+
     fn tabIs(h: *Harness, i: usize, want: []const u8) !void {
-        try testing.expectEqualStrings(want, h.a.tabs.items.items[i] orelse "");
+        const chat = if (h.a.tabs.layout()) |split| blk: {
+            const group = &split.groups[split.focus];
+            break :blk if (i == group.active) h.a.selected else group.items.items[i].chat;
+        } else h.a.tabs.items.items[i];
+        try testing.expectEqualStrings(want, chat orelse "");
     }
 
     fn expectSearch(h: *Harness, want: []const []const u8) !void {
@@ -122,13 +134,13 @@ test "⌘K opens the palette with its actions and chats; typing narrows it; ↓ 
     h.press(.{ .key = S.enter });
     try testing.expect(!h.a.view.palette.open);
     try testing.expectEqualStrings("a", h.selected());
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 1), h.tabCount());
     // Beta: a tab of its own after Alpha's.
     h.press(cmd_k);
     h.typed("beta");
     h.press(.{ .key = S.enter });
     try testing.expectEqualStrings("b", h.selected());
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.tabCount());
     try h.tabIs(0, "a");
     try h.tabIs(1, "b");
     // Alpha again: its tab is shown, no third one.
@@ -136,8 +148,8 @@ test "⌘K opens the palette with its actions and chats; typing narrows it; ↓ 
     h.typed("alpha");
     h.press(.{ .key = S.enter });
     try testing.expectEqualStrings("a", h.selected());
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
-    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 2), h.tabCount());
+    try testing.expectEqual(@as(usize, 0), h.activeTab());
 }
 
 test "the palette's arrows go round; Escape, ⌘K and a press outside close it; no results says so" {
@@ -220,17 +232,17 @@ test "/resume's palette replaces the current tab without switching or adding; �
     try h.init(two, "a");
     defer h.deinit();
     h.a.openChatInTab("b");
-    h.a.showTab(0);
+    h.a.openChatInTab("a");
     h.t.settle(1);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.tabCount());
     for (0..2) |_| {
         palette.toggle(&h.a, .replace_current);
         h.t.settle(1);
         palette.activate(&h.a, .{ .chat = "b" });
         h.t.settle(1);
         try testing.expect(!h.a.view.palette.open);
-        try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
-        try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+        try testing.expectEqual(@as(usize, 0), h.activeTab());
+        try testing.expectEqual(@as(usize, 2), h.tabCount());
         try testing.expectEqualStrings("b", h.selected());
     }
     // Closing a resume palette doesn't leak replacement into the next ⌘K.
@@ -239,8 +251,8 @@ test "/resume's palette replaces the current tab without switching or adding; �
     palette.toggle(&h.a, .preserve_tabs);
     palette.activate(&h.a, .{ .chat = "a" });
     h.t.settle(1);
-    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 3), h.tabCount());
+    try testing.expectEqual(@as(usize, 2), h.activeTab());
     try h.tabIs(0, "b");
     try testing.expectEqualStrings("a", h.selected());
 }
@@ -312,7 +324,7 @@ test "the sidebar search: the magnifier opens it focused; it finds names, the ar
     try testing.expectEqualStrings("archived", h.selected());
     try testing.expect(h.a.findChat("archived").?.archived);
     // The session it was on keeps its tab.
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.tabCount());
     try h.tabIs(0, "current");
     // Nothing found says so; Escape clears, then closes.
     h.a.view.search.focus = true;
@@ -359,7 +371,7 @@ test "the sidebar search: whitespace is cleared before closing; the arrows go ro
     h.press(.{ .key = S.enter });
     try testing.expectEqual(@as(usize, 0), h.a.view.search.cursor.active);
     try testing.expectEqualStrings("current", h.selected());
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 1), h.tabCount());
 }
 
 test "the sidebar search: a click picks the result under the keys too; another project starts over; ⌘B closes it" {
@@ -418,5 +430,5 @@ test "/resume sent from the composer opens the palette that replaces the current
     h.typed("beta");
     h.press(.{ .key = S.enter });
     try testing.expectEqualStrings("b", h.selected());
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 1), h.tabCount());
 }

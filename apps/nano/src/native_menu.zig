@@ -4,7 +4,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const nanoui = @import("nanoui");
 const App = @import("app.zig").App;
-const Item = @typeInfo(@FieldType(@FieldType(nanoui.Menu, "items"), "items")).pointer.child;
+const StoredItem = @typeInfo(@FieldType(@FieldType(nanoui.Menu, "items"), "items")).pointer.child;
+const ItemArg = if (@typeInfo(StoredItem) == .pointer) StoredItem else *StoredItem;
 
 pub fn install(app: *nanoui.App, a: *App) !void {
     const items = windowItems(a);
@@ -28,7 +29,7 @@ fn windowItems(a: *App) [7]nanoui.MenuItem {
     };
 }
 
-fn closeTab(a: *App, _: *Item) void {
+fn closeTab(a: *App, _: ItemArg) void {
     a.closeByShortcut();
     a.redraw();
 }
@@ -55,18 +56,31 @@ test "native Cmd+W closes a split pane, then a tab, without closing the app wind
     a.newTab();
     a.splitPane(.horizontal);
     try std.testing.expect(a.tabs.layout() != null);
-    const tabs = a.tabs.items.items.len;
+    const tabs = a.tabs.layout().?.groups[0].count();
     const items = windowItems(&a);
     const menu = try nanoui.Menu.create(std.testing.allocator, "Harness", &.{.{ .role = .window_menu, .submenu = &items }});
     defer menu.destroy();
     try std.testing.expect(pressClose(menu));
-    try std.testing.expect(a.tabs.layout() == null);
-    try std.testing.expectEqual(tabs, a.tabs.items.items.len);
+    // The original folder tabs remain in the surviving panel, rather than
+    // turning back into old, independent workspaces after closing a split.
+    try std.testing.expectEqual(@as(usize, 1), a.tabs.layout().?.panes.items.len);
+    try std.testing.expectEqual(tabs, a.tabs.layout().?.groups[0].count());
     try std.testing.expect(pressClose(menu));
-    try std.testing.expectEqual(tabs - 1, a.tabs.items.items.len);
+    try std.testing.expectEqual(tabs - 1, a.tabs.layout().?.groups[0].count());
+    while (a.tabs.layout() != null) try std.testing.expect(pressClose(menu));
     // Closing the final tab leaves the new-session canvas, not no window.
-    while (a.tabs.items.items.len > 1) try std.testing.expect(pressClose(menu));
     try std.testing.expect(pressClose(menu));
     try std.testing.expectEqual(@as(usize, 1), a.tabs.items.items.len);
     try std.testing.expect(a.selected == null);
+    // Native accelerators also respect the focused non-chat panel.
+    a.panels.host_open = true;
+    a.panels.active = a.panels.tabs.items.len;
+    a.view.strip.focused = .host;
+    try std.testing.expect(pressClose(menu));
+    try std.testing.expect(!a.panels.host_open);
+    a.panels.files_open = true;
+    a.view.strip.focused = .files;
+    try std.testing.expect(pressClose(menu));
+    try std.testing.expect(!a.panels.files_open);
+    try std.testing.expectEqual(@as(usize, 1), a.tabs.items.items.len);
 }

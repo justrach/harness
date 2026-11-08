@@ -73,6 +73,7 @@ pub const State = struct {
     relay: ?*relay_cb.Capture = null,
 
     pub fn deinit(s: *State, gpa: Allocator) void {
+        @import("text_buffer.zig").deinit(&s.code);
         if (s.flow) |*f| f.deinit(gpa);
         if (s.relay) |r| r.cancel();
     }
@@ -407,7 +408,7 @@ pub fn dialog(c: *ui.Context, a: *App, k: theme.Colors) void {
             set.space(c, 8);
             const rows = ui.div(c).column().gap(6).py(4);
             defer rows.end();
-            c.frameIn(1.0 / 15.0);
+            kit.loaderFrame(c, 1.0 / 15.0);
             for (0..2) |i| {
                 const t: f32 = @floatCast(@mod(c.time / 2.4 - @as(f64, @floatFromInt(i)) * 0.08, 1.0));
                 const wave = (1 - @cos(2 * std.math.pi * t)) / 2;

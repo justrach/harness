@@ -1,9 +1,6 @@
-//! The sidebar, as the GPUI shell lays it out (crates/ui/src/shell.rs,
-//! shell/chat_tabs.rs, shell/spaces.rs): the open tabs, the project filter
-//! with search and view options, then Sessions and Archived, each row a
-//! status mark, the agent's mark, the project's monogram, a fading title
-//! and how long ago; a running cloud sandbox's strip and the account badge
-//! at the foot.
+//! The conversation sidebar from shell.rs/spaces.rs: project filter first,
+//! then session lists and a compact 44-point account/create footer. Panel
+//! conversation tabs belong to the instrument strip, not this column.
 const std = @import("std");
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -18,60 +15,69 @@ const App = @import("app.zig").App;
 /// "No sessions yet": GPUI's default line (φ), up to a device pixel.
 const empty_line = kit.measured(12 * 1.618);
 
-pub const width: f32 = 256;
+pub const width: f32 = @import("settings.zig").sidebar_default;
+
+pub fn widthOf(a: *const App) f32 {
+    return a.settings.sidebarWidth();
+}
 pub const titlebar_h: f32 = 38;
 
 pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The edge is drawn over its last column (view.zig), as the GPUI app's.
-    const side = ui.div(c).column().w(width).hFull().bg(k.sidebar).pt(titlebar_h);
+    const side = ui.div(c).column().w(widthOf(a)).hFull().bg(k.sidebar).pt(titlebar_h);
     defer side.end();
-    tabList(c, a, k);
     const search = @import("view_sidebar_search.zig");
     filterRow(c, a, k);
     // The session search's field, and its results in the lists' place
     // while it filters (view_sidebar_search.zig).
     search.controls(c, a, k);
-    if (!search.results(c, a, k)) lists(c, a, k);
+    if (!search.results(c, a, k)) {
+        openWorkspaces(c, a, k);
+        lists(c, a, k);
+    }
     footer(c, a, k);
 }
 
-fn tabList(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const tabs = a.tabs.items.items;
-    const box = ui.div(c).column().wFull().px(10).pt(4).pb(6).gap(2);
-    defer box.end();
-    if (tabs.len > 1) {
-        const h = ui.div(c).row().px(4).pb(2);
-        defer h.end();
-        // GPUI's line: 11 × φ, to the device pixel.
-        ui.text(c, c.print("Tabs · {d}", .{tabs.len}), .{ .size = 11, .line_height = 18, .color = k.muted.alpha(0.8) });
+/// Multi-panel workspaces and unsent drafts need a way back from another
+/// workspace. A single listed conversation already provides that shortcut.
+fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
+    if (a.tabs.items.items.len < 2) return;
+    var rows: std.ArrayList(usize) = .empty;
+    for (a.tabs.items.items, 0..) |id, ix| {
+        if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
+            const project = a.workspaceProject(ix) orelse continue;
+            if (!std.mem.eql(u8, project, filter)) continue;
+        };
+        // An implicit group still has its workspace placeholder. Only a
+        // known, explicit singleton can be represented by the chat list alone.
+        const singleton = if (a.tabs.splits.items[ix]) |split|
+            split.panes.items.len == 1 and split.groups[0].items.items.len == 1
+        else
+            true;
+        if (singleton) if (id) |chat_id| if (a.findChat(chat_id)) |chat| {
+            if (!chat.archived and listed(a, chat)) continue;
+        };
+        rows.append(c.alloc(), ix) catch return;
     }
-    var close: ?usize = null;
-    var show: ?usize = null;
-    for (tabs, 0..) |id, i| {
-        ui.key(c, c.print("tab-{d}", .{i}));
-        const lit = i == a.tabs.active;
-        var row = ui.div(c).row().wFull().h(26).px(8).gap(6).itemsCenter().rounded(7).clip();
-        row = if (lit) row.bg(k.hover) else row.hover(k.hover);
+    if (rows.items.len == 0) return;
+    ui.key(c, "sidebar-open-workspaces");
+    const list = ui.div(c).column().wFull().maxH(240).px(8).pt(6).gap(2).scrollY();
+    defer list.end();
+    for (rows.items) |ix| {
+        const id = a.tabs.items.items[ix];
+        const title = if (id) |chat_id| (if (a.findChat(chat_id)) |chat| chat.title orelse "Untitled session" else "New session") else "New session";
+        ui.key(c, c.print("workspace-session-{d}", .{ix}));
+        var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).clip().control();
+        row = if (ix == a.tabs.active) row.bg(k.selected) else row.hover(k.hover);
         defer row.end();
-        const hovered = row.hovered();
-        if (row.clicked() and !lit) show = i;
         {
-            // The number sits at the slot's left; ✕ is centred in it.
-            const slot = ui.div(c).row().size(16, 16).itemsCenter().rounded(4);
-            defer slot.end();
-            if (hovered and tabs.len > 1) {
-                const x = ui.div(c).row().size(16, 16).center().rounded(4).hover(k.wash(0.12));
-                defer x.end();
-                if (x.clicked()) close = i;
-                icons.icon(c, .close, 12, k.muted, 0);
-            } else {
-                ui.text(c, c.print("{d}", .{i + 1}), .{ .size = 11, .color = k.muted.alpha(0.7) });
-            }
+            const mark = ui.div(c).row().size(20, 20).center();
+            defer mark.end();
+            icons.icon(c, .widget, 14, k.muted, 0);
         }
-        const title = if (id) |cid| (if (a.findChat(cid)) |ch| chatLabel(ch) else "Untitled session") else "New session";
-        kit.ellipsisText(c, title, .{ .size = 12.5, .color = if (lit) k.text else k.muted }, width - 20 - 16 - 16 - 6);
+        kit.ellipsisText(c, title, .{ .size = 12, .line_height = kit.measured(12 * 1.618), .color = k.text }, @max(0, widthOf(a) - 2 * 8 - 2 * 8 - 20 - 7));
+        if (row.clicked()) a.showTab(ix);
     }
-    if (close) |i| a.closeTabArchiving(i) else if (show) |i| a.showTab(i);
 }
 
 fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
@@ -79,7 +85,7 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     const row = ui.div(c).row().wFull().px(8).pt(8).pb(4).gap(4).itemsCenter();
     defer row.end();
     {
-        const base = ui.div(c).row().grow().h(29).px(8).gap(8).itemsCenter().rounded(8).clip();
+        const base = ui.div(c).row().grow().w(0).h(29).px(8).gap(8).itemsCenter().rounded(8).clip();
         // Hovered as GPUI's trigger is (its `hover_listener`): by the
         // pointer's moves, not the keys.
         const lh = kit.listenerHover(&a.view.hovers, if (a.view.filter_menu) base.bg(k.hover) else base, k.hover);
@@ -87,37 +93,46 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer t.end();
         if (t.clicked()) if (a.view.filter_menu) menus.close(a) else menus.openProjects(a);
         if (c.rects.get(c.node(t.index).id)) |r| a.view.filter_anchor = r;
-        icons.icon(c, .folder, 16, k.muted, 0);
         const color = if (lh.hovered) k.text else k.text.alpha(0.8);
         // The trigger less its insets, icon, chevron and gaps.
-        const room = width - 16 - 2 * 29 - 2 * 4 - 16 - 16 - 14 - 2 * 8;
+        const room = widthOf(a) - 16 - 2 * 30 - 24 - 3 * 4 - 16 - 14 - 8;
         if (a.findSpace(a.view.filter)) |s| {
             // The project, "@ device" after it, and the offline mark.
             const tag = c.print("@ {s}", .{a.deviceName(s.device_id)});
             const off = !menus.online(a, s.device_id, a.nowMs());
             const tag_w = @min(c.text.width(tag, .{ .size = 10 }), room / 2);
-            const name_w = @min(c.text.width(s.name, .{ .size = 13, .weight = .medium }), room - tag_w - 6 - (if (off) @as(f32, 18) else 0));
+            const name_w = @min(c.text.width(s.name, .{ .size = 13, .weight = theme.ui_medium_weight }), room - tag_w - 6 - (if (off) @as(f32, 18) else 0));
             const box = ui.div(c).row().grow().w(0).gap(6).itemsCenter().clip();
             defer box.end();
-            kit.fadeText(c, s.name, .{ .size = 13, .weight = .medium, .color = color }, name_w);
+            kit.fadeText(c, s.name, .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, name_w);
             kit.fadeText(c, tag, .{ .size = 10, .color = k.muted.alpha(0.45) }, tag_w);
             if (off) icons.icon(c, .@"wifi-off", 12, k.warning.alpha(0.8), 0);
         } else {
-            kit.fadeText(c, "All projects", .{ .size = 13, .weight = .medium, .color = color }, room);
-            ui.spacer(c);
+            const label = ui.div(c).row().grow().w(0).clip();
+            defer label.end();
+            kit.fadeText(c, "All projects", .{ .size = 13, .weight = theme.ui_medium_weight, .color = color }, room);
         }
         icons.icon(c, .@"alt-arrow-down", 14, k.muted.alpha(0.6), 0);
     }
     // The magnifier, muted, on a wash while the search is open
     // (`render_sidebar_search_trigger`).
     const searching = a.view.search.open;
-    if (kit.iconButton(c, k, .magnifer, .{ .size = 29, .radius = 8, .icon = 16, .color = k.muted, .on = searching }))
+    if (kit.iconButton(c, k, .magnifer, .{ .size = 30, .radius = 8, .icon = 16, .color = k.muted, .on = searching }))
         @import("view_sidebar_search.zig").toggle(a);
-    const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
-    defer more.end();
-    if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 29, .radius = 8, .icon = 16, .color = k.muted.alpha(0.6), .on = a.view.more_menu }))
-        if (a.view.more_menu) menus.close(a) else menus.openView(a);
-    if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
+    {
+        const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
+        defer more.end();
+        if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 30, .radius = 8, .icon = 16, .color = k.muted.alpha(0.6), .on = a.view.more_menu }))
+            if (a.view.more_menu) menus.close(a) else menus.openView(a);
+        if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
+    }
+    {
+        ui.key(c, "sidebar-overview");
+        const overview = tip.on(ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover), k, .{ .text = "All sessions" });
+        defer overview.end();
+        icons.icon(c, .widget, 16, k.muted, 0);
+        if (overview.clicked()) @import("view_sessions.zig").open(a);
+    }
 }
 
 /// The rows the lists show: top-level chats in a project that still
@@ -144,7 +159,7 @@ fn pinned(pins: []const []const u8, id: []const u8) ?usize {
 }
 
 /// A row's slot: its 29 points and the 2 between rows.
-pub const row_slot: f32 = 29 + 2;
+pub const row_slot: f32 = 38 + 2;
 
 const Window = struct {
     top: f32,
@@ -209,7 +224,7 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8) f32 {
                 const key = groupKey(c, a, ch, by);
                 const open = a.view.groupOpen(c.print("{s}:{s}", .{ by.prefix(), key }), true);
                 const entry = keys.getOrPut(c.alloc(), key) catch continue;
-                if (!entry.found_existing) height += if (open) @as(f32, 44) else 42;
+                if (!entry.found_existing) height += if (open) @as(f32, 46) else 44;
                 if (open) height += rowHeight(a, ch) + 2;
             } else if (a.view.sessions_open) height += rowHeight(a, ch) + 2;
         }
@@ -402,12 +417,18 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
     };
     if (by.org == .by_status) std.mem.sort([]const u8, keys.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {
-            return @intFromEnum(workspace.StatusGroup.fromKey(x).?) < @intFromEnum(workspace.StatusGroup.fromKey(y).?);
+            return @backingInt(workspace.StatusGroup.fromKey(x).?) < @backingInt(workspace.StatusGroup.fromKey(y).?);
         }
     }.lt);
     if (by.org == .by_device) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
         std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
         keys.items[0] = me;
+        break;
+    };
+    // Attention escapes project/device grouping and always comes first.
+    for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, "needs")) {
+        std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
+        keys.items[0] = key;
         break;
     };
     a.view.sessions_header = null;
@@ -422,14 +443,16 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
         };
         const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
         const open = a.view.groupOpen(collapse, true);
-        const extent: f32 = 12 + 28 + (if (open) 4 + @max(0, height - 2) else @as(f32, 0));
+        const extent: f32 = 14 + 28 + (if (open) 4 + @max(0, height - 2) else @as(f32, 0));
         const start = window.y;
         if (!omitted.include(c, window, extent)) continue;
         ui.key(c, c.print("group-{s}", .{key}));
         // Keep the existing group/body hierarchy and ID-based keys.
-        const box = ui.div(c).column().wFull().pt(12);
+        const box = ui.div(c).column().wFull().pt(14);
         defer box.end();
-        const label = if (by.org == .by_status)
+        const label = if (std.mem.eql(u8, key, "needs"))
+            "Needs you"
+        else if (by.org == .by_status)
             workspace.StatusGroup.fromKey(key).?.label()
         else if (by_project)
             (if (std.mem.startsWith(u8, key, "home:")) "~" else if (a.findSpace(key)) |sp| sp.name else "?")
@@ -438,17 +461,29 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
         {
             const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter();
             defer h.end();
-            if (h.clicked()) a.view.toggleGroup(a.gpa, collapse, true);
-            const color = k.muted.alpha(0.5);
-            ui.text(c, if (open) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 12, .weight = .medium, .color = color });
+            const color = if (k.is_harp) k.muted else k.muted.alpha(0.5);
+            ui.text(c, if (open) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 11.5, .weight = theme.ui_medium_weight, .color = color });
             ui.spacer(c);
             icons.icon(c, if (open) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
+            var create = false;
+            if (by_project and !std.mem.startsWith(u8, key, "home:") and !std.mem.eql(u8, key, "needs")) {
+                ui.key(c, "project-group-new-session");
+                const add = tip.on(ui.div(c).size(20, 20).center().rounded(4).hover(k.hover), k, .{ .text = "New session in this project" });
+                defer add.end();
+                if (h.hovered()) icons.icon(c, .plus, 13, k.muted, 0);
+                create = add.clicked();
+            }
+            if (create) {
+                a.newWorkspaceSession();
+                a.select(null, key);
+                a.new_no_project = false;
+            } else if (h.clicked()) a.view.toggleGroup(a.gpa, collapse, true);
         }
         if (!open) continue;
         const body = ui.div(c).column().wFull().pt(4).gap(2);
         defer body.end();
         var inside = window.*;
-        inside.y = start + 12 + 28 + 4;
+        inside.y = start + 14 + 28 + 4;
         var rows: Rows = .{};
         for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, a, ch, by), key)) {
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
@@ -468,8 +503,8 @@ const Grouping = struct {
 
     fn of(a: *App) Grouping {
         const org = a.settings.organization();
-        if (org != .by_status) return .{ .org = org };
         const now = a.nowMs();
+        if (org != .by_status) return .{ .org = org, .now = now };
         return .{ .org = org, .now = now, .offset = workspace.utcOffsetSeconds(now) };
     }
 
@@ -487,6 +522,8 @@ const Grouping = struct {
 /// A session's group: its status section, its project (or its device's
 /// home), or its device.
 fn groupKey(c: *ui.Context, a: *App, ch: workspace.Chat, by: Grouping) []const u8 {
+    const mark = workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), by.now);
+    if (mark == .awaiting_input or mark == .errored) return "needs";
     return switch (by.org) {
         .by_status => workspace.statusGroup(workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), by.now), ch.timeMs(), by.now, by.offset).key(),
         .by_project => ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""}),
@@ -513,8 +550,8 @@ fn sectionAt(c: *ui.Context, k: theme.Colors, label: []const u8, count: usize, o
     ui.key(c, label);
     const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(8);
     if (h.clicked()) open.* = !open.*;
-    const color = k.muted.alpha(0.5);
-    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 12, .weight = .medium, .color = color });
+    const color = if (k.is_harp) k.muted else k.muted.alpha(0.5);
+    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 11.5, .weight = theme.ui_medium_weight, .color = color });
     ui.spacer(c);
     icons.icon(c, if (open.*) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
     h.end();
@@ -527,8 +564,8 @@ fn section(c: *ui.Context, k: theme.Colors, label: []const u8, count: usize, ope
     const h = ui.div(c).row().wFull().h(28).px(8).gap(8).itemsCenter().rounded(8);
     defer h.end();
     if (h.clicked()) open.* = !open.*;
-    const color = k.muted.alpha(0.5);
-    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 12, .weight = .medium, .color = color });
+    const color = if (k.is_harp) k.muted else k.muted.alpha(0.5);
+    ui.text(c, if (open.*) label else c.print("{s} ({d})", .{ label, count }), .{ .size = 11.5, .weight = theme.ui_medium_weight, .color = color });
     ui.spacer(c);
     icons.icon(c, if (open.*) .@"alt-arrow-down" else .@"alt-arrow-right", 12, color, 0);
     return open.*;
@@ -559,17 +596,17 @@ const Look = struct {
     }
 };
 
-/// A row's height (`sidebar_row_height`): 29 compact; else 45 with its
-/// "project @ device" line, 16 more with its branch's.
+/// Desktop reserves a38px slot when context is enabled, even though its
+/// compact renderer keeps the marks, title and timestamp on one line.
 pub fn rowHeight(a: *const App, ch: workspace.Chat) f32 {
     const l = Look.of(a);
-    if (l.compact) return 29;
-    const branch = l.branch and ch.branch != null;
-    return (if (branch) @as(f32, 61) else 45) - (if (l.label) @as(f32, 0) else 16);
+    return contextHeight(l.label, l.branch and ch.branch != null, a.settings.get(.sidebar_show_updated), l.harness or l.icon);
 }
 
-/// A row as drawn while it's dragged: the same content, nothing to hover
-/// or click (`render_chat_row` with `preview`).
+pub fn contextHeight(project: bool, branch: bool, updated: bool, identity: bool) f32 {
+    return if (project or branch or updated or identity) 38 else 30;
+}
+
 pub fn rowPreview(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void {
     const l = Look.of(a);
     if (!l.compact) {
@@ -577,13 +614,13 @@ pub fn rowPreview(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) 
         defer r.end();
         return expandedLines(c, a, k, ch, l, false, false);
     }
-    const r = ui.div(c).row().wFull().h(29).px(8).pt(6).pb(5).gap(4).itemsCenter();
+    const r = ui.div(c).row().wFull().h(rowHeight(a, ch)).px(8).pt(6).pb(5).gap(4).itemsCenter();
     defer r.end();
     const now = a.nowMs();
     statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
     marks(c, a, k, ch, l, false);
     const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
-    const title_w = width - 16 - 16 - l.marksW() - 4 - 6 - c.text.width(time, .{ .size = 11 });
+    const title_w = widthOf(a) - 16 - 16 - l.marksW() - 4 - 6 - c.text.width(time, .{ .size = 11 });
     {
         const t = ui.div(c).row().grow().w(0).clip();
         defer t.end();
@@ -622,6 +659,7 @@ fn remote(a: *const App, ch: workspace.Chat) bool {
 fn folderLabel(c: *ui.Context, a: *const App, ch: workspace.Chat) []const u8 {
     const project = if (a.findSpace(ch.space_id)) |s| s.name else if (ch.space_id == null) "~" else "?";
     const dev = ch.device_id orelse return project;
+    if (a.device_id) |local| if (std.mem.eql(u8, local, dev)) return project;
     for (a.devices.items) |d| if (std.mem.eql(u8, d.id, dev)) return c.print("{s} @ {s}", .{ project, d.name });
     return project;
 }
@@ -629,7 +667,7 @@ fn folderLabel(c: *ui.Context, a: *const App, ch: workspace.Chat) []const u8 {
 /// The expanded row's lines: "project @ device" with the status or time,
 /// the marks and title, then the branch.
 fn expandedLines(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l: Look, lit: bool, hovered: bool) void {
-    const inner = width - 16 - 16;
+    const inner = widthOf(a) - 16 - 16;
     const subline = k.subline;
     var archive = false;
     if (l.label) {
@@ -667,7 +705,7 @@ fn expandedLines(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, l
 }
 
 fn cornerWidth(c: *ui.Context, a: *const App, ch: workspace.Chat, hovered: bool) f32 {
-    const st: ui.TextStyle = .{ .size = 10, .weight = .medium };
+    const st: ui.TextStyle = .{ .size = 10, .weight = theme.ui_medium_weight };
     if (hovered) return 4 + 11 + 4 + c.text.width(if (ch.archived) "Unarchive" else "Archive", st);
     const word = statusWord(workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), a.nowMs()));
     if (word) |w| return 6 + 4 + c.text.width(w, st);
@@ -718,10 +756,10 @@ fn cornerIn(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, hovere
             .completed => icons.icon(c, .check, 11, color, 0),
             else => kit.dot(c, 6, color),
         }
-        ui.text(c, word, .{ .size = 10, .weight = .medium, .color = color });
+        ui.text(c, word, .{ .size = 10, .weight = theme.ui_medium_weight, .color = color });
         return false;
     }
-    ui.text(c, rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs()), .{ .size = 10, .weight = .medium, .color = subline });
+    ui.text(c, rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs()), .{ .size = 10, .weight = theme.ui_medium_weight, .color = subline });
     return false;
 }
 
@@ -806,7 +844,7 @@ pub fn searchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o
 /// and how long ago (the archive control and menu under the pointer).
 fn compactSearchRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat, o: SearchRow) SearchHit {
     const l = Look.of(a);
-    var r = ui.div(c).row().wFull().h(29).px(8).pt(6).pb(5).gap(4).itemsCenter().rounded(8).clip();
+    var r = ui.div(c).row().wFull().h(rowHeight(a, ch)).px(8).pt(6).pb(5).gap(4).itemsCenter().rounded(8).clip();
     r = if (o.lit) r.bg(k.selected) else r.hover(k.hover);
     defer r.end();
     const hovered = r.hovered() and !@import("view_drag.zig").dragging(a);
@@ -865,7 +903,7 @@ fn notice(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "sidebar-notice");
     const s = ui.div(c).column().wFull().px(8).py(4).rounded(6).border(k.danger).borderW(1);
     defer s.end();
-    const w = ui.div(c).column().w(width - 16 - 16 - 2);
+    const w = ui.div(c).column().w(widthOf(a) - 16 - 16 - 2);
     defer w.end();
     ui.text(c, v.sidebar_notice[0..v.sidebar_notice_len], .{ .size = 11, .wrap = true, .color = k.danger });
     if (s.clicked()) {
@@ -880,7 +918,7 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     const l = Look.of(a);
     // 6 above an 18-point line, as `render_chat_row`'s `py(6)` column.
     var r = if (l.compact)
-        ui.div(c).row().wFull().h(29).px(8).pt(6).pb(5).gap(4).itemsCenter().rounded(8).clip()
+        ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(6).gap(2).rounded(8).clip()
     else
         ui.div(c).column().wFull().h(rowHeight(a, ch)).px(8).py(6).gap(2).rounded(8).clip();
     // Hovered as GPUI's row is (its `hover_listener`): by the pointer's
@@ -896,13 +934,15 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     if (!l.compact) {
         expandedLines(c, a, k, ch, l, selected or hovered, hovered);
     } else {
+        const line = ui.div(c).row().wFull().h(18).gap(4).itemsCenter();
+        defer line.end();
         statusSlot(c, k, workspace.markOf(ch, workspace.sessionOf(a.sessions.items, ch.id), now));
         marks(c, a, k, ch, l, selected or hovered);
         // In the frame's memory: the text is drawn after this returns.
         const time = rules.relativeTime(c.alloc().alloc(u8, 16) catch &.{}, now, ch.timeMs());
         const time_w = if (hovered) 18 else c.text.width(time, .{ .size = 11 });
         const far = remote(a, ch);
-        const title_w = width - 16 - 16 - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
+        const title_w = widthOf(a) - 16 - 16 - l.marksW() - 4 - 6 - time_w - (if (hovered or far) @as(f32, 22) else 0);
         const tc = if (selected or hovered) k.text else if (ch.archived) k.text.alpha(0.55) else k.text.alpha(0.8);
         {
             const t = ui.div(c).row().grow().w(0).clip();
@@ -943,7 +983,7 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     const drag = @import("view_drag.zig");
     const it = r.interaction();
     if (it.pressed and c.input.pressed) drag.press(c, a, ch.id, it.rect);
-    if (r.clicked() and !selected and !drag.dragging(a)) a.openChat(ch.id, ch.space_id);
+    if (r.clicked() and !selected and !drag.dragging(a)) a.openChatInTab(ch.id);
 }
 
 fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {
@@ -983,33 +1023,35 @@ fn firstLine(s: []const u8) []const u8 {
 
 fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
     notice(c, a, k);
-    // A running cloud sandbox is billed until it is turned off: always in
-    // view, above the account badge.
     @import("view_sandbox_strip.zig").strip(c, a, k, 0);
-    const f = ui.div(c).row().wFull().p(8);
+    const f = ui.div(c).row().wFull().h(44).px(10).itemsCenter();
     defer f.end();
-    // The account row (`render_user_menu`): avatar, name and what the
-    // workspace is, the whole row opening the menu.
-    var b = ui.div(c).row().wFull().h(40).px(6).gap(8).itemsCenter().rounded(10);
-    b = if (a.view.account_menu) b.bg(k.hover) else b.hover(k.hover.alpha(0.8));
-    defer b.end();
-    if (b.clicked()) {
-        a.view.account_menu = !a.view.account_menu;
-        // Opening asks the Codegraff sign-in again.
-        if (a.view.account_menu) @import("app_account.zig").refresh(a);
-    }
-    if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
-    const account = @import("app_account.zig");
-    const acc = &a.account;
-    const line = account.menu(acc.scope, acc.user, acc.codegraff).line;
     {
+        // The desktop's footer is avatar-only; identity stays in its
+        // accessible tooltip and in the menu, not inside the avatar's row.
+        const account = @import("app_account.zig");
+        const m = account.menu(a.account.scope, a.account.user, a.account.codegraff);
+        const display = m.name orelse m.line;
+        ui.key(c, "user-menu");
+        var b = ui.div(c).row().size(21, 21).center().roundedFull();
+        b = if (a.view.account_menu) b.bg(k.hover) else b.hover(k.hover);
+        b = tip.on(b, k, .{ .text = c.print("Account menu: {s}", .{display}) });
+        defer b.end();
+        if (b.clicked()) {
+            a.view.account_menu = !a.view.account_menu;
+            if (a.view.account_menu) account.refresh(a);
+        }
+        if (c.rects.get(c.node(b.index).id)) |r| a.view.account_anchor = r;
         const av = ui.div(c).row().size(13, 13).center().roundedFull().bg(k.text);
         defer av.end();
-        ui.text(c, c.print("{c}", .{account.initial(line)}), .{ .size = 9, .weight = .semibold, .mono = true, .color = k.shell });
+        ui.text(c, c.print("{c}", .{account.initial(display)}), .{ .size = 9, .line_height = 13, .weight = .semibold, .mono = true, .color = k.shell });
     }
-    const words = ui.div(c).column().grow().w(0).clip();
-    defer words.end();
-    const room = width - 16 - 12 - 13 - 8;
-    kit.ellipsisText(c, line, .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = k.text }, room);
-    kit.ellipsisText(c, account.subtitle(acc.scope, acc.user != null), .{ .size = 11, .line_height = 11 * 1.618, .color = k.muted }, room);
+    ui.spacer(c);
+    @import("view_sessions.zig").historyButton(c, a, k);
+    ui.div(c).w(6).end();
+    ui.key(c, "sidebar-session-create");
+    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).border(k.muted.alpha(0.45)).borderW(1).hover(k.hover), k, .{ .text = "New session" });
+    defer b.end();
+    icons.icon(c, .plus, 16, k.muted, 0);
+    if (b.clicked()) a.newWorkspaceSession();
 }

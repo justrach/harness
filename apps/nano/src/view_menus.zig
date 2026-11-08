@@ -13,7 +13,16 @@ const kit = @import("view_kit.zig");
 const App = @import("app.zig").App;
 
 pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const strip = @import("view_tab_strip.zig");
     const v = &a.view;
+    // Footer triggers retain their own anchor, but use the same retained,
+    // keyboard-accessible project search rather than a second flat list.
+    if (v.space_menu) if (v.space_anchor) |anchor| {
+        v.space_menu = false;
+        strip.open(a, .folder, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, anchor);
+        v.strip.footer_folder = true;
+    };
+    strip.menus(c, a, k);
     if (!v.account_menu and !v.space_menu and !v.checkout_menu) return;
     {
         // Behind the menu: a click anywhere else closes it.
@@ -26,24 +35,6 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
             return;
         }
     }
-    if (v.space_menu) if (v.space_anchor) |r| {
-        const m = panel(c, k, r.x, r.y + r.h + 4, 240);
-        defer m.end();
-        const current = a.newChatSpace();
-        for (a.spaces.items) |s| {
-            ui.key(c, c.print("space-{s}", .{s.id}));
-            const on = current != null and std.mem.eql(u8, current.?.id, s.id);
-            if (item(c, k, .folder, s.name, on)) {
-                a.select(null, s.id);
-                v.space_menu = false;
-            }
-        }
-        divider(c, k);
-        if (item(c, k, .plus, "Add folder…", false)) {
-            v.space_menu = false;
-            a.addFolder();
-        }
-    };
     // Where the new chat runs (`render_checkout_popover`): the project's
     // own checkout, or a fresh worktree made off the base on send.
     if (v.checkout_menu) if (v.checkout_anchor) |r| {
@@ -77,9 +68,9 @@ fn accountMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
     defer card.end();
     kit.rememberHeight(c, card, &a.view.account_h);
     {
-        const id = ui.div(c).row().wFull().px(8).pt(6).pb(4);
+        const id = ui.div(c).column().wFull().px(8).pt(6).pb(4).gap(2);
         defer id.end();
-        @import("view_kit.zig").ellipsisText(c, m.identity, .{ .size = 11, .line_height = 11 * phi, .color = k.muted }, w - 2 * card_inset - 16 - 2);
+        kit.ellipsisText(c, m.identity, .{ .size = 11, .line_height = 11 * phi, .color = k.muted }, w - 2 * card_inset - 16 - 2);
     }
     switch (m.codegraff) {
         .account => |who| if (menuRow(c, k, .global, k.accent, c.print("Codegraff · {s}", .{who}), 1)) {
@@ -116,7 +107,7 @@ const card_inset: f32 = 4;
 /// A menu row (`popover::menu_row`): a 16-point icon, 10 points, the label
 /// at 13 points; the selected-card wash under the pointer.
 fn menuRow(c: *ui.Context, k: theme.Colors, icon: icons.Name, tint: ui.Color, label: []const u8, opacity: f32) bool {
-    var row = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(12 - 1 - card_inset).hover(k.selected);
+    var row = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(12 - 1 - card_inset).hover(k.selected);
     if (opacity < 1) row = row.opacity(opacity);
     defer row.end();
     const hot = row.hovered();

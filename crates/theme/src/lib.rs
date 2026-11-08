@@ -808,6 +808,13 @@ mod tests {
     }
 
     #[test]
+    fn desktop_catalog_matches_nano_bundle() {
+        let bundled: ThemeRegistry =
+            serde_json::from_str(include_str!("../../../apps/nano/themes.json")).unwrap();
+        assert_eq!(&bundled, ThemeRegistry::desktop_builtin());
+    }
+
+    #[test]
     fn accent_overlay_meets_interaction_contrast() {
         for appearance in Appearance::ALL {
             let background = if appearance.is_dark() {

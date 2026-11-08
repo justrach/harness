@@ -268,6 +268,7 @@ impl PlatformAtlas for HeadlessAtlas {
         let tile = AtlasTile {
             texture_id: AtlasTextureId {
                 index: texture_id,
+                generation: 0,
                 kind: key.texture_kind(),
             },
             tile_id: TileId(tile_id),

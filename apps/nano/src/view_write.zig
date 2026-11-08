@@ -4,9 +4,9 @@
 //! send. It takes over the chat pane, not a new window. Enter is a new line
 //! there; ⌘↩ sends; Esc or ⌘⇧E goes back.
 //!
-//! Not here yet: the serif face and its "Aa" switch, and Markdown drawn as
-//! it's typed. nanoui's text field has one face and no styled runs, so the
-//! page uses the interface sans, as GPUI's does after "Aa".
+//! The default face is the interface sans, as on desktop. Optional serif
+//! and live Markdown styling still need styled editable text in nanoui;
+//! do not present a font toggle that cannot change the editing face.
 const std = @import("std");
 const builtin = @import("builtin");
 const ui = @import("nanoui").ui;
@@ -22,6 +22,7 @@ pub const text_size: f32 = 18;
 pub const line_h: f32 = 29;
 const page_max_w: f32 = 720;
 const page_side: f32 = 40;
+pub const toolbar_h: f32 = 40;
 
 /// `toggle_combo`: off macOS Ctrl+Shift+E already splits a pane down.
 pub const toggle: ui.Shortcut = if (builtin.os.tag == .macos) .{ .key = 'e', .cmd = true, .shift = true } else .{ .key = 'e', .cmd = true, .alt = true };
@@ -78,43 +79,39 @@ fn sendFromPage(a: *App) void {
 }
 
 /// The composer's way in (`render_write_button`): expand arrows in a
-/// 28-point circle, the shortcut in its tooltip.
+/// 32-point circle, the shortcut in its tooltip.
 pub fn button(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.key(c, "composer-write");
     var buf: [24]u8 = undefined;
-    const t = c.print("Write in full screen  {s}", .{@import("shortcuts.zig").badge(&buf, toggle_combo)});
-    const b = tip.on(@import("view_kit.zig").listenerHover(&a.view.hovers, ui.div(c).row().size(28, 28).center().roundedFull(), k.ink(0.10)).div, k, .{ .text = t });
+    const t = c.print("Expand editor  {s}", .{@import("shortcuts.zig").badge(&buf, toggle_combo)});
+    const b = tip.on(@import("view_kit.zig").listenerHover(&a.view.hovers, ui.div(c).row().size(32, 32).center().roundedFull(), k.ink(0.10)).div, k, .{ .text = t });
     defer b.end();
     icons.icon(c, .@"expand-arrows", 16, k.muted, 0);
     if (b.clicked()) open(a);
 }
 
-/// The page, in the pane's place.
+/// The page replaces the pane without painting over its rounded surface.
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     if (c.shortcut(.{ .key = ui.Shortcut.escape }) or c.shortcut(toggle)) return close(a);
     ui.key(c, "write-page");
-    const root = ui.div(c).column().wFull().grow().h(0).bg(k.pill());
+    const root = ui.div(c).column().wFull().grow().h(0);
     defer root.end();
-    {
-        // Done, the word count in the middle.
-        const bar = column(c, w).h(44).itemsCenter();
-        defer bar.end();
-        var d = ui.div(c).row().h(28).px(8).itemsCenter().rounded(7).offset(-8, 0).hover(k.ink(0.06));
-        var buf: [24]u8 = undefined;
-        d = tip.on(d, k, .{ .text = c.print("Back to the chat  Esc \u{b7} {s}", .{@import("shortcuts.zig").badge(&buf, toggle_combo)}) });
-        {
-            defer d.end();
-            ui.key(c, "write-done");
-            ui.text(c, "Done", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = if (d.hovered()) k.text else k.muted });
-            if (d.clicked()) return close(a);
-        }
-        const mid = ui.div(c).row().absolute().offset(0, 0).w(w).h(44).justifyCenter().itemsCenter();
-        defer mid.end();
-        var nb: [32]u8 = undefined;
-        ui.text(c, wordCountLabel(&nb, wordCount(a.composer.text())), .{ .size = 12, .line_height = 12 * 1.618, .color = k.faint });
+    toolbar(c, a, k, w);
+    if (a.noticeText()) |n| {
+        const notice = column(c, w).pt(10);
+        defer notice.end();
+        ui.text(c, n, .{ .size = 13, .line_height = 13 * 1.618, .color = k.danger });
+    }
+    if (attachments.count(a) > 0) {
+        const material = column(c, w).column().pb(8);
+        defer material.end();
+        ui.scroll(c, .{ .width = .fill, .max_height = 180, .direction = .column });
+        defer ui.end(c);
+        @import("view_composer_attachments.zig").strip(c, a, k, pageWidth(w));
     }
     {
-        const area = column(c, w).grow().h(0).pt(12).pb(12);
+        // The bare field contributes two points of vertical padding.
+        const area = column(c, w).grow().h(0).pt(10).pb(10);
         defer area.end();
         const at = c.nodes.items.len;
         const rect = c.rects.get(c.node(area.index).id);
@@ -137,57 +134,66 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             c.changed = true;
             a.view.write_focus = false;
         }
-        // Enter is a new line on the page, whatever the composer's setting.
+        // Enter always inserts a line here, regardless of composer settings.
         if (r.submitted) {
             _ = a.composer.insert(r.caret, "\n");
             a.composer.want_caret = r.caret + 1;
         }
         if (c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true })) sendFromPage(a);
     }
-    dock(c, a, k, w);
 }
 
-/// The page's column: `PAGE_MAX_WIDTH` and its sides, centred.
+pub fn sidePadding(w: f32) f32 {
+    return if (w < 480) 20 else page_side;
+}
+
+pub fn pageWidth(w: f32) f32 {
+    return @max(0, @min(w - 2 * sidePadding(w), page_max_w));
+}
+
+/// The desktop column narrows its gutters to20 in a panel under480.
 fn column(c: *ui.Context, w: f32) ui.Div {
-    const cw = @min(w, page_max_w + 2 * page_side);
-    return ui.div(c).row().wFull().px(page_side + @max(0, (w - cw) / 2));
+    return ui.div(c).row().wFull().px(@max(0, (w - pageWidth(w)) / 2));
 }
 
-/// The paperclip, the send hint (or why it failed), and Send.
-fn dock(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const outer = column(c, w).pb(16).column();
-    defer outer.end();
-    const box = @import("view_kit.zig").shadowLg(ui.div(c).column().wFull().rounded(@import("view_composer.zig").radius).border(k.border).borderW(1).bg(k.pill()));
-    defer box.end();
-    const row = ui.div(c).row().wFull().h(48).px(8).gap(8).itemsCenter();
-    defer row.end();
+fn toolbar(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+    ui.key(c, "write-toolbar");
+    const bar = ui.div(c).row().wFull().h(toolbar_h).px(8).gap(6).itemsCenter();
+    defer bar.end();
+    // The only chrome is the same full-width divider as Browser/Changes.
+    ui.key(c, "write-toolbar-divider");
+    ui.div(c).absolute().offset(-8, toolbar_h - 1).w(w).h(1).bg(k.border).end();
     {
         ui.key(c, "write-attach");
-        const b = ui.div(c).row().size(32, 32).center().roundedFull().hover(k.ink(0.08));
+        const b = tip.on(ui.div(c).row().size(28, 28).center().rounded(6).hover(k.hover), k, .{ .text = "Attach files" });
         defer b.end();
-        icons.icon(c, .paperclip, 18, k.muted, 0);
+        icons.icon(c, .paperclip, 16, k.muted, 0);
         if (b.clicked()) attachments.pick(a);
     }
-    const queue = a.queues();
-    const label = if (queue) "Queue" else "Send";
-    {
-        const hint = ui.div(c).row().grow().w(0).clip();
-        defer hint.end();
-        var buf: [24]u8 = undefined;
-        if (a.noticeText()) |n|
-            ui.text(c, n, .{ .size = 12, .line_height = 12 * 1.618, .color = k.danger })
-        else
-            ui.text(c, c.print("{s} to {s}", .{ @import("shortcuts.zig").badge(&buf, "mod-enter"), if (queue) "queue" else "send" }), .{ .size = 12, .line_height = 12 * 1.618, .color = k.faint });
+    if (w >= 480) {
+        const label = ui.div(c).row().pl(6);
+        defer label.end();
+        ui.text(c, "Edit message", .{ .size = 13, .line_height = 13 * 1.618, .color = k.muted });
     }
+    ui.spacer(c);
     const has = std.mem.trim(u8, a.composer.text(), " \n\t").len > 0 or attachments.count(a) > 0;
     const enabled = has and !@import("app_agent.zig").chatSendBlocked(a);
-    ui.key(c, "write-send");
-    var s = ui.div(c).row().h(32).px(14).gap(6).itemsCenter().roundedFull();
-    s = if (enabled) s.bg(k.accent) else s.bg(k.ink(0.08));
-    if (enabled and s.hovered()) s = s.opacity(0.88);
-    defer s.end();
-    const fg = if (enabled) k.onAccent() else k.faint;
-    ui.text(c, label, .{ .size = 13, .line_height = 13 * 1.618, .weight = .semibold, .color = fg });
-    icons.icon(c, .@"arrow-up", 13, fg, 0);
-    if (enabled and s.clicked()) sendFromPage(a);
+    {
+        ui.key(c, "write-send");
+        var b = ui.div(c).row().h(28).px(10).center().rounded(6).border(k.border).borderW(1);
+        b = if (enabled) b.hover(k.hover) else b.opacity(0.45);
+        var badge_buf: [24]u8 = undefined;
+        const send = tip.on(b, k, .{ .text = c.print("Send now  {s}", .{@import("shortcuts.zig").badge(&badge_buf, "mod-enter")}) });
+        defer send.end();
+        ui.text(c, "Send now", .{ .size = 13, .line_height = 13 * 1.618, .color = k.text });
+        if (enabled and send.clicked()) sendFromPage(a);
+    }
+    {
+        ui.key(c, "write-save");
+        var buf: [24]u8 = undefined;
+        const b = tip.on(ui.div(c).row().h(28).px(12).center().rounded(6).bg(k.solid).hover(k.solid.alpha(0.9)), k, .{ .text = c.print("Keep this draft in the chat  Esc · {s}", .{@import("shortcuts.zig").badge(&buf, toggle_combo)}) });
+        defer b.end();
+        ui.text(c, "Save", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.on_solid });
+        if (b.clicked()) close(a);
+    }
 }

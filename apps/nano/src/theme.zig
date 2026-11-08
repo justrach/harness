@@ -1,13 +1,20 @@
-//! Harness's default palettes, Codegraff Dark and Codegraff Light, as the
-//! GPUI app derives its roles from them (crates/theme/src/builtins.rs,
-//! crates/ui/src/theme.rs): both are opaque, so the window and the main
-//! column are painted in `shell`; the sidebar lays a wash over it. Geist for
-//! words, Geist Mono for code.
+//! Harness's desktop palettes from crates/theme's exported registry.
+//! Surface treatment is resolved separately; the sidebar shares the shell,
+//! while rounded conversation panels use the background writing plane.
+//! System type on macOS (Geist elsewhere), Geist Mono for code.
 const nanoui = @import("nanoui");
 const Color = nanoui.ui.Color;
 
+// GPUI's font-kit maps CoreText's SF Medium trait (0.23) above CSS 500.
+// Its CSS 400–500 matching rule therefore selects SF Regular for MEDIUM.
+// Match that system-family selection, without changing monospaced weights.
+pub const ui_medium_weight: nanoui.ui.Weight = if (@import("builtin").os.tag == .macos) .regular else .medium;
+
 pub const Colors = struct {
     dark: bool,
+    is_harp: bool = false,
+    is_warm_harp: bool = false,
+    active: Color = .transparent,
     frosted: bool = false,
     recommended_frosted: bool = false,
     /// Original theme roles, before compositing for opaque paint.
@@ -136,8 +143,14 @@ pub fn colors(dark: bool) Colors {
     return builtin(dark);
 }
 
-/// Codegraff Dark and Codegraff Light, as the GPUI app resolves them.
+/// Codegraff's desktop variants come from the same exported registry as GPUI.
 pub fn builtin(dark: bool) Colors {
+    if (@import("themes.zig").find(if (dark) "codegraff-dark" else "codegraff-light")) |v| return v.colors;
+    return fallback(dark);
+}
+
+/// Emergency palette and the unchanged Markdown hues used while loading.
+pub fn fallback(dark: bool) Colors {
     if (dark) {
         const accent = Color.hex(0xe8a33d);
         const muted = Color.hex(0x9a9384);
@@ -271,7 +284,8 @@ pub fn ui(dark: bool) nanoui.ui.Theme {
     t.track = k.raised;
     t.danger = k.danger;
     t.success = k.success;
-    t.font = "Geist";
+    // UiFontFamily::default_for_platform: native system type on macOS.
+    t.font = if (@import("builtin").os.tag == .macos) null else "Geist";
     t.mono_font = "Geist Mono";
     return t;
 }

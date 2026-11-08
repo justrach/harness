@@ -8,14 +8,14 @@ const ui = nanoui.ui;
 const icons = @import("icons.zig");
 const theme = @import("theme.zig");
 
-/// A text style of `size` points whose lines are `line` points tall, as
-/// the GPUI app sets them (14 px text on 22 px lines).
+/// Exact point line heights, including the desktop's half-point metrics.
+/// A leading ratio is rounded up by nanoui and accumulates vertical drift.
 pub fn style(c: *ui.Context, size: f32, line: f32, base: ui.TextStyle) ui.TextStyle {
+    _ = c;
     var s = base;
     s.size = size;
     s.leading = 1;
-    const natural = c.text.lineHeight(s);
-    s.leading = if (natural > 0) line / natural else 1;
+    s.line_height = line;
     return s;
 }
 
@@ -57,7 +57,7 @@ pub fn pressFeedback(d: ui.Div) ui.Div {
 /// separate loader beside every file. Static/history/reduced-motion rows
 /// neither animate nor keep a frame timer alive.
 pub fn activityText(c: *ui.Context, k: theme.Colors, text: []const u8, st: ui.TextStyle, active: bool) void {
-    if (!active or c.reduced_motion or text.len == 0) return ui.text(c, text, st);
+    if (!active or c.reduced_motion or text.len == 0 or !loaderOnScreen(c)) return ui.text(c, text, st);
     const base = st.color orelse k.muted;
     var spans: std.ArrayList(ui.Span) = .empty;
     var it = std.unicode.Utf8View.initUnchecked(text).iterator();
@@ -70,7 +70,7 @@ pub fn activityText(c: *ui.Context, k: theme.Colors, text: []const u8, st: ui.Te
         at += cp.len;
     }
     ui.richText(c, text, spans.items, st);
-    c.frameIn(1.0 / 30.0);
+    loaderFrame(c, 1.0 / 30.0);
 }
 
 /// `s` in one line at most `max_w` wide: as is when it fits, else cut and
@@ -119,7 +119,6 @@ pub fn highlightText(c: *ui.Context, k: theme.Colors, s: []const u8, st: ui.Text
     const wash = k.accent_wash;
     var plain = st;
     plain.color = base;
-    if (comptime @hasField(ui.TextStyle, "span_box")) plain.span_box = .{ .pad_x = 1, .inset_y = 1.5, .radius = 3 };
     const total = c.text.width(s, st);
     const band: f32 = 20;
     const fades = total > max_w;
@@ -136,7 +135,7 @@ pub fn highlightText(c: *ui.Context, k: theme.Colors, s: []const u8, st: ui.Text
         const lit = for (ranges) |r| {
             if (at >= r.start and at < r.end) break true;
         } else false;
-        if (lit or t < 1) spans.append(c.alloc(), .{
+        if (lit or t < 1) appendHighlightSpan(c.alloc(), &spans, .{
             .start = @intCast(at),
             .end = @intCast(at + cp.len),
             .color = if (lit) k.accent.alpha(t) else base.alpha(t),
@@ -145,10 +144,60 @@ pub fn highlightText(c: *ui.Context, k: theme.Colors, s: []const u8, st: ui.Text
         at += cp.len;
         x0 = x1;
     }
-    if (!fades) return ui.richText(c, s, spans.items, plain);
-    const box = ui.div(c).row().w(max_w).clip();
+    var box = ui.div(c).row();
+    if (fades) box = box.w(max_w).clip();
     defer box.end();
-    ui.richText(c, s[0..at], spans.items, plain);
+    // One rounded wash per contiguous run, not overlapping rounded boxes
+    // per character. Use shaped glyph boundaries, as nanoui's decorations
+    // do, but lower only the wash by GPUI's optical half point.
+    const label = s[0..at];
+    const layout = c.text.layout(label, plain);
+    const line_h = c.text.lineHeight(plain);
+    for (spans.items) |*span| if (span.background) |bg| {
+        const wash_x0 = for (layout.glyphs) |g| {
+            if (g.index >= span.start) break g.x;
+        } else layout.width;
+        const wash_x1 = for (layout.glyphs) |g| {
+            if (g.index >= span.end) break g.x;
+        } else layout.width;
+        if (wash_x1 > wash_x0) ui.div(c).absolute().offset(wash_x0 - 1, 2).size(wash_x1 - wash_x0 + 2, @max(0, line_h - 3)).rounded(3).bg(bg).end();
+        span.background = null;
+    };
+    ui.richText(c, label, spans.items, plain);
+}
+
+/// Keep each changing fade alpha, but merge neighboring equal treatments.
+/// Match ranges are already unioned by `palette.matchRanges`.
+fn appendHighlightSpan(gpa: std.mem.Allocator, spans: *std.ArrayList(ui.Span), span: ui.Span) !void {
+    if (spans.items.len > 0) {
+        const last = &spans.items[spans.items.len - 1];
+        if (last.end == span.start and std.meta.eql(last.color, span.color) and std.meta.eql(last.background, span.background)) {
+            last.end = span.end;
+            return;
+        }
+    }
+    try spans.append(gpa, span);
+}
+
+test "search highlight coalesces contiguous matches without flattening fade alpha or gaps" {
+    const gpa = std.testing.allocator;
+    var spans: std.ArrayList(ui.Span) = .empty;
+    defer spans.deinit(gpa);
+    const ink = ui.Color.hex(0x8899aa);
+    const wash = ink.alpha(0.2);
+    for (0..6) |i| try appendHighlightSpan(gpa, &spans, .{
+        .start = @intCast(i),
+        .end = @intCast(i + 1),
+        .color = ink,
+        .background = wash,
+    });
+    try std.testing.expectEqual(@as(usize, 1), spans.items.len);
+    try std.testing.expectEqual(@as(u32, 6), spans.items[0].end);
+    try appendHighlightSpan(gpa, &spans, .{ .start = 6, .end = 7, .color = ink.alpha(0.5), .background = wash.alpha(0.5) });
+    try appendHighlightSpan(gpa, &spans, .{ .start = 8, .end = 9, .color = ink.alpha(0.5), .background = wash.alpha(0.5) });
+    try std.testing.expectEqual(@as(usize, 3), spans.items.len);
+    try std.testing.expectEqual(ink.alpha(0.5), spans.items[1].color.?);
+    try std.testing.expectEqual(wash.alpha(0.5), spans.items[1].background.?);
 }
 
 /// A muted key-cap inside a row or header (`popover::kbd_hint`): 5 across,
@@ -213,12 +262,16 @@ pub fn truncateAt(c: *ui.Context, s: []const u8, st: ui.TextStyle, max_w: f32) u
 }
 
 /// The 2×3 "snake" a working session shows: rows in the accent's three
-/// tones, lit clockwise at 15 Hz (`loaders.rs`). Asks for its next frame.
+/// tones, lit clockwise at 15 Hz (`loaders.rs`). Asks for its next frame
+/// only while the graphic is on screen. An unfocused window stretches that
+/// request by GPUI's background tick divisor.
 pub fn snake(c: *ui.Context, k: theme.Colors) void {
-    const order = [_][2]u8{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 }, .{ 0, 1 } };
-    const step: usize = if (c.reduced_motion) 0 else @intFromFloat(@mod(@floor(c.time * 15), 6));
     const box = ui.div(c).column().size(5, 8).gap(1);
     defer box.end();
+    // Keep the slot, but do not paint or schedule a wave the reader cannot see.
+    if (!c.reduced_motion and !loaderOnScreen(c)) return;
+    const order = [_][2]u8{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 }, .{ 0, 1 } };
+    const step: usize = if (c.reduced_motion) 0 else @intFromFloat(@mod(@floor(c.time * 15), 6));
     for (0..3) |row| {
         const r = ui.div(c).row().gap(1);
         defer r.end();
@@ -233,7 +286,25 @@ pub fn snake(c: *ui.Context, k: theme.Colors) void {
             _ = c.leaf(.{ .width = .{ .px = 2 }, .height = .{ .px = 2 }, .background = k.glyph[row].alpha(lit) }, .none, null);
         }
     }
-    if (!c.reduced_motion) c.frameIn(1.0 / 15.0);
+    if (!c.reduced_motion) loaderFrame(c, 1.0 / 15.0);
+}
+
+/// GPUI's `BACKGROUND_TICK_DIVISOR`: an unfocused window delivers every
+/// third loader tick (30Hz → 10Hz). A graphic whose last box is outside
+/// the window schedules nothing — the same as a virtualized row that
+/// never mounts its spinner.
+pub const background_tick_divisor: f32 = 3;
+
+pub fn loaderFrame(c: *ui.Context, seconds: f32) void {
+    if (!loaderOnScreen(c)) return;
+    c.frameIn(if (c.input.window_active) seconds else seconds * background_tick_divisor);
+}
+
+pub fn loaderOnScreen(c: *ui.Context) bool {
+    if (c.stack.items.len == 0) return true;
+    const box = c.rects.get(c.node(c.stack.items[c.stack.items.len - 1]).id) orelse return true;
+    if (box.w <= 0 or box.h <= 0) return false;
+    return box.intersect(.{ .x = 0, .y = 0, .w = c.size.w, .h = c.size.h }).h > 0;
 }
 
 /// A small round dot.
@@ -379,9 +450,13 @@ pub const spinner_w: f32 = 3 * cell + 2 * cell / 2;
 const tints = [_]u24{ 0xB6D3EF, 0xEDB185, 0xF888A0 };
 
 pub fn gradientSpinner(c: *ui.Context) void {
-    const delta: f32 = @floatCast(@mod(c.time / 0.75, 1.0));
     const g = ui.div(c).column().gap(cell / 2);
     defer g.end();
+    if (!loaderOnScreen(c)) {
+        _ = c.leaf(.{ .width = .{ .px = spinner_w }, .height = .{ .px = spinner_w } }, .none, null);
+        return;
+    }
+    const delta: f32 = @floatCast(@mod(c.time / 0.75, 1.0));
     for (0..3) |row| {
         const r = ui.div(c).row().gap(cell / 2);
         defer r.end();
@@ -391,7 +466,7 @@ pub fn gradientSpinner(c: *ui.Context) void {
             _ = c.leaf(.{ .width = .{ .px = cell }, .height = .{ .px = cell }, .radius = cell / 2, .background = tint.alpha(gspinOpacity(delta + d / 4, 0.1)) }, .none, null);
         }
     }
-    c.frameIn(1.0 / 30.0);
+    loaderFrame(c, 1.0 / 30.0);
 }
 
 /// `gspin_opacity`: full, down to `dim` over 45% of the period, resting,

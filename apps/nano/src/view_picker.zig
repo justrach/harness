@@ -44,6 +44,7 @@ pub fn opened(a: *App) void {
     loadFavorites(a);
     p.query.clear();
     p.focus = true;
+    p.opened_at = null;
     p.clearStage(a.gpa);
     p.detail = null;
     p.hover_target = null;
@@ -83,8 +84,11 @@ pub fn prepare(a: *App) void {
         if (!std.mem.eql(u8, h, a.target().harness)) a.setHarness(h);
         if (pick.model == null) p.focus = true;
     }
-    if (pick.model) |id| a.pickModel(id);
-    if (pick.reasoning) |level| a.pickReasoning(level);
+    if (pick.model) |id| if (pick.reasoning) |level| {
+        a.pickModelAndReasoning(id, level);
+    } else {
+        a.pickModel(id);
+    } else if (pick.reasoning) |level| a.pickReasoning(level);
     if (pick.model != null or pick.reasoning != null) a.view.focus_composer = true;
 }
 
@@ -324,9 +328,20 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     // GPUI retains the menu while MENU_OUT fades and lifts it by two points.
     // It no longer owns focus or accepts picks during that short exit.
-    const exit = if (open) ui.motion.Frame{} else ui.motion.menuOut(c, ui.motion.catalog.menu_out.progress(@floatCast((c.time - p.closing_since.?) / ui.motion.catalog.menu_out.total())));
+    var motion = if (open) ui.motion.Frame{} else ui.motion.menuOut(c, ui.motion.catalog.menu_out.progress(@floatCast((c.time - p.closing_since.?) / ui.motion.catalog.menu_out.total())));
+    if (open) {
+        if (p.opened_at == null) p.opened_at = c.time;
+        const total = ui.motion.catalog.menu_in.total();
+        const raw: f32 = @floatCast(std.math.clamp((c.time - (p.opened_at orelse c.time)) / total, 0, 1));
+        const entered = ui.motion.Easing.css_ease_out.sample(raw)[0];
+        motion.opacity *= 0.3 + 0.7 * entered;
+        motion.y -= 2 * (1 - entered);
+        if (raw < 1) c.animationFrame();
+    } else {
+        p.opened_at = null;
+    }
     ui.key(c, "model-picker-card");
-    const panel = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(w).h(h).layer(5).column().p(1)
+    const panel = @import("view_sidebar_menus.zig").held(kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(motion).w(w).h(h).layer(5).column().p(1)
         .bg(k.composer).border(k.border).borderW(1).rounded(12).clip()));
     defer panel.end();
     if (p.stage != null) return page(c, a, k, w - 2, open);
@@ -334,7 +349,7 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
     search(c, a, k);
-    modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35, open, exit);
+    modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35, open, motion);
 }
 
 /// The models: a 34-point row each, in sections by route while browsing

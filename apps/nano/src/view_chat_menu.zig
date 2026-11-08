@@ -32,6 +32,7 @@ pub const Dialogs = struct {
     space: bool = false,
 
     pub fn deinit(d: *Dialogs, gpa: std.mem.Allocator) void {
+        @import("text_buffer.zig").deinit(&d.name);
         if (d.rename) |*r| r.deinit(gpa);
         if (d.delete) |*r| r.deinit(gpa);
     }
@@ -78,6 +79,15 @@ pub fn removeSpace(a: *App, space_id: []const u8) void {
     if (a.view.dialogs.delete) |*old| old.deinit(a.gpa);
     a.view.dialogs.delete = id;
     a.view.dialogs.space = true;
+}
+
+/// History and the row menu share the same confirmed deletion flow.
+pub fn deleteChat(a: *App, chat_id: []const u8) void {
+    var id: std.ArrayList(u8) = .empty;
+    id.appendSlice(a.gpa, chat_id) catch return;
+    if (a.view.dialogs.delete) |*old| old.deinit(a.gpa);
+    a.view.dialogs.delete = id;
+    a.view.dialogs.space = false;
 }
 
 /// Escape: the dialog, else the menu.
@@ -128,11 +138,7 @@ fn menu(c: *ui.Context, a: *App, k: theme.Colors) void {
             separator(c, k, w);
             if (row(c, k, .@"trash-bin-minimalistic", "Delete…", k.danger, k.danger, false)) {
                 close(a);
-                var id: std.ArrayList(u8) = .empty;
-                id.appendSlice(a.gpa, ch.id) catch return;
-                if (a.view.dialogs.delete) |*old| old.deinit(a.gpa);
-                a.view.dialogs.delete = id;
-                a.view.dialogs.space = false;
+                deleteChat(a, ch.id);
             }
         },
         .copy => {

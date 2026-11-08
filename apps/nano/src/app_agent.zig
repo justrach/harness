@@ -7,6 +7,7 @@ const rules = @import("rules.zig");
 const rpc = @import("rpc.zig");
 const requests = @import("requests.zig");
 const workspace = @import("workspace.zig");
+const composer_defaults = @import("composer_defaults.zig");
 const App = @import("app.zig").App;
 
 pub const Target = struct {
@@ -98,6 +99,10 @@ pub fn setHarness(a: *App, id: []const u8) void {
     a.new_harness = copy;
     setNew(a, &a.new_model, null);
     setNew(a, &a.new_reasoning, null);
+    // GPUI's effective picks fall back to the sticky per-agent model and
+    // the last reasoning level after an agent switch.
+    if (!a.new_chat_mode) composer_defaults.adopt(a, id);
+    if (a.selected == null and !a.new_chat_mode) composer_defaults.rememberHarness(a);
     ensureModels(a, id);
     a.redraw();
 }
@@ -106,6 +111,7 @@ pub fn setHarness(a: *App, id: []const u8) void {
 pub fn setModel(a: *App, id: ?[]const u8) void {
     setNew(a, &a.new_model, id);
     a.picker = .none;
+    if (a.selected == null) composer_defaults.rememberModel(a);
     a.redraw();
 }
 
@@ -126,9 +132,27 @@ pub fn pickReasoning(a: *App, level: []const u8) void {
     a.picker = .none;
     if (a.selected == null) {
         setNew(a, &a.new_reasoning, level);
+        composer_defaults.rememberReasoning(a);
         return a.redraw();
     }
     setChatConfig(a, null, level, false);
+}
+
+/// The model page commits model and level together. Sending two
+/// SetChatConfig calls raced: the level call still named the old model and
+/// could turn a just-picked Max back into that model's default.
+pub fn pickModelAndReasoning(a: *App, id: []const u8, level: []const u8) void {
+    a.picker = .none;
+    if (a.selected == null) {
+        setNew(a, &a.new_model, id);
+        setNew(a, &a.new_reasoning, level);
+        composer_defaults.rememberModel(a);
+        composer_defaults.rememberReasoning(a);
+        a.ensureModels(a.target().harness);
+        a.view.focus_composer = true;
+        return a.redraw();
+    }
+    storeChatConfig(a, id, level);
 }
 
 /// Replaces the open chat's config: its agent stays, the model or the
@@ -137,20 +161,38 @@ fn setChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8, new_model:
     a.picker = .none;
     const id = a.selected orelse return;
     const ch = a.findChat(id) orelse return;
-    a.request(requests.setChatConfig(id, .{
+    storeChatConfig(a, if (new_model) model else ch.model, if (new_model) null else reasoning orelse ch.reasoning);
+}
+
+/// One request carries both values, and the local row changes now instead
+/// of waiting for the next WatchChats item.
+fn storeChatConfig(a: *App, model: ?[]const u8, reasoning: ?[]const u8) void {
+    const id = a.selected orelse return;
+    const ch = a.findChat(id) orelse return;
+    const sent = a.send_(requests.setChatConfig(id, .{
         .harness = ch.harness orelse "graff",
-        .model = if (new_model) model else ch.model,
-        .reasoning = if (new_model) null else reasoning orelse ch.reasoning,
+        .model = model,
+        .reasoning = reasoning,
         // The config is replaced whole: a plain chat stays one.
         .chatMode = if (ch.chat_mode) true else null,
     }), .of(App, a, App.onNotice));
+    if (sent == null) return a.setNotice("The config change couldn't be sent. Reconnect and try again.");
+    _ = @import("workspace.zig").setChatConfig(&a.chats, id, model, reasoning);
+    a.view.focus_composer = true;
     a.redraw();
 }
 
-/// The project a new chat starts in: the one picked, else the first; a
-/// plain chat has none.
+/// The project a new chat starts in: the one picked, else the first;
+/// plain chats and explicitly projectless drafts have none.
 pub fn newChatSpace(a: *const App) ?workspace.Space {
-    if (a.selected == null and a.new_chat_mode) return null;
+    if (a.selected == null) {
+        if (a.new_chat_mode or a.new_no_project) return null;
+        if (a.new_device) |device| {
+            if (a.findSpace(a.space)) |space| if (std.mem.eql(u8, space.device_id orelse a.device_id orelse "", device)) return space;
+            for (a.spaces.items) |space| if (std.mem.eql(u8, space.device_id orelse a.device_id orelse "", device)) return space;
+            return null;
+        }
+    }
     return a.findSpace(a.space) orelse if (a.spaces.items.len > 0) a.spaces.items[0] else null;
 }
 

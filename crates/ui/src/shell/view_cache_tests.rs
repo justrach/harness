@@ -168,6 +168,56 @@ impl Render for Panes {
     }
 }
 
+/// A cached view whose paint carries atlas tiles must repaint when an image
+/// retires; otherwise a sibling pane replays the freed (or reused) texture.
+#[gpui::test]
+fn atlas_eviction_invalidates_cached_view_paint(cx: &mut gpui::TestAppContext) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct Cached(Rc<Cell<usize>>);
+    impl Render for Cached {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            div().size_full()
+        }
+    }
+
+    struct Host(Entity<Cached>);
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.0
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    let renders = Rc::new(Cell::new(0));
+    let (host, cx) = cx.add_window_view({
+        let renders = renders.clone();
+        move |_, cx| Host(cx.new(|_| Cached(renders)))
+    });
+    cx.run_until_parked();
+    let initially = renders.get();
+    assert!(initially > 0, "the cached view painted once");
+
+    host.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(renders.get(), initially, "an unchanged cached view reuses paint");
+
+    cx.update(|window, cx| {
+        window.test_atlas_evicted();
+        window.refresh();
+        window.draw(cx).clear();
+    });
+    assert!(
+        renders.get() > initially,
+        "the cached view must rebuild after atlas eviction"
+    );
+}
+
 /// A guard more than a regression: a pane that renders sets `refreshing`, so a view inside it
 /// renders too. Its replay ranges are also tagged with the frame they index into, so a view
 /// left behind by a replayed ancestor or a rolled-back prepaint can never replay them.

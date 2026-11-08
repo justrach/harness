@@ -85,6 +85,7 @@ struct GradientColor {
 
 struct AtlasTextureId {
     uint index;
+    uint generation;
     uint kind;
 };
 

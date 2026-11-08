@@ -66,6 +66,65 @@ pub fn control(c: *ui.Context, a: *App, k: theme.Colors) void {
     ui.text(c, "Add action", .{ .size = 11.5, .color = k.text.alpha(0.9) });
 }
 
+/// Release desktop keeps project actions inside the conversation panel.
+pub fn toolbar(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const x = &a.actions;
+    if (x.status == .idle or x.status == .loading or x.status == .unsupported) return;
+    const bar = ui.div(c).column().wFull().h(36);
+    defer bar.end();
+    {
+        const row_box = ui.div(c).row().wFull().grow().h(0).px(10).gap(6).itemsCenter();
+        defer row_box.end();
+        if (x.status == .unavailable) {
+            const button = ui.div(c).row().h(24).px(8).center().rounded(6).border(k.border).borderW(1).hover(k.hover);
+            defer button.end();
+            if (c.rects.get(c.node(button.index).id)) |r| x.anchor = r;
+            icons.icon(c, .@"danger-triangle", 13, k.danger, 0);
+            if (button.clicked()) x.menu = !x.menu;
+        } else {
+            const viewport = ui.div(c).grow().w(0).h(24).clip();
+            {
+                defer viewport.end();
+                const id = c.node(viewport.index).id;
+                const available = if (c.rects.get(id)) |r| r.w else 0;
+                var wanted: f32 = 14 + 13 + 5 + c.text.width("Add action", .{ .size = 11.5 });
+                for (x.list) |action| wanted += 6 + 14 + 13 + 5 + c.text.width(action.name, .{ .size = 11.5 });
+                const limit = @max(0, wanted - available);
+                var offset = std.math.clamp(c.scroll.get(id) orelse 0, 0, limit);
+                if (viewport.interaction().hovered and c.input.scroll.x != 0) {
+                    offset = std.math.clamp(offset - c.input.scroll.x, 0, limit);
+                    c.scroll.put(c.gpa, id, offset) catch {};
+                    c.input.scroll.x = 0;
+                    c.changed = true;
+                }
+                const list = ui.div(c).absolute().offset(-offset, 0).row().h(24).gap(6);
+                defer list.end();
+                for (x.list) |action| {
+                    ui.key(c, action.id);
+                    const button = segment(c, k).rounded(5);
+                    defer button.end();
+                    icons.icon(c, iconOf(action.icon), 13, k.muted, 0);
+                    ui.text(c, action.name, .{ .size = 11.5, .color = k.text });
+                    if (button.clicked()) actions.run(a, action);
+                }
+                const add = segment(c, k).rounded(5);
+                defer add.end();
+                icons.icon(c, .plus, 13, k.muted, 0);
+                ui.text(c, "Add action", .{ .size = 11.5, .color = k.text });
+                if (add.clicked()) actions.openEditor(a, null);
+            }
+            if (x.list.len > 0) {
+                const button = ui.div(c).row().w(23).h(24).center().rounded(5).hover(k.hover);
+                defer button.end();
+                if (c.rects.get(c.node(button.index).id)) |r| x.anchor = r;
+                icons.icon(c, .@"alt-arrow-down", 11, k.muted, 0);
+                if (button.clicked()) x.menu = !x.menu;
+            }
+        }
+    }
+    ui.div(c).wFull().h(1).bg(k.border).end();
+}
+
 fn segment(c: *ui.Context, k: theme.Colors) ui.Div {
     return ui.div(c).row().hFull().px(7).gap(5).itemsCenter().hover(k.ink(0.07));
 }

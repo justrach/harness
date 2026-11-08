@@ -30,6 +30,13 @@ pub const Editor = struct {
     confirm_delete: bool = false,
     /// The name field takes the keys when the dialog opens.
     want_focus: bool = true,
+
+    fn deinit(e: *Editor, gpa: Allocator) void {
+        if (e.id) |id| gpa.free(id);
+        @import("text_buffer.zig").deinit(&e.name);
+        @import("text_buffer.zig").deinit(&e.command);
+        e.* = .{};
+    }
 };
 
 pub const Run = struct {
@@ -63,7 +70,7 @@ pub const Actions = struct {
     pub fn deinit(x: *Actions) void {
         x.arena.deinit();
         if (x.space) |s| x.gpa.free(s);
-        if (x.editor) |e| if (e.id) |id| x.gpa.free(id);
+        if (x.editor) |*e| e.deinit(x.gpa);
         var it = x.last.iterator();
         while (it.next()) |e| {
             x.gpa.free(e.key_ptr.*);
@@ -165,6 +172,7 @@ pub fn preferred(a: *const App) ?Action {
 pub fn openEditor(a: *App, act: ?Action) void {
     const x = &a.actions;
     x.menu = false;
+    if (x.editor) |*old| old.deinit(x.gpa);
     var e: Editor = .{};
     if (act) |it| {
         e.id = x.gpa.dupe(u8, it.id) catch null;
@@ -181,7 +189,7 @@ pub fn openEditor(a: *App, act: ?Action) void {
 
 pub fn closeEditor(a: *App) void {
     const x = &a.actions;
-    if (x.editor) |e| if (e.id) |id| x.gpa.free(id);
+    if (x.editor) |*e| e.deinit(x.gpa);
     x.editor = null;
     a.redraw();
 }

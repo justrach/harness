@@ -95,6 +95,7 @@ pub const Page = struct {
         if (p.size_menu) |b| gpa.free(b);
         for (p.inputs.items) |i| {
             gpa.free(i.key);
+            @import("text_buffer.zig").deinit(i.buf);
             gpa.destroy(i.buf);
         }
         p.inputs.deinit(gpa);
@@ -201,6 +202,7 @@ fn ensureInputs(a: *App, rs: *const runners.Runners) void {
         buf.set(text);
         p.inputs.append(a.gpa, .{ .key = key, .buf = buf }) catch {
             a.gpa.free(key);
+            @import("text_buffer.zig").deinit(buf);
             a.gpa.destroy(buf);
         };
     };

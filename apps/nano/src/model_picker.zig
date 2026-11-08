@@ -62,6 +62,8 @@ pub const State = struct {
     height: f32 = 337,
     visible: bool = false,
     closing_since: ?f64 = null,
+    /// First frame of this opening, for the menu's entrance tween.
+    opened_at: ?f64 = null,
     anchor: ?ui.Rect = null,
     favorites: std.ArrayList(Favorite) = .empty,
     loaded_favorites: bool = false,
@@ -91,6 +93,7 @@ pub const State = struct {
     }
 
     pub fn deinit(s: *State, gpa: Allocator) void {
+        @import("text_buffer.zig").deinit(&s.query);
         for (s.favorites.items) |f| {
             gpa.free(f.harness);
             gpa.free(f.model);
@@ -183,7 +186,11 @@ pub fn ensureCatalog(a: *App, harness: []const u8, refresh: bool) ?*Catalog {
 }
 
 pub fn modelsFor(a: *const App, harness: []const u8) []const workspace.Model {
-    if (std.mem.eql(u8, a.models_for, harness) or std.mem.eql(u8, a.target().harness, harness)) return a.models.items;
+    // target() resolves plain-chat defaults through this catalog. Reading
+    // it here would recurse before a first model has been selected.
+    const selected = if (a.selected) |id| a.findChat(id) else null;
+    const active = if (@import("app_agent.zig").chatMode(a)) @import("chat_mode.zig").harness else if (selected) |chat| chat.harness orelse "graff" else a.new_harness;
+    if (std.mem.eql(u8, a.models_for, harness) or std.mem.eql(u8, active, harness)) return a.models.items;
     const cat = a.view.model_picker.catalogs.get(harness) orelse return &.{};
     return cat.models.items;
 }
@@ -238,19 +245,19 @@ pub fn route(m: workspace.Model) []const u8 {
 pub fn providerInfo(id: []const u8) struct { name: []const u8, icon: icons.Name } {
     const P = struct { []const u8, []const u8, icons.Name };
     const table = [_]P{
-        .{ "anthropic", "Anthropic", .@"claude-mark" },       .{ "codegraff", "Codegraff", .@"graff-mark" },
-        .{ "deepseek", "DeepSeek", .@"maker-deepseek" },      .{ "openai", "OpenAI", .@"openai-mark" },
-        .{ "google", "Google", .@"maker-gemini" },            .{ "minimax", "MiniMax", .@"maker-minimax" },
-        .{ "xiaomi", "Xiaomi", .@"maker-mimo" },              .{ "kilo", "Kilo Gateway", .globe },
-        .{ "groq", "Groq", .globe },                          .{ "cerebras", "Cerebras", .globe },
-        .{ "mistral", "Mistral", .@"maker-mistral" },         .{ "kimi", "Kimi", .@"maker-kimi" },
-        .{ "moonshot", "Moonshot", .@"maker-kimi" },          .{ "xai", "xAI", .@"grok-mark" },
-        .{ "zai", "Z.ai", .@"maker-zai" },                    .{ "meta", "Meta", .@"maker-meta" },
-        .{ "vercel", "Vercel AI Gateway", .globe },           .{ "openrouter", "OpenRouter", .globe },
-        .{ "fugu", "Sakana", .globe },                        .{ "fireworks", "Fireworks", .globe },
-        .{ "mlx", "MLX", .globe },                            .{ "lmstudio", "LM Studio", .globe },
-        .{ "omlx", "oMLX", .globe },                          .{ "chatgpt-new", "ChatGPT plan", .@"openai-mark" },
-        .{ "codex", "Codex / ChatGPT", .@"openai-mark" },      .{ "claude-agent", "Claude Agent", .@"claude-mark" },
+        .{ "anthropic", "Anthropic", .@"claude-mark" },   .{ "codegraff", "Codegraff", .@"graff-mark" },
+        .{ "deepseek", "DeepSeek", .@"maker-deepseek" },  .{ "openai", "OpenAI", .@"openai-mark" },
+        .{ "google", "Google", .@"maker-gemini" },        .{ "minimax", "MiniMax", .@"maker-minimax" },
+        .{ "xiaomi", "Xiaomi", .@"maker-mimo" },          .{ "kilo", "Kilo Gateway", .globe },
+        .{ "groq", "Groq", .globe },                      .{ "cerebras", "Cerebras", .globe },
+        .{ "mistral", "Mistral", .@"maker-mistral" },     .{ "kimi", "Kimi", .@"maker-kimi" },
+        .{ "moonshot", "Moonshot", .@"maker-kimi" },      .{ "xai", "xAI", .@"grok-mark" },
+        .{ "zai", "Z.ai", .@"maker-zai" },                .{ "meta", "Meta", .@"maker-meta" },
+        .{ "vercel", "Vercel AI Gateway", .globe },       .{ "openrouter", "OpenRouter", .globe },
+        .{ "fugu", "Sakana", .globe },                    .{ "fireworks", "Fireworks", .globe },
+        .{ "mlx", "MLX", .globe },                        .{ "lmstudio", "LM Studio", .globe },
+        .{ "omlx", "oMLX", .globe },                      .{ "chatgpt-new", "ChatGPT plan", .@"openai-mark" },
+        .{ "codex", "Codex / ChatGPT", .@"openai-mark" }, .{ "claude-agent", "Claude Agent", .@"claude-mark" },
     };
     for (table) |p| if (std.mem.eql(u8, p[0], id)) return .{ .name = p[1], .icon = p[2] };
     return .{ .name = id, .icon = .globe };
@@ -267,13 +274,13 @@ pub fn brandHex(m: workspace.Model, harness: []const u8, dark: bool) ?u24 {
     const key = maker(m) orelse route(m);
     const Pair = struct { []const u8, u24, u24 };
     const table = [_]Pair{
-        .{ "openai", 0x66b5ff, 0x66b5ff },   .{ "codex", 0x66b5ff, 0x66b5ff },     .{ "chatgpt-new", 0x66b5ff, 0x66b5ff },
-        .{ "anthropic", 0xd97757, 0xd97757 }, .{ "moonshot", 0x00a1ff, 0x007cff }, .{ "kimi", 0x00a1ff, 0x007cff },
-        .{ "deepseek", 0x3964fe, 0x3964fe }, .{ "google", 0x3186ff, 0x3186ff },   .{ "minimax", 0x1887fb, 0x1887fb },
-        .{ "xiaomi", 0xff6900, 0xff6900 },   .{ "mistral", 0xff5229, 0xff5229 },  .{ "codegraff", 0x0285ff, 0x0285ff },
-        .{ "groq", 0xf43e01, 0xf43e01 },     .{ "cerebras", 0xf15a27, 0xf15a27 }, .{ "kilo", 0xffdd00, 0xffdd00 },
-        .{ "openrouter", 0x6467f2, 0x6467f2 }, .{ "fugu", 0xe10600, 0xe10600 },   .{ "fireworks", 0xffc0e7, 0x7a155c },
-        .{ "lmstudio", 0x7b74db, 0x4338ca }, .{ "xai", 0xffffff, 0x000000 },      .{ "zai", 0xb4b4b4, 0x4d4d4d },
+        .{ "openai", 0x66b5ff, 0x66b5ff },     .{ "codex", 0x66b5ff, 0x66b5ff },    .{ "chatgpt-new", 0x66b5ff, 0x66b5ff },
+        .{ "anthropic", 0xd97757, 0xd97757 },  .{ "moonshot", 0x00a1ff, 0x007cff }, .{ "kimi", 0x00a1ff, 0x007cff },
+        .{ "deepseek", 0x3964fe, 0x3964fe },   .{ "google", 0x3186ff, 0x3186ff },   .{ "minimax", 0x1887fb, 0x1887fb },
+        .{ "xiaomi", 0xff6900, 0xff6900 },     .{ "mistral", 0xff5229, 0xff5229 },  .{ "codegraff", 0x0285ff, 0x0285ff },
+        .{ "groq", 0xf43e01, 0xf43e01 },       .{ "cerebras", 0xf15a27, 0xf15a27 }, .{ "kilo", 0xffdd00, 0xffdd00 },
+        .{ "openrouter", 0x6467f2, 0x6467f2 }, .{ "fugu", 0xe10600, 0xe10600 },     .{ "fireworks", 0xffc0e7, 0x7a155c },
+        .{ "lmstudio", 0x7b74db, 0x4338ca },   .{ "xai", 0xffffff, 0x000000 },      .{ "zai", 0xb4b4b4, 0x4d4d4d },
     };
     for (table) |p| if (std.mem.eql(u8, p[0], key)) return if (dark) p[1] else p[2];
     for ([_][]const u8{ "vercel", "mlx", "omlx" }) |mono| if (std.mem.eql(u8, mono, key)) return null;

@@ -37,6 +37,7 @@ pub const Page = struct {
     updates: updates_panel.State = .{},
 
     pub fn deinit(p: *Page, gpa: Allocator) void {
+        @import("text_buffer.zig").deinit(&p.name);
         p.updates.deinit(gpa);
         p.rename.deinit(gpa);
         p.copied.deinit(gpa);

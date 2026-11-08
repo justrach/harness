@@ -25,7 +25,7 @@ pub const Scope = enum {
     }
 };
 
-pub const TabKind = enum { diffs, file, subagent, browser };
+pub const TabKind = enum { diffs, file, subagent, browser, tool_access };
 
 pub const Tab = struct {
     kind: TabKind,
@@ -101,6 +101,7 @@ pub const Panels = struct {
     }
 
     pub fn deinit(p: *Panels) void {
+        @import("text_buffer.zig").deinit(&p.search);
         if (p.pending_agent) |s| s.destroy();
         if (p.pending_browser) |b| b.destroy();
         for (p.tabs.items) |t| destroyTab(p, t);
@@ -223,7 +224,7 @@ pub fn showTab(a: *App, i: usize) void {
     switch (t.kind) {
         .diffs => openDiffs(a),
         .file => readFile(a, t.path),
-        .subagent, .browser => {},
+        .subagent, .browser, .tool_access => {},
     }
     a.redraw();
 }

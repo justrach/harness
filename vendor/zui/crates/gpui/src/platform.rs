@@ -1311,6 +1311,12 @@ pub trait PlatformAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
+
+    /// Bumped whenever a tile is retired and cached scenes may still carry the
+    /// old reference. Cached view paint must be rebuilt when this changes.
+    fn eviction_revision(&self) -> u64 {
+        0
+    }
 }
 
 #[doc(hidden)]
@@ -1370,6 +1376,8 @@ pub struct AtlasTextureId {
     // We use u32 instead of usize for Metal Shader Language compatibility
     /// The index of this texture in the atlas.
     pub index: u32,
+    /// Distinguishes a reused slot from the allocation a stale scene sampled.
+    pub generation: u32,
     /// The kind of content stored in this texture.
     pub kind: AtlasTextureKind,
 }

@@ -63,7 +63,9 @@ test "splitting and focusing keep the loaded transcript without another engine r
     try testing.expectEqual(@as(usize, 2), h.a.transcript.entries.items.len);
     try testing.expect(h.a.transcript.complete);
     const composer = h.a.view.composer_anchor orelse return error.ComposerMissing;
-    try testing.expect(composer.x >= 256 and composer.x + composer.w < 729);
+    const chrome = @import("panel_chrome.zig");
+    const first = chrome.paneSpan(h.a.view.chrome.chat_width, 0.5, 2, true);
+    try testing.expect(composer.x >= h.a.view.chrome.x + 1 and composer.x + composer.w < h.a.view.chrome.x + first);
     try testing.expect(composer.y > 40 and composer.y + composer.h < 780);
     _ = h.t.shortcut(.{ .key = ']', .cmd = true });
     h.t.settle(1);

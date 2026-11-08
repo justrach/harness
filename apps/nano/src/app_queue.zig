@@ -67,6 +67,7 @@ pub fn stop(a: *App) void {
     a.w_queue = .{};
     a.queue.replace(.{ .array = .init(a.gpa) }) catch {};
     if (a.queue_edit) |*e| {
+        @import("app_attachments.zig").clear(a);
         e.deinit(a.gpa);
         a.queue_edit = null;
     }
@@ -303,7 +304,15 @@ fn onBegun(a: *App, _: u64, r: rpc.Reply) void {
     };
     a.draft_stash.clearRetainingCapacity();
     a.draft_stash.appendSlice(a.gpa, a.composer.text()) catch {};
-    a.composer.set(text);
+    // The acquired lease text is authoritative; metadata may also carry
+    // refs for rows queued by another client. Never reupload committed refs.
+    const paths = for (a.queue.items) |queued| {
+        if (std.mem.eql(u8, queued.id, row)) break queued.paths;
+    } else &.{};
+    @import("app_attachments.zig").restore(a, text, paths) catch {
+        a.composer.set(text);
+        a.setNotice("Couldn't restore the attachments; the original message is still in the editor.");
+    };
     a.redraw();
 }
 

@@ -17,10 +17,13 @@ const App = @import("app.zig").App;
 
 pub const width: f32 = 286;
 
+fn contentWidth(a: *const App) f32 {
+    return if (a.view.chrome.files_width > 0) @max(0, a.view.chrome.files_width - 2) else width;
+}
+
 pub fn explorer(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const col = ui.div(c).column().w(width).hFull().bg(if (k.frosted) k.panel else k.shell).clip();
+    const col = ui.div(c).column().w(contentWidth(a)).hFull().bg(if (k.frosted) k.panel else k.shell).clip();
     defer col.end();
-    _ = c.leaf(.{ .height = .{ .px = 38 } }, .none, null);
     toolbar(c, a, k);
     const q = std.mem.trim(u8, a.panels.search.text(), " ");
     ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .top = 4, .bottom = 12 } });
@@ -81,7 +84,7 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: panels.Entry, depth: u32) vo
     }
     file_icons.icon(c, e.path, e.dir, k.dark, 14);
     const color = if (git) |g| gitColor(k, g) else if (selected) k.text else k.muted;
-    kit.fadeText(c, e.name, .{ .size = 11.5, .color = color }, width - 8 - @as(f32, @floatFromInt(depth)) * 14 - 8 - 36);
+    kit.fadeText(c, e.name, .{ .size = 11.5, .color = color }, @max(0, contentWidth(a) - 8 - @as(f32, @floatFromInt(depth)) * 14 - 8 - 36));
 }
 
 pub fn gitColor(k: theme.Colors, g: panels.GitKind) ui.Color {
@@ -113,6 +116,6 @@ fn results(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
         file_icons.icon(c, e.path, e.dir, k.dark, 14);
         ui.text(c, e.name, .{ .size = 11.5, .color = k.text });
-        kit.fadeText(c, std.fs.path.dirname(e.path) orelse "", .{ .size = 10.5, .color = k.faint }, width - 140);
+        kit.fadeText(c, std.fs.path.dirname(e.path) orelse "", .{ .size = 10.5, .color = k.faint }, @max(0, contentWidth(a) - 140));
     }
 }

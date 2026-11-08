@@ -31,11 +31,14 @@ pub const Draft = struct {
     reasoning: ?[]u8 = null,
     /// The project it starts in.
     space: ?[]u8 = null,
+    no_project: bool = false,
+    /// Explicit execution device, including a draft outside any project.
+    device: ?[]u8 = null,
 
     pub fn deinit(d: *Draft, gpa: Allocator) void {
         gpa.free(d.text);
         gpa.free(d.harness);
-        inline for (.{ "model", "reasoning", "space" }) |f| if (@field(d, f)) |x| gpa.free(x);
+        inline for (.{ "model", "reasoning", "space", "device" }) |f| if (@field(d, f)) |x| gpa.free(x);
     }
 
     /// The same picks with an empty prompt: a new pane or tab starts with
@@ -44,7 +47,8 @@ pub const Draft = struct {
         var out: Draft = .{ .text = try gpa.dupe(u8, ""), .harness = &.{} };
         errdefer out.deinit(gpa);
         out.harness = try gpa.dupe(u8, d.harness);
-        inline for (.{ "model", "reasoning", "space" }) |f| if (@field(d, f)) |x| {
+        out.no_project = d.no_project;
+        inline for (.{ "model", "reasoning", "space", "device" }) |f| if (@field(d, f)) |x| {
             @field(out, f) = try gpa.dupe(u8, x);
         };
         return out;
@@ -55,6 +59,34 @@ fn dropDraft(gpa: Allocator, d: *?Draft) void {
     if (d.*) |*x| x.deinit(gpa);
     d.* = null;
 }
+
+/// A panel's inactive tabs. Its active slot borrows the pane's live chat and
+/// draft; inactive slots own both, so adding a tab never replaces a neighbor.
+pub const PanelTab = struct {
+    chat: ?[]u8 = null,
+    draft: ?Draft = null,
+
+    fn deinit(tab: *PanelTab, gpa: Allocator) void {
+        if (tab.chat) |id| gpa.free(id);
+        dropDraft(gpa, &tab.draft);
+        tab.* = .{};
+    }
+};
+
+pub const PanelTabs = struct {
+    items: std.ArrayList(PanelTab) = .empty,
+    active: usize = 0,
+
+    pub fn deinit(group: *PanelTabs, gpa: Allocator) void {
+        for (group.items.items) |*tab| tab.deinit(gpa);
+        group.items.deinit(gpa);
+        group.* = .{};
+    }
+
+    pub fn count(group: PanelTabs) usize {
+        return @max(1, group.items.items.len);
+    }
+};
 
 pub const Split = struct {
     axis: Axis,
@@ -68,10 +100,13 @@ pub const Split = struct {
     focus: usize = 0,
     /// ⌘⇧↩: the focused pane alone, the split kept.
     zoomed: bool = false,
+    /// Per-panel tab groups, in pane order. Only inactive slots own data.
+    groups: [max_panes]PanelTabs = @splat(.{}),
 
-    fn deinit(s: *Split, gpa: Allocator) void {
+    pub fn deinit(s: *Split, gpa: Allocator) void {
         for (s.panes.items) |p| if (p) |id| gpa.free(id);
         for (s.drafts.items) |*d| dropDraft(gpa, d);
+        for (&s.groups) |*group| group.deinit(gpa);
         s.panes.deinit(gpa);
         s.shares.deinit(gpa);
         s.drafts.deinit(gpa);
@@ -207,10 +242,17 @@ pub const Tabs = struct {
 
     /// Where `id` is open: its tab, and its pane there when it isn't the
     /// tab's focused one.
-    pub fn find(t: *const Tabs, id: []const u8) ?struct { tab: usize, pane: ?usize } {
+    pub fn find(t: *const Tabs, id: []const u8) ?struct { tab: usize, pane: ?usize, panel_tab: ?usize = null } {
         if (t.paneOf(t.active, id)) |ix| return .{ .tab = t.active, .pane = ix };
         for (t.items.items, 0..) |c, i| if (c) |have| if (std.mem.eql(u8, have, id)) return .{ .tab = i, .pane = null };
         for (0..t.splits.items.len) |i| if (t.paneOf(i, id)) |ix| return .{ .tab = i, .pane = ix };
+        for (t.splits.items, 0..) |layout_state, i| if (layout_state) |s| {
+            for (s.groups[0..s.panes.items.len], 0..) |group, pane| {
+                for (group.items.items, 0..) |tab, ix| if (tab.chat) |chat| {
+                    if (std.mem.eql(u8, chat, id)) return .{ .tab = i, .pane = pane, .panel_tab = ix };
+                };
+            }
+        };
         return null;
     }
 
@@ -260,6 +302,18 @@ pub const Tabs = struct {
         }
         if (t.items.items[t.active]) |old| t.gpa.free(old);
         t.items.items[t.active] = copy;
+    }
+
+    /// Give an independent workspace a structural boundary even before its
+    /// first split, so split() cannot migrate neighboring workspaces into it.
+    pub fn isolateWorkspace(t: *Tabs) !void {
+        if (t.splits.items[t.active] != null) return;
+        var s: Split = .{ .axis = .horizontal };
+        errdefer s.deinit(t.gpa);
+        try s.panes.append(t.gpa, null);
+        try s.shares.append(t.gpa, 1);
+        try s.drafts.append(t.gpa, null);
+        t.splits.items[t.active] = s;
     }
 
     /// A new chat in a tab of its own, after the current one.
@@ -315,6 +369,19 @@ pub const Tabs = struct {
             t.gpa.free(have);
             p.* = null;
         };
+        for (t.splits.items) |*layout_state| if (layout_state.*) |*s| {
+            for (&s.groups) |*group| {
+                var ix = group.items.items.len;
+                while (ix > 0) {
+                    ix -= 1;
+                    if (group.items.items[ix].chat) |chat| if (std.mem.eql(u8, chat, id)) {
+                        var removed = group.items.orderedRemove(ix);
+                        removed.deinit(t.gpa);
+                        if (group.active > ix) group.active -= 1;
+                    };
+                }
+            }
+        };
         var i = t.items.items.len;
         while (i > 0) {
             i -= 1;
@@ -326,7 +393,7 @@ pub const Tabs = struct {
     /// with room for another pane (`can_split`).
     pub fn canSplit(t: *const Tabs, axis: Axis) bool {
         const s = t.layout() orelse return true;
-        return s.axis == axis and s.panes.items.len < max_panes;
+        return (s.panes.items.len == 1 or s.axis == axis) and s.panes.items.len < max_panes;
     }
 
     /// `id` out of every pane and every other tab, which are left on a new
@@ -336,6 +403,12 @@ pub const Tabs = struct {
         for (t.splits.items) |*sp| if (sp.*) |*s| for (s.panes.items) |*p| if (p.*) |have| if (std.mem.eql(u8, have, id)) {
             t.gpa.free(have);
             p.* = null;
+        };
+        for (t.splits.items) |*layout_state| if (layout_state.*) |*s| {
+            for (&s.groups) |*group| for (group.items.items) |*tab| if (tab.chat) |chat| if (std.mem.eql(u8, chat, id)) {
+                t.gpa.free(chat);
+                tab.chat = null;
+            };
         };
         for (t.items.items, 0..) |*c, i| if (i != t.active) if (c.*) |have| if (std.mem.eql(u8, have, id)) {
             t.gpa.free(have);
@@ -347,16 +420,43 @@ pub const Tabs = struct {
     /// then the same size, the new one a new chat with focus. Nothing at
     /// the cap or across an existing split's axis (`split_chat`).
     pub fn split(t: *Tabs, axis: Axis) !bool {
-        const slot = &t.splits.items[t.active];
+        var slot = &t.splits.items[t.active];
         if (slot.* == null) {
             var s: Split = .{ .axis = axis };
             errdefer s.deinit(t.gpa);
             try s.panes.append(t.gpa, null);
             try s.shares.append(t.gpa, 1);
             try s.drafts.append(t.gpa, null);
+            // A first split moves the existing folder tabs into its original
+            // panel. They are not separate workspaces that hide the split when
+            // selected. Legacy snapshots with other splits remain reachable.
+            var flat = true;
+            for (t.splits.items) |other| if (other != null) {
+                flat = false;
+                break;
+            };
+            if (flat and t.items.items.len > 1) {
+                const group = &s.groups[0];
+                try group.items.ensureTotalCapacity(t.gpa, t.items.items.len);
+                for (t.items.items, t.drafts.items, 0..) |chat, draft, ix| {
+                    group.items.appendAssumeCapacity(if (ix == t.active) .{} else .{ .chat = chat, .draft = draft });
+                }
+                group.active = t.active;
+                const chat = t.items.items[t.active];
+                const draft = t.drafts.items[t.active];
+                t.items.items.len = 1;
+                t.drafts.items.len = 1;
+                t.splits.items.len = 1;
+                t.items.items[0] = chat;
+                t.drafts.items[0] = draft;
+                t.splits.items[0] = null;
+                t.active = 0;
+                slot = &t.splits.items[0];
+            }
             slot.* = s;
         }
         const s = &slot.*.?;
+        if (s.panes.items.len == 1) s.axis = axis;
         if (s.axis != axis or s.panes.items.len >= max_panes) {
             if (s.panes.items.len == 1) {
                 s.deinit(t.gpa);
@@ -375,6 +475,9 @@ pub const Tabs = struct {
             _ = s.shares.orderedRemove(at);
             return e;
         };
+        var group_at = s.panes.items.len - 1;
+        while (group_at > at) : (group_at -= 1) s.groups[group_at] = s.groups[group_at - 1];
+        s.groups[at] = .{};
         s.panes.items[s.focus] = t.items.items[t.active];
         t.items.items[t.active] = null;
         s.equalize();
@@ -404,6 +507,10 @@ pub const Tabs = struct {
         if (t.items.items[t.active]) |id| t.gpa.free(id);
         const even = s.isEven();
         const closed = s.focus;
+        s.groups[closed].deinit(t.gpa);
+        var group_at = closed;
+        while (group_at + 1 < s.panes.items.len) : (group_at += 1) s.groups[group_at] = s.groups[group_at + 1];
+        s.groups[s.panes.items.len - 1] = .{};
         const share = s.shares.orderedRemove(closed);
         _ = s.panes.orderedRemove(closed);
         var gone = s.drafts.orderedRemove(closed);
@@ -415,7 +522,7 @@ pub const Tabs = struct {
         s.zoomed = false;
         t.items.items[t.active] = s.panes.items[next];
         s.panes.items[next] = null;
-        if (s.panes.items.len == 1) {
+        if (s.panes.items.len == 1 and s.groups[0].count() == 1) {
             // The pane left is the tab: its parked draft goes with it.
             dropDraft(t.gpa, &t.drafts.items[t.active]);
             t.drafts.items[t.active] = s.drafts.items[0];
@@ -424,6 +531,79 @@ pub const Tabs = struct {
             t.splits.items[t.active] = null;
         }
         return true;
+    }
+
+    /// Add a tab to the focused panel, retaining the split, its shares, and
+    /// all neighboring chats. Takes the outgoing live draft on success only.
+    pub fn newPaneTab(t: *Tabs, draft: Draft) !void {
+        return t.insertPaneTab(draft, false);
+    }
+
+    /// External navigation appends, unlike Cmd+T's insert-after-current.
+    pub fn appendPaneTab(t: *Tabs, draft: Draft) !void {
+        return t.insertPaneTab(draft, true);
+    }
+
+    fn insertPaneTab(t: *Tabs, draft: Draft, at_end: bool) !void {
+        const s = t.layout() orelse return error.NoSplit;
+        const group = &s.groups[s.focus];
+        try group.items.ensureUnusedCapacity(t.gpa, if (group.items.items.len == 0) 2 else 1);
+        if (group.items.items.len == 0) group.items.appendAssumeCapacity(.{});
+        group.items.items[group.active] = .{ .chat = t.items.items[t.active], .draft = draft };
+        t.items.items[t.active] = null;
+        const at = if (at_end) group.items.items.len else group.active + 1;
+        group.items.insertAssumeCapacity(at, .{});
+        group.active = at;
+    }
+
+    /// Switch inside the focused panel. No tab data from another panel moves.
+    /// Takes `draft` on success and returns the incoming tab's parked draft.
+    pub fn selectPaneTab(t: *Tabs, ix: usize, draft: Draft) !?Draft {
+        const s = t.layout() orelse return error.NoSplit;
+        const group = &s.groups[s.focus];
+        if (ix >= group.items.items.len or ix == group.active) return error.NoTab;
+        group.items.items[group.active] = .{ .chat = t.items.items[t.active], .draft = draft };
+        const incoming = group.items.items[ix];
+        group.items.items[ix] = .{};
+        group.active = ix;
+        t.items.items[t.active] = incoming.chat;
+        return incoming.draft;
+    }
+
+    /// Close a tab without closing its panel while another tab remains.
+    pub fn closePaneTab(t: *Tabs) bool {
+        const s = t.layout() orelse return false;
+        const group = &s.groups[s.focus];
+        if (group.items.items.len <= 1) return false;
+        if (t.items.items[t.active]) |id| t.gpa.free(id);
+        _ = group.items.orderedRemove(group.active);
+        group.active = @min(group.active, group.items.items.len - 1);
+        const incoming = group.items.items[group.active];
+        group.items.items[group.active] = .{};
+        t.items.items[t.active] = incoming.chat;
+        dropDraft(t.gpa, &s.drafts.items[s.focus]);
+        s.drafts.items[s.focus] = incoming.draft;
+        if (s.panes.items.len == 1 and group.count() == 1) {
+            dropDraft(t.gpa, &t.drafts.items[t.active]);
+            t.drafts.items[t.active] = s.drafts.items[0];
+            s.drafts.items[0] = null;
+            s.deinit(t.gpa);
+            t.splits.items[t.active] = null;
+        }
+        return true;
+    }
+
+    /// Reorder the focused panel, carrying its tabs, draft and share together.
+    pub fn movePane(t: *Tabs, after: bool) void {
+        const s = t.layout() orelse return;
+        const from = s.focus;
+        const to = if (after) from + 1 else from -| 1;
+        if (to >= s.panes.items.len or to == from) return;
+        std.mem.swap(?[]u8, &s.panes.items[from], &s.panes.items[to]);
+        std.mem.swap(?Draft, &s.drafts.items[from], &s.drafts.items[to]);
+        std.mem.swap(f32, &s.shares.items[from], &s.shares.items[to]);
+        std.mem.swap(PanelTabs, &s.groups[from], &s.groups[to]);
+        s.focus = to;
     }
 
     /// ⌘] / ⌘[: the next pane, round.
@@ -583,10 +763,16 @@ test "a dragged chat moves into its new pane, out of every other place" {
     try testing.expect(t.canSplit(.vertical));
     try testing.expect(try t.split(.horizontal));
     try testing.expect(!t.canSplit(.vertical));
-    // "a", open in the first tab, dragged in: that tab is left on a new chat.
+    // The first split folds the original tabs into panel0. Moving its
+    // inactive "a" into panel1 clears only that old slot, not focused "b".
     t.detach("a");
     t.setCurrent("a");
     try testing.expectEqualStrings("a", t.current().?);
-    try testing.expect(t.items.items[0] == null);
-    try testing.expectEqualStrings("b", t.layout().?.panes.items[0].?);
+    try testing.expectEqual(@as(usize, 1), t.items.items.len);
+    const layout_state = t.layout().?;
+    try testing.expect(layout_state.groups[0].items.items[0].chat == null);
+    try testing.expectEqualStrings("b", layout_state.panes.items[0].?);
+    const found = t.find("a").?;
+    try testing.expectEqual(@as(usize, 0), found.tab);
+    try testing.expect(found.pane == null and found.panel_tab == null);
 }

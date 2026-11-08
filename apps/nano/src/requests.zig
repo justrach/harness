@@ -56,6 +56,20 @@ pub fn createSpace(space_id: []const u8, device_id: []const u8, path: []const u8
     return .{ .method = "Mutate", .params = .{ .op = "createSpace", .spaceId = space_id, .deviceId = device_id, .path = path, .gitDetected = git } };
 }
 
+/// Name-first AddSpacePalette; keep createSpace's existing wire vector unchanged.
+pub fn createNamedSpace(space_id: []const u8, device_id: []const u8, path: []const u8, name: []const u8, git: bool) Request(struct { op: []const u8, spaceId: []const u8, deviceId: []const u8, path: []const u8, name: []const u8, gitDetected: bool }) {
+    return .{ .method = "Mutate", .params = .{ .op = "createSpace", .spaceId = space_id, .deviceId = device_id, .path = path, .name = name, .gitDetected = git } };
+}
+
+/// Browse on the selected host; omit targetDeviceId for the local engine.
+pub fn listFolders(path: ?[]const u8, host: ?[]const u8) Request(struct { path: ?[]const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ListFolders", .params = .{ .path = path, .targetDeviceId = host } };
+}
+
+pub fn listDrives(host: ?[]const u8) Request(struct { targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ListDrives", .params = .{ .targetDeviceId = host } };
+}
+
 pub fn focusChat(chat_id: []const u8) Request(struct { chatId: []const u8 }) {
     return .{ .method = "FocusChat", .params = .{ .chatId = chat_id } };
 }

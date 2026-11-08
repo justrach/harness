@@ -77,7 +77,7 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const r = set.row(c, k, true, false);
         defer r.end();
         set.tile(c, k, .@"eye-closed");
-        words(c, k, "Compact mode", "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.", 32);
+        words(c, k, "Compact mode", "Show progress while running, then fold the turn's work when it finishes. The final reply stays visible.", 32);
         if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
     }
     caption(c, k, "Motion");

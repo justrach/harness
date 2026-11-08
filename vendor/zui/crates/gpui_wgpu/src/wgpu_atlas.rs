@@ -221,6 +221,7 @@ impl WgpuAtlasState {
         let atlas_texture = WgpuAtlasTexture {
             id: AtlasTextureId {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
+                generation: 0,
                 kind,
             },
             allocator: BucketedAtlasAllocator::new(device_size_to_etagere(size)),
