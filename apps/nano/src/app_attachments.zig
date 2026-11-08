@@ -86,7 +86,7 @@ pub const Item = struct {
     pub fn preview(item: *Item) []const u8 {
         if (item.bytes.len > 0) return item.bytes;
         const image = @import("app_attachment_images.zig").getDevice(item.app, item.target orelse item.app.device_id orelse "", item.path orelse return "") orelse return "";
-        return if (image.status == .ready) image.bytes.items else "";
+        return @import("app_attachment_images.zig").tileBytes(image);
     }
 
     pub fn start(item: *Item) void {

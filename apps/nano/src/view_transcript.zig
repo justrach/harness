@@ -71,11 +71,43 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     rail.step(c, &a.view.rail);
     const drawn = entries(c, a, k, &a.transcript, paneWidth(c, a), a.w_doc.id != null, 64 - sidebar.titlebar_h);
     rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, mainWidth(c, a));
+    recoverBlank(c, a, drawn);
+    a.view.jump_box = drawn.box;
+    a.view.jump_distance = drawn.from_end;
+}
+
+/// A scroll offset left over from a taller transcript can park the reader
+/// in padding, with no row in the window. That is not a place to stay.
+fn recoverBlank(c: *ui.Context, a: *App, drawn: Drawn) void {
+    if (drawn.box == 0 or drawn.ticks.len == 0) return;
+    const view = c.rects.get(drawn.box) orelse return;
+    var any = false;
+    var near = false;
+    for (drawn.ticks) |tick| if (tick.top) |top| {
+        any = true;
+        if (top + 200 >= view.y - 80 and top <= view.y + view.h + 80) near = true;
+    };
+    if (!any or near) return;
+    // One correction. Repeating it rebuilds the window forever and the
+    // beachball follows.
+    if (a.view.blank_recovered == drawn.box) return;
+    a.view.blank_recovered = drawn.box;
+    c.scroll.put(c.gpa, drawn.box, std.math.floatMax(f32)) catch {};
+    c.scroll_follow.put(c.gpa, drawn.box, true) catch {};
+    a.view.jump_distance = 0;
+    a.view.jump_shown = false;
+    c.changed = true;
 }
 
 /// What a transcript drew: its scroll box, and its prompts' rows as last
 /// laid out.
-pub const Drawn = struct { box: u64 = 0, ticks: []const @import("view_rail.zig").Tick = &.{} };
+pub const Drawn = struct {
+    box: u64 = 0,
+    ticks: []const @import("view_rail.zig").Tick = &.{},
+    /// How far the reader is from the end. The jump pill shows past GPUI's
+    /// `SCROLL_BUTTON_THRESHOLD_PX`.
+    from_end: f32 = 0,
+};
 
 /// A transcript `w` wide: the open chat's, or a split pane's neighbor's.
 /// The first row sits `top` points down; rows settle at the bottom, over
@@ -120,6 +152,10 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const scroll = c.open(st, null);
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
+    if (c.scroll_max.get(drawn.box)) |max| {
+        const at = c.scroll.get(drawn.box) orelse 0;
+        drawn.from_end = @max(0, max - at);
+    }
     // Just sent: past the end, which layout clamps to it, and moving the
     // offset there makes the box follow its end again (`follow_end`).
     if (subagent == null and t == &a.transcript and a.view.stick_end) {
@@ -196,7 +232,7 @@ fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8
     const tiles = @import("view_composer_attachments.zig");
     const name = @import("app_attachments.zig").displayName(path);
     const image = attachment_images.get(a, chat_id, path);
-    const bytes: []const u8 = if (image) |loaded| (if (loaded.status == .ready) loaded.bytes.items else "") else "";
+    const bytes: []const u8 = if (image) |loaded| attachment_images.tileBytes(loaded) else "";
     const tile = ui.div(c).column().w(56).gap(2);
     defer tile.end();
     {

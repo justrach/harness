@@ -20,8 +20,11 @@ pub const Image = struct {
     device: []u8,
     path: []u8,
     bytes: std.ArrayList(u8) = .empty,
+    /// A small JPEG the tile can decode without blocking the frame.
+    preview: std.ArrayList(u8) = .empty,
     encoded: std.ArrayList(u8) = .empty,
     status: enum { loading, ready, failed } = .loading,
+    shrinking: bool = false,
     request: ?u64 = null,
     offset: u64 = 0,
     chunks: usize = 0,
@@ -32,8 +35,21 @@ pub const Image = struct {
         gpa.free(image.device);
         gpa.free(image.path);
         image.bytes.deinit(gpa);
+        image.preview.deinit(gpa);
         image.encoded.deinit(gpa);
         gpa.destroy(image);
+    }
+
+    /// ImageIO on the UI thread is the beachball. A 112-point JPEG is
+    /// made here, off that thread, and the tile draws only that.
+    fn shrink(image: *Image) void {
+        if (image.shrinking or image.bytes.items.len <= 256 * 1024) return;
+        image.shrinking = true;
+        const t = std.Thread.spawn(.{}, shrinkWork, .{image}) catch {
+            image.shrinking = false;
+            return;
+        };
+        t.detach();
     }
 
     fn fail(image: *Image) void {
@@ -80,6 +96,7 @@ pub const Image = struct {
             };
             image.encoded.clearAndFree(image.app.gpa);
             image.status = .ready;
+            image.shrink();
             image.app.redraw();
             return;
         }
@@ -91,6 +108,47 @@ pub const Image = struct {
         image.next();
     }
 };
+
+fn shrinkWork(image: *Image) void {
+    const gpa = image.app.gpa;
+    const io = image.app.io;
+    const id = @intFromPtr(image);
+    const path = std.fmt.allocPrint(gpa, "/tmp/harness-nano-thumb-{d}.png", .{id}) catch return shrinkDone(image, null);
+    defer gpa.free(path);
+    const out = std.fmt.allocPrint(gpa, "/tmp/harness-nano-thumb-{d}.jpg", .{id}) catch return shrinkDone(image, null);
+    defer gpa.free(out);
+    {
+        var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch return shrinkDone(image, null);
+        defer file.close(io);
+        file.writeStreamingAll(io, image.bytes.items) catch return shrinkDone(image, null);
+    }
+    var child = std.process.spawn(io, .{
+        .argv = &.{ "sips", "-Z", "224", "-s", "format", "jpeg", "-s", "formatOptions", "60", path, "--out", out },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return shrinkDone(image, null);
+    _ = child.wait(io) catch return shrinkDone(image, null);
+    const jpeg = std.Io.Dir.cwd().readFileAlloc(io, out, gpa, .limited(256 * 1024)) catch return shrinkDone(image, null);
+    shrinkDone(image, jpeg);
+}
+
+fn shrinkDone(image: *Image, jpeg: ?[]u8) void {
+    image.shrinking = false;
+    if (jpeg) |bytes| {
+        image.preview.clearRetainingCapacity();
+        image.preview.appendSlice(image.app.gpa, bytes) catch {};
+        image.app.gpa.free(bytes);
+    }
+    image.app.redraw();
+}
+
+pub fn tileBytes(image: *Image) []const u8 {
+    if (image.preview.items.len > 0) return image.preview.items;
+    if (image.status == .ready and image.bytes.items.len <= 256 * 1024) return image.bytes.items;
+    if (image.status == .ready) image.shrink();
+    return "";
+}
 
 /// Resolve the containing chat, not the focused pane or the message author.
 pub fn get(a: *App, chat_id: ?[]const u8, path: []const u8) ?*Image {

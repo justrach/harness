@@ -47,6 +47,12 @@ pub const View = struct {
     /// A prompt was just sent: the open chat's transcript goes to its end
     /// and follows the reply again, however far up it was read.
     stick_end: bool = false,
+    /// The jump pill is up. It stays until the reader is near the end.
+    jump_shown: bool = false,
+    jump_box: u64 = 0,
+    jump_distance: f32 = 0,
+    /// The scroll box already pulled back from a blank offset.
+    blank_recovered: u64 = 0,
     /// Effective slot width this frame, shared by chat, header and drop zones.
     sidebar_width: f32 = 256,
     /// The seam's current 200ms tween, and whether the first frame has

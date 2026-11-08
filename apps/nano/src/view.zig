@@ -43,6 +43,9 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_transcript.zig").column_w = @import("view_settings_appearance.zig").transcriptWidth(a);
     a.ansi = k.ansi;
     if (a.tick(c.time)) |wait| c.frameIn(wait);
+    // A loader or a once-a-second clock must not become the display-link
+    // rate in the middle of a scroll. The link takes the soonest request.
+    if (c.scroll_moved.count() > 0) c.frameIn(1.0 / 120.0);
     c.title_bar_height = sidebar.titlebar_h;
     @import("view_kit.zig").beginFrame(c, k);
     // Box edges on the device's pixels, a half toward zero, as GPUI's

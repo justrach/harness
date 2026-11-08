@@ -154,3 +154,49 @@ test "an unfocused window slows loader redraws and an off-screen spinner schedul
     t.advance(1.7);
     try testing.expect(t.ctx.frame_in == null);
 }
+
+test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.offscreen = true;
+    a.dark = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic", null);
+    try apply(&a,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic short prompt"}]}]}
+    );
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 1100, .height = 800, .dark = true });
+    defer t.deinit();
+    t.frame();
+    try testing.expect(!t.hasText("Scroll to bottom"));
+    // The rail's tick is a 12-point dash. A chat that fits must not draw one
+    // in the empty band above the prompt.
+    for (t.ctx.nodes.items) |n| if (n.content == .none and n.rect.h <= 2 and n.rect.w >= 12 and n.rect.w <= 20 and n.rect.x < 80) {
+        return error.RailDashInShortChat;
+    };
+
+    var history: std.ArrayList(u8) = .empty;
+    defer history.deinit(testing.allocator);
+    try history.appendSlice(testing.allocator, "{\"reset\":[");
+    for (0..30) |i| {
+        if (i > 0) try history.appendSlice(testing.allocator, ",");
+        try history.print(testing.allocator, "{{\"id\":\"u{d}\",\"role\":\"user\",\"parts\":[{{\"id\":\"p\",\"kind\":\"text\",\"text\":\"Synthetic prompt {d}\"}}]}}", .{ i, i });
+    }
+    try history.appendSlice(testing.allocator, "]}");
+    try apply(&a, history.items);
+    t.frame();
+    const box = for (t.ctx.nodes.items) |n| {
+        if (n.style.scroll and n.rect.h > 200) break n.id;
+    } else return error.NoTranscriptScroll;
+    try t.ctx.scroll.put(t.ctx.gpa, box, 0);
+    try t.ctx.scroll_follow.put(t.ctx.gpa, box, false);
+    t.frame();
+    t.frame();
+    const pill = t.findText("Scroll to bottom") orelse return error.NoJumpPill;
+    t.click(pill.x + 8, pill.y + 8);
+    t.frame();
+    try testing.expect(!t.hasText("Scroll to bottom"));
+    try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
+}

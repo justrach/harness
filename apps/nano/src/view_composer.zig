@@ -66,6 +66,7 @@ pub fn docked(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The finished turn's "N files changed" card floats over the
     // transcript's foot, 8 clear of the pill and 8 wider either side,
     // growing upward as its names wrap.
+    jumpToBottom(c, a, k, w);
     const work = @import("view_turn_work.zig");
     if (work.changes(c, a)) |t| {
         ui.key(c, "turn-work-cue");
@@ -305,7 +306,8 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
 /// top and bottom, 1.5 round, in the primary accent (the user's accent
 /// override included). It blinks at 500 ms and is solid after an edit or
 /// a caret move, as nanoui's caret already does.
-pub const message_caret: ui.TextFieldCaret = .{ .width = 3, .inset = 2, .radius = 1.5 };
+/// GPUI's insertion caret: a hairline on the glyph, not a 3-point block.
+pub const message_caret: ui.TextFieldCaret = .{ .width = 1.5, .inset = 1, .radius = 0.75 };
 
 /// ↑ at the text's start or ↓ at its end steps through the chat's earlier
 /// prompts (`history_step`, `navigate_prompt_history`), unless a question,
@@ -429,5 +431,34 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
         _ = c.leaf(.{ .width = .{ .px = 11 }, .height = .{ .px = 11 }, .radius = 3, .background = k.onAccent() }, .none, null);
     } else {
         icons.icon(c, .@"arrow-up", 14, k.onAccent(), 0);
+    }
+}
+
+
+const jump_show: f32 = 320;
+const jump_hide: f32 = 70;
+
+/// GPUI's labeled pill, six pixels above the composer (`render_jump_to_bottom`
+/// uses `top(-36)` on a 30-point chip). Shown once the reader is 320 points
+/// off the end, and kept until they are within 70.
+fn jumpToBottom(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
+    const box = a.view.jump_box;
+    if (box == 0) return;
+    const show = if (a.view.jump_shown) a.view.jump_distance > jump_hide else a.view.jump_distance > jump_show;
+    a.view.jump_shown = show;
+    if (!show) return;
+    ui.key(c, "jump-to-bottom");
+    const row = ui.div(c).row().absolute().offset(0, -36).w(w).justifyCenter();
+    defer row.end();
+    const jump_chip = kit.shadowLg(ui.div(c).row().h(30).pl(11).pr(13).gap(6).itemsCenter().rounded(15).bg(k.composer).border(k.border).borderW(1));
+    defer jump_chip.end();
+    icons.icon(c, .@"alt-arrow-down", 13, k.muted, 0);
+    ui.text(c, "Scroll to bottom", kit.style(c, 13, 18, .{ .color = k.text }));
+    if (jump_chip.clicked()) {
+        c.scroll.put(c.gpa, box, std.math.floatMax(f32)) catch {};
+        c.scroll_follow.put(c.gpa, box, true) catch {};
+        a.view.jump_shown = false;
+        a.view.jump_distance = 0;
+        c.changed = true;
     }
 }
