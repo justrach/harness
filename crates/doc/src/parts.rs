@@ -667,6 +667,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         | AgentEvent::ContextSavings { .. }
         | AgentEvent::AvailableCommands { .. }
         | AgentEvent::ReasoningChanged { .. }
+        | AgentEvent::SessionCwdChanged { .. }
         | AgentEvent::ToolProgress { .. }
         // SubagentProgress only means something tagged (handled above).
         | AgentEvent::UserMessage { .. }
