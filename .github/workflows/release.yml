@@ -290,6 +290,7 @@ jobs:
               '.files[$name] = {sha256: $sha}' <<<"$manifest")
           done
           printf '%s' "$manifest" > manifest.json
+          printf '%s' "$VERSION" > latest.txt
       - uses: softprops/action-gh-release@v2
         with:
           name: Harness v${{ env.VERSION }}
@@ -297,6 +298,7 @@ jobs:
           files: |
             dist/*
             manifest.json
+            latest.txt
       - name: upload to R2 (edge.codegraff.com/releases/*)
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
