@@ -75,6 +75,10 @@ contents:
     dst: /usr/bin/harness
     file_info:
       mode: 0755
+  - src: $ROOT/apps/nano/zig-out/bin/harness-nano
+    dst: /usr/bin/harness-nano
+    file_info:
+      mode: 0755
   - src: $ROOT/dist/harness.desktop
     dst: /usr/share/applications/harness.desktop
   - src: $ROOT/dist/harness.png

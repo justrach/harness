@@ -45,7 +45,7 @@ try {
     Copy-Item -LiteralPath "./target/$CargoProfile/harness.exe" -Destination (Join-Path $stage 'harness.exe')
     Push-Location (Join-Path $root 'apps/nano')
     try {
-        zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
+        zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe
         if ($LASTEXITCODE -ne 0) { throw 'harness-nano Windows build failed' }
     } finally { Pop-Location }
     Copy-Item -LiteralPath './apps/nano/zig-out/bin/harness-nano.exe' -Destination (Join-Path $stage 'harness-nano.exe')
