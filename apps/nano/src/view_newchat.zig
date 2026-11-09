@@ -53,16 +53,26 @@ test "the greeting uses the first name only (greeting_uses_the_first_name_only)"
 }
 
 pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const w = composer.dockedWidth(transcript_view.paneWidth(c, a), transcript_view.column_w);
+    const pane_w = transcript_view.paneWidth(c, a);
+    const pane_h = transcript_view.paneHeight(c, a) orelse c.size.h;
+    const w = composer.dockedWidth(pane_w, transcript_view.column_w);
     const area = ui.div(c).column().wFull().grow().h(0).itemsCenter();
     defer area.end();
-    // Suggestions own only the space left above THIS frame's dock and
-    // reserved status strip. A max-height based on composer_anchor fed the
-    // previous input height back into layout, pushing a short pane's dock
-    // off its bottom before snapping back on the following frame.
+    // Center the hero and starter chips optically in spacious canvases while
+    // keeping bottom-aligned flow in short or expanded panes so chips never
+    // overlap the composer dock.
+    const center_hero = pane_h >= 520 and !a.view.composer_expanded and a.composer.text().len == 0;
     {
-        ui.scroll(c, .{ .width = .fill, .height = .{ .px = 0 }, .grow = 1, .align_items = .center, .justify = .end, .follow_end = true });
+        ui.scroll(c, .{
+            .width = .fill,
+            .height = .{ .px = 0 },
+            .grow = 1,
+            .align_items = .center,
+            .justify = if (center_hero) .center else .end,
+            .follow_end = !center_hero,
+        });
         defer ui.end(c);
+        if (center_hero) _ = c.leaf(.{ .height = .{ .px = @min(72, (pane_h - 460) * 0.28) } }, .none, null);
         suggestions(c, a, k, w);
     }
     _ = c.leaf(.{ .height = .{ .px = 24 } }, .none, null);
@@ -73,11 +83,23 @@ const phi: f32 = 1.618;
 
 pub fn suggestions(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     ui.key(c, "new-conversation-suggestions");
-    const box = ui.div(c).column().w(w).itemsCenter().gap(suggestion_gap);
+    const enter = ui.motion.frame(c, .{
+        .initial = .{ .opacity = 0 },
+        .target = .{ .opacity = 1 },
+        .transition = .{ .tween = .{ .duration = 0.16, .ease = .linear } },
+    });
+    const box = ui.div(c).column().w(w).itemsCenter().gap(suggestion_gap).motion(enter);
     defer box.end();
+    // Centered agent emblem tile above the greeting for visual balance.
+    {
+        const mark = icons.harnessMark(a.new_harness);
+        const badge = ui.div(c).row().size(40, 40).center().rounded(12).bg(k.ink(if (k.dark) 0.06 else 0.035)).border(k.border).borderW(1);
+        defer badge.end();
+        icons.icon(c, mark.name, 20, mark.brand orelse k.text, 0);
+    }
     const buf = c.alloc().alloc(u8, 128) catch return;
     const name = if (a.account.user) |u| u.name else null;
-    kit.ellipsisText(c, if (a.new_chat_mode) chat_mode.heading_title else greeting(buf, name), .{ .size = 22, .line_height = 22 * phi, .weight = .semibold, .color = k.text }, w);
+    kit.ellipsisText(c, if (a.new_chat_mode) chat_mode.heading_title else greeting(buf, name), .{ .size = 24, .line_height = 24 * phi, .weight = .semibold, .color = k.text }, w);
     starterChips(c, a, k, w);
 }
 
@@ -102,13 +124,20 @@ fn modeSwitch(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 /// Same footer and model anchor as an established conversation. A draft
-/// adds mode, an explicit execution computer, and its project/checkout.
+/// adds mode, an explicit execution computer, and its project/checkout,
+/// centered cleanly under the composer pill.
 pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
-    const r = ui.div(c).row().w(w).h(24).px(10).gap(4).itemsCenter().clip();
+    const wide = w >= 540;
+    var r = ui.div(c).row().w(w).h(24).px(10).gap(if (wide) 6 else 4).itemsCenter().clip();
+    if (wide) r = r.justifyCenter();
     defer r.end();
     composer.chip(c, a, k);
+    if (wide) ui.div(c).size(3, 3).rounded(1.5).bg(k.muted.alpha(0.35)).end();
     {
-        const slot = ui.div(c).row().grow().w(0).hFull().px(10).gap(4).itemsCenter().clip();
+        const slot = if (wide)
+            ui.div(c).row().hFull().gap(4).itemsCenter().clip()
+        else
+            ui.div(c).row().grow().w(0).hFull().gap(4).itemsCenter().clip();
         defer slot.end();
         modeSwitch(c, a, k);
         // Keep the execution target beside the draft, not only in the
@@ -190,9 +219,15 @@ fn starterChips(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         const end = chipRowEnd(widths[0..n], start, w);
         const row = ui.div(c).row().gap(chip_gap).itemsCenter();
         defer row.end();
-        for (shown[start..end], widths[start..end]) |s, cw| {
+        for (shown[start..end], widths[start..end], 0..) |s, cw, chip_ix| {
             ui.key(c, s.title);
-            const b = ui.div(c).row().h(chip_h).w(cw).px(11).gap(6).itemsCenter().rounded(14).border(k.border).borderW(1).hover(k.hover);
+            const chip_enter = ui.motion.frame(c, .{
+                .initial = .{ .opacity = 0 },
+                .target = .{ .opacity = 1 },
+                .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+                .delay = ui.motion.stagger(start + chip_ix, 0.025),
+            });
+            const b = ui.div(c).row().h(chip_h).w(cw).px(11).gap(6).itemsCenter().rounded(14).bg(k.ink(if (k.dark) 0.04 else 0.022)).border(k.border).borderW(1).hover(k.hover).motion(chip_enter);
             defer b.end();
             const ink = if (b.hovered()) k.text else k.muted;
             icons.icon(c, s.icon, 13, ink, 0);

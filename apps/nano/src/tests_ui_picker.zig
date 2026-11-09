@@ -65,7 +65,9 @@ test "the picker: agent tabs, a search, and the models in a section per route" {
         const openai = h.t.findText("OpenAI") orelse return error.MissingSection;
         const fast = inPicker(&h, "Synthetic Fast") orelse return error.MissingModel;
         const plan_head = h.t.findText("ChatGPT plan") orelse return error.MissingSection;
-        try testing.expect(openai.y < fast.y and fast.y < plan_head.y);
+        const plan_row = inPicker(&h, "Synthetic Plan") orelse return error.MissingModel;
+        // Subscription ("plan") routes and models lead non-subscription ("credits") ones.
+        try testing.expect(plan_head.y < plan_row.y and plan_row.y < openai.y and openai.y < fast.y);
         const tab = h.t.findText("Starred") orelse return error.MissingTabs;
         const chip = h.a.view.chip_anchor orelse return error.MissingChip;
         try testing.expect(tab.y + tab.h < chip.y);

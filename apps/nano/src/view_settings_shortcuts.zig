@@ -159,7 +159,7 @@ const queue_mod = @import("app_queue.zig");
 fn followUpCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     // `mt(12)` in place of the section card's own 24.
     set.space(c, 12);
-    const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
     defer cd.end();
     const copy = c.print("Queue waits until the current turn finishes. Steer adds your message to the current turn. {s}", .{queue_mod.followUpHint(sendsOnEnter(a), @import("builtin").os.tag == .macos)});
     const r = tallRow(c, k, "Messages while the agent is working", copy, 170);

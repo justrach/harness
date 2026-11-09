@@ -157,13 +157,22 @@ fn route_sections(flat: &[ModelRowData]) -> Vec<ModelRowData> {
         }
     }
     super::claude_agent_before_anthropic(&mut routes, |route, id| *route == id);
+    routes.sort_by_key(|id| {
+        flat.iter()
+            .filter(|r| route(&r.model) == *id)
+            .map(|r| super::billing_rank(r.model.billing.as_deref()))
+            .min()
+            .unwrap_or(2)
+    });
     let mut rows = Vec::with_capacity(flat.len() + routes.len());
     for id in routes {
-        let mut section = flat
+        let mut section: Vec<ModelRowData> = flat
             .iter()
             .filter(|r| route(&r.model) == id)
             .cloned()
-            .peekable();
+            .collect();
+        section.sort_by_key(|r| super::billing_rank(r.model.billing.as_deref()));
+        let mut section = section.into_iter().peekable();
         if let Some(first) = section.peek() {
             let mut header = first.clone();
             header.header = Some(provider(id).0.to_owned().into());
@@ -402,6 +411,22 @@ impl Pickers {
             }
         }
         let grouped = self.model_rail == ModelRail::Harness && key.query.is_empty();
+        if !grouped {
+            flat.sort_by_key(|r| {
+                let rank = if key.query.is_empty() {
+                    0
+                } else {
+                    let haystack = format!(
+                        "{} {} {}",
+                        r.model.label,
+                        r.model.id,
+                        r.model.description.as_deref().unwrap_or("")
+                    );
+                    popover::match_rank(&key.query, &haystack).unwrap_or(u8::MAX)
+                };
+                (super::billing_rank(r.model.billing.as_deref()), rank)
+            });
+        }
         let rows = if grouped { route_sections(&flat) } else { flat };
         let rows = std::sync::Arc::new(rows);
         *self.model_rows_cache.borrow_mut() = Some((key, rows.clone()));

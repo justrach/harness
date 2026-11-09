@@ -324,6 +324,26 @@ pub fn billingLabel(billing: []const u8) []const u8 {
     return billing;
 }
 
+/// Subscription (`plan`) models lead, followed by local models, then
+/// non-subscription (`credits` / unreported / `api`) models.
+pub fn billingRank(billing: ?[]const u8) u8 {
+    const b = billing orelse return 2;
+    if (std.mem.eql(u8, b, "plan")) return 0;
+    if (std.mem.eql(u8, b, "local")) return 1;
+    if (std.mem.eql(u8, b, "api")) return 3;
+    return 2;
+}
+
+fn routeBillingRank(models: []const workspace.Model, id: []const u8) u8 {
+    var best: u8 = 3;
+    var found = false;
+    for (models) |m| if (std.mem.eql(u8, route(m), id)) {
+        best = @min(best, billingRank(m.billing));
+        found = true;
+    };
+    return if (found) best else 2;
+}
+
 /// "1M", "200k", "1.05M" (`harness_proto::context_label`).
 pub fn contextLabel(buf: []u8, tokens: u64) []const u8 {
     if (tokens >= 1 << 10 and std.math.isPowerOfTwo(tokens)) {
@@ -360,32 +380,37 @@ pub fn rows(a: *const App, gpa: Allocator) ![]Row {
         return out.toOwnedSlice(gpa);
     }
     if (p.starred) {
-        for (p.favorites.items) |f| {
+        for (0..4) |b_rank| for (p.favorites.items) |f| {
             if (a.selected != null and !std.mem.eql(u8, f.harness, harness)) continue;
-            for (modelsFor(a, f.harness)) |m| if (std.mem.eql(u8, m.id, f.model) and searchRank(query, m) != null) {
+            for (modelsFor(a, f.harness)) |m| if (billingRank(m.billing) == b_rank and std.mem.eql(u8, m.id, f.model) and searchRank(query, m) != null) {
                 try out.append(gpa, .{ .harness = f.harness, .model = m });
             };
-        }
+        };
         return out.toOwnedSlice(gpa);
     }
     const models = a.models.items;
     if (query.len > 0) {
-        for (0..3) |rank| for (models) |m| {
+        for (0..4) |b_rank| for (0..3) |rank| for (models) |m| {
+            if (billingRank(m.billing) != b_rank) continue;
             if (searchRank(query, m)) |r| if (r == rank) try out.append(gpa, .{ .harness = harness, .model = m });
         };
         return out.toOwnedSlice(gpa);
     }
-    var routes: std.ArrayList([]const u8) = .empty;
+    var raw_routes: std.ArrayList([]const u8) = .empty;
     for (models) |m| {
         const id = route(m);
-        for (routes.items) |have| {
+        for (raw_routes.items) |have| {
             if (std.mem.eql(u8, have, id)) break;
-        } else try routes.append(gpa, id);
+        } else try raw_routes.append(gpa, id);
     }
-    claudeAgentFirst(routes.items);
+    claudeAgentFirst(raw_routes.items);
+    var routes: std.ArrayList([]const u8) = .empty;
+    for (0..4) |b_rank| for (raw_routes.items) |id| {
+        if (routeBillingRank(models, id) == b_rank) try routes.append(gpa, id);
+    };
     for (routes.items) |id| {
         var first = true;
-        for (models) |m| if (std.mem.eql(u8, route(m), id)) {
+        for (0..4) |b_rank| for (models) |m| if (billingRank(m.billing) == b_rank and std.mem.eql(u8, route(m), id)) {
             if (first) try out.append(gpa, .{ .harness = harness, .model = m, .header = providerInfo(id).name });
             first = false;
             try out.append(gpa, .{ .harness = harness, .model = m });
@@ -445,4 +470,39 @@ test "every slider has a colour and Grok and Z.ai differ (every_slider_has_a_col
     try testing.expect(binary(&.{ "none", "high" }));
     try testing.expect(!binary(&.{ "low", "high" }));
     try testing.expectEqualStrings("On", levelLabel("high", true));
+}
+
+test "subscription models and routes come before non-subscription credits and API models" {
+    try testing.expect(billingRank("plan") < billingRank("local"));
+    try testing.expect(billingRank("local") < billingRank("credits"));
+    try testing.expect(billingRank("credits") < billingRank("api"));
+
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    a.new_harness = try testing.allocator.dupe(u8, "graff");
+    a.models_for = try testing.allocator.dupe(u8, "graff");
+    const sample = [_]workspace.Model{
+        .{ .id = "codegraff/kimi-k3", .label = "kimi-k3", .billing = "credits" },
+        .{ .id = "kimi/kimi-for-coding", .label = "kimi-for-coding", .billing = "plan" },
+        .{ .id = "kimi/k3.1-pro", .label = "k3.1-pro", .billing = "plan" },
+    };
+    try copyModels(&a.models, &sample);
+
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const grouped = try rows(&a, arena.allocator());
+    try testing.expectEqualStrings("Kimi", grouped[0].header.?);
+    try testing.expectEqualStrings("kimi/kimi-for-coding", grouped[1].model.id);
+    try testing.expectEqualStrings("kimi/k3.1-pro", grouped[2].model.id);
+    try testing.expectEqualStrings("Codegraff", grouped[3].header.?);
+    try testing.expectEqualStrings("codegraff/kimi-k3", grouped[4].model.id);
+
+    a.view.model_picker.query.set("kimi");
+    const searched = try rows(&a, arena.allocator());
+    try testing.expectEqual(@as(usize, 3), searched.len);
+    // Both Kimi subscription models lead the Codegraff credits model even though
+    // `k3.1-pro` matches `kimi` via its route prefix (`kimi/k3.1-pro`).
+    try testing.expectEqualStrings("kimi/kimi-for-coding", searched[0].model.id);
+    try testing.expectEqualStrings("kimi/k3.1-pro", searched[1].model.id);
+    try testing.expectEqualStrings("codegraff/kimi-k3", searched[2].model.id);
 }

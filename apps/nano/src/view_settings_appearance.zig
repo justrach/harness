@@ -117,7 +117,7 @@ fn caption(c: *ui.Context, k: theme.Colors, label: []const u8) void {
 
 /// `section_card` with its top margin taken off.
 fn card(c: *ui.Context, k: theme.Colors) ui.Div {
-    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
 }
 
 // System, Light, Dark.

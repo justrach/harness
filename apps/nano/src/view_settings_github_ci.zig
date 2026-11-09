@@ -386,7 +386,7 @@ fn rowInner() f32 {
 /// `section_card`, `mt` below what's above.
 fn card(c: *ui.Context, k: theme.Colors, mt: f32) ui.Div {
     set.space(c, mt);
-    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
 }
 
 /// The quiet line (`quiet_text`), wrapped at `w`.

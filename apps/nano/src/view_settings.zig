@@ -141,12 +141,15 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (back.clicked()) close(a);
 }
 
+const nav_shadow_dark = [_]ui.Shadow{.{ .color = .{ .a = 0.16 }, .blur = 2, .y = 1 }};
+const nav_shadow_light = [_]ui.Shadow{.{ .color = .{ .a = 0.06 }, .blur = 2, .y = 1 }};
+
 fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
     ui.key(c, s.key());
     var r = ui.div(c).row().wFull().px(8).py(6).gap(8).itemsCenter().rounded(8);
     if (selected) {
         r = r.bg(if (k.is_harp) k.active else k.selected);
-        if (k.is_harp) r = r.border(k.border_strong).borderW(0.5).shadows(&.{.{ .color = .{ .a = if (k.dark) 0.16 else 0.06 }, .blur = 2, .y = 1 }});
+        if (k.is_harp) r = r.border(k.border_strong).borderW(0.5).shadows(if (k.dark) &nav_shadow_dark else &nav_shadow_light);
     } else {
         r = r.hover(k.hover);
     }
@@ -159,7 +162,10 @@ fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
 
 /// The open section's page.
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
-    c.scroll_scene_ok = false;
+    // Prevent retain.store from caching a viewport-culled partial scene for
+    // Settings pages, so every 120Hz scroll event paints newly revealed cards
+    // immediately without torn borders or pop-in.
+    c.virtual_list = true;
     {
         // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
         // with a nanoui that has overlay bars (justrach/nanoui#21).
@@ -168,7 +174,13 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.scroll(c, page_style);
         defer ui.end(c);
         // `page_column`: 768 wide at most, centred, 24 either side, 32 above.
-        const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64);
+        ui.key(c, c.print("settings-page-{s}", .{@tagName(a.settings.section)}));
+        const enter = ui.motion.frame(c, .{
+            .initial = .{ .opacity = 0 },
+            .target = .{ .opacity = 1 },
+            .transition = .{ .tween = .{ .duration = 0.14, .ease = .linear } },
+        });
+        const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64).motion(enter);
         defer col.end();
         // The column's inside: wrapped text needs its width up front.
         const main_w = c.size.w - sidebar.width;

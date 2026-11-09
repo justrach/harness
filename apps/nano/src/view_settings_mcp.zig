@@ -293,7 +293,7 @@ fn empty(c: *ui.Context, k: theme.Colors) void {
 
 fn list(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.space(c, 16);
-    const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    const cd = ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
     defer cd.end();
     for (a.mcp.servers.items, 0..) |s, ix| {
         ui.key(c, s.name);
