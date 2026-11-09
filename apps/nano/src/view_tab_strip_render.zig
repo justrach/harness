@@ -69,7 +69,7 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
         const controls: f32 = 18 + (if (width >= chrome.slot_room_for_add) @as(f32, 24) else 0) + (if (width >= chrome.slot_room_for_close) @as(f32, 24) else 0);
         const room = @max(0, width - 7 - 4 - 14 - 12 - controls);
         kit.ellipsisText(c, name, .{ .size = 12, .line_height = 14, .color = if (on) k.text else k.muted }, room);
-        const meta = ui.div(c).row().h(12).wFull().gap(6).itemsCenter().clip();
+        const meta = ui.div(c).row().h(14).wFull().gap(6).itemsCenter().clip();
         defer meta.end();
         // A new, unsent session can move computers from this label; its
         // project belongs to the old computer, so that choice clears it.
@@ -77,37 +77,59 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
             .chat => |pane| strip.chatId(a, pane) == null,
             else => false,
         };
-        const device_extra: f32 = if (device_editable) 9 else 0;
-        const dev_w = (if (project != null) @min(c.text.width(computer, .{ .size = 10 }) + 13 + device_extra, room * 0.5) else room);
+        const dev_text_w = c.text.width(computer, .{ .size = 10 });
+        const pick_text_w: ?f32 = if (project) |f| c.text.width(f.name, .{ .size = 10 }) else null;
+        const pick_changeable = if (project) |f| f.changeable else false;
+        const chips = @import("motion_rules.zig").slotChipWidths(room, dev_text_w, device_editable, pick_text_w, pick_changeable);
         {
-            var dev = ui.div(c).row().w(@max(0, dev_w)).gap(3).itemsCenter().rounded(3).clip();
+            ui.key(c, "slot-device");
+            var dev = ui.div(c).row().w(chips.dev_w).h(14).gap(3).itemsCenter().rounded(3).clip();
             if (device_editable) dev = dev.px(3).hover(k.ink(0.10)).control();
             defer dev.end();
+            const dev_rect = c.rects.get(c.node(dev.index).id) orelse c.rects.get(c.node(box.index).id);
+            if (device_editable and a.view.strip.menu == .device and strip.same(a.view.strip.target, target)) {
+                if (dev_rect) |r| a.view.strip.device_anchor = r;
+            }
             icons.icon(c, .monitor, 10, k.muted, 0);
-            kit.ellipsisText(c, computer, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, dev_w - 13 - device_extra));
+            kit.ellipsisText(c, computer, .{ .size = 10, .line_height = 12, .color = k.muted }, chips.dev_text_max);
             if (device_editable) {
                 icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
                 if (dev.clicked()) {
                     handled = true;
-                    strip.queue(a, .{ .focus = target });
-                    strip.open(a, .device, target, c.rects.get(c.node(dev.index).id));
+                    const state = &a.view.strip;
+                    if (state.menu == .device and strip.same(state.target, target)) {
+                        state.menu = null;
+                    } else {
+                        strip.queue(a, .{ .focus = target });
+                        strip.open(a, .device, target, dev_rect);
+                    }
                 }
             }
         }
         if (project) |f| {
-            var pick = ui.div(c).row().grow().w(0).h(14).gap(3).itemsCenter().rounded(3).clip();
+            ui.key(c, "slot-folder");
+            var pick = ui.div(c).row().w(chips.pick_w).h(14).gap(3).itemsCenter().rounded(3).clip();
             if (f.changeable) pick = pick.px(3).hover(k.ink(0.10)).control();
             defer pick.end();
+            const pick_rect = c.rects.get(c.node(pick.index).id) orelse c.rects.get(c.node(box.index).id);
+            if (f.changeable and a.view.strip.menu == .folder and !a.view.strip.footer_folder and strip.same(a.view.strip.target, target)) {
+                if (pick_rect) |r| a.view.strip.anchor = r;
+            }
             icons.icon(c, .folder, 10, k.muted, 0);
-            kit.ellipsisText(c, f.name, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, room - dev_w - 6 - 13 - (if (f.changeable) @as(f32, 18) else 0)));
+            kit.ellipsisText(c, f.name, .{ .size = 10, .line_height = 12, .color = k.muted }, chips.pick_text_max);
             if (f.changeable) {
                 icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
                 strip.offerSplitFolder(c, a, target, c.rects.get(c.node(pick.index).id));
                 if (pick.clicked()) {
                     handled = true;
-                    // Focus is queued; the menu's rows read the target's draft.
-                    strip.queue(a, .{ .focus = target });
-                    strip.open(a, .folder, target, c.rects.get(c.node(pick.index).id));
+                    const state = &a.view.strip;
+                    if (state.menu == .folder and !state.footer_folder and strip.same(state.target, target)) {
+                        state.menu = null;
+                    } else {
+                        // Focus is queued; the menu's rows read the target's draft.
+                        strip.queue(a, .{ .focus = target });
+                        strip.open(a, .folder, target, pick_rect);
+                    }
                 }
             }
         }
@@ -129,7 +151,12 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
         if (menu_count > 1 or hot) icons.icon(c, .@"alt-arrow-down", 11, k.muted, 0);
         if (button.clicked()) {
             handled = true;
-            strip.open(a, .panel, target, c.rects.get(c.node(button.index).id));
+            const state = &a.view.strip;
+            if (state.menu == .panel and strip.same(state.target, target)) {
+                state.menu = null;
+            } else {
+                strip.open(a, .panel, target, c.rects.get(c.node(button.index).id) orelse c.rects.get(c.node(box.index).id));
+            }
         }
     }
     if (width >= chrome.slot_room_for_close) {

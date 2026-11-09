@@ -401,6 +401,11 @@ pub const Store = struct {
     /// The open chat tabs, as the GPUI app stores them: `openTabs` in visual
     /// order and `lastChatId` for the active one. Other keys stay as they are.
     pub fn setOpenTabs(s: *Store, ids: []const []const u8, active: ?[]const u8) void {
+        if (!s.updateOpenTabs(ids, active)) return;
+        s.flushOpenTabsAndLayout();
+    }
+
+    pub fn updateOpenTabs(s: *Store, ids: []const []const u8, active: ?[]const u8) bool {
         var same = s.open_tabs.items.len == ids.len;
         if (same) for (s.open_tabs.items, ids) |have, want| {
             if (!std.mem.eql(u8, have, want)) {
@@ -412,23 +417,14 @@ pub const Store = struct {
             const last = s.text("lastChatId");
             if ((active == null and last == null) or
                 (active != null and last != null and std.mem.eql(u8, active.?, last.?)))
-                return;
+                return false;
         }
         if (s.doc_arena == null) s.doc_arena = .init(s.gpa);
         const a = s.doc_arena.?.allocator();
         s.open_tabs = .empty;
-        for (ids) |id| s.open_tabs.append(a, a.dupe(u8, id) catch return) catch return;
+        for (ids) |id| s.open_tabs.append(a, a.dupe(u8, id) catch return false) catch return false;
         if (active) |id| s.remember("lastChatId", .{ .string = id }) else _ = s.doc.orderedRemove("lastChatId");
-
-        var arena: std.heap.ArenaAllocator = .init(s.gpa);
-        defer arena.deinit();
-        const ar = arena.allocator();
-        var tabs: json.Array = .init(ar);
-        for (ids) |id| tabs.append(.{ .string = id }) catch return;
-        s.writeMany(&.{
-            .{ .key = "openTabs", .value = .{ .array = tabs } },
-            .{ .key = "lastChatId", .value = if (active) |id| .{ .string = id } else .null },
-        });
+        return true;
     }
 
     /// Nano's tab-split layout. Kept beside the shared `openTabs` so Nano
@@ -439,9 +435,35 @@ pub const Store = struct {
     }
 
     pub fn setTabLayout(s: *Store, body: []const u8) void {
-        if (s.text("nanoTabLayout")) |old| if (std.mem.eql(u8, old, body)) return;
-        s.remember("nanoTabLayout", .{ .string = body });
+        if (!s.updateTabLayout(body)) return;
         s.write("nanoTabLayout", .{ .string = body });
+    }
+
+    pub fn updateTabLayout(s: *Store, body: []const u8) bool {
+        if (s.text("nanoTabLayout")) |old| if (std.mem.eql(u8, old, body)) return false;
+        s.remember("nanoTabLayout", .{ .string = body });
+        return true;
+    }
+
+    pub fn flushOpenTabsAndLayout(s: *Store) void {
+        var arena: std.heap.ArenaAllocator = .init(s.gpa);
+        defer arena.deinit();
+        const ar = arena.allocator();
+        var tabs: json.Array = .init(ar);
+        for (s.open_tabs.items) |id| tabs.append(.{ .string = id }) catch return;
+        const active = s.text("lastChatId");
+        if (s.text("nanoTabLayout")) |layout_body| {
+            s.writeMany(&.{
+                .{ .key = "openTabs", .value = .{ .array = tabs } },
+                .{ .key = "lastChatId", .value = if (active) |id| .{ .string = id } else .null },
+                .{ .key = "nanoTabLayout", .value = .{ .string = layout_body } },
+            });
+        } else {
+            s.writeMany(&.{
+                .{ .key = "openTabs", .value = .{ .array = tabs } },
+                .{ .key = "lastChatId", .value = if (active) |id| .{ .string = id } else .null },
+            });
+        }
     }
 
     /// The pins, replaced and written: only this profile's, the others as

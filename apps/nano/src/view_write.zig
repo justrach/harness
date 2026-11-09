@@ -113,9 +113,12 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         // The bare field contributes two points of vertical padding.
         const area = column(c, w).grow().h(0).pt(10).pb(10);
         defer area.end();
-        const at = c.nodes.items.len;
         const rect = c.rects.get(c.node(area.index).id);
         const lines: u16 = if (rect) |r| @intFromFloat(@max(1, @floor((r.h - 24) / line_h))) else 20;
+        if (a.view.write_focus) {
+            c.focus = c.peekId(null);
+            a.view.write_focus = false;
+        }
         const r = ui.textField(c, &a.composer, .{
             .placeholder = "Do anything\u{2026}",
             .width = .fill,
@@ -128,12 +131,6 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
             .caret = @import("view_composer.zig").message_caret,
             .caret_color = k.accent,
         });
-        const id = c.node(@intCast(at)).id;
-        if (a.view.write_focus) {
-            c.focus = id;
-            c.changed = true;
-            a.view.write_focus = false;
-        }
         // Enter always inserts a line here, regardless of composer settings.
         if (r.submitted) {
             _ = a.composer.insert(r.caret, "\n");

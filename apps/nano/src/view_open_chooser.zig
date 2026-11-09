@@ -104,14 +104,12 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         const field = ui.div(c).row().wFull().px(10).py(8).rounded(8).bg(k.ink(0.04));
         defer field.end();
         ui.key(c, "destination-folder-search");
-        const at = c.nodes.items.len;
-        const result = ui.textField(c, &s.query, .{ .placeholder = "Search projects…", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 13 });
-        s.field = c.node(@intCast(at)).id;
+        s.field = c.peekId(null);
         if (s.focus) {
             c.focus = s.field;
-            c.changed = true;
             s.focus = false;
         }
+        const result = ui.textField(c, &s.query, .{ .placeholder = "Search projects…", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 13 });
         if (result.changed) {
             s.cursor = 0;
             c.changed = true;

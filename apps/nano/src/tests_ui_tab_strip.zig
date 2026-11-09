@@ -373,10 +373,12 @@ test "Cmd+[ and Cmd+] step single-pane panel tabs and retain loaded transcripts 
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
     _ = h.t.shortcut(.{ .key = '[', .cmd = true });
     try testing.expectEqual(@as(u8, 1), h.t.ctx.stats.passes);
+    try testing.expectEqual(@as(usize, 0), h.t.ctx.scroll_moved.count());
     try testing.expectEqualStrings("a", h.a.selected.?);
     try testing.expectEqual(entries_ptr, h.a.transcript.entries.items.ptr);
     _ = h.t.shortcut(.{ .key = ']', .cmd = true });
     try testing.expectEqual(@as(u8, 1), h.t.ctx.stats.passes);
+    try testing.expectEqual(@as(usize, 0), h.t.ctx.scroll_moved.count());
     try testing.expectEqualStrings("c", h.a.selected.?);
     _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
     try testing.expectEqual(@as(u8, 1), h.t.ctx.stats.passes);

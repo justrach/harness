@@ -7,6 +7,7 @@ test {
     _ = @import("engine.zig");
     _ = @import("app.zig");
     _ = @import("rules.zig");
+    _ = @import("motion_rules.zig");
     _ = @import("tools.zig");
     _ = @import("compact.zig");
     _ = @import("prompt_history.zig");

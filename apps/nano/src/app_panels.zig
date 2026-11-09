@@ -159,6 +159,8 @@ fn host(a: *const App) ?[]const u8 {
 /// A new chat was opened: what the panels showed was the last one's.
 pub fn chatChanged(a: *App) void {
     const p = &a.panels;
+    const same = if (p.chat) |c| (if (a.selected) |s| std.mem.eql(u8, c, s) else false) else a.selected == null;
+    if (same) return;
     if (p.w_diffs) |id| a.engine.cancel(id);
     if (p.w_git) |id| a.engine.cancel(id);
     p.w_diffs = null;

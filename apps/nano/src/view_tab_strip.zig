@@ -212,7 +212,24 @@ pub fn settle(a: *App) void {
             @import("app_open_chooser.zig").open(a, .new_project);
         },
     }
-    if (a.view.strip.menu == null and active(a) == .chat) a.view.focus_composer = true;
+    const motion = @import("motion_rules.zig");
+    const menu_kind: motion.MenuKind = if (a.view.strip.menu) |m| switch (m) {
+        .panel => .panel,
+        .history => .history,
+        .folder => .folder,
+        .device => .device,
+    } else .none;
+    const focus_decision = motion.settleFocus(menu_kind, active(a) == .chat);
+    if (focus_decision.focus_menu) {
+        a.view.focus_composer = false;
+        a.view.strip.focus_menu = true;
+        if (focus_decision.search_focus) {
+            a.view.strip.search_focus = true;
+            a.view.strip.select_current = true;
+        }
+    } else if (focus_decision.focus_composer) {
+        a.view.focus_composer = true;
+    }
     a.redraw();
 }
 pub fn newTab(a: *App, panel: Panel) void {
@@ -247,6 +264,13 @@ pub fn queue(a: *App, action: Action) void {
     a.redraw();
 }
 pub fn open(a: *App, menu: Menu, target: Panel, anchor: ?ui.Rect) void {
+    @import("frame_profile.zig").note(a, switch (menu) {
+        .panel => "strip-menu-panel",
+        .history => "strip-menu-history",
+        .folder => "strip-menu-folder",
+        .device => "strip-menu-device",
+    });
+    a.view.focus_composer = false;
     a.view.strip.menu = menu;
     a.view.strip.footer_folder = false;
     a.view.strip.cursor = 0;
@@ -332,6 +356,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
 /// ⌘D keeps the release flow: split now, then choose the new pane's folder
 /// from the menu under its slot.
 pub fn splitChoosingFolder(a: *App, axis: tabs.Axis) void {
+    @import("frame_profile.zig").note(a, if (axis == .horizontal) "cmd-d" else "cmd-shift-d");
     const before = chatCount(a);
     a.splitPane(axis);
     if (chatCount(a) <= before) return;

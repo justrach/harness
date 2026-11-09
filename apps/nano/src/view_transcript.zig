@@ -69,9 +69,10 @@ pub fn paneHeight(c: *ui.Context, a: *const App) ?f32 {
 pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     const rail = @import("view_rail.zig");
     rail.step(c, &a.view.rail);
+    const just_stuck = a.view.stick_end;
     const drawn = entries(c, a, k, &a.transcript, paneWidth(c, a), a.w_doc.id != null, 64 - sidebar.titlebar_h);
     rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, mainWidth(c, a));
-    recoverBlank(c, a, drawn);
+    if (!just_stuck) recoverBlank(c, a, drawn);
     a.view.jump_box = drawn.box;
     a.view.jump_distance = drawn.from_end;
 }
@@ -153,6 +154,11 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     if (subagent != null) st.justify = .start;
     st.scroll = true;
     st.direction = .column;
+    // The chat these are, for routing a sign-in: the open one's or a pane's.
+    const chat_id: ?[]const u8 = if (subagent) |s| s.parent else if (t == &a.transcript) a.selected else for (a.peers.items) |*p| {
+        if (&p.transcript == t) break p.id;
+    } else null;
+    if (subagent == null) if (chat_id) |id| ui.key(c, c.print("scroll-{s}", .{id}));
     const scroll = c.open(st, null);
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
@@ -160,7 +166,10 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // offset there makes the box follow its end again (`follow_end`).
     if (subagent == null and t == &a.transcript and a.view.stick_end) {
         a.view.stick_end = false;
-        c.scroll.put(c.gpa, drawn.box, std.math.floatMax(f32)) catch {};
+        const sync = @import("motion_rules.zig").stickEndScroll(c.scroll_max.get(drawn.box));
+        c.scroll_follow.put(c.gpa, drawn.box, sync.follow) catch {};
+        c.scroll.put(c.gpa, drawn.box, sync.scroll) catch {};
+        c.scroll_seen.put(c.gpa, drawn.box, sync.seen) catch {};
     }
     if (c.scroll_max.get(drawn.box)) |max| {
         const at = c.scroll.get(drawn.box) orelse 0;
@@ -170,10 +179,6 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const body = ui.div(c).column().w(col);
     defer body.end();
     const entries_ = t.entries.items;
-    // The chat these are, for routing a sign-in: the open one's or a pane's.
-    const chat_id: ?[]const u8 = if (subagent) |s| s.parent else if (t == &a.transcript) a.selected else for (a.peers.items) |*p| {
-        if (&p.transcript == t) break p.id;
-    } else null;
     // Loading does not itself imply work; the session row does, even when
     // no assistant part has arrived yet.
     _ = loading;
@@ -190,7 +195,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         };
         if (tweening and i + 2 < entries_.len and e.status != .streaming and e.cached_h > 0) {
             if (scroll_rect) |view| if (prev) |r| {
-                if (r.y + r.h < view.y - 250 or r.y > view.y + view.h + 250) {
+                if (@import("motion_rules.zig").skipOffscreenRow(tweening, r.y, r.y + r.h, view.y, view.y + view.h, 250)) {
                     _ = c.leaf(.{ .width = .fill, .height = .{ .px = e.cached_h } }, .none, null);
                     if (e.role == .user) {
                         ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};

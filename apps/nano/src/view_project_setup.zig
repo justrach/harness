@@ -174,14 +174,12 @@ fn details(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer box.end();
         if (s.busy) text(c, k, s.name.text()) else {
             ui.key(c, "project-name-field");
-            const at = c.nodes.items.len;
-            const result = ui.textField(c, &s.name, .{ .placeholder = "Project name", .placeholder_color = k.faint, .bare = true, .width = .fill, .size = 14 });
-            s.field = c.node(@intCast(at)).id;
+            s.field = c.peekId(null);
             if (s.focus) {
                 c.focus = s.field;
-                c.changed = true;
                 s.focus = false;
             }
+            const result = ui.textField(c, &s.name, .{ .placeholder = "Project name", .placeholder_color = k.faint, .bare = true, .width = .fill, .size = 14 });
             submit = result.submitted;
         }
     }
@@ -263,18 +261,16 @@ fn browser(c: *ui.Context, a: *App, k: theme.Colors) void {
         const box = ui.div(c).row().wFull().px(10).py(8).rounded(8).bg(k.ink(0.04));
         defer box.end();
         ui.key(c, "project-folder-search");
-        const at = c.nodes.items.len;
+        s.field = c.peekId(null);
+        if (s.focus) {
+            c.focus = s.field;
+            s.focus = false;
+        }
         const result = ui.textField(c, &s.query, .{ .placeholder = switch (s.step) {
             .devices => "Search devices…",
             .locations => "Search locations…",
             else => "Search folders…",
         }, .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 13 });
-        s.field = c.node(@intCast(at)).id;
-        if (s.focus) {
-            c.focus = s.field;
-            c.changed = true;
-            s.focus = false;
-        }
         if (result.submitted and !s.loading) {
             const list = rows(a, c.alloc());
             if (list.len > 0) activate(a, list[@min(s.active, list.len - 1)]) else typedPath(a);

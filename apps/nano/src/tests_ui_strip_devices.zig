@@ -244,3 +244,38 @@ test "Nanoui request: an existing conversation keeps its execution computer" {
     try testing.expectEqualStrings("local", h.a.findChat("a").?.device_id.?);
     try testing.expectEqualStrings("local", h.a.device_id.?);
 }
+
+test "split slot computer picker fits its chevron and switches directly while Cmd+D folder menu is open" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.press(.{ .key = 'd', .cmd = true });
+    try testing.expect(h.a.view.strip.menu == .folder);
+    const label = @import("strip_device.zig").localLabel();
+    var slot_computer: ?@import("nanoui").ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| {
+            if (std.mem.eql(u8, text.str, label) and node.rect.y < 42 and node.rect.x > 650) {
+                slot_computer = node.rect;
+            }
+        },
+        else => {},
+    };
+    const comp = slot_computer orelse return error.MissingSplitSlotComputer;
+    // The chevron (9px) after `This Mac` must fit inside `slot-device` without clipping.
+    var chevron_fits = false;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.rect.y < 42 and node.rect.x <= comp.x and node.rect.x + node.rect.w >= comp.x + comp.w + 9) {
+            chevron_fits = true;
+        }
+    }
+    try testing.expect(chevron_fits);
+    // Clicking `This Mac` while the Cmd+D folder menu is open switches directly to `.device`.
+    h.t.click(comp.x + comp.w / 2, comp.y + comp.h / 2);
+    h.t.settle(1);
+    try testing.expectEqual(strip.Menu.device, h.a.view.strip.menu.?);
+    try h.t.clickText("Build box");
+    h.t.settle(1);
+    try testing.expectEqualStrings("remote", h.a.new_device.?);
+    try testing.expect(h.a.new_no_project);
+}

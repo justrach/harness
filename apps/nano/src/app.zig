@@ -192,6 +192,9 @@ pub const View = struct {
     theme_reload: bool = false,
     /// Boxes hovered as GPUI's `hover_listener` hovers them (kit.listenerHover).
     hovers: std.AutoHashMapUnmanaged(u64, bool) = .empty,
+    /// True while `view.zig` is running pre-tree setup/input dispatch before
+    /// building nodes, so `a.redraw()` does not redundantly reset `frame_in`.
+    in_pre_tree: bool = false,
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);
@@ -405,6 +408,8 @@ pub const App = struct {
     /// The saved GPUI `openTabs` were applied (or there were none): this
     /// window may now publish its own tabs back to the shared settings.
     tabs_ready: bool = false,
+    tabs_dirty: bool = false,
+    tabs_save_at: f64 = 0,
     /// The active tab's other panes' chats, each watched.
     peers: std.ArrayList(Peer) = .empty,
     /// A split's divider being dragged.
@@ -490,6 +495,10 @@ pub const App = struct {
         }
         a.devices.deinit();
         a.rememberTabs();
+        if (a.tabs_dirty) {
+            a.tabs_dirty = false;
+            a.settings.flushOpenTabsAndLayout();
+        }
         a.tabs.deinit();
         for (a.peers.items) |*p| {
             p.transcript.deinit();
@@ -571,7 +580,11 @@ pub const App = struct {
     }
 
     pub fn redraw(a: *App) void {
-        if (a.window) |w| w.redraw();
+        if (a.view.in_pre_tree) return;
+        if (a.window) |w| {
+            @import("frame_profile.zig").countRedraw();
+            w.redraw();
+        }
     }
 
     /// The agents and the new chat's agent's models, for the composer.
@@ -693,6 +706,13 @@ pub const App = struct {
                 if (a.engine.state == .connected) a.watchPeer(p);
             } else next = if (next) |n| @min(n, t) else t;
         };
+        if (a.tabs_dirty) {
+            if (now >= a.tabs_save_at) {
+                a.tabs_dirty = false;
+                @import("frame_profile.zig").note(a, "flush-tabs");
+                a.settings.flushOpenTabsAndLayout();
+            } else next = if (next) |n| @min(n, a.tabs_save_at) else a.tabs_save_at;
+        }
         return if (next) |n| @floatCast(n - now) else null;
     }
 
@@ -821,8 +841,15 @@ pub const App = struct {
             for (s.panes.items) |id| addTabId(a, &ids, id);
             for (s.groups[0..s.panes.items.len]) |group| for (group.items.items) |tab| addTabId(a, &ids, tab.chat);
         };
-        a.settings.setOpenTabs(ids.items, a.tabs.current());
-        @import("app_tab_layout.zig").remember(a);
+        const tabs_changed = a.settings.updateOpenTabs(ids.items, a.tabs.current());
+        const layout_changed = @import("app_tab_layout.zig").rememberInMemory(a);
+        if (!tabs_changed and !layout_changed) return;
+        if (a.window != null and !a.offscreen) {
+            a.tabs_dirty = true;
+            a.tabs_save_at = a.now + 0.25;
+        } else {
+            a.settings.flushOpenTabsAndLayout();
+        }
     }
 
     fn addTabId(a: *App, ids: *std.ArrayList([]const u8), id: ?[]const u8) void {

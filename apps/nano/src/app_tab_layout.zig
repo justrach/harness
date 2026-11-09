@@ -34,11 +34,15 @@ const SavedLayout = struct {
 
 /// Publishes the current top-level tabs and every split under them.
 pub fn remember(a: *App) void {
+    if (rememberInMemory(a)) a.settings.flushOpenTabsAndLayout();
+}
+
+pub fn rememberInMemory(a: *App) bool {
     var arena: std.heap.ArenaAllocator = .init(a.gpa);
     defer arena.deinit();
     const alloc = arena.allocator();
     var saved: std.ArrayList(SavedTab) = .empty;
-    saved.ensureTotalCapacity(alloc, a.tabs.items.items.len) catch return;
+    saved.ensureTotalCapacity(alloc, a.tabs.items.items.len) catch return false;
 
     for (a.tabs.items.items, 0..) |active, ix| {
         var tab: SavedTab = .{ .chat = active };
@@ -46,12 +50,12 @@ pub fn remember(a: *App) void {
             const count = @min(s.panes.items.len, tabs.max_panes);
             var panes: std.ArrayList(SavedPane) = .empty;
             var shares: std.ArrayList(f32) = .empty;
-            panes.ensureTotalCapacity(alloc, count) catch return;
-            shares.ensureTotalCapacity(alloc, count) catch return;
+            panes.ensureTotalCapacity(alloc, count) catch return false;
+            shares.ensureTotalCapacity(alloc, count) catch return false;
             for (0..count) |pane_ix| {
                 var rows: std.ArrayList(SavedPanelTab) = .empty;
                 const group = &s.groups[pane_ix];
-                rows.ensureTotalCapacity(alloc, group.items.items.len) catch return;
+                rows.ensureTotalCapacity(alloc, group.items.items.len) catch return false;
                 for (group.items.items) |row| rows.appendAssumeCapacity(.{ .chat = row.chat });
                 panes.appendAssumeCapacity(.{
                     .active = group.active,
@@ -78,8 +82,8 @@ pub fn remember(a: *App) void {
     const body = std.json.Stringify.valueAlloc(alloc, SavedLayout{
         .active = a.tabs.active,
         .tabs = saved.items,
-    }, .{}) catch return;
-    a.settings.setTabLayout(body);
+    }, .{}) catch return false;
+    return a.settings.updateTabLayout(body);
 }
 
 /// Replaces the live Tabs with the saved arrangement. False when there is no

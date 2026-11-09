@@ -24,6 +24,9 @@ const cluster_x: f32 = 88;
 const cluster_w: f32 = 24 * 3 + 8 + 2;
 
 pub fn view(a: *App, c: *ui.Context) void {
+    @import("frame_profile.zig").beginPass();
+    a.view.in_pre_tree = true;
+    defer a.view.in_pre_tree = false;
     @import("view_picker.zig").prepare(a);
     // The themes Settings › Appearance picked, for every palette drawn now.
     theme.light_id = a.settings.themeId(false);
@@ -100,6 +103,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     strip.settle(a);
     keys(c, a);
     a.syncPeers();
+    a.view.in_pre_tree = false;
     if (a.view.menus.overview.open and !a.view.settings_open) {
         @import("view_sessions.zig").page(c, a, k);
         @import("view_palette.zig").overlay(c, a, surfaces.popup(k));
@@ -447,12 +451,12 @@ fn divider(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, across: bool, to
 fn neighbor(c: *ui.Context, a: *App, k: theme.Colors, ix: usize, chat_id: ?[]const u8, w: f32) bool {
     _ = ix;
     // The strip is this panel's only header, even when unfocused.
-    const body = ui.div(c).column().grow().wFull();
-    defer body.end();
     if (chat_id) |id| {
         if (a.peer(id)) |p| _ = transcript_view.entries(c, a, k, &p.transcript, w, p.watch != null, 8);
         return false;
     }
+    const body = ui.div(c).column().grow().wFull();
+    defer body.end();
     const empty = ui.div(c).column().grow().wFull().px(16).gap(4).center();
     defer empty.end();
     ui.text(c, "Empty pane", .{ .size = 13, .color = k.muted.alpha(0.8) });

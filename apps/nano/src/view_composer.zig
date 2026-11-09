@@ -148,7 +148,7 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     // The whole writing plane focuses the input, including its padding.
     // Picker controls keep their own focus when they open.
     if (box.clicked() and a.picker == .none) a.view.focus_composer = true;
-    if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else c.animationFrame();
+    if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else if (a.window == null) c.animationFrame();
     if (shape == .expanded) attachmentStrip(c, a, k, w);
     {
         // Keep the field's keyed ancestry in both shapes. Only styles and

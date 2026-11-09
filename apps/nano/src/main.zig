@@ -26,6 +26,7 @@ pub fn main(init: std.process.Init) !void {
     // pinned its agent for this run.
     if (harness_override == null) @import("composer_defaults.zig").apply(&a);
     a.env = init.environ_map;
+    @import("frame_profile.zig").start(&a);
     // Panics, fatal signals and hangs leave their stacks in ~/.harness/logs.
     if (a.settings.dataDir()) |dir| crash_log.start(init.io, dir);
     // Custom themes either app added, for the pickers and a picked one.
@@ -68,6 +69,5 @@ pub fn main(init: std.process.Init) !void {
     a.release.done = .{ .ctx = &a, .func = App.releaseCame };
     a.release.start();
     @import("graff_update.zig").start(&a);
-    @import("frame_profile.zig").start(&a);
     try app.run();
 }

@@ -107,10 +107,7 @@ fn host(a: *const App) ?[]const u8 {
 /// Lists the open chat's project's actions, when it changed.
 pub fn refresh(a: *App) void {
     const x = &a.actions;
-    const sid = spaceOf(a) orelse {
-        x.status = .idle;
-        return;
-    };
+    const sid = spaceOf(a) orelse return;
     if (x.space) |s| if (std.mem.eql(u8, s, sid) and x.status != .idle) return;
     if (x.space) |s| x.gpa.free(s);
     x.space = x.gpa.dupe(u8, sid) catch null;

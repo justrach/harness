@@ -10,9 +10,9 @@ const rules = @import("rules.zig");
 
 pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     const menu = a.view.strip.menu orelse return;
-    const anchor = (if (menu == .device) a.view.strip.device_anchor else a.view.strip.anchor) orelse return;
+    const anchor = (if (menu == .device) a.view.strip.device_anchor orelse a.view.strip.anchor else a.view.strip.anchor) orelse ui.Rect{ .x = a.view.sidebar_width + 16, .y = 5, .w = 100, .h = 32 };
     if (a.view.strip.focus_menu) {
-        c.focus = 0;
+        if (menu != .folder) c.focus = 0;
         a.view.strip.focus_menu = false;
     }
     a.view.strip.rows = 0;
@@ -23,7 +23,8 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     const x = rules.snapToWindow(anchor.x, width, c.size.w, 8);
     const y = @min(anchor.y + anchor.h + 4, @max(8, c.size.h - 220));
     {
-        const scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(4);
+        const scrim_top = @import("motion_rules.zig").scrimTop(false, @import("panel_chrome.zig").header_height);
+        const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);
         defer scrim.end();
         if (scrim.clicked()) {
             a.view.strip.menu = null;
@@ -40,12 +41,13 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
             ui.text(c, "A session's computer can't be changed.", .{ .size = 12, .color = k.muted, .wrap = true });
             return;
         }
-        if (a.device_id) |local| {
-            const selected = if (id) |have| std.mem.eql(u8, have, local) else false;
+        const local = a.device_id orelse "local";
+        {
+            const selected = if (id) |have| std.mem.eql(u8, have, local) else true;
             if (row(c, a, k, .monitor, @import("strip_device.zig").localLabel(), selected)) strip.queueDevice(a, target, local);
         }
         for (a.devices.items) |dev| {
-            if (a.device_id) |local| if (std.mem.eql(u8, local, dev.id)) continue;
+            if (std.mem.eql(u8, local, dev.id)) continue;
             const selected = if (id) |have| std.mem.eql(u8, have, dev.id) else false;
             // This is a real execution target, even with no folders. Its ID
             // is parked with this draft and sent in CreateChat, never swapped
@@ -150,7 +152,8 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
     const x = rules.snapToWindow(anchor.x, width, c.size.w, 8);
     const y = rules.snapToWindow(if (footer and !flip) anchor.y - height - 4 else anchor.y + anchor.h + (if (footer) @as(f32, 4) else 0), height, c.size.h, 8);
     {
-        const scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(4);
+        const scrim_top = @import("motion_rules.zig").scrimTop(footer, @import("panel_chrome.zig").header_height);
+        const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);
         defer scrim.end();
         if (scrim.clicked()) {
             state.menu = null;
@@ -164,13 +167,12 @@ fn folderMenu(c: *ui.Context, a: *App, k: theme.Colors, anchor: ui.Rect) void {
         ui.key(c, "panel-menu-search");
         const field = ui.div(c).row().wFull().px(10).py(6).rounded(7).bg(k.ink(0.04));
         defer field.end();
-        const at = c.nodes.items.len;
-        const result = ui.textField(c, &state.query, .{ .placeholder = if (footer) "Search projects…" else "Search folders…", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 13 });
+        const field_id = c.peekId(null);
         if (state.search_focus) {
-            c.focus = c.node(@intCast(at)).id;
+            c.focus = field_id;
             state.search_focus = false;
-            c.changed = true;
         }
+        const result = ui.textField(c, &state.query, .{ .placeholder = if (footer) "Search projects…" else "Search folders…", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 13 });
         if (result.changed) {
             matches = search.indices(c.alloc(), a.spaces.items, device, state.query.text()) catch return;
             state.cursor = if (footer) 0 else search.afterEdit(matches.len);
