@@ -399,6 +399,7 @@ struct HomeView: View {
         }
         .onChange(of: horizontalSizeClass) { noteFoldable() }
         .environment(\.switchToSession, switchTo)
+        .environment(\.openNewSession, { startNewSession(prompt: nil) })
         .onChange(of: path) { _, _ in
             // A row picked from the list over the upper half opens there; the list gets out of the way.
             if laptopListShown { withAnimation(Motion.collapse) { laptopListShown = false } }

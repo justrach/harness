@@ -38,14 +38,17 @@ struct ModelInfo: Identifiable, Hashable {
     let reasoningLevels: [String]
     /// Harness-specific traits such as Codex Standard/Fast.
     let options: [ModelOptionInfo]
+    /// Catalog billing tag ("plan", "local", "credits", "api") when reported.
+    let billing: String?
 
     init(id: String, label: String, description: String?, reasoningLevels: [String],
-         options: [ModelOptionInfo] = []) {
+         options: [ModelOptionInfo] = [], billing: String? = nil) {
         self.id = id
         self.label = label
         self.description = description
         self.reasoningLevels = reasoningLevels
         self.options = options
+        self.billing = billing
     }
 }
 
@@ -330,7 +333,8 @@ enum HarnessCatalog {
                 label = curated
             }
             return ModelInfo(id: id, label: label, description: row.description,
-                             reasoningLevels: row.reasoningLevels, options: options)
+                             reasoningLevels: row.reasoningLevels, options: options,
+                             billing: row.billing)
         }
     }
 
@@ -363,7 +367,8 @@ enum HarnessCatalog {
                 options.append(resolvedContext)
             }
             return ModelInfo(id: modelId, label: existing.label, description: existing.description,
-                             reasoningLevels: existing.reasoningLevels, options: options)
+                             reasoningLevels: existing.reasoningLevels, options: options,
+                             billing: existing.billing)
         }
         return ModelInfo(id: modelId, label: curatedLabel(modelId, harness: harness) ?? modelId,
                          description: nil, reasoningLevels: [], options: [])
@@ -386,5 +391,51 @@ enum HarnessCatalog {
 
     static func modelLabel(harness: String, modelId: String?) -> String {
         resolve(modelId: modelId, in: models(for: harness), harness: harness).label
+    }
+
+    /// Subscription (`plan`) models come first, then local models, then
+    /// non-subscription (`credits`, unreported, `api`) models.
+    static func billingRank(for model: ModelInfo) -> Int {
+        if let billing = model.billing {
+            switch billing {
+            case "plan": return 0
+            case "local": return 1
+            case "api": return 3
+            default: return 2
+            }
+        }
+        let route = model.id.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
+        switch route {
+        case "claude-agent", "codex", "chatgpt-new", "kimi": return 0
+        case "mlx", "lmstudio", "omlx": return 1
+        case "codegraff": return 2
+        default: return 2
+        }
+    }
+
+    static func searchRank(query: String, model: ModelInfo) -> Int? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return 0 }
+        if model.label.lowercased().hasPrefix(trimmed.lowercased()) { return 0 }
+        if model.label.localizedCaseInsensitiveContains(trimmed) { return 1 }
+        if model.id.localizedCaseInsensitiveContains(trimmed)
+            || (model.description?.localizedCaseInsensitiveContains(trimmed) ?? false) {
+            return 2
+        }
+        return nil
+    }
+
+    /// Orders models from subscription (`plan`) to non-subscription (`credits`/`api`),
+    /// preserving catalog order within each tier (and search relevance when `query` is non-empty).
+    static func orderedModels(_ models: [ModelInfo], query: String = "") -> [ModelInfo] {
+        let indexed = models.enumerated().compactMap { index, model -> (Int, Int, Int, ModelInfo)? in
+            guard let sRank = searchRank(query: query, model: model) else { return nil }
+            return (billingRank(for: model), sRank, index, model)
+        }
+        return indexed.sorted { lhs, rhs in
+            if lhs.0 != rhs.0 { return lhs.0 < rhs.0 }
+            if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
+            return lhs.2 < rhs.2
+        }.map(\.3)
     }
 }

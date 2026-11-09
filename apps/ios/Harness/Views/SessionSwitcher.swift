@@ -11,6 +11,8 @@ extension EnvironmentValues {
     /// Open a session from anywhere under Home. From inside a session it
     /// replaces that session rather than stacking another one behind it.
     @Entry var switchToSession: ((String) -> Void)? = nil
+    /// Open a brand-new session canvas from anywhere under Home.
+    @Entry var openNewSession: (() -> Void)? = nil
 }
 
 /// The sessions you're juggling, in the order you last called them: anything
@@ -127,6 +129,7 @@ struct SessionSwitcherSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @Environment(\.switchToSession) private var switchToSession
+    @Environment(\.openNewSession) private var openNewSession
     var current: String?
 
     var body: some View {
@@ -159,6 +162,17 @@ struct SessionSwitcherSheet: View {
             .navigationTitle("Your sessions")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if let openNewSession {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            dismiss()
+                            openNewSession()
+                        } label: {
+                            Label("New session", systemImage: "plus")
+                        }
+                        .accessibilityIdentifier("switcher-new-session")
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }

@@ -883,6 +883,7 @@ final class WorkspaceStore {
             var description: String?
             var reasoningLevels: [String]?
             var options: [WireOption]?
+            var billing: String?
         }
         let wire: [WireModel]? = try? await relay(for: deviceId)
             .call(method: "ListModels", params: ["harness": harness])
@@ -899,7 +900,8 @@ final class WorkspaceStore {
                                   },
                                   defaultChoice: option.defaultChoice
                               )
-                          })
+                          },
+                          billing: $0.billing)
             }
         }
     }

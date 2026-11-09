@@ -175,13 +175,55 @@ struct NewSessionView: View {
             // Canvas — tap dismisses the keyboard, like the old app.
             ZStack {
                 Theme.bg
-                VStack(spacing: 24) {
-                    HarnessMark()
-                        .frame(width: 84, height: 84)
-                        .opacity(0.22)
-                    Text(isChat ? "What's on your mind?" : "What are we building?")
-                        .font(Theme.sans(15))
-                        .foregroundStyle(Theme.textFaint)
+                VStack(spacing: 16) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Theme.surface)
+                            .frame(width: 48, height: 48)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .strokeBorder(Theme.border, lineWidth: 1)
+                            )
+                        HarnessBadge(harness: runHarness, size: 22)
+                    }
+                    VStack(spacing: 4) {
+                        Text(isChat ? "What's on your mind?" : "What should Graff do?")
+                            .font(Theme.sans(22, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                        Text(deviceId.map { "\(contextLabel) · \(model.deviceName($0))" } ?? contextLabel)
+                            .font(Theme.sans(13))
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                    if !isChat && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(HomeStarter.all.filter { space != nil || !$0.needsProject }) { starter in
+                                    Button {
+                                        draft = starter.prompt
+                                        focused = true
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: starter.symbol)
+                                                .font(.system(size: 12, weight: .medium))
+                                                .foregroundStyle(Theme.textMuted)
+                                            Text(starter.title)
+                                                .font(Theme.sans(12.5, weight: .medium))
+                                                .foregroundStyle(Theme.text.opacity(0.9))
+                                                .lineLimit(1)
+                                        }
+                                        .padding(.horizontal, 12)
+                                        .frame(height: 32)
+                                        .background(Theme.surface, in: Capsule())
+                                        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+                                    }
+                                    .buttonStyle(ChipPressButtonStyle())
+                                    .accessibilityIdentifier("new-session-starter-\(starter.id)")
+                                }
+                            }
+                            .padding(.horizontal, 20)
+                        }
+                        .padding(.top, 2)
+                    }
                 }
             }
             .contentShape(Rectangle())
@@ -836,13 +878,9 @@ struct ModelPickerSheet: View {
 
     private var searching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
-    /// Models in `harness` matching the search (all of them when not searching).
+    /// Models in `harness` matching the search (ordered from subscription to non-subscription).
     private func shown(for harness: String) -> [ModelInfo] {
-        let needle = query.trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty else { return models(for: harness) }
-        return models(for: harness).filter { m in
-            [m.label, m.id, m.description ?? ""].contains { $0.localizedCaseInsensitiveContains(needle) }
-        }
+        HarnessCatalog.orderedModels(models(for: harness), query: query)
     }
 
     /// While searching, only sections with a match, each open.
