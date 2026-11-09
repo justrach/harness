@@ -34,15 +34,62 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
         n += 1;
     }
     var aligned: [tabs.max_panes + 2]f32 = undefined;
-    const in_row = (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
+    const other_tabs: usize = if (a.tabs.items.items.len > 1) a.tabs.items.items.len - 1 else 0;
+    const other_pill_w: f32 = 128;
+    const other_reserve: f32 = if (other_tabs > 0) @as(f32, @floatFromInt(other_tabs)) * (other_pill_w + 6) else 0;
+    const in_row = other_tabs == 0 and (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
     const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8, &aligned);
-    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(c.size.w - a.view.sidebar_width, left, 8, n));
+    const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(240, c.size.w - a.view.sidebar_width - other_reserve), left, 8, n));
     ui.key(c, "instrument-strip");
-    const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) chrome.gutter else 2).itemsCenter().layer(2);
+    const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) chrome.gutter else 4).itemsCenter().layer(2);
     defer row.end();
     for (targets[0..n], 0..) |target, ix| slot(c, a, k, target, ix, @max(0, if (columns) aligned[ix] else shared));
+    if (other_tabs > 0) {
+        for (0..a.tabs.items.items.len) |ws| {
+            if (ws != a.tabs.active) topWorkspacePill(c, a, k, ws, other_pill_w);
+        }
+    }
     ui.key(c, "instrument-new-tab");
     if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
+}
+
+fn workspaceChatId(a: *const App, ws: usize) ?[]const u8 {
+    const primary = if (ws == a.tabs.active) a.selected else a.tabs.items.items[ws];
+    if (primary != null) return primary;
+    if (ws < a.tabs.splits.items.len) if (a.tabs.splits.items[ws]) |s| {
+        for (s.panes.items) |p| if (p) |cid| return cid;
+        for (&s.groups) |*g| for (g.items.items) |pt| if (pt.chat) |cid| return cid;
+    };
+    return null;
+}
+
+fn workspacePaneCount(a: *const App, ws: usize) usize {
+    if (ws < a.tabs.splits.items.len) if (a.tabs.splits.items[ws]) |s| return @max(1, s.panes.items.len);
+    return 1;
+}
+
+fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w: f32) void {
+    ui.key(c, c.print("top-workspace-tab-{d}", .{ws}));
+    const cid = workspaceChatId(a, ws);
+    const ch = if (cid) |id| a.findChat(id) else null;
+    const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
+    const panes_n = workspacePaneCount(a, ws);
+    var pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
+    pill = tip.on(pill, k, .{ .text = t_name, .look = .tab });
+    defer pill.end();
+    const pill_hot = pill.hovered();
+    icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 13, k.muted, 0);
+    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, @max(0, pill_w - (if (pill_hot) @as(f32, 46) else 28)));
+    var closed = false;
+    if (pill_hot) {
+        const spacer = ui.div(c).row().grow();
+        spacer.end();
+        if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 10, .tip = .{ .text = "Close tab" } })) {
+            closed = true;
+            strip.queue(a, .{ .close_global_tab = ws });
+        }
+    }
+    if (!closed and pill.clicked()) strip.queue(a, .{ .global_tab = ws });
 }
 
 fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32) void {
@@ -246,7 +293,8 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const row = ui.div(c).absolute().offset(-scroll, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
     defer row.end();
     for (0..n) |ix| {
-        const chat = if (group) |g| (if (ix == selected) a.selected else g.items.items[ix].chat) else (if (ix == selected) a.selected else a.tabs.items.items[ix]);
+        const chat = if (group) |g| (if (ix == selected) a.selected else g.items.items[ix].chat) else workspaceChatId(a, ix);
+        const panes_n = if (group != null) @as(usize, 1) else workspacePaneCount(a, ix);
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
@@ -254,12 +302,16 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         if (ix != selected) cap = cap.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
         defer cap.end();
         const hot = cap.hovered();
-        icons.icon(c, .@"chat-round-line", 14, if (ix == selected) k.text else k.muted, 0);
+        icons.icon(c, if (panes_n > 1) .widget else .@"chat-round-line", 14, if (ix == selected) k.text else k.muted, 0);
         {
             const labels = ui.div(c).column().grow().w(0).clip();
             defer labels.end();
             kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .color = if (ix == selected) k.text else k.muted }, @max(0, width - 58));
-            if (ch) |chat_row| {
+            if (panes_n > 1) {
+                const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
+                defer meta.end();
+                kit.ellipsisText(c, c.print("{d} split panes", .{panes_n}), .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, width - 58));
+            } else if (ch) |chat_row| {
                 const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
                 defer meta.end();
                 if (chat_row.branch) |branch| kit.ellipsisText(c, branch, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, (width - 58) * 0.45));

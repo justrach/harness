@@ -58,90 +58,68 @@ const OpenSession = struct {
 /// underneath each session at the top of the ⌘B sidebar.
 fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
     var sessions: std.ArrayList(OpenSession) = .empty;
-    const isolated = a.tabs.hasIsolatedWorkspaces();
-    if (!isolated) {
+    for (a.tabs.items.items, 0..) |id, ws| {
         if (a.tabs.items.items.len > 1) {
-            var stabs: std.ArrayList(SessionTab) = .empty;
-            var primary: ?[]const u8 = a.selected;
-            for (a.tabs.items.items, 0..) |id, t_ix| {
-                const cid = if (t_ix == a.tabs.active) a.selected else id;
-                if (primary == null and cid != null) primary = cid;
-                stabs.append(c.alloc(), .{
-                    .ws = 0,
-                    .tab = t_ix,
-                    .chat_id = cid,
-                    .active = t_ix == a.tabs.active,
-                    .flat = true,
-                }) catch return;
-            }
-            sessions.append(c.alloc(), .{
-                .ws = 0,
-                .title_chat_id = primary,
-                .active = true,
-                .tabs = stabs.items,
-            }) catch return;
+            if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
+                const project = a.workspaceProject(ws) orelse continue;
+                if (!std.mem.eql(u8, project, filter)) continue;
+            };
         }
-    } else {
-        for (a.tabs.items.items, 0..) |id, ws| {
-            if (a.tabs.items.items.len > 1) {
-                if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
-                    const project = a.workspaceProject(ws) orelse continue;
-                    if (!std.mem.eql(u8, project, filter)) continue;
-                };
-            }
-            var stabs: std.ArrayList(SessionTab) = .empty;
-            const active_cid: ?[]const u8 = if (ws == a.tabs.active) a.selected else id;
-            if (a.tabs.splits.items[ws]) |split| {
-                for (0..split.panes.items.len) |pane_ix| {
-                    const g = &split.groups[pane_ix];
-                    const pane_cid = if (ws == a.tabs.active and pane_ix == split.focus)
-                        a.selected
-                    else if (pane_ix == split.focus)
-                        id
-                    else
-                        split.panes.items[pane_ix];
-                    if (g.items.items.len > 1) {
-                        for (0..g.items.items.len) |pt_ix| {
-                            const cid = if (pt_ix == g.active) pane_cid else g.items.items[pt_ix].chat;
-                            stabs.append(c.alloc(), .{
-                                .ws = ws,
-                                .pane = pane_ix,
-                                .tab = pt_ix,
-                                .chat_id = cid,
-                                .active = ws == a.tabs.active and pane_ix == split.focus and pt_ix == g.active,
-                            }) catch return;
-                        }
-                    } else {
+        var stabs: std.ArrayList(SessionTab) = .empty;
+        const active_cid: ?[]const u8 = if (ws == a.tabs.active) a.selected else id;
+        var title_cid: ?[]const u8 = active_cid;
+        if (a.tabs.splits.items[ws]) |split| {
+            for (0..split.panes.items.len) |pane_ix| {
+                const g = &split.groups[pane_ix];
+                const pane_cid = if (ws == a.tabs.active and pane_ix == split.focus)
+                    a.selected
+                else if (pane_ix == split.focus)
+                    id
+                else
+                    split.panes.items[pane_ix];
+                if (split.panes.items.len > 1 and title_cid == null and pane_cid != null) title_cid = pane_cid;
+                if (g.items.items.len > 1) {
+                    for (0..g.items.items.len) |pt_ix| {
+                        const cid = if (pt_ix == g.active) pane_cid else g.items.items[pt_ix].chat;
+                        if (split.panes.items.len > 1 and title_cid == null and cid != null) title_cid = cid;
                         stabs.append(c.alloc(), .{
                             .ws = ws,
                             .pane = pane_ix,
-                            .chat_id = pane_cid,
-                            .active = ws == a.tabs.active and pane_ix == split.focus,
+                            .tab = pt_ix,
+                            .chat_id = cid,
+                            .active = ws == a.tabs.active and pane_ix == split.focus and pt_ix == g.active,
                         }) catch return;
                     }
+                } else {
+                    stabs.append(c.alloc(), .{
+                        .ws = ws,
+                        .pane = pane_ix,
+                        .chat_id = pane_cid,
+                        .active = ws == a.tabs.active and pane_ix == split.focus,
+                    }) catch return;
                 }
-            } else {
-                stabs.append(c.alloc(), .{
-                    .ws = ws,
-                    .chat_id = active_cid,
-                    .active = ws == a.tabs.active,
-                }) catch return;
             }
-            if (a.tabs.items.items.len == 1 and stabs.items.len <= 1) continue;
-            const singleton = if (a.tabs.splits.items[ws]) |split|
-                split.panes.items.len == 1 and split.groups[0].items.items.len == 1
-            else
-                true;
-            if (singleton) if (id) |chat_id| if (a.findChat(chat_id)) |chat| {
-                if (!chat.archived and listed(a, chat)) continue;
-            };
-            sessions.append(c.alloc(), .{
+        } else {
+            stabs.append(c.alloc(), .{
                 .ws = ws,
-                .title_chat_id = active_cid,
+                .chat_id = active_cid,
                 .active = ws == a.tabs.active,
-                .tabs = stabs.items,
             }) catch return;
         }
+        if (a.tabs.items.items.len == 1 and stabs.items.len <= 1) continue;
+        const singleton = if (a.tabs.splits.items[ws]) |split|
+            split.panes.items.len == 1 and split.groups[0].items.items.len == 1
+        else
+            true;
+        if (singleton) if (id) |chat_id| if (a.findChat(chat_id)) |chat| {
+            if (!chat.archived and listed(a, chat)) continue;
+        };
+        sessions.append(c.alloc(), .{
+            .ws = ws,
+            .title_chat_id = title_cid,
+            .active = ws == a.tabs.active,
+            .tabs = stabs.items,
+        }) catch return;
     }
     if (sessions.items.len == 0) return;
     ui.key(c, "sidebar-open-workspaces");
