@@ -51,6 +51,48 @@ pub const Catalog = struct {
     }
 };
 
+/// A scalar transition on the shell's 200ms `RESIZE` curve (`cubic-bezier(0, 0, 0.58, 1)`),
+/// ported from `crates/ui/src/pickers/compact.rs` (`ScalarTransition`):
+/// changing the target mid-flight starts from the live interpolated value, and
+/// dragging seeds `from == to == drag_fraction` so releasing glides smoothly
+/// from the exact pointer position to the snapped stop.
+pub const ScalarTransition = struct {
+    from: f32,
+    to: f32,
+    started: f64,
+
+    pub const Sample = struct { value: f32, moving: bool };
+
+    pub fn valueAt(self: ScalarTransition, now: f64, reduced: bool) Sample {
+        const duration: f64 = 0.2;
+        if (reduced or (self.from - self.to) == 0) return .{ .value = self.to, .moving = false };
+        const elapsed = @max(0.0, now - self.started);
+        if (elapsed >= duration) return .{ .value = self.to, .moving = false };
+        const raw: f32 = @floatCast(std.math.clamp(elapsed / duration, 0.0, 1.0));
+        const progress = ui.motion.Easing.css_ease_out.sample(raw)[0];
+        return .{
+            .value = self.from + (self.to - self.from) * progress,
+            .moving = true,
+        };
+    }
+
+    pub fn sample(slot: *?ScalarTransition, target: f32, now: f64, reduced: bool) Sample {
+        if (slot.*) |*tr| {
+            const current = tr.valueAt(now, reduced);
+            if ((tr.to - target) != 0) {
+                tr.* = .{
+                    .from = if (reduced) target else current.value,
+                    .to = target,
+                    .started = now,
+                };
+            }
+            return tr.valueAt(now, reduced);
+        }
+        slot.* = .{ .from = target, .to = target, .started = now };
+        return .{ .value = target, .moving = false };
+    }
+};
+
 pub const State = struct {
     query: ui.TextBuffer = .{},
     starred: bool = false,
@@ -82,6 +124,20 @@ pub const State = struct {
     /// The slider's track as last laid out, and a drag on it.
     track: ?ui.Rect = null,
     dragging: bool = false,
+    slider_seeded: bool = false,
+    /// Continuous 0–1 pointer position while dragging the effort slider (`CompactMotion.drag_fraction`).
+    drag_fraction: ?f32 = null,
+    /// 0–1 effort thumb/fill position (`CompactMotion.effort`).
+    effort_anim: ?ScalarTransition = null,
+    /// 0–1 press elevation while dragging the effort thumb (`CompactMotion.press`).
+    press_anim: ?ScalarTransition = null,
+    /// 0–1 glow/shimmer energy on deeper effort stops (`CompactMotion.energy`).
+    energy_anim: ?ScalarTransition = null,
+    /// Continuous 0–1 phase of the effort shimmer wave (`CompactMotion.shimmer_phase`).
+    shimmer_phase: f32 = 0,
+    shimmer_last: ?f64 = null,
+    /// Animated width of the composer's model + effort trigger chip (`model_chip_width`).
+    chip_width: ?ScalarTransition = null,
 
     pub fn clearStage(s: *State, gpa: Allocator) void {
         if (s.stage) |st| {
@@ -90,6 +146,12 @@ pub const State = struct {
         }
         s.stage = null;
         s.dragging = false;
+        s.slider_seeded = false;
+        s.drag_fraction = null;
+        s.effort_anim = null;
+        s.press_anim = null;
+        s.energy_anim = null;
+        s.shimmer_last = null;
     }
 
     pub fn deinit(s: *State, gpa: Allocator) void {
@@ -505,4 +567,30 @@ test "subscription models and routes come before non-subscription credits and AP
     try testing.expectEqualStrings("kimi/kimi-for-coding", searched[0].model.id);
     try testing.expectEqualStrings("kimi/k3.1-pro", searched[1].model.id);
     try testing.expectEqualStrings("codegraff/kimi-k3", searched[2].model.id);
+}
+
+test "ScalarTransition glides from pointer release position to snapped effort stop" {
+    var slot: ?ScalarTransition = null;
+    // First sample seeds at target without moving.
+    const s0 = ScalarTransition.sample(&slot, 0.5, 1.0, false);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), s0.value, 1e-5);
+    try testing.expect(!s0.moving);
+
+    // Dragging roots the transition at the continuous pointer fraction (e.g. 0.62).
+    slot = .{ .from = 0.62, .to = 0.62, .started = 1.1 };
+
+    // On mouse release at t = 1.1, sampling against snapped stop 0.5 starts a smooth glide from 0.62 -> 0.5.
+    const s1 = ScalarTransition.sample(&slot, 0.5, 1.1, false);
+    try testing.expectApproxEqAbs(@as(f32, 0.62), s1.value, 1e-5);
+    try testing.expect(s1.moving);
+
+    // Halfway through the 200ms RESIZE curve, the thumb is between 0.62 and 0.5.
+    const s_mid = ScalarTransition.sample(&slot, 0.5, 1.2, false);
+    try testing.expect(s_mid.value < 0.62 and s_mid.value > 0.5);
+    try testing.expect(s_mid.moving);
+
+    // At 200ms (t = 1.3), it lands cleanly at 0.5 and stops moving.
+    const s_end = ScalarTransition.sample(&slot, 0.5, 1.31, false);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), s_end.value, 1e-5);
+    try testing.expect(!s_end.moving);
 }

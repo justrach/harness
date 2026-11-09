@@ -153,8 +153,9 @@ theorem restart_place_exclusive (u s d : Bool) :
 /-- `Cmd+W` close target resolution (`decideCloseTarget` in `motion_rules.zig`):
 1. If the archive-on-close dialog (`closeChoiceOpen`) is already open, a second
    `Cmd+W` immediately confirms closing (`confirmChoice`) instead of stalling.
-2. When focused on `.chat` inside a split (`splitPanes > 1`), `Cmd+W` always
-   closes the focused split pane (`closeSplitPane`), never a background host tab.
+2. Whenever an open file/diffs/host tab is visible (`hasHost && !expanded`),
+   `Cmd+W` closes that open host tab (`closeHost`) before closing any chat pane
+   tab (`closePaneTab`), split pane (`closeSplitPane`), or chat tab (`closeTab`).
 3. When on the last empty new-chat tab (`isOnlyNewChat`), `Cmd+W` is a `.noop`. -/
 inductive CloseSurface where
   | chat | host | files
@@ -185,9 +186,9 @@ def decideCloseTarget
   | .host  => .closeHost
   | .files => .closeFiles
   | .chat  =>
-    if paneTabs > 1 then .closePaneTab
+    if hasHost && !expanded then .closeHost
+    else if paneTabs > 1 then .closePaneTab
     else if splitPanes > 1 then .closeSplitPane
-    else if hasHost && !expanded then .closeHost
     else if isOnlyNewChat then .noop
     else if asksArchive then .askChoice
     else .closeTab
@@ -215,9 +216,14 @@ theorem cmd_w_second_press_confirms_choice
     decideCloseTarget s true pt sp hh ex only ask = .confirmChoice := by
   rfl
 
-theorem cmd_w_split_pane_takes_precedence_over_host
-    (sp : Nat) (hsp : sp > 1) (hh ex only ask : Bool) :
-    decideCloseTarget .chat false 1 sp hh ex only ask = .closeSplitPane := by
+theorem cmd_w_visible_host_closes_before_chat
+    (pt sp : Nat) (only ask : Bool) :
+    decideCloseTarget .chat false pt sp true false only ask = .closeHost := by
+  rfl
+
+theorem cmd_w_split_pane_closes_when_no_host
+    (sp : Nat) (hsp : sp > 1) (ex only ask : Bool) :
+    decideCloseTarget .chat false 1 sp false ex only ask = .closeSplitPane := by
   unfold decideCloseTarget
   simp [hsp]
 

@@ -212,6 +212,8 @@ pub fn addDiffsTab(a: *App) void {
     p.tabs.append(p.gpa, .{ .kind = .diffs, .shown = p.bumpShown() }) catch return;
     p.active = p.tabs.items.len - 1;
     p.host_open = true;
+    a.view.strip.focused = .host;
+    if (a.view.strip.expanded != null) a.view.strip.expanded = .host;
     openDiffs(a);
     a.redraw();
 }

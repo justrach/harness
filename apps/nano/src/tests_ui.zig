@@ -2134,3 +2134,127 @@ test "Settings Devices and the sidebar footer surface desktop app updates and au
     h.t.settle(1);
     try testing.expect(!h.a.settings.get(.restart_to_install_updates));
 }
+
+test "model picker row context badges stay valid through paint and clicking Models back button with reasoning slider never panics" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    h.a.gpa.free(h.a.new_harness);
+    h.a.new_harness = try h.a.gpa.dupe(u8, "codex");
+    h.a.gpa.free(h.a.models_for);
+    h.a.models_for = try h.a.gpa.dupe(u8, "codex");
+    var models_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"chatgpt-new/gpt-5.6-sol","label":"gpt-5.6-sol","context":200000,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high","xhigh"],"defaultReasoningLevel":"high"},
+        \\ {"id":"chatgpt-new/gpt-6.1-sol","label":"gpt-6.1-sol","context":1048576,"maker":"openai","billing":"plan","reasoningLevels":["low","medium","high"],"defaultReasoningLevel":"medium"}]
+    , .{});
+    defer models_parsed.deinit();
+    try h.a.models.replace(models_parsed.value);
+    h.a.select(null, null);
+    h.t.settle(1);
+    h.a.togglePicker();
+    h.t.settle(1);
+
+    // Context badges ("200k", "1M") are allocated in the frame arena `c.alloc()`,
+    // never on a stack buffer that corrupts into `?` before paint.
+    try testing.expect(h.t.hasText("200k"));
+    try testing.expect(h.t.hasText("1M"));
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| {
+            try testing.expect(std.unicode.utf8ValidateSlice(tx.str));
+            try testing.expect(std.mem.indexOf(u8, tx.str, "\xaa") == null);
+        },
+        else => {},
+    };
+
+    // Click `gpt-6.1-sol` in the picker list to open the Reasoning page (`levels.len == 3 > 1`).
+    try h.t.clickText("gpt-6.1-sol");
+    h.t.frame();
+    const initial_page_h = h.a.view.model_picker.height;
+    h.t.settle(1);
+    try testing.expect(h.a.view.model_picker.stage != null);
+    // Page height opens at its exact natural height without a 2-frame bounce.
+    try testing.expect(@abs(h.a.view.model_picker.height - initial_page_h) <= 1.0);
+
+    // Click the slider track to move reasoning from `medium` (1) to `low` (0),
+    // release the mouse, and verify the thumb never snaps backward on release.
+    const track = h.a.view.model_picker.track orelse return error.MissingSliderTrack;
+    h.t.moveTo(track.x + 2, track.y + track.h / 2);
+    h.t.ctx.input.click_count = 1;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    try testing.expectEqual(@as(?usize, 0), h.a.view.model_picker.stage.?.level);
+    h.t.ctx.pointerUp();
+    h.t.frame();
+    h.t.settle(1);
+    try testing.expectEqual(@as(?usize, 0), h.a.view.model_picker.stage.?.level);
+
+    // Click `<- Models` (`model-page-back`): `back(c, a)` clears `p.stage = null`
+    // mid-frame before `slider()` runs; verify it never unwraps `p.stage.?` or
+    // leaves freed memory in any text node.
+    const back_btn = h.t.findText("Models") orelse return error.MissingBackButton;
+    h.t.moveTo(back_btn.x + back_btn.w / 2, back_btn.y + back_btn.h / 2);
+    h.t.ctx.input.click_count = 1;
+    h.t.ctx.pointerDown();
+    h.t.frame();
+    h.t.ctx.pointerUp();
+    h.t.frame();
+    try testing.expect(h.a.view.model_picker.stage == null);
+    try testing.expectEqual(@as(f32, 480), h.a.view.model_picker.height);
+    for (h.t.ctx.nodes.items) |n| switch (n.content) {
+        .text => |tx| try testing.expect(std.mem.indexOf(u8, tx.str, "\xaa\xaa\xaa\xaa") == null),
+        else => {},
+    };
+}
+
+test "Cmd+W closes an open file tab before closing a chat tab even when multiple chat tabs are open" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.settings.set(.archive_on_close_chosen, true);
+    h.a.settings.set(.archive_sessions_on_close, false);
+    h.a.select("c1", "s1");
+    h.a.newTab();
+    h.a.select("c2", "s1");
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+
+    // Open a file tab in the workbench host pane, then click back into the chat
+    // composer so `.chat` is the focused surface while the file tab remains open.
+    @import("app_files.zig").openFile(&h.a, "src/main.rs");
+    try testing.expect(h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 1), h.a.panels.tabs.items.len);
+    h.a.view.strip.focused = .{ .chat = 0 };
+    h.t.settle(1);
+
+    // First Cmd+W closes the open file tab (`src/main.rs`), NOT the chat tab `c2`.
+    try testing.expect(h.t.shortcut(.{ .key = 'w', .cmd = true }));
+    try testing.expectEqual(@as(usize, 0), h.a.panels.tabs.items.len);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("c2", h.a.selected.?);
+}
+
+test "Cmd+=, Cmd+-, and Cmd+0 step and reset interface zoom at 120Hz" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.settle(1);
+    try testing.expectEqual(@as(f32, 16), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 1.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '=', .cmd = true }));
+    try testing.expectEqual(@as(f32, 18), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 18.0 / 16.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '=', .cmd = true, .shift = true }));
+    try testing.expectEqual(@as(f32, 20), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 20.0 / 16.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '-', .cmd = true }));
+    try testing.expectEqual(@as(f32, 18), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 18.0 / 16.0), h.t.ctx.access.zoom, 0.001);
+
+    try testing.expect(h.t.shortcut(.{ .key = '0', .cmd = true }));
+    try testing.expectEqual(@as(f32, 16), h.a.settings.uiFontSize());
+    try testing.expectApproxEqAbs(@as(f32, 1.0), h.t.ctx.access.zoom, 0.001);
+}

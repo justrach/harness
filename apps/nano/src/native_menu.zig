@@ -8,13 +8,24 @@ const StoredItem = @typeInfo(@FieldType(@FieldType(nanoui.Menu, "items"), "items
 const ItemArg = if (@typeInfo(StoredItem) == .pointer) StoredItem else *StoredItem;
 
 pub fn install(app: *nanoui.App, a: *App) !void {
+    const view_items = viewItems(a);
     const items = windowItems(a);
     try app.setMenu(&.{
         .{ .role = .app_menu },
         .{ .role = .edit_menu },
-        .{ .role = .view_menu },
+        .{ .role = .view_menu, .submenu = &view_items },
         .{ .role = .window_menu, .submenu = &items },
     });
+}
+
+fn viewItems(a: *App) [5]nanoui.MenuItem {
+    return .{
+        .{ .label = "Bigger Text", .accelerator = "Cmd+=", .click = .of(a, zoomIn) },
+        .{ .label = "Smaller Text", .accelerator = "Cmd+-", .click = .of(a, zoomOut) },
+        .{ .label = "Actual Size", .accelerator = "Cmd+0", .click = .of(a, resetZoom) },
+        .separator,
+        .{ .role = .toggle_full_screen },
+    };
 }
 
 fn windowItems(a: *App) [7]nanoui.MenuItem {
@@ -27,6 +38,30 @@ fn windowItems(a: *App) [7]nanoui.MenuItem {
         .{ .label = "Close Tab", .accelerator = "Cmd+W", .click = .of(a, closeTab) },
         .{ .role = .close, .accelerator = "Cmd+Shift+W" },
     };
+}
+
+fn zoomIn(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.stepZoom(1);
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn zoomOut(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.stepZoom(-1);
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn resetZoom(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.resetZoom();
+    a.view.in_pre_tree = was;
+    a.redraw();
 }
 
 fn closeTab(a: *App, _: ItemArg) void {

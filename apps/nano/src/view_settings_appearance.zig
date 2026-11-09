@@ -456,7 +456,15 @@ fn fonts(c: *ui.Context, a: *App, k: theme.Colors) void {
         const pair = ui.div(c).row().gap(8);
         defer pair.end();
         if (dropdown(c, k, 220, familyLabel(family))) a.setNotice("Choosing a font isn't in Harness Nano yet: use Harness.");
-        if (dropdown(c, k, 128, c.print("{d} px", .{size}))) a.setNotice("Choosing a size isn't in Harness Nano yet: use Harness.");
+        if (dropdown(c, k, 128, c.print("{d} px", .{size}))) {
+            if (comptime std.mem.eql(u8, f[4], "uiFontSize")) {
+                const cur = a.settings.uiFontSize();
+                const next = if (cur >= 20) @as(f32, 12) else @import("settings.zig").stepUiFontSize(cur, 1);
+                a.settings.setUiFontSize(next);
+            } else {
+                a.setNotice("Choosing a size isn't in Harness Nano yet: use Harness.");
+            }
+        }
     }
     widthRow(c, a, k);
 }

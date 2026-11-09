@@ -43,6 +43,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     // Context.begin seeded an implicit root before the view resolved its
     // live theme. It must not leave an opaque sheet under a glass window.
     c.node(0).style.background = c.theme.background;
+    c.setZoom(a.settings.uiFontSize() / 16.0);
     @import("view_transcript.zig").column_w = @import("view_settings_appearance.zig").transcriptWidth(a);
     a.ansi = k.ansi;
     if (a.tick(c.time)) |wait| c.frameIn(wait);
@@ -108,6 +109,8 @@ pub fn view(a: *App, c: *ui.Context) void {
     }
     strip.settle(a);
     keys(c, a);
+    c.setZoom(a.settings.uiFontSize() / 16.0);
+    if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
     a.view.in_pre_tree = false;
     if (a.view.menus.overview.open and !a.view.settings_open) {
@@ -532,6 +535,23 @@ fn keys(c: *ui.Context, a: *App) void {
         @import("frame_profile.zig").note(a, "cmd-b");
         c.changed = false;
         toggleSidebar(c, a, false);
+    }
+    if (c.shortcut(.{ .key = '=', .cmd = true }) or
+        c.shortcut(.{ .key = '=', .cmd = true, .shift = true }) or
+        c.shortcut(.{ .key = '+', .cmd = true }) or
+        c.shortcut(.{ .key = '+', .cmd = true, .shift = true }))
+    {
+        a.stepZoom(1);
+    }
+    if (c.shortcut(.{ .key = '-', .cmd = true }) or
+        c.shortcut(.{ .key = '-', .cmd = true, .shift = true }) or
+        c.shortcut(.{ .key = '_', .cmd = true }) or
+        c.shortcut(.{ .key = '_', .cmd = true, .shift = true }))
+    {
+        a.stepZoom(-1);
+    }
+    if (c.shortcut(.{ .key = '0', .cmd = true })) {
+        a.resetZoom();
     }
     if (c.shortcut(.{ .key = ',', .cmd = true })) settings_view.open(a);
     if (boundShortcut(c, a, "newProject")) {

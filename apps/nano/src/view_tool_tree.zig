@@ -102,7 +102,7 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     // Older snapshots can omit resolved, but a finished turn cannot still
     // be running. Keep any real result without inventing a start time.
     var effective = p.*;
-    if (e.status != .streaming) effective.resolved = true;
+    if (e.status != .streaming or p.output.len > 0 or p.output_ref.len > 0 or p.is_error) effective.resolved = true;
     const result = if (ordinary) rules.result(c.alloc(), &effective, if (e.status == .streaming) arrival.row.elapsed(c.time) else null) else rules.Result.settled;
     const running = ordinary and result == .running;
     var wrapper = ui.div(c).column().wFull();
@@ -139,13 +139,10 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
             const rect = c.rects.get(c.node(detail.index).id);
             const room = if (rect) |b| b.w else 160;
             const raw = if (p.agent and p.text.items.len == 0) p.subagent_title else firstLine(p.text.items);
-            // Quantize to desktop's 80ms pulse rather than allocating a
-            // distinct path every render. No scramble with reduced motion.
-            const tick: f32 = @floatCast(@mod(@floor(c.time / 0.080), 97) / 97);
             if (p.path.len > 0) {
                 const name = file_icons.basename(p.path);
-                fileBadge(c, a, k, p.path, if (running and !c.reduced_motion) rules.scramble(c.alloc(), name, tick) else name, room, parent);
-            } else kit.fadeText(c, if (running and !c.reduced_motion) rules.scramble(c.alloc(), raw, tick) else raw, kit.style(c, if (ordinary) 12 else 15, 18, .{ .mono = ordinary, .color = k.muted }), @max(room, 0));
+                fileBadge(c, a, k, p.path, name, room, parent);
+            } else kit.fadeText(c, raw, kit.style(c, if (ordinary) 12 else 15, 18, .{ .mono = ordinary, .color = k.muted }), @max(room, 0));
             if (running and !c.reduced_motion) kit.loaderFrame(c, 0.080);
         }
         // Reserving a real end column prevents a long command/path from

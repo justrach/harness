@@ -155,6 +155,36 @@ pub fn skipOffscreenRow(
     return row_bottom < view_top - pad or row_top > view_bottom + pad;
 }
 
+/// Offscreen transcript row culling gate (`Nano.Tween.shouldCullOffscreen`).
+/// Proven in `Nano/Tween.lean` (`cmd_b_always_culls_offscreen`,
+/// `settled_frame_preserves_retain_fast_path`, `rail_glide_disables_culling`):
+/// - `Cmd+B` (`tweening = true`) always culls offscreen rows, invariant to
+///   `resizing` and `streaming` state.
+/// - Settled frames (`!tweening and !resizing and !streaming`) and scrollbar
+///   rail gliding (`rail_gliding`) disable leaf-spacer culling so `nanoui`'s
+///   `< 0.02ms` GPU `retain.shift` scroll fast-path stays active and all
+///   offscreen row heights are warm before the next `Cmd+B`.
+pub fn shouldCullOffscreen(
+    tweening: bool,
+    resizing: bool,
+    streaming: bool,
+    rail_gliding: bool,
+) bool {
+    return !rail_gliding and (tweening or resizing or streaming);
+}
+
+/// Transcript column width quantization during `Cmd+B` (`Nano.Tween.tweenColumnWidth`).
+/// Proven in `Nano/Tween.lean` (`tween_column_never_exceeds_raw` and
+/// `tween_column_exact_at_cap`) never to exceed `raw_col` while quantizing widths
+/// below `max_col` to `8px` steps during `tweening` so CoreText line-wrap caches
+/// hit across intermediate `Cmd+B` frames.
+pub fn tweenColumnWidth(tweening: bool, raw_col: f32, max_col: f32) f32 {
+    if (tweening and raw_col < max_col) {
+        return @floor(raw_col / 8.0) * 8.0;
+    }
+    return raw_col;
+}
+
 /// Right-side control reservation inside a top-strip slot (`Nano.StripMenu.slotControlsWidth`).
 /// When unhovered (`!hovered`) and `menu_count <= 1`, reserves `0px` instead of `66px`.
 pub fn slotControlsWidth(slot_w: f32, hovered: bool, menu_count: usize) f32 {
@@ -211,12 +241,12 @@ pub fn decideCloseTarget(
     return switch (surface) {
         .host => .close_host,
         .files => .close_files,
-        .chat => if (pane_tabs > 1)
+        .chat => if (has_host and !expanded)
+            .close_host
+        else if (pane_tabs > 1)
             .close_pane_tab
         else if (split_panes > 1)
             .close_split_pane
-        else if (has_host and !expanded)
-            .close_host
         else if (is_only_new_chat)
             .noop
         else if (asks_archive)
@@ -377,6 +407,25 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expect(skipOffscreenRow(true, 900, 1000, 100, 700, 160));
     try std.testing.expect(!skipOffscreenRow(false, 900, 1000, 100, 700, 160));
 
+    // Exhaustive 16-state boolean truth cube for `shouldCullOffscreen`:
+    // 1. `Cmd+B` (`tweening = true, rail_gliding = false`) ALWAYS culls offscreen rows.
+    // 2. Settled frames (`!tweening and !resizing and !streaming`) NEVER cull offscreen rows
+    //    (preserving `retain.shift` and keeping offscreen heights warm before `Cmd+B`).
+    // 3. `rail_gliding = true` NEVER culls offscreen rows.
+    for ([_]bool{ false, true }) |rsz| {
+        for ([_]bool{ false, true }) |str| {
+            try std.testing.expect(shouldCullOffscreen(true, rsz, str, false));
+            try std.testing.expect(!shouldCullOffscreen(true, rsz, str, true));
+        }
+    }
+    for ([_]bool{ false, true }) |rg| {
+        try std.testing.expect(!shouldCullOffscreen(false, false, false, rg));
+    }
+    try std.testing.expectEqual(@as(f32, 736), tweenColumnWidth(true, 736, 736));
+    try std.testing.expectEqual(@as(f32, 640), tweenColumnWidth(true, 645, 736));
+    try std.testing.expectEqual(@as(f32, 645), tweenColumnWidth(false, 645, 736));
+    try std.testing.expect(tweenColumnWidth(true, 645, 736) <= 645);
+
     // Unhovered 184px slot recovers 72px of room (`153px`), fitting both `This Mac ⌄` and `harness ⌄`.
     const room = slotTextRoom(184, false, 1);
     try std.testing.expectEqual(@as(f32, 153), room);
@@ -391,7 +440,8 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, true));
     try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, false));
     try std.testing.expectEqual(CloseAction.confirm_choice, decideCloseTarget(.chat, true, 1, 1, false, false, false, true));
-    try std.testing.expectEqual(CloseAction.close_split_pane, decideCloseTarget(.chat, false, 1, 2, true, false, false, false));
+    try std.testing.expectEqual(CloseAction.close_host, decideCloseTarget(.chat, false, 2, 2, true, false, false, false));
+    try std.testing.expectEqual(CloseAction.close_split_pane, decideCloseTarget(.chat, false, 1, 2, false, false, false, false));
 
     // Split-pane slot partition, other-tabs reserve, cap shadow mask, billing rank, virtual_list retain, and frosted pill policy.
     for ([_]f32{ 120, 180, 240, 320, 440 }) |sw| {

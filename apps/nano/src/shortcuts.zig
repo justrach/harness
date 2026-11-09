@@ -108,6 +108,9 @@ pub const fixed = [_]Fixed{
     .{ .title = "Command palette", .keys = "Cmd+K" },
     .{ .title = "Search sessions", .keys = "Cmd+F" },
     .{ .title = "Settings", .keys = "Cmd+," },
+    .{ .title = "Bigger text (zoom in)", .keys = "Cmd+=" },
+    .{ .title = "Smaller text (zoom out)", .keys = "Cmd+-" },
+    .{ .title = "Actual size (reset zoom)", .keys = "Cmd+0" },
 };
 
 /// "mod-shift-n" as a key-cap shows it, "⇧⌘N" (`badge_combo` on the Mac):

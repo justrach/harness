@@ -19,9 +19,12 @@ pub const State = struct {
     /// The pill as last laid out, which the card hangs from.
     anchor: ?ui.Rect = null,
     card: ?ui.Rect = null,
+    card_id: u64 = 0,
     hover_since: ?f64 = null,
     /// When the pointer left both the ring and the card.
     leave_since: ?f64 = null,
+    /// First frame of this opening, for the 120Hz hero ease-out rise.
+    opened_at: ?f64 = null,
     /// Where the pointer was when the card opened: it hangs from there.
     at: ui.Point = .{ .x = 0, .y = 0 },
     open: bool = false,
@@ -73,6 +76,7 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
         const waited = c.time - s.hover_since.?;
         if (!s.open and waited >= open_delay) {
             s.open = true;
+            s.opened_at = c.time;
             s.at = c.input.mouse;
             c.changed = true;
         } else if (!s.open) c.frameIn(@floatCast(open_delay - waited));
@@ -85,6 +89,7 @@ pub fn indicator(c: *ui.Context, a: *App, k: theme.Colors) void {
         const gone = c.time - s.leave_since.?;
         if (gone < hide_delay) return c.frameIn(@floatCast(hide_delay - gone));
         s.open = false;
+        s.opened_at = null;
         s.leave_since = null;
         s.saved_hover = null;
         c.changed = true;
@@ -144,6 +149,30 @@ const caption: f32 = 11;
 const title: f32 = 13;
 const phi: f32 = 1.618;
 
+fn estimateCardHeight(a: *const App, b: cw.Breakdown) f32 {
+    var non_zero: usize = 0;
+    for (cw.Slot.all) |slot| if (b.items[@backingInt(slot)] > 0) {
+        non_zero += 1;
+    };
+    const legend_rows = (non_zero + 1) / 2;
+    const legend_h: f32 = if (legend_rows > 0)
+        @as(f32, @floatFromInt(legend_rows)) * 19.5 + @as(f32, @floatFromInt(legend_rows - 1)) * 8.0
+    else
+        0;
+    var win_h: f32 = 21.5 + 16.0 + legend_h + 19.5 + 18.0;
+    var children: usize = if (legend_rows > 0) 5 else 4;
+    if (cw.promptCachePercent(b.tokens, a.transcript.savings, a.transcript.turn_cache_read_tokens, a.transcript.turn_input_tokens) != null) {
+        win_h += 19.5;
+        children += 1;
+    }
+    if (a.transcript.savings) |sv| if (sv.keptOut() > 0) {
+        win_h += 59.5;
+        children += 1;
+    };
+    win_h += @as(f32, @floatFromInt(children - 1)) * 10.0;
+    return @round(26.0 + win_h + 8.0 + 38.0);
+}
+
 /// The card, over everything, above the ring and ending at its right edge.
 pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     const s = &a.view.context;
@@ -151,16 +180,36 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
         s.card = null;
         return;
     }
-    if (s.anchor == null) return;
+    const anchor = s.anchor orelse return;
     const b = cw.breakdown(a.transcript.tokens, a.transcript.window, a.transcript.savings, a.transcript.entries.items) orelse return;
+    if (s.card_id != 0) if (c.rects.get(s.card_id)) |r| {
+        s.card = r;
+    };
     const w = cw.bar_width + 2 * 12 + 2;
-    const h = if (s.card) |r| r.h else 300;
-    const at = tooltipAt(s.at, .{ .w = w, .h = h }, c.size);
+    const h = if (s.card) |r| r.h else estimateCardHeight(a, b);
+    var at = tooltipAt(s.at, .{ .w = w, .h = h }, c.size);
+    if (at.y < s.at.y) at.y = @min(at.y, @max(8, anchor.y - h - 6));
+    const raw: f32 = if (c.reduced_motion) 1 else @floatCast(std.math.clamp((c.time - (s.opened_at orelse c.time)) / 0.16, 0, 1));
+    const inv = 1.0 - raw;
+    const eased = 1.0 - inv * inv * inv;
+    var hero: ui.motion.Frame = .{};
+    if (raw < 1.0) {
+        const from_x = (anchor.x + anchor.w * 0.5) - (at.x + w * 0.5);
+        hero.x = std.math.clamp(from_x * 0.18, -18, 18) * (1.0 - eased);
+        hero.y = 14.0 * (1.0 - eased);
+        hero.scale = 0.95 + 0.05 * eased;
+        hero.opacity = 0.25 + 0.75 * raw;
+        c.frameIn(1.0 / 120.0);
+    }
     ui.key(c, "context-usage-card");
-    const card = kit.shadowLg(ui.div(c).fixed().offset(at.x, at.y).w(w).layer(6).column().p(12 + 1).gap(8)
+    const card = kit.shadowLg(ui.div(c).fixed().offset(at.x, at.y).motion(hero).w(w).layer(6).column().p(12 + 1).gap(8)
         .bg(k.composer).border(k.border).borderW(1).rounded(12));
     defer card.end();
-    if (c.rects.get(c.node(card.index).id)) |r| s.card = r;
+    s.card_id = c.node(card.index).id;
+    if (c.rects.get(s.card_id)) |r| {
+        if (@abs(r.h - h) > 0.5) c.changed = true;
+        s.card = r;
+    }
     windowCard(c, a, k, b);
     // The exact numbers, a line each.
     var lines = std.mem.splitScalar(u8, cw.details(c.alloc(), a.transcript.tokens, a.transcript.window), '\n');

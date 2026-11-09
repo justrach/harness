@@ -79,9 +79,17 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
         const list = ui.div(c).column().wFull().grow().h(0).px(8).clip();
         defer list.end();
         {
-            const h = ui.div(c).row().px(8).pt(12).pb(8);
+            const h = ui.div(c).row().wFull().px(4).pt(10).pb(8).itemsCenter();
             defer h.end();
-            ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.6) }));
+            ui.key(c, "settings-top-back");
+            const top_back = kit.pressFeedback(ui.div(c).row().h(28).px(8).gap(6).itemsCenter().rounded(7).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
+            const top_hot = top_back.hovered();
+            icons.icon(c, .@"arrow-left", 13, if (top_hot) k.text else k.text.alpha(0.9), 0);
+            ui.text(c, "Back", st(c, 12.5, .{ .weight = .medium, .color = if (top_hot) k.text else k.text.alpha(0.9) }));
+            if (top_back.clicked()) close(a);
+            top_back.end();
+            ui.spacer(c);
+            ui.text(c, "Settings", st(c, 11, .{ .weight = .medium, .color = k.muted.alpha(0.75) }));
         }
         {
             // 33 tall: GPUI's search is a composer input, 5 above and below.
@@ -133,11 +141,13 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
     const foot = ui.div(c).column().wFull().px(8).pb(12);
     defer foot.end();
     ui.key(c, "settings-back");
-    const back = ui.div(c).row().wFull().px(8).py(6).gap(6).itemsCenter().rounded(8).hover(k.hover);
+    const back = kit.pressFeedback(ui.div(c).row().wFull().h(34).px(10).gap(7).itemsCenter().rounded(8).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1).hover(k.hover).control());
     defer back.end();
     const hot = back.hovered();
-    icons.icon(c, .@"alt-arrow-left", 16, k.muted, 0);
-    ui.text(c, "Back", st(c, 13, .{ .color = if (hot) k.text else k.muted }));
+    icons.icon(c, .@"arrow-left", 14, if (hot) k.text else k.text.alpha(0.9), 0);
+    ui.text(c, "Back", st(c, 13, .{ .weight = .medium, .color = if (hot) k.text else k.text.alpha(0.9) }));
+    ui.spacer(c);
+    kit.kbdHint(c, k, "esc");
     if (back.clicked()) close(a);
 }
 

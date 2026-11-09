@@ -139,7 +139,7 @@ pub fn dirKind(a: *const App, dir: []const u8) ?panels.GitKind {
         const path = e.key_ptr.*;
         if (path.len <= dir.len or !std.mem.startsWith(u8, path, dir) or path[dir.len] != '/') continue;
         const k = e.value_ptr.*;
-        if (worst == null or @intFromEnum(k) > @intFromEnum(worst.?)) worst = k;
+        if (worst == null or @backingInt(k) > @backingInt(worst.?)) worst = k;
     }
     return worst;
 }
@@ -185,6 +185,8 @@ fn onSearched(a: *App, id: u64, r: rpc.Reply) void {
 pub fn openFile(a: *App, path: []const u8) void {
     const p = &a.panels;
     p.selected = p.arena.allocator().dupe(u8, path) catch null;
+    a.view.strip.focused = .host;
+    if (a.view.strip.expanded != null) a.view.strip.expanded = .host;
     for (p.tabs.items, 0..) |t, i| if (t.kind == .file and std.mem.eql(u8, t.path, path)) {
         p.host_open = true;
         return panels.showTab(a, i);

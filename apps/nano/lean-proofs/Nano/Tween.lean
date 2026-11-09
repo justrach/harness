@@ -105,4 +105,58 @@ def cullingSoundCube : Bool :=
 
 theorem culling_never_drops_visible_row : cullingSoundCube = true := by native_decide
 
+/-- Offscreen transcript row culling gate (`shouldCullOffscreen`).
+Active layout motion (`Cmd+B` `tweening`, live window `resizing`, or active
+token `streaming`) culls offscreen rows so `Cmd+B` and live resize stay O(visible).
+When settled (`!tweening && !resizing && !streaming`) or during scrollbar rail
+gliding (`rail_gliding`), culling is off so `nanoui`'s `< 0.02ms` GPU
+`retain.shift` scroll fast-path is never disabled by tall leaf spacers and
+all offscreen row heights are warm before the next `Cmd+B`. -/
+def shouldCullOffscreen (tweening resizing streaming rail_gliding : Bool) : Bool :=
+  !rail_gliding && (tweening || resizing || streaming)
+
+/-- Theorem: `Cmd+B` (`tweening = true`, `rail_gliding = false`) always culls
+offscreen rows, completely invariant to `resizing` or `streaming` state. -/
+theorem cmd_b_always_culls_offscreen (resizing streaming : Bool) :
+    shouldCullOffscreen true resizing streaming false = true := by
+  cases resizing <;> cases streaming <;> rfl
+
+/-- Theorem: Every settled frame (`tweening = false, resizing = false, streaming = false`)
+disables offscreen leaf-spacer culling so `retain.shift` stays active and
+offscreen rows never trigger an un-cull spike at the end of `Cmd+B`. -/
+theorem settled_frame_preserves_retain_fast_path (rail_gliding : Bool) :
+    shouldCullOffscreen false false false rail_gliding = false := by
+  cases rail_gliding <;> rfl
+
+/-- Theorem: Scrollbar rail gliding (`rail_gliding = true`) always keeps the
+full retained tree intact so `retain.shift` handles the scroll in `< 0.02ms`. -/
+theorem rail_glide_disables_culling (tweening resizing streaming : Bool) :
+    shouldCullOffscreen tweening resizing streaming true = false := by
+  cases tweening <;> cases resizing <;> cases streaming <;> rfl
+
+/-- Transcript column width quantization during `Cmd+B` (`tweenColumnWidth`):
+quantizes widths below `max_col` to `8px` steps during `tweening` so CoreText
+line-wrap caches hit on `7/8` of intermediate frames without ever exceeding `raw_col`. -/
+def tweenColumnWidth (tweening : Bool) (raw_col max_col : Nat) : Nat :=
+  if tweening && decide (raw_col < max_col) then (raw_col / 8) * 8 else raw_col
+
+/-- Theorem: Quantized `Cmd+B` column width never exceeds `raw_col` (never overflows
+narrow split panes). -/
+theorem tween_column_never_exceeds_raw (tweening : Bool) (raw_col max_col : Nat) :
+    tweenColumnWidth tweening raw_col max_col ≤ raw_col := by
+  unfold tweenColumnWidth
+  split
+  · exact Nat.div_mul_le_self raw_col 8
+  · exact Nat.le_refl raw_col
+
+/-- Theorem: Whenever `raw_col ≥ max_col`, `tweenColumnWidth` is exact (`raw_col`). -/
+theorem tween_column_exact_at_cap (tweening : Bool) (raw_col max_col : Nat)
+    (h : max_col ≤ raw_col) :
+    tweenColumnWidth tweening raw_col max_col = raw_col := by
+  unfold tweenColumnWidth
+  have hlt : decide (raw_col < max_col) = false :=
+    decide_eq_false (Nat.not_lt.mpr h)
+  rw [hlt, Bool.and_false]
+  rfl
+
 end Nano.Tween

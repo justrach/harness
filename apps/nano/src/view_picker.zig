@@ -20,7 +20,7 @@ const detail_width: f32 = 276;
 /// The list's height; the model's page fits its content (`h_auto`,
 /// 4c9766def), measured as drawn, from this first guess.
 const list_height: f32 = 480;
-const stage_height: f32 = 330;
+const stage_height: f32 = 293;
 
 /// GPUI's menu_geometry and measure_trigger: new-chat menus prefer down
 /// when 180 points fit; established chats prefer up, flipping near the top.
@@ -152,9 +152,15 @@ fn stage(c: *ui.Context, a: *App, r: models.Row) void {
         if (level == null) level = levels.len - 1;
     }
     p.stage = .{ .harness = harness, .model = id, .level = level };
+    p.slider_seeded = false;
+    p.drag_fraction = null;
+    p.effort_anim = null;
+    p.press_anim = null;
+    p.energy_anim = null;
+    p.shimmer_last = null;
     p.detail = null;
     p.hover_target = null;
-    p.height = stage_height;
+    p.height = if (levels.len > 1) stage_height else 245;
     c.changed = true;
 }
 
@@ -185,7 +191,7 @@ fn commit(c: *ui.Context, a: *App) void {
     const p = &a.view.model_picker;
     const st = p.stage orelse return;
     const m = staged(a) orelse {
-        p.stage.?.error_text = "Availability changed. Go back and select the model again.";
+        if (p.stage) |*s| s.error_text = "Availability changed. Go back and select the model again.";
         c.changed = true;
         return;
     };
@@ -226,7 +232,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
         else
             null;
         if (next) |n| {
-            p.stage.?.level = n;
+            if (p.stage) |*s| s.level = n;
             c.changed = true;
         }
         return;
@@ -504,8 +510,8 @@ fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, 
     if (open and hot) p.active = at;
     const icon_sz: f32 = if (grouped) 14 else 15;
     icons.icon(c, models.modelIcon(r.model), icon_sz, if (hot or selected) k.text else k.muted.alpha(0.8), icon_sz);
-    var ctx_buf: [24]u8 = undefined;
-    const ctx_tag: ?[]const u8 = rowContextBadge(&ctx_buf, r.model);
+    const ctx_buf = c.alloc().alloc(u8, 24) catch return .{};
+    const ctx_tag: ?[]const u8 = rowContextBadge(ctx_buf, r.model);
     const tag_w: f32 = if (ctx_tag) |t| c.text.width(t, .{ .size = 10, .mono = true }) + 16 else 0;
     const room = inner - 16 - 24 - 9 - 23 - tag_w - (if (selected) @as(f32, 20) else 0);
     {
@@ -618,7 +624,10 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
 /// "Use model".
 fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     const p = &a.view.model_picker;
-    const st = p.stage.?;
+    const st = p.stage orelse return;
+    const harness_id = c.print("{s}", .{st.harness});
+    const model_id = c.print("{s}", .{st.model});
+    const fallback_level = st.level orelse 0;
     ui.key(c, "model-page");
     // The card wants its content's own height (`h_auto`), capped by the
     // room there is (`max_h`): the controls are measured as laid out, not
@@ -628,16 +637,16 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     const content = ui.div(c).column().wFull().grow().h(0);
     defer {
         content.end();
-        if (measured == 2 and @abs(natural - p.height) > 0.5) {
+        if (p.stage != null and measured == 2 and @abs(natural - p.height) > 0.5) {
             p.height = natural;
             c.changed = true;
         }
     }
     // A model the catalog dropped keeps its page, to say so on commit.
-    const m: workspace.Model = staged(a) orelse .{ .id = st.model, .label = st.model };
-    const levels = levelsOf(a, st.harness, m);
+    const m: workspace.Model = staged(a) orelse .{ .id = model_id, .label = model_id };
+    const levels = levelsOf(a, harness_id, m);
     const is_binary = models.binary(levels);
-    const raw_accent: ui.Color = if (models.brandHex(m, st.harness, k.dark)) |hx| ui.Color.hex(hx) else k.accent;
+    const raw_accent: ui.Color = if (models.brandHex(m, harness_id, k.dark)) |hx| ui.Color.hex(hx) else k.accent;
     // Ensure high contrast on warm light surfaces when the brand hex is a
     // light sky blue (`0x66b5ff`).
     const accent: ui.Color = if (!k.dark and raw_accent.b > 0.85 and raw_accent.r > 0.3)
@@ -684,13 +693,14 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             const st13: ui.TextStyle = .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.text };
             ui.text(c, if (is_binary) "Thinking" else "Reasoning", st13);
             ui.spacer(c);
-            const label = if (st.level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Model default") else "Model default";
-            const badge = ui.div(c).row().px(8).py(2).rounded(6).bg(accent.alpha(0.14)).border(accent.alpha(0.28)).borderW(1);
+            const cur_level = if (p.stage) |s| s.level else st.level;
+            const label = if (cur_level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Model default") else "Model default";
+            const badge = ui.div(c).row().px(8).py(2).rounded(6).bg(accent.alpha(0.14)).border(accent.alpha(0.28)).borderW(1).clip();
             defer badge.end();
-            ui.text(c, label, .{ .size = 12.5, .line_height = 18, .weight = .semibold, .color = k.text });
+            kit.rollText(c, "model-picker-effort-badge", label, .{ .size = 12.5, .line_height = 18, .weight = .semibold, .color = k.text });
         }
         if (levels.len > 1) {
-            slider(c, a, k, accent, levels.len, w - 32 - 28, open);
+            slider(c, a, k, accent, levels.len, w - 32 - 28, open, fallback_level);
             const ends = ui.div(c).row().wFull().itemsCenter();
             defer ends.end();
             ui.text(c, if (is_binary) "Off" else "Faster", .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.muted });
@@ -715,45 +725,129 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     ui.text(c, "Use model", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.on_solid });
 }
 
-/// The reasoning slider: a 26-point capsule rail, filled to the level in
-/// the model's colour, a dot per level, a crisp thumb; a press or a drag
-/// anywhere on it picks the nearest level, and the thumb settles in 150 ms.
-fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, tw: f32, open: bool) void {
+/// The reasoning slider (`crates/ui/src/pickers/compact.rs`): a 26-point
+/// circular capsule rail, filled to the level in the model's colour with a
+/// flowing light-wave shimmer and breathing halo on deeper effort stops,
+/// stop dots that light up as the animated fill front reaches them, and a
+/// circular thumb that tracks the pointer continuously while dragging and
+/// glides from the exact release pointer position to the snapped stop over
+/// 200ms (`RESIZE` curve).
+fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, tw: f32, open: bool, fallback_level: usize) void {
     const p = &a.view.model_picker;
-    const level = p.stage.?.level orelse 0;
     const last: f32 = @floatFromInt(n - 1);
-    const target = @as(f32, @floatFromInt(level)) / last;
-    const percent = if (p.dragging) target else ui.motion.number(c, "model-slider", target, .{ .tween = .{ .duration = 0.15, .ease = .{ .bezier = .{ 0.16, 1, 0.3, 1 } } } });
     const pad = ui.div(c).row().wFull().px(14);
     defer pad.end();
     ui.key(c, "model-slider-track");
     const track = ui.div(c).w(tw).h(34);
     defer track.end();
-    if (c.rects.get(c.node(track.index).id)) |r| p.track = r;
+    const track_id = c.node(track.index).id;
+    if (c.rects.get(track_id)) |r| p.track = r;
+    var level = if (p.stage) |s| (s.level orelse 0) else fallback_level;
     if (open and track.hovered() and c.input.pressed) p.dragging = true;
     if (p.dragging) {
         if (p.track) |r| {
             const at = std.math.clamp((c.input.mouse.x - r.x) / @max(1, r.w), 0, 1);
+            p.drag_fraction = at;
             const next: usize = @intFromFloat(@round(at * last));
             if (next != level) {
-                p.stage.?.level = next;
+                level = next;
+                if (p.stage) |*s| s.level = next;
                 c.changed = true;
             }
         }
         if (!c.input.down or c.input.released) {
             p.dragging = false;
+            p.drag_fraction = null;
             c.changed = true;
         }
     }
-    ui.div(c).absolute().offset(-14, 4).size(tw + 28, 26).rounded(13).bg(k.ink(if (k.dark) 0.08 else 0.055)).border(k.border).borderW(1).end();
-    ui.div(c).absolute().offset(-14, 4).size(percent * tw + 28, 26).rounded(13).bg(accent).end();
+    const target = @as(f32, @floatFromInt(level)) / last;
+    const effort_sample = models.ScalarTransition.sample(&p.effort_anim, target, c.time, c.reduced_motion);
+    var fraction = effort_sample.value;
+    if (p.dragging) {
+        fraction = p.drag_fraction orelse target;
+        // Root the release animation at the actual pointer position, not the previous stop.
+        p.effort_anim = .{ .from = fraction, .to = fraction, .started = c.time };
+    }
+    const press_sample = models.ScalarTransition.sample(&p.press_anim, if (p.dragging) 1.0 else 0.0, c.time, c.reduced_motion);
+    const press = press_sample.value;
+    const target_energy: f32 = if (n > 1 and level >= 2) target else if (n == 2 and level == 1) 0.75 else 0.0;
+    const energy_sample = models.ScalarTransition.sample(&p.energy_anim, target_energy, c.time, c.reduced_motion);
+    const intensity = energy_sample.value;
+    if (effort_sample.moving or press_sample.moving or energy_sample.moving) {
+        c.frameIn(1.0 / 120.0);
+    }
+    var breath: f32 = 0.0;
+    if (intensity > 0.001 and !c.reduced_motion) {
+        const dt: f32 = if (p.shimmer_last) |prev| @floatCast(std.math.clamp(c.time - prev, 0.0, 0.1)) else 0.0;
+        p.shimmer_last = c.time;
+        p.shimmer_phase = @mod(p.shimmer_phase + dt * (0.32 + 0.22 * intensity), 1.0);
+        breath = 0.5 + 0.5 * @sin(std.math.tau * p.shimmer_phase);
+        if (!effort_sample.moving and !press_sample.moving and !energy_sample.moving) {
+            c.frameIn(1.0 / 60.0);
+        }
+    } else {
+        p.shimmer_last = null;
+    }
+
+    // Track rail.
+    ui.div(c).absolute().offset(-14, 4).size(tw + 28, 26).rounded(13).circular().bg(k.ink(if (k.dark) 0.08 else 0.055)).border(k.border).borderW(1).end();
+
+    // Accent fill + flowing light-wave shimmer (`effort_fill`).
+    const fill_w = fraction * tw + 28;
+    const fill_bg = ui.motion.effects.mix(accent, ui.Color.hex(0xffffff), intensity * (0.08 + 0.12 * breath));
+    {
+        const fill_box = ui.div(c).absolute().offset(-14, 4).size(fill_w, 26).rounded(13).circular().bg(fill_bg).clip();
+        defer fill_box.end();
+        if (intensity > 0.001 and fill_w > 26) {
+            const lifted = ui.motion.effects.mix(accent, ui.Color.hex(0xffffff), 0.45);
+            const shifted = ui.Color{
+                .r = @min(1.0, accent.r * 0.85 + 0.15),
+                .g = @min(1.0, accent.g * 0.90 + 0.14),
+                .b = @min(1.0, accent.b * 0.95 + 0.18),
+                .a = 1.0,
+            };
+            const center_x = fraction * tw + 14.0;
+            const step_w: f32 = 6.0;
+            var x: f32 = 0.0;
+            while (x < fill_w) : (x += step_w) {
+                const sw = @min(step_w, fill_w - x);
+                const xm = x + sw * 0.5;
+                const slow = 0.5 + 0.5 * @sin(std.math.tau * (xm / 150.0 - 2.0 * p.shimmer_phase));
+                const quick = 0.5 + 0.5 * @sin(std.math.tau * (xm / 64.0 - 3.0 * p.shimmer_phase) + 1.7);
+                const glow_base = 0.65 * slow + 0.35 * quick;
+                const glow = glow_base * glow_base;
+                const charge = @exp(-@max(0.0, center_x - xm) / 40.0) * (0.6 + 0.4 * breath);
+                const lead = std.math.clamp(xm / 28.0, 0.0, 1.0);
+                const alpha = std.math.clamp(intensity * ((0.08 + 0.34 * glow) * lead + 0.22 * charge), 0.0, 1.0);
+                const sc = ui.motion.effects.mix(shifted, lifted, slow).alpha(alpha);
+                ui.div(c).absolute().offset(x, 0).size(sw, 26).bg(sc).end();
+            }
+        }
+    }
+
+    // Stops: filled stops follow the animated front, never jumping ahead of the thumb.
     for (0..n) |i| {
         const f = @as(f32, @floatFromInt(i)) / last;
-        const dot = if (f <= percent + 0.001) ui.Color.hex(0xffffff).alpha(0.85) else k.muted.alpha(0.45);
-        _ = c.leaf(.{ .absolute = true, .width = .{ .px = 5 }, .height = .{ .px = 5 }, .radius = 2.5, .background = dot, .offset = .{ .x = f * tw - 2.5, .y = 14.5 } }, .none, null);
+        const dot = if (f <= fraction) ui.Color.hex(0xffffff).alpha(0.45) else k.muted.alpha(0.32);
+        ui.div(c).absolute().offset(f * tw - 2.0, 15.0).size(4, 4).roundedFull().circular().bg(dot).end();
     }
-    const th: f32 = if (p.dragging) 30 else 28;
-    ui.div(c).absolute().offset(percent * tw - th / 2, (34 - th) / 2).size(th, th).roundedFull().bg(ui.Color.hex(0xfffefa)).border(k.border).borderW(1).shadowSm().end();
+
+    // Thumb: breathing accent halo on deeper effort + press elevation shadow + crisp circular handle.
+    const th: f32 = 28;
+    const tx = fraction * tw - th / 2;
+    const ty = (34 - th) / 2;
+    const live = intensity * (0.55 + 0.45 * breath);
+    if (intensity > 0.001) {
+        ui.div(c).absolute().offset(tx, ty).size(th, th).roundedFull().circular()
+            .shadow(.{ .color = accent.alpha(0.35 * live), .y = 1, .blur = 10 }).end();
+    }
+    if (press > 0.001) {
+        ui.div(c).absolute().offset(tx, ty).size(th, th).roundedFull().circular()
+            .shadow(.{ .color = ui.Color.black.alpha(0.12 * press), .y = 2.0 * press, .blur = 8 }).end();
+    }
+    ui.div(c).absolute().offset(tx, ty).size(th, th).roundedFull().circular()
+        .bg(ui.Color.hex(0xfffefa)).border(k.border).borderW(1).shadowSm().end();
 }
 
 fn tabs(c: *ui.Context, a: *App, k: theme.Colors, width: f32) void {

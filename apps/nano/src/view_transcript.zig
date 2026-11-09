@@ -155,7 +155,8 @@ fn topFade(c: *ui.Context, k: theme.Colors) void {
 fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f32, loading: bool, top: f32) Drawn {
     const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
     const resizing = c.time < a.view.resize_until;
-    const col = columnWidth(w);
+    const raw_col = columnWidth(w);
+    const col = @import("motion_rules.zig").tweenColumnWidth(tweening, raw_col, column_w);
     // The last row clears the status strip over the composer and the fade
     // band above it (`bottom_clearance + TRANSCRIPT_FADE_BAND + 8`); the
     // composer itself is under the scroll, not over it. Its bar shows
@@ -229,8 +230,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // no assistant part has arrived yet.
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
-    const scrolling = c.scroll_moved.contains(drawn.box) or c.retain.scroll_delta;
-    const cull_offscreen = (!a.offscreen or tweening or resizing) and a.view.rail.glide == null and (tweening or resizing or scrolling or streaming or entries_.len > 4);
+    const cull_offscreen = (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming, a.view.rail.glide != null);
     const cull_pad: f32 = if (tweening or resizing) 220 else 380;
     for (entries_, 0..) |*e, i| {
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).

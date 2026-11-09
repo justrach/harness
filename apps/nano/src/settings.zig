@@ -158,6 +158,40 @@ pub const sidebar_default: f32 = sidebar_min;
 pub const right_pane_min: f32 = 360;
 pub const right_pane_default: f32 = 520;
 
+/// Interface text sizes (`UiFontSize::ALL` in `typography.rs`, 16px baseline).
+pub const ui_font_sizes = [_]f32{ 12, 13, 14, 15, 16, 18, 20 };
+pub const ui_font_size_default: f32 = 16;
+
+pub fn normalizeUiFontSize(size: f32) f32 {
+    if (!std.math.isFinite(size)) return ui_font_size_default;
+    var best: f32 = ui_font_size_default;
+    var best_diff: f32 = std.math.inf(f32);
+    for (ui_font_sizes) |candidate| {
+        const diff = @abs(candidate - size);
+        if (diff < best_diff) {
+            best_diff = diff;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+/// The next supported interface text size up (`step > 0`) or down (`step < 0`),
+/// held at the ends (`UiFontSize::stepped`).
+pub fn stepUiFontSize(size: f32, step: i32) f32 {
+    const norm = normalizeUiFontSize(size);
+    var at: i32 = 4;
+    for (ui_font_sizes, 0..) |candidate, idx| {
+        if (candidate == norm) {
+            at = @intCast(idx);
+            break;
+        }
+    }
+    const last: i32 = @intCast(ui_font_sizes.len - 1);
+    const next_ix: usize = @intCast(std.math.clamp(at + step, 0, last));
+    return ui_font_sizes[next_ix];
+}
+
 /// The desktop's first-window size (`lib.rs`, 1320×880).
 pub const window_default_width: f64 = 1320;
 pub const window_default_height: f64 = 880;
@@ -666,6 +700,16 @@ pub const Store = struct {
         return @max(right_pane_min, @as(f32, @floatCast(value)));
     }
 
+    pub fn uiFontSize(s: *const Store) f32 {
+        const value = s.number("uiFontSize") orelse return ui_font_size_default;
+        if (!std.math.isFinite(value)) return ui_font_size_default;
+        return normalizeUiFontSize(@floatCast(value));
+    }
+
+    pub fn setUiFontSize(s: *Store, size: f32) void {
+        s.setNumber("uiFontSize", normalizeUiFontSize(size));
+    }
+
     /// The desktop window's last saved size, or the desktop's same first-run
     /// size. Position is intentionally left to AppKit's centering here.
     pub fn windowSize(s: *const Store) struct { width: f64, height: f64 } {
@@ -1067,4 +1111,14 @@ test "the window reopens at the desktop's saved size and falls back safely" {
         try testing.expectEqual(window_default_width, size.width);
         try testing.expectEqual(window_default_height, size.height);
     }
+}
+
+test "font size steps through the supported sizes and holds at the ends" {
+    try testing.expectEqual(@as(f32, 15), stepUiFontSize(14, 1));
+    try testing.expectEqual(@as(f32, 18), stepUiFontSize(16, 1));
+    try testing.expectEqual(@as(f32, 15), stepUiFontSize(16, -1));
+    try testing.expectEqual(@as(f32, 20), stepUiFontSize(20, 1));
+    try testing.expectEqual(@as(f32, 12), stepUiFontSize(12, -1));
+    // An off-table size steps from its nearest supported one.
+    try testing.expectEqual(@as(f32, 18), stepUiFontSize(17, 1));
 }

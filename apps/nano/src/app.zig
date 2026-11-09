@@ -1176,6 +1176,27 @@ pub const App = struct {
         if (s.toward(d)) |ix| a.focusPane(ix);
     }
 
+    /// ⌘= / ⌘+ / ⌘-: steps the interface text size through the supported
+    /// sizes (`UiFontSize::stepped`) and schedules 120Hz reflow.
+    pub fn stepZoom(a: *App, step: i32) void {
+        const settings_mod = @import("settings.zig");
+        const cur = a.settings.uiFontSize();
+        const next = settings_mod.stepUiFontSize(cur, step);
+        if (next == cur) return;
+        a.settings.setUiFontSize(next);
+        a.view.resize_until = a.now + 0.16;
+        a.redraw();
+    }
+
+    /// ⌘0: resets the interface text size to the 16 px baseline.
+    pub fn resetZoom(a: *App) void {
+        const settings_mod = @import("settings.zig");
+        if (a.settings.uiFontSize() == settings_mod.ui_font_size_default) return;
+        a.settings.setUiFontSize(settings_mod.ui_font_size_default);
+        a.view.resize_until = a.now + 0.16;
+        a.redraw();
+    }
+
     /// ⌘W (`close_chat_view_by_shortcut`): asks first until a choice is
     /// made, then closes, archiving per Settings › Archived.
     pub fn closeByShortcut(a: *App) void {

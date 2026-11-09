@@ -206,7 +206,7 @@ fn micButton(c: *ui.Context, a: *App, k: theme.Colors) bool {
     const busy = s.running != null and !listening;
     const level = std.math.clamp(s.level, 0, 1);
     ui.key(c, "composer-dictate");
-    const base = ui.div(c).row().size(28, 28).center().roundedFull();
+    const base = ui.div(c).row().size(28, 28).center().roundedFull().circular();
     const b = if (listening) base.bg(k.danger.alpha(0.10 + 0.30 * level)) else kit.listenerHover(&a.view.hovers, base, k.ink(0.10)).div;
     defer b.end();
     icons.icon(c, .microphone, 17, if (listening) k.danger else if (busy) k.faint else k.muted, 0);
@@ -349,9 +349,32 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
 /// The model chip: what the next message runs on, 24 tall at the footer's
 /// leading edge (`PickerKind::HarnessModel`'s trigger).
 pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const mp = @import("model_picker.zig");
     const t = a.target();
     const room = @max(80, transcript_view.paneWidth(c, a) - 32 - 100);
-    const base = ui.div(c).row().h(24).maxW(@min(248, room)).px(6).gap(6).itemsCenter().rounded(8).clip();
+    const max_chip_w = @min(248, room);
+    const chat_harness = if (a.selected) |id| (if (a.findChat(id)) |ch| ch.harness != null else false) else false;
+    const unresolved = a.harnesses.items.len == 0 and !chat_harness and a.harnesses_failed;
+    const label_loading = !unresolved and a.models.items.len == 0 and t.model == null;
+    const failed = if (label_loading) (if (a.view.model_picker.catalogs.get(t.harness)) |cat| cat.failed else false) else false;
+    const label_text = if (!unresolved and !label_loading) a.modelLabel(t.model) else "";
+    const suffix_text: ?[]const u8 = if (!unresolved and !label_loading) (if (t.reasoning) |level| rules.reasoningLabel(level) else null) else null;
+    const st_measure: ui.TextStyle = .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight };
+    var wanted_w: f32 = 12 + 16;
+    if (!unresolved) {
+        if (label_loading) {
+            if (!failed) wanted_w += 6 + 56;
+        } else {
+            wanted_w += 6 + @ceil(c.text.width(label_text, st_measure));
+            if (suffix_text) |sfx| wanted_w += 6 + @ceil(c.text.width(sfx, st_measure));
+        }
+    }
+    const target_w = @min(wanted_w, max_chip_w);
+    const width_sample = mp.ScalarTransition.sample(&a.view.model_picker.chip_width, target_w, c.time, c.reduced_motion);
+    if (width_sample.moving) c.frameIn(1.0 / 120.0);
+
+    var base = ui.div(c).row().h(24).maxW(max_chip_w).px(6).gap(6).itemsCenter().rounded(8).clip();
+    if (width_sample.moving) base = base.w(width_sample.value);
     // GPUI's trigger uses on_hover: closing by keyboard doesn't move the
     // pointer and must not clear the wash until the pointer actually moves.
     const b = kit.listenerHover(&a.view.hovers, if (a.picker != .none) base.bg(k.hover) else base, k.hover).div;
@@ -361,10 +384,8 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     // Before the engine lists them: the glyph spinner for an agent not yet
     // known (an open chat's is: its own), a pulsing bar for its model
     // (`trigger_chip` loading, `chip_icon_loading`).
-    const chat_harness = if (a.selected) |id| (if (a.findChat(id)) |ch| ch.harness != null else false) else false;
     // The list failed and nothing names an agent: GPUI's `effective_harness`
     // is none, so a muted terminal and no label, not a loader.
-    const unresolved = a.harnesses.items.len == 0 and !chat_harness and a.harnesses_failed;
     // Its label is always a child, empty or not, so its gap stays.
     if (unresolved) {
         icons.icon(c, .terminal, 16, k.muted, 0);
@@ -382,15 +403,14 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
         const mark = icons.harnessMark(t.harness);
         icons.icon(c, mark.name, 16, mark.brand orelse k.muted, 0);
     }
-    if (a.models.items.len == 0 and t.model == null) {
+    if (label_loading) {
         // A failed catalog has nothing to name: no label, no ghost bar.
-        const failed = if (a.view.model_picker.catalogs.get(t.harness)) |cat| cat.failed else false;
         if (failed) _ = c.leaf(.{ .width = .{ .px = 0 } }, .none, null) else skeleton(c);
         return;
     }
-    // `hover_blend`: the label brightens under the pointer.
-    ui.text(c, a.modelLabel(t.model), .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
-    if (t.reasoning) |level| ui.text(c, rules.reasoningLabel(level), .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
+    // `hover_blend`: the label brightens under the pointer, rolling Scritto-style when changed.
+    kit.rollText(c, "composer-model-label", label_text, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
+    if (suffix_text) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
 }
 
 /// The selected model's maker mark, or the catalog's first model's when
@@ -422,8 +442,9 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
     const pad = ui.div(c).row().pl(8);
     defer pad.end();
     // Filled with the primary accent, its glyph contrast-checked on it
-    // (`render_send_button`, `on_primary_accent`).
-    var b = ui.div(c).row().size(28, 28).center().roundedFull().bg(k.accent);
+    // (`render_send_button`, `on_primary_accent`). `.circular()` renders a
+    // true analytical Euclidean circle rather than a squircle polygon.
+    var b = ui.div(c).row().size(28, 28).center().roundedFull().circular().bg(k.accent);
     b = b.opacity(if (blocked) 0.35 else if (b.hovered()) 0.85 else 1);
     defer b.end();
     if (b.clicked() and !blocked and (stop or !empty)) {
@@ -435,7 +456,6 @@ fn send(c: *ui.Context, a: *App, k: theme.Colors) void {
         icons.icon(c, .@"arrow-up", 14, k.onAccent(), 0);
     }
 }
-
 
 const jump_show: f32 = 320;
 const jump_hide: f32 = 70;
@@ -452,7 +472,7 @@ fn jumpToBottom(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     ui.key(c, "jump-to-bottom");
     const row = ui.div(c).row().absolute().offset(0, -36).w(w).justifyCenter();
     defer row.end();
-    const jump_chip = kit.shadowLg(ui.div(c).row().h(30).pl(11).pr(13).gap(6).itemsCenter().rounded(15).bg(k.composer).border(k.border).borderW(1));
+    const jump_chip = kit.shadowLg(ui.div(c).row().h(30).pl(11).pr(13).gap(6).itemsCenter().rounded(15).circular().bg(k.composer).border(k.border).borderW(1));
     defer jump_chip.end();
     icons.icon(c, .@"alt-arrow-down", 13, k.muted, 0);
     ui.text(c, "Scroll to bottom", kit.style(c, 13, 18, .{ .color = k.text }));

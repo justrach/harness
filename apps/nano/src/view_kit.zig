@@ -34,6 +34,7 @@ pub const IconButton = struct {
 /// A square button holding one icon; true when clicked.
 pub fn iconButton(c: *ui.Context, k: theme.Colors, name: icons.Name, o: IconButton) bool {
     var b = ui.div(c).row().size(o.size, o.size).center().rounded(o.radius);
+    if (o.radius * 2 >= o.size) b = b.circular();
     if (o.on) b = b.bg(k.hover) else if (!o.disabled) b = b.hover(k.hover);
     if (o.tip) |t| b = @import("view_tooltip.zig").on(b, k, t);
     if (!o.disabled) b = pressFeedback(b.control());
@@ -483,4 +484,209 @@ test "the spinner's pulse, as GPUI's" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), gspinOpacity(0.45, 0.1), 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), gspinOpacity(0.7, 0.1), 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1), gspinOpacity(0.99999, 0.1), 1e-3);
+}
+
+const RollSlot = struct {
+    key: u64 = 0,
+    ctx_ptr: usize = 0,
+    last_frame: u64 = 0,
+    used: bool = false,
+    current_buf: [64]u8 = undefined,
+    current_len: usize = 0,
+    from_buf: [64]u8 = undefined,
+    from_len: usize = 0,
+    started: f64 = 0,
+    active: bool = false,
+};
+
+var roll_slots: [32]RollSlot = @splat(.{});
+var roll_clock: usize = 0;
+
+/// Byte lengths of the shared leading and trailing character runs, never
+/// overlapping in either string (`crates/ui/src/roll_text.rs` `shared_ends`).
+pub fn sharedEnds(from: []const u8, to: []const u8) struct { prefix: usize, suffix: usize } {
+    var prefix: usize = 0;
+    var it_from = std.unicode.Utf8View.initUnchecked(from).iterator();
+    var it_to = std.unicode.Utf8View.initUnchecked(to).iterator();
+    while (true) {
+        const a = it_from.nextCodepointSlice() orelse break;
+        const b = it_to.nextCodepointSlice() orelse break;
+        if (!std.mem.eql(u8, a, b)) break;
+        prefix += a.len;
+    }
+    const room = @min(from.len - prefix, to.len - prefix);
+    var suffix: usize = 0;
+    while (suffix < room) {
+        var step: usize = 1;
+        while (step <= room - suffix and (from[from.len - suffix - step] & 0xC0) == 0x80) : (step += 1) {}
+        if (step > room - suffix) break;
+        const a = from[from.len - suffix - step .. from.len - suffix];
+        const b = to[to.len - suffix - step .. to.len - suffix];
+        if (!std.mem.eql(u8, a, b)) break;
+        suffix += step;
+    }
+    return .{ .prefix = prefix, .suffix = suffix };
+}
+
+/// Scritto-style rolling label transition (`crates/ui/src/roll_text.rs`):
+/// when a keyed label changes, shared prefix/suffix runs stay put (the
+/// trailing run glides with the 200ms resize curve) while changed middle
+/// glyphs roll vertically with `ease_out_quint`, 0.35em travel, 0.6 scale,
+/// and 2° tilt over 550ms + 30% left-to-right stagger.
+pub fn rollText(c: *ui.Context, key: []const u8, text: []const u8, st: ui.TextStyle) void {
+    if (text.len == 0 or text.len > 64) return ui.text(c, text, st);
+    const id = std.hash.Wyhash.hash(0x726f6c6c, key);
+    var slot: ?*RollSlot = null;
+    for (&roll_slots) |*s| {
+        if (s.used and s.key == id) {
+            slot = s;
+            break;
+        }
+    }
+    if (slot == null) {
+        for (&roll_slots) |*s| {
+            if (!s.used) {
+                slot = s;
+                break;
+            }
+        }
+        if (slot == null) {
+            slot = &roll_slots[roll_clock % roll_slots.len];
+            roll_clock +%= 1;
+        }
+        const s = slot.?;
+        s.* = .{ .key = id, .ctx_ptr = @intFromPtr(c), .last_frame = c.frame, .used = true, .current_len = text.len };
+        @memcpy(s.current_buf[0..text.len], text);
+        return ui.text(c, text, st);
+    }
+    const s = slot.?;
+    const mounted_continuously = s.ctx_ptr == @intFromPtr(c) and c.frame > 1 and (s.last_frame == c.frame or s.last_frame + 1 == c.frame);
+    s.ctx_ptr = @intFromPtr(c);
+    s.last_frame = c.frame;
+    if (!mounted_continuously) {
+        @memcpy(s.current_buf[0..text.len], text);
+        s.current_len = text.len;
+        s.active = false;
+        return ui.text(c, text, st);
+    }
+    const current = s.current_buf[0..s.current_len];
+    if (!std.mem.eql(u8, current, text)) {
+        @memcpy(s.from_buf[0..s.current_len], current);
+        s.from_len = s.current_len;
+        @memcpy(s.current_buf[0..text.len], text);
+        s.current_len = text.len;
+        s.started = c.time;
+        s.active = !c.reduced_motion;
+    }
+    const duration: f32 = 0.55;
+    const stagger_frac: f32 = 0.3;
+    const total_span: f64 = @as(f64, duration * (1.0 + stagger_frac));
+    const elapsed_f64 = @max(0.0, c.time - s.started);
+    if (!s.active or c.reduced_motion or elapsed_f64 >= total_span) {
+        s.active = false;
+        return ui.text(c, text, st);
+    }
+    c.frameIn(1.0 / 120.0);
+    c.animationFrame();
+    const elapsed: f32 = @floatCast(elapsed_f64);
+    const from = c.alloc().dupe(u8, s.from_buf[0..s.from_len]) catch return ui.text(c, text, st);
+    const to = text;
+    const ends = sharedEnds(from, to);
+    const resize_p = ui.motion.catalog.resize.progress(@floatCast(elapsed_f64 / ui.motion.catalog.resize.total()));
+    const from_w = c.text.width(from, st);
+    const to_w = c.text.width(to, st);
+    const width = @ceil(ui.motion.effects.lerp(from_w, to_w, resize_p));
+    const line_h = if (st.line_height > 0) st.line_height else c.text.lineHeight(st);
+    const travel = st.size * 0.35;
+    const base_color = st.color orelse c.theme.text;
+
+    const box = ui.div(c).row().w(width).h(line_h).itemsCenter();
+    defer box.end();
+
+    // Shared prefix stays put.
+    if (ends.prefix > 0) {
+        const p_div = ui.div(c).absolute().offset(0, 0);
+        defer p_div.end();
+        ui.text(c, to[0..ends.prefix], st);
+    }
+
+    // Changed middle of `from` rolls up and shrinks out.
+    paintRollRun(c, from, ends.prefix, from.len - ends.suffix, st, base_color, elapsed, duration, stagger_frac, travel, true);
+
+    // Changed middle of `to` rolls up from below and grows in.
+    paintRollRun(c, to, ends.prefix, to.len - ends.suffix, st, base_color, elapsed, duration, stagger_frac, travel, false);
+
+    // Shared suffix slides with the 200ms resize curve.
+    if (ends.suffix > 0) {
+        const from_sx = c.text.width(from[0 .. from.len - ends.suffix], st);
+        const to_sx = c.text.width(to[0 .. to.len - ends.suffix], st);
+        const suffix_dx = (from_sx - to_sx) * (1.0 - resize_p);
+        const s_div = ui.div(c).absolute().offset(to_sx + suffix_dx, 0);
+        defer s_div.end();
+        ui.text(c, to[to.len - ends.suffix ..], st);
+    }
+}
+
+fn paintRollRun(
+    c: *ui.Context,
+    line: []const u8,
+    start_byte: usize,
+    end_byte: usize,
+    st: ui.TextStyle,
+    base_color: ui.Color,
+    elapsed: f32,
+    duration: f32,
+    stagger_frac: f32,
+    travel: f32,
+    outgoing: bool,
+) void {
+    if (start_byte >= end_byte) return;
+    const sub = line[start_byte..end_byte];
+    var count: usize = 0;
+    var it_count = std.unicode.Utf8View.initUnchecked(sub).iterator();
+    while (it_count.nextCodepointSlice()) |_| count += 1;
+    if (count == 0) return;
+
+    const min_x = c.text.width(line[0..start_byte], st);
+    const max_x = c.text.width(line[0..end_byte], st);
+    const spread = duration * stagger_frac * @as(f32, @floatFromInt(count -| 1)) / @as(f32, @floatFromInt(@max(count, 1)));
+
+    var at: usize = start_byte;
+    var it = std.unicode.Utf8View.initUnchecked(sub).iterator();
+    while (it.nextCodepointSlice()) |cp| {
+        const x = c.text.width(line[0..at], st);
+        at += cp.len;
+        const delay = if (max_x > min_x) spread * std.math.clamp((x - min_x) / (max_x - min_x), 0.0, 1.0) else 0.0;
+        const raw_t = std.math.clamp((elapsed - delay) / duration, 0.0, 1.0);
+        const p = ui.motion.catalog.ease_out_quint.sample(raw_t)[0];
+        const alpha = if (outgoing) 1.0 - p else p;
+        if (alpha <= 0.005) continue;
+        const dy = if (outgoing) -travel * p else travel * (1.0 - p);
+        const sc = if (outgoing) ui.motion.effects.lerp(1.0, 0.6, p) else ui.motion.effects.lerp(0.6, 1.0, p);
+        const motion_dist = if (outgoing) p else 1.0 - p;
+        const rot = std.math.degreesToRadians(2.0 * motion_dist);
+        const g_div = ui.div(c).absolute().offset(x, dy).scale(sc).rotate(rot);
+        defer g_div.end();
+        var gst = st;
+        gst.color = base_color.alpha(base_color.a * alpha);
+        ui.text(c, cp, gst);
+    }
+}
+
+test "sharedEnds keeps common leading and trailing character runs without overlapping" {
+    const e1 = sharedEnds("Opus 5.5", "Opus 5.1");
+    try std.testing.expectEqual(@as(usize, 7), e1.prefix);
+    try std.testing.expectEqual(@as(usize, 0), e1.suffix);
+
+    const e2 = sharedEnds("feature/a", "fix/a");
+    try std.testing.expectEqual(@as(usize, 1), e2.prefix);
+    try std.testing.expectEqual(@as(usize, 2), e2.suffix);
+
+    const e3 = sharedEnds("aa", "aaa");
+    try std.testing.expectEqual(@as(usize, 2), e3.prefix);
+    try std.testing.expectEqual(@as(usize, 0), e3.suffix);
+
+    const e4 = sharedEnds("Low", "High");
+    try std.testing.expectEqual(@as(usize, 0), e4.prefix);
+    try std.testing.expectEqual(@as(usize, 0), e4.suffix);
 }
