@@ -272,6 +272,15 @@ pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        // Match iOS's square.on.square (14pt regular, PR #764) everywhere
+        // on macOS. GPUI uses the high-resolution glyph's alpha as a mask,
+        // preserving each caller's theme tint. Keep Apple artwork macOS-only.
+        #[cfg(target_os = "macos")]
+        if path == COPY {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/copy-macos.svg"
+            ))));
+        }
         if let Some(asset) = ControlAssets.load(path)? {
             return Ok(Some(asset));
         }
@@ -313,6 +322,48 @@ mod tests {
             let text = std::str::from_utf8(&bytes).expect("icon svg is utf-8");
             assert!(text.contains("<svg"), "{path} is not an svg");
             assert!(text.contains("viewBox"), "{path} lacks a viewBox");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copy_icon_uses_ios_square_on_square_symbol_on_macos() {
+        // Every desktop copy affordance uses COPY through the shared Assets
+        // source, including message/code footers, link menus and settings.
+        let bytes = Assets.load(COPY).unwrap().unwrap();
+        assert_eq!(
+            bytes.as_ref(),
+            include_bytes!("../assets/icons/copy-macos.svg").as_slice()
+        );
+        // SF Symbols has a wider stroke than the hand-drawn fallback.
+        assert_copy_icon_has_clear_interior(&bytes, 17);
+    }
+
+    #[test]
+    fn copy_icon_front_square_has_no_crossing_strokes() {
+        let bytes = ControlAssets.load(COPY).unwrap().unwrap();
+        assert_copy_icon_has_clear_interior(&bytes, 16);
+    }
+
+    fn assert_copy_icon_has_clear_interior(bytes: &[u8], left_in_48ths: usize) {
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        let image = renderer.render_single_frame(bytes, 8.0).unwrap();
+        let size = image.size(0);
+        let width = size.width.0 as usize;
+        let height = size.height.0 as usize;
+        let pixels = image.as_bytes(0).unwrap();
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
+
+        // The rear square must stop at the front outline, not protrude into
+        // its transparent interior. Sample away from the rounded corners.
+        for y in (height * 10 / 24)..(height * 18 / 24) {
+            for x in (width * left_in_48ths / 48)..(width * 19 / 24) {
+                assert_eq!(
+                    pixels[(y * width + x) * 4 + 3],
+                    0,
+                    "copy icon has a stroke inside the front square at ({x}, {y})"
+                );
+            }
         }
     }
 
