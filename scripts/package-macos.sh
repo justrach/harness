@@ -47,6 +47,17 @@ install -m 755 "$BUILD_BINARY" "$APP/Contents/MacOS/harness"
 (cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseSafe)
 install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$APP/Contents/MacOS/harness-nano"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+# ADR 0008: Verify both binaries inside the bundle carry the exact Cargo.toml
+# release version so a stale build cache can never trigger an update loop.
+CLI_VER="$("$APP/Contents/MacOS/harness" --version | awk '{print $2}')"
+if [[ "$CLI_VER" != "$VERSION" ]]; then
+  echo "error: harness CLI version ($CLI_VER) != Cargo.toml version ($VERSION)" >&2
+  exit 1
+fi
+if [[ "$(strings "$APP/Contents/MacOS/harness-nano" | grep -Fc "version = \"$VERSION\"" || true)" -lt 1 ]]; then
+  echo "error: harness-nano binary does not embed version $VERSION (stale .zig-cache)" >&2
+  exit 1
+fi
 # graff ships inside the bundle (Contents/Resources/bin/graff): the app seeds
 # ~/.harness/bin/graff from it and links `graff` onto the PATH. GRAFF_BINARY
 # overrides; otherwise the latest codegraff release, checked against its
@@ -137,6 +148,27 @@ else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still
   # requires right-click → Open on first launch without notarization).
   codesign --deep --force --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign - "$APP"
+fi
+
+# ADR 0008: Local live-bundle smoke gate before notarization/upload. Launch the
+# signed app binary against an isolated temporary HOME for 3 seconds and assert
+# that it stays alive (catching both startup crashes and self-update exit loops).
+if [[ "${CI:-}" != "true" && "${SKIP_SMOKE_LAUNCH:-0}" != "1" ]]; then
+  SMOKE_HOME="$(mktemp -d)"
+  echo "running 3s live smoke check on $APP/Contents/MacOS/harness-nano..."
+  HOME="$SMOKE_HOME" HARNESS_IPC_PORT=49877 "$APP/Contents/MacOS/harness-nano" >/dev/null 2>&1 &
+  SMOKE_PID=$!
+  sleep 3
+  if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
+    rm -rf "$SMOKE_HOME"
+    echo "error: $APP/Contents/MacOS/harness-nano exited or crashed within 3s of launch" >&2
+    exit 1
+  fi
+  kill "$SMOKE_PID" 2>/dev/null || true
+  wait "$SMOKE_PID" 2>/dev/null || true
+  pkill -f "$SMOKE_HOME" 2>/dev/null || true
+  rm -rf "$SMOKE_HOME"
+  echo "live smoke check passed: $APP/Contents/MacOS/harness-nano stayed up cleanly."
 fi
 
 # notarize <path>: submit to Apple and wait for the verdict. A rejection may

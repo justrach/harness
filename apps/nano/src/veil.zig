@@ -163,7 +163,7 @@ pub const ElemVeil = struct {
                 const step_ms: f64 = if (words.len <= 1)
                     0.0
                 else
-                    @min(22.0, @as(f64, dur) * 0.42 / @as(f64, @floatFromInt(words.len)));
+                    @min(14.0, @as(f64, dur) * 0.32 / @as(f64, @floatFromInt(words.len)));
                 for (words, 0..) |w, idx| {
                     self.chunks.append(gpa, .{
                         .start = w.start,

@@ -201,6 +201,13 @@ pub const View = struct {
     /// True while `view.zig` is running pre-tree setup/input dispatch before
     /// building nodes, so `a.redraw()` does not redundantly reset `frame_in`.
     in_pre_tree: bool = false,
+    /// Last observed window size and active live-resize horizon for 120Hz reflow.
+    last_win_w: f32 = 0,
+    last_win_h: f32 = 0,
+    resize_until: f64 = 0,
+    /// Active streaming scroll-glide horizon and last streaming content signature.
+    stream_glide_until: f64 = 0,
+    stream_sig: u64 = 0,
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);

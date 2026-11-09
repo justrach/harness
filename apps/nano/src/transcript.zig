@@ -148,8 +148,10 @@ pub const Entry = struct {
     duration_ms: ?i64 = null,
     /// When it was made (`createdAt`); 0 for one that hasn't said.
     created_ms: i64 = 0,
-    /// Last laid-out height for offscreen culling during width tweens.
+    /// Last laid-out height and column width for offscreen culling.
     cached_h: f32 = 0,
+    cached_w: f32 = 0,
+    measured_w: f32 = 0,
 
     pub fn deinit(e: *Entry, gpa: Allocator) void {
         gpa.free(e.id);
@@ -303,6 +305,8 @@ pub const Transcript = struct {
             try part.text.appendSlice(t.gpa, string(a.object.get("text")) orelse "");
             if (part.text.items.len != uint(a.object.get("len")) orelse return error.Desync) return error.Desync;
             t.entries.items[i].cached_h = 0;
+            t.entries.items[i].cached_w = 0;
+            t.entries.items[i].measured_w = 0;
         }
         if (o.get("count")) |n| if (t.entries.items.len != uint(n) orelse return error.Desync) return error.Desync;
         // Only an accepted frame releases the entries it replaced/removed.

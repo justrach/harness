@@ -49,6 +49,12 @@ pub fn view(a: *App, c: *ui.Context) void {
     // A loader or a once-a-second clock must not become the display-link
     // rate in the middle of a scroll. The link takes the soonest request.
     if (c.scroll_moved.count() > 0) c.frameIn(1.0 / 120.0);
+    if (a.view.last_win_w > 0 and (@abs(c.size.w - a.view.last_win_w) > 0.5 or @abs(c.size.h - a.view.last_win_h) > 0.5)) {
+        a.view.resize_until = c.time + 0.16;
+    }
+    a.view.last_win_w = c.size.w;
+    a.view.last_win_h = c.size.h;
+    if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     c.title_bar_height = sidebar.titlebar_h;
     @import("view_kit.zig").beginFrame(c, k);
     // Box edges on the device's pixels, a half toward zero, as GPUI's

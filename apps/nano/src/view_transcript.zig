@@ -154,8 +154,8 @@ fn topFade(c: *ui.Context, k: theme.Colors) void {
 
 fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f32, loading: bool, top: f32) Drawn {
     const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
-    const raw_col = columnWidth(w);
-    const col = if (tweening and raw_col < column_w) @floor(raw_col / 8.0) * 8.0 else raw_col;
+    const resizing = c.time < a.view.resize_until;
+    const col = columnWidth(w);
     // The last row clears the status strip over the composer and the fade
     // band above it (`bottom_clearance + TRANSCRIPT_FADE_BAND + 8`); the
     // composer itself is under the scroll, not over it. Its bar shows
@@ -176,14 +176,44 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const scroll = c.open(st, null);
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
+    const entries_ = t.entries.items;
+    const streaming = entries_.len > 0 and entries_[entries_.len - 1].status == .streaming;
     // Just sent: past the end, which layout clamps to it, and moving the
     // offset there makes the box follow its end again (`follow_end`).
-    if (subagent == null and t == &a.transcript and a.view.stick_end) {
+    const just_stuck = subagent == null and t == &a.transcript and a.view.stick_end;
+    if (just_stuck) {
         a.view.stick_end = false;
         const sync = @import("motion_rules.zig").stickEndScroll(c.scroll_max.get(drawn.box));
         c.scroll_follow.put(c.gpa, drawn.box, sync.follow) catch {};
         c.scroll.put(c.gpa, drawn.box, sync.scroll) catch {};
         c.scroll_seen.put(c.gpa, drawn.box, sync.seen) catch {};
+    }
+    if (subagent == null and t == &a.transcript) {
+        if (streaming and !a.offscreen and !c.reduced_motion and !just_stuck and a.view.rail.glide == null) {
+            const last_e = &entries_[entries_.len - 1];
+            var sig: u64 = @as(u64, last_e.parts.items.len) << 32;
+            for (last_e.parts.items) |*p| sig +%= @as(u64, p.text.items.len) *% 0x9e3779b97f4a7c15;
+            if (sig != a.view.stream_sig) {
+                a.view.stream_sig = sig;
+                a.view.stream_glide_until = c.time + 0.32;
+            }
+            const follow = c.scroll_follow.get(drawn.box) orelse true;
+            if (follow) {
+                const max_s = c.scroll_max.get(drawn.box) orelse 0;
+                const cap = ui.spring(c, drawn.box, 0x7363_6361, max_s, .{ .response = 0.20, .damping = 1.0 });
+                c.scroll_cap.put(c.gpa, drawn.box, @max(0, cap)) catch {};
+                if (@abs(cap - max_s) > 0.25 or c.time < a.view.stream_glide_until) {
+                    c.frameIn(1.0 / 120.0);
+                }
+            } else {
+                ui.jump(c, drawn.box, 0x7363_6361, c.scroll.get(drawn.box) orelse 0);
+                _ = c.scroll_cap.remove(drawn.box);
+            }
+        } else {
+            a.view.stream_sig = 0;
+            ui.jump(c, drawn.box, 0x7363_6361, c.scroll_max.get(drawn.box) orelse 0);
+            _ = c.scroll_cap.remove(drawn.box);
+        }
     }
     if (c.scroll_max.get(drawn.box)) |max| {
         const at = c.scroll.get(drawn.box) orelse 0;
@@ -191,27 +221,32 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     }
     var ticks: std.ArrayList(@import("view_rail.zig").Tick) = .empty;
     const body = ui.div(c).column().w(col);
+    if (subagent == null and t == &a.transcript and streaming and !a.offscreen and !c.reduced_motion and !just_stuck and a.view.rail.glide == null) {
+        c.node(body.index).style.settle_y = .{ .response = 0.20, .damping = 1.0 };
+    }
     defer body.end();
-    const entries_ = t.entries.items;
     // Loading does not itself imply work; the session row does, even when
     // no assistant part has arrived yet.
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
-    const streaming = entries_.len > 0 and entries_[entries_.len - 1].status == .streaming;
-    const cull_offscreen = tweening or (streaming and a.view.rail.glide == null);
-    const cull_pad: f32 = if (tweening) 250 else 600;
+    const scrolling = c.scroll_moved.contains(drawn.box) or c.retain.scroll_delta;
+    const cull_offscreen = (!a.offscreen or tweening or resizing) and a.view.rail.glide == null and (tweening or resizing or scrolling or streaming or entries_.len > 4);
+    const cull_pad: f32 = if (tweening or resizing) 220 else 380;
     for (entries_, 0..) |*e, i| {
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
         ui.key(c, c.print("entry-{s}", .{e.id}));
         const entry_id = c.peekId(null);
         const prev = c.rects.get(entry_id);
-        if (prev) |r| if (r.h > 0) {
+        if (prev) |r| if (r.h > 0 and e.measured_w > 0) {
             e.cached_h = r.h;
+            e.cached_w = e.measured_w;
         };
-        if (cull_offscreen and i + 2 < entries_.len and e.status != .streaming and e.cached_h > 0) {
+        const width_ok = tweening or resizing or @abs(e.cached_w - col) <= 1.0;
+        if (cull_offscreen and (!just_stuck or i + 1 < entries_.len) and e.status != .streaming and e.cached_h > 0 and width_ok) {
             if (scroll_rect) |view| if (prev) |r| {
                 if (@import("motion_rules.zig").skipOffscreenRow(true, r.y, r.y + r.h, view.y, view.y + view.h, cull_pad)) {
+                    e.measured_w = 0;
                     _ = c.leaf(.{ .width = .fill, .height = .{ .px = e.cached_h } }, .none, null);
                     if (e.role == .user) {
                         ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
@@ -220,6 +255,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
                 }
             };
         }
+        e.measured_w = col;
         const at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
         switch (e.role) {
             .user => {

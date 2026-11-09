@@ -56,11 +56,32 @@ pub fn build(b: *std.Build) void {
         \\
     );
     const themes_json = b.createModule(.{ .root_source_file = themes_root });
-    // Harness's version, as the GPUI app has it: the workspace's.
-    const info = b.addOptions();
-    info.addOption([]const u8, "version", workspaceVersion(b));
+    // Harness's version, read directly from `../../Cargo.toml` via WriteFiles
+    // so Zig's build runner hashes `Cargo.toml` on every build and never
+    // reuses a stale cached version string across releases.
+    const info_files = b.addWriteFiles();
+    _ = info_files.addCopyFile(b.path("../../Cargo.toml"), "Cargo.toml");
+    const info_root = info_files.add("build_info.zig",
+        \\const std = @import("std");
+        \\pub const version: []const u8 = blk: {
+        \\    @setEvalBranchQuota(100_000);
+        \\    const text = @embedFile("Cargo.toml");
+        \\    const section = std.mem.indexOf(u8, text, "[workspace.package]") orelse break :blk "0.0.0";
+        \\    var lines = std.mem.splitScalar(u8, text[section..], '\n');
+        \\    while (lines.next()) |line| {
+        \\        const t = std.mem.trim(u8, line, " \r");
+        \\        if (!std.mem.startsWith(u8, t, "version")) continue;
+        \\        const q = std.mem.indexOfScalar(u8, t, '"') orelse continue;
+        \\        const end = std.mem.indexOfScalarPos(u8, t, q + 1, '"') orelse continue;
+        \\        break :blk t[q + 1 .. end];
+        \\    }
+        \\    break :blk "0.0.0";
+        \\};
+        \\
+    );
+    const info_mod = b.createModule(.{ .root_source_file = info_root });
     const imports: []const std.Build.Module.Import = &.{
-        .{ .name = "build_info", .module = info.createModule() },
+        .{ .name = "build_info", .module = info_mod },
         .{ .name = "nanoui", .module = nanoui },
         .{ .name = "http_zig", .module = http_zig },
         .{ .name = "fonts", .module = fonts },
@@ -133,20 +154,4 @@ pub fn build(b: *std.Build) void {
     b.step("vectors", "Write protocol/desktop/requests.json").dependOn(&write_vectors.step);
     // Large UI artifacts must never use Zig's self-hosted backend.
     inline for (.{ exe, tests, snap, profile, vectors }) |artifact| artifact.use_llvm = true;
-}
-
-/// `version` under `[workspace.package]` in the repository's Cargo.toml.
-fn workspaceVersion(b: *std.Build) []const u8 {
-    const path = b.root.joinString(b.allocator, "../../Cargo.toml") catch return "0.0.0";
-    const text = std.Io.Dir.cwd().readFileAlloc(b.graph.io, path, b.allocator, .limited(1 << 20)) catch return "0.0.0";
-    const section = std.mem.indexOf(u8, text, "[workspace.package]") orelse return "0.0.0";
-    var lines = std.mem.splitScalar(u8, text[section..], '\n');
-    while (lines.next()) |line| {
-        const t = std.mem.trim(u8, line, " \r");
-        if (!std.mem.startsWith(u8, t, "version")) continue;
-        const q = std.mem.indexOfScalar(u8, t, '"') orelse continue;
-        const end = std.mem.indexOfScalarPos(u8, t, q + 1, '"') orelse continue;
-        return t[q + 1 .. end];
-    }
-    return "0.0.0";
 }

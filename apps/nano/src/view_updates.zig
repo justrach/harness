@@ -444,16 +444,50 @@ fn appUpdateWorker(a: *App) void {
     };
     a.updates.acquire();
     a.updates.app_downloading = false;
-    if (ok) {
-        a.updates.app_ready = true;
-        a.updates.app_failed_len = 0;
-    } else {
-        const line = firstLine(res.stderr) orelse firstLine(res.stdout) orelse "update exited with an error";
-        a.updates.setAppFailed(line);
+    switch (classifyUpdateOutput(ok, res.stdout, res.stderr)) {
+        .staged => {
+            a.updates.app_ready = true;
+            a.updates.app_failed_len = 0;
+        },
+        .up_to_date => {
+            a.updates.app_ready = false;
+            a.updates.app_relaunch_when_ready = false;
+            a.updates.app_failed_len = 0;
+        },
+        .failed => |line| {
+            a.updates.setAppFailed(line);
+        },
     }
     a.updates.dirty = true;
     a.updates.release();
     nanoui.App.after(0, a, appUpdateDelivered);
+}
+
+pub const UpdateCommandOutcome = union(enum) {
+    staged,
+    up_to_date,
+    failed: []const u8,
+};
+
+/// Pure classifier for `harness update` process output (ADR 0008). Only a
+/// bundle swap (`"relaunch Harness to finish"`) marks an update ready; a no-op
+/// (`"is up to date"`) must never mark `app_ready` or trigger a relaunch loop.
+pub fn classifyUpdateOutput(exited_zero: bool, stdout: []const u8, stderr: []const u8) UpdateCommandOutcome {
+    if (exited_zero and std.mem.indexOf(u8, stdout, "relaunch Harness to finish") != null) {
+        return .staged;
+    }
+    if (exited_zero and std.mem.indexOf(u8, stdout, "is up to date") != null) {
+        return .up_to_date;
+    }
+    const line = firstLine(stderr) orelse firstLine(stdout) orelse "update exited with an error";
+    return .{ .failed = line };
+}
+
+/// Pure guard for whether `appUpdateDelivered` may exit and relaunch the app
+/// immediately (ADR 0008): only when the update is staged AND the user
+/// explicitly requested a relaunch (`relaunch_when_ready`).
+pub fn shouldRelaunchOnDeliver(ready: bool, relaunch_when_ready: bool) bool {
+    return ready and relaunch_when_ready;
 }
 
 fn firstLine(s: []const u8) ?[]const u8 {
@@ -473,7 +507,7 @@ fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
     a.updates.app_relaunch_when_ready = false;
     a.updates.release();
     a.redraw();
-    if (ready and (relaunch or a.settings.get(.restart_to_install_updates))) {
+    if (shouldRelaunchOnDeliver(ready, relaunch)) {
         restartIntoUpdate(a);
     }
 }
@@ -889,4 +923,26 @@ test "restartPlace chooses sidebar row when open and titlebar when collapsed" {
     try std.testing.expectEqual(RestartPlace.sidebar_row, restartPlace("0.2.175", true, null));
     try std.testing.expectEqual(RestartPlace.titlebar, restartPlace("0.2.175", false, null));
     try std.testing.expectEqual(RestartPlace.none, restartPlace("0.2.175", true, "0.2.175"));
+}
+
+test "classifyUpdateOutput and shouldRelaunchOnDeliver prevent no-op relaunch loops (ADR 0008)" {
+    try std.testing.expectEqual(
+        UpdateCommandOutcome.up_to_date,
+        classifyUpdateOutput(true, "Harness 0.2.178 is up to date (latest: 0.2.178).\n", ""),
+    );
+    try std.testing.expectEqual(
+        UpdateCommandOutcome.staged,
+        classifyUpdateOutput(true, "downloading harness-0.2.178-macos-arm64-app.tar.gz…\nupdated /Applications/Harness.app — relaunch Harness to finish.\n", ""),
+    );
+    switch (classifyUpdateOutput(false, "", "network timeout\n")) {
+        .failed => |msg| try std.testing.expectEqualStrings("network timeout", msg),
+        else => return error.ExpectedFailure,
+    }
+    // Background downloads (`relaunch_when_ready = false`) never auto-exit the window.
+    try std.testing.expect(!shouldRelaunchOnDeliver(true, false));
+    try std.testing.expect(!shouldRelaunchOnDeliver(false, true));
+    try std.testing.expect(shouldRelaunchOnDeliver(true, true));
+    // Verify build_info.version tracks Cargo.toml and is never a stale 0.2.175 cache.
+    try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.2.175"));
+    try std.testing.expect(!std.mem.eql(u8, @import("build_info").version, "0.0.0"));
 }
