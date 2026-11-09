@@ -3988,10 +3988,10 @@ async fn run_session(session: Session) {
                     .map(str::to_owned);
             }
         }
-        // Graff reports the worktree it runs the session in; the engine
+        // Graff reports the checkout it runs the session in; the engine
         // re-homes the chat there so later runs, resumes and panels follow.
         let session_cwd = (harness == HarnessId::Graff)
-            .then(|| graff_worktree::session_worktree(&options_snapshot))
+            .then(|| graff_worktree::session_cwd(&options_snapshot))
             .flatten();
         Ok::<(String, bool, Vec<SlashCommand>, Option<String>, Option<String>, bool), HarnessError>((
             session_id,

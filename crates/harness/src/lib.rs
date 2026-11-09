@@ -248,6 +248,7 @@ pub mod interrupt_reason;
 pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;
+pub mod nanocua_bundle;
 pub mod opencode;
 pub mod pi;
 pub mod process;
