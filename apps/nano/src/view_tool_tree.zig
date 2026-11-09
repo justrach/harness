@@ -168,7 +168,7 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     defer body.end();
     rememberHeight(c, a, fold_id, body.index);
     if (is_animating) c.frameIn(1.0 / 30.0);
-    if (p.kind == .reasoning) return @import("view_markdown.zig").withLinks(c, k, p.text.items, a, parent);
+    if (p.kind == .reasoning) return transcript_view.streamMarkdown(c, a, k, e, p, parent);
     if (p.invocation.len > 0) textDetail(c, k, p.invocation, false);
     if (p.diff_new) |new| return transcript_view.editDiff(c, k, p, new);
     if (p.stats.len > 0) return transcript_view.statRows(c, k, p.stats);

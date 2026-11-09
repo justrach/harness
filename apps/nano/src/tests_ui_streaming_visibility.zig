@@ -81,7 +81,6 @@ test "a short live turn stays visible when its expanded reasoning shrinks to too
     try visible(&t, "Synthetic final reply");
 }
 
-
 test "an unfocused window slows loader redraws and an off-screen spinner schedules none" {
     @import("theme.zig").registerFonts();
     var a: App = .init(testing.allocator, testing.io, 1);
@@ -199,4 +198,46 @@ test "a short chat has no rail dash, and scrolling away offers jump to bottom" {
     t.frame();
     try testing.expect(!t.hasText("Scroll to bottom"));
     try testing.expect(t.ctx.scroll_follow.get(box) orelse false);
+}
+
+test "live streaming reply dissolves incoming words with a 120Hz veil and balances unclosed markdown" {
+    @import("theme.zig").registerFonts();
+    var a: App = .init(testing.allocator, testing.io, 1);
+    defer a.deinit();
+    // Live window (`offscreen = false`) activates the 120Hz streaming veil and inline balancer.
+    a.offscreen = false;
+    a.dark = true;
+    a.view.sidebar_open = false;
+    a.openChat("synthetic-live", null);
+    try apply(&a,
+        \\{"reset":[
+        \\ {"id":"u1","role":"user","parts":[{"id":"p","kind":"text","text":"Explain the architecture"}]},
+        \\ {"id":"a1","role":"assistant","status":"streaming","parts":[{"id":"ans","kind":"text","text":"1. **Initial MVP"}]}]}
+    );
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&a, @import("view.zig").view), .{ .width = 900, .height = 600, .dark = true });
+    defer t.deinit();
+    t.frame();
+
+    // Unclosed `**Initial MVP` is auto-balanced on the active streaming line so
+    // "Initial MVP" renders without literal `**` markers.
+    try testing.expect(t.containsText("Initial MVP"));
+    try testing.expect(!t.containsText("**Initial MVP"));
+    const part_id = @import("tool_ui_state.zig").key("synthetic-live", "a1", "ans");
+    try testing.expect(a.view.tool_ui.veils.isFading(part_id));
+    const wake = t.ctx.frame_in orelse return error.VeilFrameNotScheduled;
+    try testing.expect(wake <= 1.0 / 120.0 + 0.001);
+
+    // Advance past the fade duration: the veil settles and stops requesting 120Hz frames.
+    t.advance(0.6);
+    t.frame();
+    try testing.expect(!a.view.tool_ui.veils.isFading(part_id));
+}
+
+test "build.zig keeps src/main.zig as the single root module so std and nanoui never split across optimize modes" {
+    const build_src = try std.Io.Dir.cwd().readFileAlloc(testing.io, "build.zig", testing.allocator, .limited(1 << 16));
+    defer testing.allocator.free(build_src);
+    try testing.expect(std.mem.indexOf(u8, build_src, ".root_source_file = b.path(\"src/main.zig\")") != null);
+    try testing.expect(std.mem.indexOf(u8, build_src, "entry.zig") == null);
+    _ = @import("main.zig");
 }

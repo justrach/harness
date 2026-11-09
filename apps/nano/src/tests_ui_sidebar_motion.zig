@@ -434,3 +434,67 @@ test "Cmd+B culls offscreen transcript entries during the sidebar tween" {
     h.t.advance(0.3);
     try testing.expect(h.t.ctx.stats.nodes >= settled_nodes - 1);
 }
+
+test "Cmd+B keeps user bubbles and headings inside narrow split panes without horizontal clipping" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+
+    const messages = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[
+        \\ {"id":"a1","role":"assistant","status":"complete","parts":[{"id":"p1","kind":"text","text":"## Testing"}]},
+        \\ {"id":"u1","role":"user","parts":[{"id":"p2","kind":"text","text":"Check the build after I committed"}]}]}
+    , .{});
+    defer messages.deinit();
+    try h.a.transcript.apply(messages.value);
+
+    // Split horizontally and squeeze the left pane so opening the sidebar with
+    // Cmd+B drops its width below 224pt (where the old 200pt column floor
+    // overflowed both edges of the scroll container).
+    _ = try h.a.tabs.split(.horizontal);
+    h.a.panels.host_open = true;
+    const layout = h.a.tabs.layout().?;
+    layout.focus = 0;
+    layout.shares.items[0] = 0.32;
+    layout.shares.items[1] = 0.68;
+    h.t.settle(1);
+
+    const checkBounds = struct {
+        fn check(harness: *Harness) !void {
+            const pane_left = harness.a.view.chrome.x + 1;
+            const pane_w = @import("view_transcript.zig").paneWidth(&harness.t.ctx, &harness.a);
+            const pane_right = pane_left + pane_w;
+            const k = @import("theme.zig").colors(harness.a.dark orelse false);
+            var found_bubble = false;
+            for (harness.t.ctx.nodes.items) |node| {
+                if (std.meta.eql(node.style.background, k.user_bubble) and node.style.radius == 16) {
+                    found_bubble = true;
+                    try testing.expect(node.rect.x >= pane_left + 11.5);
+                    try testing.expect(node.rect.x + node.rect.w <= pane_right - 11.5);
+                }
+            }
+            try testing.expect(found_bubble);
+            const heading = harness.t.findText("Testing") orelse return error.MissingHeading;
+            try testing.expect(heading.x >= pane_left + 11.5);
+            try testing.expect(heading.x + heading.w <= pane_right - 11.5);
+        }
+    }.check;
+
+    try checkBounds(&h);
+    // Toggle closed across tween frames.
+    h.toggle();
+    for (0..16) |_| {
+        h.t.advance(0.016);
+        try checkBounds(&h);
+    }
+    h.t.advance(0.2);
+    try checkBounds(&h);
+    // Toggle open across tween frames (where the pane narrows).
+    h.toggle();
+    for (0..16) |_| {
+        h.t.advance(0.016);
+        try checkBounds(&h);
+    }
+    h.t.advance(0.2);
+    try checkBounds(&h);
+}

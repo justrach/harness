@@ -180,7 +180,7 @@ pub fn view(a: *App, c: *ui.Context) void {
         }
         a.view.seam_inset = 2;
         const layout = a.tabs.layout();
-        a.view.chrome = chrome.frameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal else true, strip.hasHost(a), strip.hasFiles(a), a.settings.rightPaneWidth());
+        a.view.chrome = chrome.frameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal and !s.zoomed else true, strip.hasHost(a), strip.hasFiles(a), a.settings.rightPaneWidth());
         ui.key(c, "main-column");
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
@@ -396,7 +396,8 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
         if (c.input.released and it.hovered) if (press) |p| {
             if (p.tab == a.tabs.active and p.pane == ix) focus = ix;
         };
-        if (neighbor(c, a, k, ix, chat, size)) return;
+        const neighbor_w = @max(0, (if (across) size else a.view.chrome.chat_width) - a.view.seam_inset);
+        if (neighbor(c, a, k, ix, chat, neighbor_w)) return;
     }
     if (focus) |ix| strip.focus(a, .{ .chat = ix });
 }

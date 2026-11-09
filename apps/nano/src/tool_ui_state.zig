@@ -74,6 +74,7 @@ pub const Fold = struct {
 pub const State = struct {
     rows: std.AutoHashMapUnmanaged(u64, Row) = .empty,
     folds: std.AutoHashMapUnmanaged(u64, Fold) = .empty,
+    veils: @import("veil.zig").Store = .{},
     access_chat: ?[]u8 = null,
     selected_agent: usize = 0,
     selected_tool: ?@import("tool_access.zig").Family = null,
@@ -85,6 +86,7 @@ pub const State = struct {
     pub fn deinit(s: *State, a: Allocator) void {
         s.rows.deinit(a);
         s.folds.deinit(a);
+        s.veils.deinit(a);
         var maps = s.maps.valueIterator();
         while (maps.next()) |map| map.deinit();
         s.maps.deinit(a);

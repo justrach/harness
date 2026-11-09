@@ -13,6 +13,7 @@ const md = @import("markdown.zig");
 const highlight = @import("highlight.zig");
 const kit = @import("view_kit.zig");
 const icons = @import("icons.zig");
+const veil_mod = @import("veil.zig");
 
 /// Prose: 15 points on 22.5-point lines (`typography.rs`), set per frame.
 var body: ui.TextStyle = .{ .size = 15, .leading = 1.5, .wrap = true };
@@ -21,6 +22,10 @@ var body: ui.TextStyle = .{ .size = 15, .leading = 1.5, .wrap = true };
 var k: theme.Colors = undefined;
 const LinkOwner = struct { app: *@import("app.zig").App, parent: []const u8 };
 var link_owner: ?LinkOwner = null;
+var active_veil: ?*veil_mod.RowVeil = null;
+var active_streaming: bool = false;
+var veil_now_ms: f64 = 0;
+var current_elem_ix: usize = 0;
 var mermaid_source_ids: [32]u64 = @splat(0);
 var mermaid_source_len: usize = 0;
 
@@ -48,9 +53,37 @@ fn toggleMermaidSource(id: u64) void {
 /// A transcript or workspace preview keeps links in its containing chat,
 /// including when a subagent is drawn beside it.
 pub fn withLinks(c: *ui.Context, colors: theme.Colors, src: []const u8, a: *@import("app.zig").App, parent: ?[]const u8) void {
-    const old = link_owner;
-    defer link_owner = old;
+    withLinksVeil(c, colors, src, a, parent, null, false);
+}
+
+/// Draws Markdown `src` with optional streaming fade-in veil and live
+/// inline-mark balancing.
+pub fn withLinksVeil(
+    c: *ui.Context,
+    colors: theme.Colors,
+    src: []const u8,
+    a: *@import("app.zig").App,
+    parent: ?[]const u8,
+    row_veil: ?*veil_mod.RowVeil,
+    streaming: bool,
+) void {
+    const old_owner = link_owner;
+    const old_veil = active_veil;
+    const old_streaming = active_streaming;
+    const old_now = veil_now_ms;
+    const old_elem = current_elem_ix;
+    defer {
+        link_owner = old_owner;
+        active_veil = old_veil;
+        active_streaming = old_streaming;
+        veil_now_ms = old_now;
+        current_elem_ix = old_elem;
+    }
     link_owner = if (parent) |p| .{ .app = a, .parent = p } else null;
+    active_veil = row_veil;
+    active_streaming = streaming;
+    veil_now_ms = c.time * 1000.0;
+    current_elem_ix = 0;
     markdown(c, colors, src);
 }
 
@@ -58,7 +91,8 @@ pub fn withLinks(c: *ui.Context, colors: theme.Colors, src: []const u8, a: *@imp
 pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     k = colors;
     body = kit.style(c, 15, 22.5, .{ .wrap = true });
-    const blocks = md.parse(c.alloc(), src, .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted });
+    const src_in = if (active_streaming) veil_mod.balanceStreamingMarkdown(c.alloc(), src) else src;
+    const blocks = md.parse(c.alloc(), src_in, .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted });
     const col = ui.div(c).column().wFull();
     defer col.end();
     for (blocks, 0..) |b, i| {
@@ -68,8 +102,13 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
             const tight = b == .item and blocks[i - 1] == .item;
             _ = c.leaf(.{ .height = .{ .px = if (tight) 4 else 12 } }, .none, null);
         }
+        current_elem_ix = i * 64;
         ui.key(c, c.print("md-{d}", .{i}));
         block(c, b, i == 0);
+    }
+    if (active_veil) |v| {
+        v.finishSeeding();
+        if (v.isFading()) c.frameIn(1.0 / 120.0);
     }
 }
 
@@ -83,11 +122,16 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
     // round (`INLINE_CODE_PAD_X`, `INLINE_CODE_INSET_Y`,
     // `INLINE_CODE_RADIUS`; nanoui's `span_box`).
     if (comptime @hasField(ui.TextStyle, "span_box")) st.span_box = .{ .pad_x = 2, .inset_y = 2, .radius = 4.5 };
-    if (in.links.len == 0 or link_owner == null) return ui.richText(c, in.text, in.spans, st);
+    const spans: []const ui.Span = if (active_veil) |v| blk: {
+        const v_spans = v.advance(c.gpa, c.alloc(), current_elem_ix, in.text, veil_now_ms);
+        current_elem_ix += 1;
+        break :blk veil_mod.applyVeil(c.alloc(), in.text.len, in.spans, v_spans, st.color orelse k.text);
+    } else in.spans;
+    if (in.links.len == 0 or link_owner == null) return ui.richText(c, in.text, spans, st);
     const area = ui.div(c).column().wFull();
     defer area.end();
     const at = c.nodes.items.len;
-    ui.richText(c, in.text, in.spans, st);
+    ui.richText(c, in.text, spans, st);
     const rect = c.rects.get(c.node(@intCast(at)).id) orelse {
         const owner = link_owner.?;
         if (owner.app.window == null or owner.app.offscreen) c.changed = true else c.frameIn(0);
@@ -239,10 +283,22 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
     defer lines.end();
     const st = kit.style(c, 12.5, 18, .{ .mono = true, .wrap = true, .color = k.text });
     var in_block: highlight.State = .{};
-    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, src, "\n"), '\n');
+    const trimmed_src = std.mem.trimEnd(u8, src, "\n");
+    const code_veils: []const veil_mod.VeilSpan = if (active_veil) |v| blk: {
+        const vs = v.advance(c.gpa, c.alloc(), current_elem_ix, trimmed_src, veil_now_ms);
+        current_elem_ix += 1;
+        break :blk vs;
+    } else &.{};
+    var line_offset: usize = 0;
+    var it = std.mem.splitScalar(u8, trimmed_src, '\n');
     while (it.next()) |l| {
-        const spans = highlight.line(c.alloc(), l, lang, pal, &in_block);
+        const raw_spans = highlight.line(c.alloc(), l, lang, pal, &in_block);
+        const spans: []const ui.Span = if (code_veils.len > 0 and l.len > 0) blk: {
+            const local = veil_mod.sliceSpans(c.alloc(), code_veils, line_offset, line_offset + l.len);
+            break :blk veil_mod.applyVeil(c.alloc(), l.len, raw_spans, local, st.color orelse k.text);
+        } else raw_spans;
         ui.richText(c, if (l.len == 0) " " else l, spans, st);
+        line_offset += l.len + 1;
     }
 }
 

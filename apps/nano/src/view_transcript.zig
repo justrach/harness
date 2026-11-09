@@ -29,7 +29,7 @@ pub var column_w: f32 = 736;
 /// The column's width in a main area `w` wide, with its gutters.
 pub fn columnWidth(w: f32) f32 {
     const gutter = std.math.clamp(w * 0.06, 12, 48);
-    return @max(@min(column_w, w - 2 * gutter), 200);
+    return @max(0, @min(column_w, w - 2 * gutter));
 }
 
 /// The shared shell frame owns the actual chat allocation, including the
@@ -50,9 +50,20 @@ pub fn contentWidth(c: *ui.Context, a: *const App) f32 {
 /// split across it.
 pub fn paneWidth(c: *ui.Context, a: *const App) f32 {
     const w = contentWidth(c, a);
+    if (a.view.strip.expanded != null) return w;
     const s = a.tabs.layout() orelse return w;
-    if (s.zoomed or s.axis != .horizontal) return w;
-    return @max(0, @import("panel_chrome.zig").paneSpan(a.view.chrome.chat_width, s.shares.items[s.focus], s.panes.items.len, true) - a.view.seam_inset);
+    if (s.zoomed or s.axis != .horizontal or s.panes.items.len <= 1) return w;
+    const total = a.view.chrome.chat_width;
+    const target = @import("panel_chrome.zig").paneSpan(total, s.shares.items[s.focus], s.panes.items.len, true);
+    const span = if (a.view.split_reveal) |r| blk: {
+        if (r.tab != a.tabs.active or r.new_index >= s.panes.items.len) break :blk target;
+        const start = r.started orelse c.time;
+        const raw: f32 = if (c.reduced_motion) 1 else @floatCast(std.math.clamp((c.time - start) / 0.24, 0, 1));
+        const inv = 1 - raw;
+        const t: f32 = if (c.reduced_motion) 1 else 1 - inv * inv * inv * inv * inv;
+        break :blk @import("view.zig").revealSpan(total, true, r, s.focus, target, t);
+    } else target;
+    return @max(0, span - a.view.seam_inset);
 }
 
 /// The focused pane's height under the title bar, in a split down the
@@ -70,8 +81,9 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     const rail = @import("view_rail.zig");
     rail.step(c, &a.view.rail);
     const just_stuck = a.view.stick_end;
-    const drawn = entries(c, a, k, &a.transcript, paneWidth(c, a), a.w_doc.id != null, 64 - sidebar.titlebar_h);
-    rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, mainWidth(c, a));
+    const pane_w = paneWidth(c, a);
+    const drawn = entries(c, a, k, &a.transcript, pane_w, a.w_doc.id != null, 64 - sidebar.titlebar_h);
+    rail.rail(c, k, &a.view.rail, &a.transcript, drawn.ticks, drawn.box, pane_w + a.view.seam_inset);
     if (!just_stuck) recoverBlank(c, a, drawn);
     a.view.jump_box = drawn.box;
     a.view.jump_distance = drawn.from_end;
@@ -385,6 +397,21 @@ fn partRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts:
     }
 }
 
+pub fn streamMarkdown(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, chat_id: ?[]const u8) void {
+    const state = @import("tool_ui_state.zig");
+    const part_id = state.key(chat_id, e.id, p.id);
+    const live = e.status == .streaming;
+    const use_veil = !a.offscreen and !c.reduced_motion and (live or a.view.tool_ui.veils.isFading(part_id));
+    const row_veil = if (use_veil)
+        a.view.tool_ui.veils.getOrCreate(a.gpa, part_id, live and p.text.items.len > 64, c.time * 1000.0)
+    else
+        null;
+    @import("view_markdown.zig").withLinksVeil(c, k, p.text.items, a, chat_id, row_veil, live and !a.offscreen);
+    if (!live and row_veil != null) {
+        a.view.tool_ui.veils.pruneSettled(a.gpa, part_id);
+    }
+}
+
 fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const tr.Part, at: At, answer: Answer) void {
     switch (p.kind) {
         .text => {
@@ -392,8 +419,8 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
                 const box = ui.div(c).column().wFull();
                 defer box.end();
                 answerHeading(c, k, e, answer.label);
-                @import("view_markdown.zig").withLinks(c, k, p.text.items, a, at.chat_id);
-            } else @import("view_markdown.zig").withLinks(c, k, p.text.items, a, at.chat_id);
+                streamMarkdown(c, a, k, e, p, at.chat_id);
+            } else streamMarkdown(c, a, k, e, p, at.chat_id);
         },
         .tool => treeRow(c, a, k, e, p, true, at.chat_id),
         .@"error" => errorPart(c, a, k, e, p, at),
@@ -568,7 +595,7 @@ fn workRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
                 defer thoughts.end();
                 for (work[r.start..r.end]) |*tp| {
                     if (tp.kind == .reasoning and tp.text.items.len > 0) {
-                        @import("view_markdown.zig").withLinks(c, k, tp.text.items, a, at.chat_id);
+                        streamMarkdown(c, a, k, e, tp, at.chat_id);
                     }
                 }
             }
