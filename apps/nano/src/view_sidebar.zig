@@ -14,8 +14,6 @@ const App = @import("app.zig").App;
 
 /// "No sessions yet": GPUI's default line (φ), up to a device pixel.
 const empty_line = kit.measured(12 * 1.618);
-const active_row_shadow_dark = [_]ui.Shadow{.{ .color = .{ .a = 0.16 }, .blur = 2, .y = 1 }};
-const active_row_shadow_light = [_]ui.Shadow{.{ .color = .{ .a = 0.06 }, .blur = 2, .y = 1 }};
 
 pub const width: f32 = @import("settings.zig").sidebar_default;
 
@@ -139,8 +137,7 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
             });
             var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).control().motion(row_mot);
             if (sess.active and !multi_tabs) {
-                row = row.bg(if (k.is_harp) k.active else k.selected);
-                if (k.is_harp) row = row.border(k.border_strong).borderW(0.5).shadows(if (k.dark) &active_row_shadow_dark else &active_row_shadow_light);
+                row = row.bg(k.selected);
             } else if (sess.active and multi_tabs) {
                 row = row.bg(k.ink(if (k.dark) 0.07 else 0.04)).hover(k.hover.alpha(0.45));
             } else {
@@ -197,8 +194,7 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
                 rail.end();
                 var trow = ui.div(c).row().grow().w(0).h(28).px(7).gap(6).itemsCenter().rounded(6).control();
                 if (t.active) {
-                    trow = trow.bg(if (k.is_harp) k.active else k.selected);
-                    if (k.is_harp) trow = trow.border(k.border_strong).borderW(0.5).shadows(if (k.dark) &active_row_shadow_dark else &active_row_shadow_light);
+                    trow = trow.bg(k.selected);
                 } else {
                     trow = trow.hover(k.hover.alpha(0.45));
                 }

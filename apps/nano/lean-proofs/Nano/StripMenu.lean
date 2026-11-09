@@ -208,4 +208,66 @@ theorem update_button_never_overlaps_first_slot :
     stripLeftInset 0 false true = 180 ∧ stripLeftInset 0 false true > 166 := by
   native_decide
 
+structure SplitSlotPartition where
+  activeW : Nat
+  pillW   : Nat
+  totalW  : Nat
+deriving DecidableEq, Repr, BEq
+
+/-- Partition of a split-pane tab slot (`slotW`) among 1 active tab and `nTabs - 1`
+inactive tab pills separated by `4px` gaps (`view_tab_strip_render.zig`).
+Guarantees `totalW ≤ slotW` so inactive tab pills never overflow into the adjacent
+split-pane slot (`hey there` overlapping `Orchestrated Multi-Agent...`). -/
+def splitSlotPartition (slotW nTabs : Nat) : SplitSlotPartition :=
+  if nTabs <= 1 then
+    { activeW := slotW, pillW := 0, totalW := slotW }
+  else
+    let inactive := nTabs - 1
+    let gaps := inactive * 4
+    let avail := slotW - Nat.min slotW gaps
+    let pillBudget := (avail * 45) / 100
+    let pillW := Nat.min 120 (pillBudget / inactive)
+    let activeW := avail - Nat.min avail (inactive * pillW)
+    { activeW := activeW
+    , pillW := pillW
+    , totalW := activeW + inactive * pillW + Nat.min slotW gaps }
+
+def splitSlotPartitionCube : Bool :=
+  [120, 180, 240, 320, 440].all (fun slotW =>
+    [1, 2, 3, 4, 5].all (fun nTabs =>
+      let p := splitSlotPartition slotW nTabs
+      p.totalW <= slotW && p.activeW <= slotW))
+
+theorem split_slot_partition_bounded : splitSlotPartitionCube = true := by
+  native_decide
+
+/-- Width reserved for background global tabs beside a multi-pane split
+(`otherTabsReserve` in `view_tab_strip_render.zig`): capped at `38%` of `availBar`
+so split slots retain at least `62%` of the top strip. -/
+def otherTabsReserve (availBar otherCount : Nat) : Nat :=
+  if otherCount == 0 then 0
+  else Nat.min (otherCount * 114 + 34) ((availBar * 38) / 100)
+
+theorem other_tabs_reserve_bounded (availBar otherCount : Nat) :
+    otherTabsReserve availBar otherCount <= (availBar * 38) / 100 := by
+  unfold otherTabsReserve
+  split
+  · exact Nat.zero_le _
+  · exact Nat.min_le_right _ _
+
+/-- Downward shadow bleed (in px) from the selected tab cap onto the conversation
+body below `foot` (`paint_decor.zig`). Shortening the cap shadow box by `r` (`10px`)
+and masking the interior `[0, foot]` leaves `0px` downward shadow bleed. -/
+def capShadowDownwardBleed (_top foot r blurReach : Nat) (interiorMasked : Bool) : Nat :=
+  if interiorMasked then
+    let shBottom := (foot - Nat.min foot r) + blurReach
+    shBottom - Nat.min shBottom foot
+  else
+    (foot + blurReach) - foot
+
+theorem cap_shadow_interior_masked :
+    capShadowDownwardBleed 4 42 10 8 true = 0 ∧
+    capShadowDownwardBleed 4 42 10 8 false = 8 := by
+  native_decide
+
 end Nano.StripMenu

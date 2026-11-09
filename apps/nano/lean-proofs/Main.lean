@@ -13,5 +13,5 @@ def main : IO Unit := do
   IO.println s!"frame_schedule  {FrameSchedule.scheduleCells}  single_pass={FrameSchedule.singlePassCells}"
   IO.println s!"scroll_follow   {ScrollFollow.scrollCells}  quiescent={ScrollFollow.stationaryQuiescentCheck}  growth={ScrollFollow.growthFollowCheck}"
   IO.println s!"tween           {Tween.tweenCells}  continuous={Tween.retargetContinuityCube}  culling_sound={Tween.cullingSoundCube}"
-  IO.println s!"strip_menu      {StripMenu.stripCells}  chip_conserved={StripMenu.chipConservationCube}  focus_kept={StripMenu.menuFocusPreservedCube}"
+  IO.println s!"strip_menu      {StripMenu.stripCells}  chip_conserved={StripMenu.chipConservationCube}  focus_kept={StripMenu.menuFocusPreservedCube}  split_bounded={StripMenu.splitSlotPartitionCube}"
   IO.println s!"cells_total     {FrameSchedule.scheduleCells + ScrollFollow.scrollCells + Tween.tweenCells + StripMenu.stripCells}"

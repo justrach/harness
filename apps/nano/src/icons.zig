@@ -201,8 +201,10 @@ test "every original Harness SVG renders at screen density inside its existing f
             .image => |im| {
                 const Cache = @TypeOf(t.text.images.decoded);
                 const Key = @FieldType(Cache.KV, "key");
-                const key: Key = if (comptime Key == u64) im.key else .{ .key = im.key, .side = @intFromFloat(14 * scale) };
-                const decoded = t.text.images.decoded.get(key).?.?;
+                const decoded = if (comptime Key == u64)
+                    t.text.images.decoded.get(im.key).?.?
+                else
+                    (t.text.images.decoded.get(.{ .key = im.key, .side = 0 }) orelse t.text.images.decoded.get(.{ .key = im.key, .side = @intFromFloat(14 * scale) }).?).?;
                 try std.testing.expectEqual(@as(u32, @intFromFloat(14 * scale)), decoded.width);
                 try std.testing.expectEqual(decoded.width, decoded.height);
                 try std.testing.expectEqual(@as(f32, 14), node.rect.w);

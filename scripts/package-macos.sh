@@ -44,6 +44,8 @@ fi
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$BUILD_BINARY" "$APP/Contents/MacOS/harness"
+(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build -Doptimize=ReleaseFast)
+install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$APP/Contents/MacOS/harness-nano"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 # graff ships inside the bundle (Contents/Resources/bin/graff): the app seeds
 # ~/.harness/bin/graff from it and links `graff` onto the PATH. GRAFF_BINARY
@@ -86,14 +88,14 @@ else
 fi
 echo "bundled $("$APP/Contents/Resources/bin/codedb" --version | head -1)"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
-cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
+cp "$ROOT/apps/nano/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/"
 cp "$ROOT/third_party/licenses/Zeron-MIT.txt" "$APP/Contents/Resources/licenses/"
 cp "$ROOT/third_party/licenses/CodeGraff-LICENSE.txt" "$APP/Contents/Resources/licenses/"
 # Session chimes, by name, for the notification center to play: background
-# chimes ride on their banner so Focus applies (crates/ui/src/sound.rs).
+# chimes ride on their banner so Focus applies (apps/nano/src/sound.zig).
 for chime in done request attention; do
-  cp "$ROOT/crates/ui/assets/sounds/$chime.wav" "$APP/Contents/Resources/harness-$chime.wav"
+  cp "$ROOT/apps/nano/assets/sounds/$chime.wav" "$APP/Contents/Resources/harness-$chime.wav"
 done
 
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow

@@ -83,7 +83,8 @@ pub fn start(io: std.Io, data_dir: []const u8) void {
     const file = cwd.createFile(io, path, .{ .truncate = true }) catch return;
     log_file = file;
     if (builtin.os.tag != .windows and std.c.isatty(2) == 0) _ = std.c.dup2(file.handle, 2);
-    line("started pid={d} build={s}", .{ std.c.getpid(), @tagName(builtin.mode) });
+    const pid_num: i64 = if (builtin.os.tag == .windows) @intCast(std.os.windows.GetCurrentProcessId()) else std.c.getpid();
+    line("started pid={d} build={s}", .{ pid_num, @tagName(builtin.mode) });
     // AppKit quits with exit(): no defer runs, its handlers do.
     if (builtin.os.tag != .windows) _ = atexit(onExit);
     if (builtin.os.tag == .macos) {
@@ -169,6 +170,7 @@ fn watch() void {
 
 /// Every thread's stack, two seconds' worth, in a file of its own.
 fn sampleStacks() void {
+    if (comptime builtin.os.tag != .macos) return;
     var name_buf: [std.fs.max_path_bytes]u8 = undefined;
     const name = std.fmt.bufPrint(&name_buf, "{s}/{s}{d}.txt", .{ logs, stall_prefix, @divTrunc(std.Io.Clock.real.now(global_io).toMilliseconds(), 1000) }) catch return;
     var pid_buf: [16]u8 = undefined;

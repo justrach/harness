@@ -231,6 +231,74 @@ pub fn closeRedrawPasses(coalesce_pre_tree: bool, has_archive_side_effect: bool)
     return 1 + @as(usize, if (has_archive_side_effect) 1 else 0) + 1;
 }
 
+pub const SplitSlotPartition = struct {
+    active_w: f32,
+    pill_w: f32,
+    total_w: f32,
+};
+
+/// Partition of a split-pane tab slot (`slot_w`) among 1 active tab and `n_tabs - 1`
+/// inactive tab pills separated by `4px` gaps (`Nano.StripMenu.splitSlotPartition`).
+/// Proven (`split_slot_partition_bounded`) never to overflow `slot_w`.
+pub fn splitSlotPartition(slot_w_in: f32, n_tabs: usize) SplitSlotPartition {
+    const slot_w = @max(0, slot_w_in);
+    if (n_tabs <= 1) {
+        return .{ .active_w = slot_w, .pill_w = 0, .total_w = slot_w };
+    }
+    const inactive: f32 = @floatFromInt(n_tabs - 1);
+    const gaps = inactive * 4;
+    const avail = @max(0, slot_w - @min(slot_w, gaps));
+    const pill_budget = avail * 0.45;
+    const pill_w = @min(120, @floor(pill_budget / inactive));
+    const active_w = @max(0, avail - @min(avail, inactive * pill_w));
+    return .{
+        .active_w = active_w,
+        .pill_w = pill_w,
+        .total_w = active_w + inactive * pill_w + @min(slot_w, gaps),
+    };
+}
+
+/// Width reserved for background global tabs beside a multi-pane split
+/// (`Nano.StripMenu.otherTabsReserve`), capped at `38%` of `avail_bar`.
+pub fn otherTabsReserve(avail_bar: f32, other_count: usize) f32 {
+    if (other_count == 0) return 0;
+    const natural = @as(f32, @floatFromInt(other_count)) * 114 + 34;
+    return @min(natural, avail_bar * 0.38);
+}
+
+/// Downward shadow bleed (in px) from the selected tab cap onto the conversation
+/// body below `foot` (`Nano.StripMenu.capShadowDownwardBleed`).
+pub fn capShadowDownwardBleed(foot: f32, r: f32, blur_reach: f32, interior_masked: bool) f32 {
+    if (interior_masked) {
+        const sh_bottom = @max(0, foot - @min(foot, r)) + blur_reach;
+        return @max(0, sh_bottom - @min(sh_bottom, foot));
+    }
+    return (foot + blur_reach) - foot;
+}
+
+pub const BillingTier = enum { plan, local, credits, api };
+
+/// Model picker billing tier rank (`Nano.FrameSchedule.billingRank`):
+/// orders subscription (`plan`) models strictly before non-subscription models.
+pub fn billingRank(tier: BillingTier) u8 {
+    return switch (tier) {
+        .plan => 0,
+        .local => 1,
+        .credits => 2,
+        .api => 3,
+    };
+}
+
+/// Retained-scene eligibility (`Nano.FrameSchedule.retainStoreOk`).
+pub fn retainStoreOk(virtual_list: bool, animating: bool, changed: bool) bool {
+    return !virtual_list and !animating and !changed;
+}
+
+/// Active sidebar row fill policy (`Nano.FrameSchedule.sidebarActiveOpaqueCard`).
+pub fn sidebarActiveOpaqueCard(frosted: bool) bool {
+    return !frosted;
+}
+
 test "lean StripMenu kernel: screenshot slot chevron unclipped and conservation cube holds" {
     const shot = slotChipWidths(180, 43, true, 40, true);
     try std.testing.expectEqual(@as(f32, 74), shot.dev_w);
@@ -324,4 +392,21 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, false));
     try std.testing.expectEqual(CloseAction.confirm_choice, decideCloseTarget(.chat, true, 1, 1, false, false, false, true));
     try std.testing.expectEqual(CloseAction.close_split_pane, decideCloseTarget(.chat, false, 1, 2, true, false, false, false));
+
+    // Split-pane slot partition, other-tabs reserve, cap shadow mask, billing rank, virtual_list retain, and frosted pill policy.
+    for ([_]f32{ 120, 180, 240, 320, 440 }) |sw| {
+        for ([_]usize{ 1, 2, 3, 4, 5 }) |nt| {
+            const part = splitSlotPartition(sw, nt);
+            try std.testing.expect(part.total_w <= sw);
+            try std.testing.expect(part.active_w <= sw);
+        }
+    }
+    try std.testing.expect(otherTabsReserve(900, 5) <= 900 * 0.38 + 0.001);
+    try std.testing.expectEqual(@as(f32, 0), capShadowDownwardBleed(42, 10, 8, true));
+    try std.testing.expectEqual(@as(f32, 8), capShadowDownwardBleed(42, 10, 8, false));
+    try std.testing.expect(billingRank(.plan) < billingRank(.local));
+    try std.testing.expect(billingRank(.local) < billingRank(.credits));
+    try std.testing.expect(billingRank(.credits) < billingRank(.api));
+    try std.testing.expect(!retainStoreOk(true, false, false));
+    try std.testing.expect(!sidebarActiveOpaqueCard(true));
 }

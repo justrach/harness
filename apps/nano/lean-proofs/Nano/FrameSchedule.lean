@@ -221,4 +221,47 @@ theorem cmd_w_split_pane_takes_precedence_over_host
   unfold decideCloseTarget
   simp [hsp]
 
+/-- Model picker billing tier rank (`billingRank` in `view_picker_models.zig`
+and `ModelSelectionSheet.swift`): orders subscription (`plan`) models first,
+followed by `local`, `credits`, and `api` (non-subscription). -/
+inductive BillingTier where
+  | plan | local | credits | api
+deriving DecidableEq, Repr, BEq
+
+def billingRank (b : BillingTier) : Nat :=
+  match b with
+  | .plan    => 0
+  | .local   => 1
+  | .credits => 2
+  | .api     => 3
+
+theorem billing_rank_subs_before_nonsubs :
+    billingRank .plan < billingRank .local ∧
+    billingRank .local < billingRank .credits ∧
+    billingRank .credits < billingRank .api := by
+  native_decide
+
+/-- Retained-scene eligibility (`retain.store` in `nanoui`): a scroll container
+that culls offscreen children in user space (`virtualList = true`, such as Settings
+pages) must never cache its partial node tree in `retain.store`, preventing `retain.use`
+from shifting a culled scene on 120Hz scroll events. -/
+def retainStoreOk (virtualList animating changed : Bool) : Bool :=
+  !virtualList && !animating && !changed
+
+theorem virtual_list_prevents_culled_retain_shift (animating changed : Bool) :
+    retainStoreOk true animating changed = false := by
+  rfl
+
+/-- Active sidebar row fill policy (`view_sidebar.zig`, `view_settings.zig`):
+on a translucent frosted sidebar (`alpha = 204 < 255`), active rows use the
+translucent `selected` wash (`opaqueCard = false`) rather than an `alpha = 255`
+opaque card + dark shadow, preventing `R > A ≥ B` premultiplied-alpha corner
+overflow (`#0201ff`). -/
+def sidebarActiveOpaqueCard (frosted : Bool) : Bool :=
+  !frosted
+
+theorem frosted_sidebar_never_paints_opaque_card :
+    sidebarActiveOpaqueCard true = false := by
+  rfl
+
 end Nano.FrameSchedule

@@ -7,10 +7,10 @@ pub fn build(b: *std.Build) void {
     // HTTPS with ALPN h2 for what the app asks the network itself (releases,
     // the edge); the engine's own socket is a local WebSocket (src/ws.zig).
     const http_zig = b.dependency("http_zig", .{ .target = target, .optimize = optimize }).module("http_zig");
-    // The GPUI app's own fonts (crates/ui/assets/fonts), the same files,
-    // in a module that embeds them: Geist isn't installed on most Macs.
+    // Harness's bundled fonts (assets/fonts), in a module that embeds them:
+    // Geist isn't installed on most Macs.
     const font_files = b.addWriteFiles();
-    _ = font_files.addCopyDirectory(b.path("../../crates/ui/assets/fonts"), "fonts", .{ .include_extensions = &.{".ttf"} });
+    _ = font_files.addCopyDirectory(b.path("assets/fonts"), "fonts", .{ .include_extensions = &.{".ttf"} });
     const fonts_root = font_files.add("fonts.zig",
         \\//! Geist and Geist Mono, as the GPUI app bundles them.
         \\pub const all = [_][]const u8{
@@ -34,10 +34,10 @@ pub fn build(b: *std.Build) void {
         \\
     );
     const fonts = b.createModule(.{ .root_source_file = fonts_root });
-    // The same SVGs the GPUI app draws, rasterized at the screen's density,
+    // Harness's SVGs, rasterized at the screen's density,
     // not a second, pre-rendered copy of the icon set.
     const icon_files = b.addWriteFiles();
-    _ = icon_files.addCopyDirectory(b.path("../../crates/ui/assets/icons"), "icons", .{ .include_extensions = &.{".svg"} });
+    _ = icon_files.addCopyDirectory(b.path("assets/icons"), "icons", .{ .include_extensions = &.{".svg"} });
     const icons_root = icon_files.add("icons_svg.zig",
         \\pub fn get(comptime name: []const u8) []const u8 {
         \\    return @embedFile("icons/" ++ name ++ ".svg");

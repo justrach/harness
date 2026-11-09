@@ -90,7 +90,7 @@ contents:
   - src: $ROOT/third_party/licenses/CodeGraff-LICENSE.txt
     dst: /usr/share/licenses/harness/CodeGraff-LICENSE.txt
 YAML
-for f in "$ROOT"/crates/ui/assets/fonts/licenses/*; do
+for f in "$ROOT"/apps/nano/assets/fonts/licenses/*; do
   printf '  - src: %s\n    dst: /usr/share/licenses/harness/fonts/%s\n' \
     "$f" "$(basename "$f")" >>"$config"
 done

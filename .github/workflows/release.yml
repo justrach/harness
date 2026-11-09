@@ -57,6 +57,9 @@ jobs:
             libvulkan-dev pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -141,6 +144,10 @@ jobs:
       - name: rust toolchain (rust-toolchain.toml)
         if: steps.signing.outputs.enabled == 'true'
         run: rustup show active-toolchain || rustup toolchain install
+      - uses: mlugg/setup-zig@v2
+        if: steps.signing.outputs.enabled == 'true'
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         if: steps.signing.outputs.enabled == 'true'
         with:
@@ -209,12 +216,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: rust toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Locate Windows SDK shader compiler
-        run: |
-          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}

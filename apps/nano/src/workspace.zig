@@ -432,6 +432,17 @@ extern "c" fn localtime_r(t: *const c_long, out: *Tm) ?*Tm;
 
 /// The local zone's offset from UTC at `now_ms`, in seconds.
 pub fn utcOffsetSeconds(now_ms: i64) i64 {
+    if (comptime @import("builtin").os.tag == .windows) {
+        const w = struct {
+            const SYSTEMTIME = extern struct { wYear: u16, wMonth: u16, wDayOfWeek: u16, wDay: u16, wHour: u16, wMinute: u16, wSecond: u16, wMilliseconds: u16 };
+            const TIME_ZONE_INFORMATION = extern struct { Bias: i32, StandardName: [32]u16, StandardDate: SYSTEMTIME, StandardBias: i32, DaylightName: [32]u16, DaylightDate: SYSTEMTIME, DaylightBias: i32 };
+            extern "kernel32" fn GetTimeZoneInformation(lpTimeZoneInformation: *TIME_ZONE_INFORMATION) callconv(.winapi) u32;
+        };
+        var tzi: w.TIME_ZONE_INFORMATION = undefined;
+        const r = w.GetTimeZoneInformation(&tzi);
+        const extra: i32 = if (r == 2) tzi.DaylightBias else if (r == 1) tzi.StandardBias else 0;
+        return -@as(i64, tzi.Bias + extra) * 60;
+    }
     const t: c_long = @intCast(@divFloor(now_ms, std.time.ms_per_s));
     var tm: Tm = undefined;
     return if (localtime_r(&t, &tm) != null) tm.gmtoff else 0;

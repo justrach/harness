@@ -32,6 +32,8 @@ TARGET_DIR="$("$ROOT/scripts/heavy-build.sh" cargo metadata --format-version 1 -
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
 install -m 755 "$TARGET_DIR/$PROFILE_DIR/harness" "$CONTENTS/MacOS/harness"
+(cd "$ROOT/apps/nano" && "$ROOT/scripts/heavy-build.sh" zig build)
+install -m 755 "$ROOT/apps/nano/zig-out/bin/harness-nano" "$CONTENTS/MacOS/harness-nano"
 # Bundle graff like the release does (scripts/package-macos.sh), from
 # GRAFF_BINARY or the graff on PATH, so the bundled/managed path is exercised.
 GRAFF_SRC="${GRAFF_BINARY:-$(command -v graff || true)}"
@@ -40,7 +42,7 @@ if [[ -n "$GRAFF_SRC" ]]; then
   install -m 755 "$GRAFF_SRC" "$CONTENTS/Resources/bin/graff"
 fi
 for chime in done request attention; do
-  cp "$ROOT/crates/ui/assets/sounds/$chime.wav" "$CONTENTS/Resources/harness-$chime.wav"
+  cp "$ROOT/apps/nano/assets/sounds/$chime.wav" "$CONTENTS/Resources/harness-$chime.wav"
 done
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.HARNESS_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory)][string]$ReleasesUrl,
     # `dist` is what ships; CI passes `release` to package the build it has.
     [ValidateSet('dist', 'release')][string]$CargoProfile = 'dist'
@@ -43,11 +43,17 @@ try {
     $stage = Join-Path $out "harness-$version-windows-x86_64"
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath "./target/$CargoProfile/harness.exe" -Destination (Join-Path $stage 'harness.exe')
+    Push-Location (Join-Path $root 'apps/nano')
+    try {
+        zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast
+        if ($LASTEXITCODE -ne 0) { throw 'harness-nano Windows build failed' }
+    } finally { Pop-Location }
+    Copy-Item -LiteralPath './apps/nano/zig-out/bin/harness-nano.exe' -Destination (Join-Path $stage 'harness-nano.exe')
     @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'harness-update.json')
     Copy-Item -LiteralPath 'LICENSE','THIRD_PARTY_NOTICES.md' -Destination $stage
     $licenses = Join-Path $stage 'licenses/fonts'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
-    Copy-Item -Path 'crates/ui/assets/fonts/licenses/*' -Destination $licenses
+    Copy-Item -Path 'apps/nano/assets/fonts/licenses/*' -Destination $licenses
     Copy-Item -LiteralPath 'third_party/licenses/Zeron-MIT.txt' -Destination (Join-Path $stage 'licenses')
     Copy-Item -LiteralPath 'third_party/licenses/CodeGraff-LICENSE.txt' -Destination (Join-Path $stage 'licenses')
     Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force

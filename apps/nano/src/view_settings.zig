@@ -141,15 +141,11 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (back.clicked()) close(a);
 }
 
-const nav_shadow_dark = [_]ui.Shadow{.{ .color = .{ .a = 0.16 }, .blur = 2, .y = 1 }};
-const nav_shadow_light = [_]ui.Shadow{.{ .color = .{ .a = 0.06 }, .blur = 2, .y = 1 }};
-
 fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
     ui.key(c, s.key());
     var r = ui.div(c).row().wFull().px(8).py(6).gap(8).itemsCenter().rounded(8);
     if (selected) {
-        r = r.bg(if (k.is_harp) k.active else k.selected);
-        if (k.is_harp) r = r.border(k.border_strong).borderW(0.5).shadows(if (k.dark) &nav_shadow_dark else &nav_shadow_light);
+        r = r.bg(k.selected);
     } else {
         r = r.hover(k.hover);
     }
@@ -165,7 +161,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     // Prevent retain.store from caching a viewport-culled partial scene for
     // Settings pages, so every 120Hz scroll event paints newly revealed cards
     // immediately without torn borders or pop-in.
-    c.virtual_list = true;
+    if (comptime @hasField(ui.Context, "retain")) {
+        c.retain.virtual_list = true;
+    } else if (comptime @hasField(ui.Context, "virtual_list")) {
+        c.virtual_list = true;
+    }
     {
         // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
         // with a nanoui that has overlay bars (justrach/nanoui#21).

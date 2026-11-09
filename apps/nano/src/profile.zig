@@ -91,7 +91,8 @@ pub fn main(init: std.process.Init) !void {
         }
     };
     debug_frames = std.c.getenv(debug_frames_env) != null;
-    std.debug.print("pid={d} phase=replay\n", .{std.c.getpid()});
+    const pid_num: i64 = if (@import("builtin").os.tag == .windows) @intCast(std.os.windows.GetCurrentProcessId()) else std.c.getpid();
+    std.debug.print("pid={d} phase=replay\n", .{pid_num});
     const first_at = frames[0].object.get("at").?.integer;
     var next: usize = 0;
     var dirty = true;
@@ -201,4 +202,4 @@ const debug_frames_env = "NANO_PROFILE_FRAMES";
 var debug_frames = false;
 
 /// A nanoui with targets kept across frames (the fork's benchmark draw).
-const has_target = @hasField(ui.Tester, "renderer") and @hasDecl(@FieldType(ui.Tester, "renderer"), "drawTimed");
+const has_target = @hasField(ui.Tester, "renderer") and @FieldType(ui.Tester, "renderer") != void and @hasDecl(@FieldType(ui.Tester, "renderer"), "drawTimed");

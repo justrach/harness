@@ -54,7 +54,7 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
 /// Empty/unavailable read-back stays a file tile, not a raw transport path.
 pub fn picture(c: *ui.Context, k: theme.Colors, key: []const u8, name: []const u8, bytes: []const u8) void {
     if (bytes.len > 0 and bytes.len <= attachments.max_bytes and (attachments.isImageName(name) or std.mem.endsWith(u8, key, ".jpg"))) {
-        if (ui.image(c, .{ .key = key, .bytes = bytes, .max_width = 56, .max_height = 56, .radius = 6, .scale = 1 })) return;
+        if (ui.image(c, .{ .key = key, .source = .{ .encoded = bytes }, .max_width = 56, .max_height = 56, .radius = 6, .scale = 1 })) return;
     }
     icons.icon(c, .document, 24, k.muted, 0);
 }

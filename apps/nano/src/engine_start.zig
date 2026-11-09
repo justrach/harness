@@ -12,6 +12,7 @@
 //!
 //! `HARNESS_NANO_NO_ENGINE_START` keeps the old behaviour: wait for one.
 const std = @import("std");
+const builtin = @import("builtin");
 const nanoui = @import("nanoui");
 const App = @import("app.zig").App;
 const Allocator = std.mem.Allocator;
@@ -104,6 +105,12 @@ pub fn find(gpa: Allocator, env: *const Map) ?[]u8 {
 fn executable(gpa: Allocator, path: []const u8) bool {
     const z = gpa.dupeSentinel(u8, path, 0) catch return false;
     defer gpa.free(z);
+    if (comptime builtin.os.tag == .windows) {
+        const w = struct {
+            extern "c" fn _access(p: [*:0]const u8, mode: c_int) c_int;
+        };
+        return w._access(z, 0) == 0;
+    }
     return std.c.access(z, std.c.X_OK) == 0;
 }
 
@@ -175,7 +182,16 @@ fn tick(a: *App) void {
 /// it when it stopped before answering.
 fn reap(s: *State) void {
     const pid = s.pid orelse return;
-    if (std.c.waitpid(pid, null, std.c.W.NOHANG) == 0) return;
+    if (comptime builtin.os.tag == .windows) {
+        const w = struct {
+            extern "kernel32" fn WaitForSingleObject(hHandle: *anyopaque, dwMilliseconds: u32) callconv(.winapi) u32;
+            extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) i32;
+        };
+        if (w.WaitForSingleObject(pid, 0) == 0x00000102) return;
+        _ = w.CloseHandle(pid);
+    } else {
+        if (std.c.waitpid(pid, null, std.c.W.NOHANG) == 0) return;
+    }
     s.pid = null;
     if (!s.answered) s.failed += 1;
 }
@@ -199,7 +215,7 @@ fn spawn(a: *App, path: []const u8) !std.c.pid_t {
         .stdout = out,
         .stderr = out,
         // A group of its own: it outlives this app and its signals.
-        .pgid = 0,
+        .pgid = if (builtin.os.tag == .windows) null else 0,
     });
     return child.id orelse error.NoPid;
 }
@@ -294,6 +310,7 @@ fn waitForFile(path: []const u8) ![]u8 {
 }
 
 test "starts `harness headless` with this app's environment, and quitting leaves it running for everyone else" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var name_buf: [128]u8 = undefined;
     const script = try std.fmt.bufPrint(&name_buf, "/tmp/nano-engine-start-{d}.sh", .{std.c.getpid()});
     var path_buf: [160]u8 = undefined;
@@ -349,6 +366,7 @@ test "starts `harness headless` with this app's environment, and quitting leaves
 }
 
 test "a start that never answers counts as failed, and three in a row give up" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var env = Map.init(testing.allocator);
     defer env.deinit();
     // `false` exits at once: an engine that stops before it answers.

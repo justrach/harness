@@ -11,7 +11,6 @@ members = [
     "crates/engine",
     "crates/rpc",
     "crates/update",
-    "crates/ui",
     "crates/syntax",
     "crates/mcp",
     "crates/observe",
@@ -19,10 +18,10 @@ members = [
     "apps/harness",
 ]
 # Vendored forks are their own (trimmed) workspaces.
-exclude = ["vendor/zui", "vendor/gpui-component", "tui"]
+exclude = ["tui"]
 
 [workspace.package]
-version = "0.2.173"
+version = "0.2.175"
 edition = "2024"
 license-file = "LICENSE"
 publish = false
@@ -37,7 +36,6 @@ harness-adapters = { path = "crates/harness" }
 harness-engine = { path = "crates/engine" }
 harness-rpc = { path = "crates/rpc" }
 harness-update = { path = "crates/update" }
-harness-ui = { path = "crates/ui" }
 harness-syntax = { path = "crates/syntax" }
 harness-theme = { path = "crates/theme" }
 harness-mcp = { path = "crates/mcp" }
@@ -46,47 +44,6 @@ harness-observe = { path = "crates/observe" }
 
 # CRDT
 loro = "1.13"
-
-# gpui — vendored Zui, extracted from wingleeio/zed e2ddcc6 with identical
-# crate sources; adds bounded blur passes and shared Gaussian weights.
-# Removes GPL tracing crates and composites deferred GPUI content above native macOS views.
-# Preserved fork history: upstream f14fea9 + commits on
-# `comet/edge-fade-horizontal` (tip of `comet/line-wrap-closing-punctuation`
-# + 5d1f83d horizontal per-pixel EdgeFade for quads/images; rebase when bumping the
-# upstream rev): a6bf17c fixes BOTH wrap-rule copies (LineWrapper +
-# line_layout's shaped-text duplicate); 14baea0 adds the EdgeFade primitive
-# (Window::with_edge_fade — per-primitive scroll-edge fades for the glass
-# sidebar); a6c1ad5 adds BackdropBlur + horizontal EdgeFade + glass fixes;
-# 9b672fa bounds renderer GPU memory (region-sized backdrop blur scratch,
-# idle release of blur/path intermediates, instance pool shrink,
-# HARNESS_GPU_STATS=1 diagnostics); b687328 adds ImageSource::evict (frees
-# sprite-atlas tiles — remove_asset alone leaked them, see
-# attachments::flush_evicted); ac135eb adds device memory to the stats line;
-# f596cde fixes destination alpha on transparent windows (Porter-Duff OVER,
-# not additive); 53518c0 merges the edge-fade line: per-edge fade bands +
-# per-pixel EdgeFade for quads/images (true fade-into-glass), and
-# object-fit Cover cropping via atlas-tile UVs so image corner radii hold;
-# 8a8954c switches the macOS blurred view to UnderWindowBackground (macOS 26
-# stopped vending CABackdropLayer for Selection — window blur went dead);
-# b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
-# Linux — the Metal path's snapshot/blur/composite, ported).
-# Paint-time rounded image masks (#9), bounded Windows backdrop blur and
-# translucent compositing, plus blur-aware scene batching (#10).
-#
-# Harness vendors both forks (Apache-2.0; see vendor/README.md): zui at
-# gaelcado/zui 53869c2 (the text-fade patch harness pinned on top of
-# the pinned Zui revision c2d273d) and gpui-base from the pinned gpui-component revision 03cd994.
-# Synced with zeronsh/zui 18a89af on 2026-09-26: only its Windows drag
-# threshold (div.rs) was new; the edge-fade and Windows blur work was already here.
-gpui = { path = "vendor/zui/crates/gpui" }
-gpui_platform = { path = "vendor/zui/crates/gpui_platform", features = [
-    "wayland",
-    "x11",
-    "font-kit",
-    "runtime_shaders",
-] }
-gpui_tokio = { path = "vendor/zui/crates/gpui_tokio" }
-gpui-base = { path = "vendor/gpui-component/crates/base" }
 
 # diffs
 similar = "2"

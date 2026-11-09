@@ -298,8 +298,49 @@ fn nowMs(io: std.Io) i64 {
     return std.Io.Clock.awake.now(io).toMilliseconds();
 }
 
+const win_pipe = struct {
+    extern "kernel32" fn PeekNamedPipe(
+        hNamedPipe: *anyopaque,
+        lpBuffer: ?*anyopaque,
+        nBufferSize: u32,
+        lpBytesRead: ?*u32,
+        lpTotalBytesAvail: ?*u32,
+        lpBytesLeftThisMessage: ?*u32,
+    ) callconv(.winapi) i32;
+    extern "kernel32" fn ReadFile(
+        hFile: *anyopaque,
+        lpBuffer: [*]u8,
+        nNumberOfBytesToRead: u32,
+        lpNumberOfBytesRead: *u32,
+        lpOverlapped: ?*anyopaque,
+    ) callconv(.winapi) i32;
+    extern "kernel32" fn WriteFile(
+        hFile: *anyopaque,
+        lpBuffer: [*]const u8,
+        nNumberOfBytesToWrite: u32,
+        lpNumberOfBytesWritten: *u32,
+        lpOverlapped: ?*anyopaque,
+    ) callconv(.winapi) i32;
+    extern "kernel32" fn CreatePipe(
+        hReadPipe: **anyopaque,
+        hWritePipe: **anyopaque,
+        lpPipeAttributes: ?*anyopaque,
+        nSize: u32,
+    ) callconv(.winapi) i32;
+    extern "kernel32" fn CloseHandle(hObject: *anyopaque) callconv(.winapi) i32;
+};
+
 /// Waits until `fd` can be read, or `deadline` (ms, awake clock) passes.
 fn readable(io: std.Io, fd: posix.fd_t, deadline: i64) !bool {
+    if (comptime builtin.os.tag == .windows) {
+        while (true) {
+            var avail: u32 = 0;
+            if (win_pipe.PeekNamedPipe(fd, null, 0, null, &avail, null) == 0) return true;
+            if (avail > 0) return true;
+            if (nowMs(io) >= deadline) return false;
+            std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+        }
+    }
     const left = deadline - nowMs(io);
     if (left <= 0) return false;
     var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
@@ -307,12 +348,26 @@ fn readable(io: std.Io, fd: posix.fd_t, deadline: i64) !bool {
 }
 
 fn readSome(fd: posix.fd_t, buf: []u8) !usize {
+    if (comptime builtin.os.tag == .windows) {
+        var got: u32 = 0;
+        if (win_pipe.ReadFile(fd, buf.ptr, @intCast(buf.len), &got, null) == 0) return 0;
+        return got;
+    }
     const n = std.c.read(fd, buf.ptr, buf.len);
     if (n < 0) return error.ReadFailed;
     return @intCast(n);
 }
 
 fn writeAll(fd: posix.fd_t, bytes: []const u8) !void {
+    if (comptime builtin.os.tag == .windows) {
+        var off: usize = 0;
+        while (off < bytes.len) {
+            var put: u32 = 0;
+            if (win_pipe.WriteFile(fd, bytes[off..].ptr, @intCast(bytes.len - off), &put, null) == 0 or put == 0) return error.WriteFailed;
+            off += put;
+        }
+        return;
+    }
     var off: usize = 0;
     while (off < bytes.len) {
         const n = std.c.write(fd, bytes[off..].ptr, bytes.len - off);
@@ -971,8 +1026,8 @@ const Fake = struct {
     muted_at_finish: bool = false,
     closed: bool = false,
     // The session's ends of the helper's pipes.
-    host_in_w: posix.fd_t = -1,
-    host_out_r: posix.fd_t = -1,
+    host_in_w: posix.fd_t = if (builtin.os.tag == .windows) undefined else -1,
+    host_out_r: posix.fd_t = if (builtin.os.tag == .windows) undefined else -1,
 
     fn line(fd: posix.fd_t, buf: *std.ArrayList(u8), a: Allocator) ?[]const u8 {
         while (true) {
@@ -1102,9 +1157,23 @@ const Heard = struct {
 };
 
 fn pipePair() ![2]posix.fd_t {
+    if (comptime builtin.os.tag == .windows) {
+        var r: *anyopaque = undefined;
+        var w: *anyopaque = undefined;
+        if (win_pipe.CreatePipe(&r, &w, null, 0) == 0) return error.Pipe;
+        return .{ r, w };
+    }
     var fds: [2]posix.fd_t = undefined;
     if (std.c.pipe(&fds) != 0) return error.Pipe;
     return fds;
+}
+
+fn closePipe(fd: posix.fd_t) void {
+    if (comptime builtin.os.tag == .windows) {
+        _ = win_pipe.CloseHandle(fd);
+    } else {
+        _ = std.c.close(fd);
+    }
 }
 
 fn runFake(devices_reply: []const u8) !struct { heard: []const []const u8, failure: ?[]const u8, fake: Fake } {
@@ -1122,10 +1191,10 @@ fn runFake(devices_reply: []const u8) !struct { heard: []const []const u8, failu
     var rpc: Rpc = .{ .a = arena.allocator(), .io = io, .in = to_server[1], .out = from_server[0] };
     const failure = session(arena.allocator(), io, &rpc, .{ .ctx = &fake, .func = Fake.open }, &controls, .{ .ctx = &heard, .func = Heard.sink }, "sess", "/tmp");
     // Hung up: both fakes see the end of their input.
-    for ([_]posix.fd_t{ to_server[1], to_helper[1] }) |fd| _ = std.c.close(fd);
+    for ([_]posix.fd_t{ to_server[1], to_helper[1] }) |fd| closePipe(fd);
     server.join();
     helper.join();
-    for ([_]posix.fd_t{ to_server[0], from_server[0], from_server[1], to_helper[0], from_helper[0], from_helper[1] }) |fd| _ = std.c.close(fd);
+    for ([_]posix.fd_t{ to_server[0], from_server[0], from_server[1], to_helper[0], from_helper[0], from_helper[1] }) |fd| closePipe(fd);
     return .{ .heard = heard.events.items, .failure = failure, .fake = fake };
 }
 

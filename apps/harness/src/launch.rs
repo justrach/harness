@@ -47,7 +47,61 @@ pub fn resolve_open_arg(
 }
 
 fn folder_link(path: &Path) -> String {
-    harness_ui::links::folder_open_link(&path.to_string_lossy())
+    folder_open_link(&path.to_string_lossy())
+}
+
+pub fn folder_open_link(path: &str) -> String {
+    format!("harness://open/folder?path={}", encode_component(path))
+}
+
+#[cfg(test)]
+pub fn parse_folder_open_link(url: &str) -> Result<String, &'static str> {
+    let query = url
+        .strip_prefix("harness://open/folder?")
+        .ok_or("not a Harness folder link")?;
+    let path = query
+        .split('&')
+        .find_map(|part| part.strip_prefix("path="))
+        .ok_or("missing folder path")?;
+    let path = decode_component(path)?;
+    if !Path::new(&path).is_absolute() {
+        return Err("folder path must be absolute");
+    }
+    Ok(path)
+}
+
+fn encode_component(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn decode_component(value: &str) -> Result<String, &'static str> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let encoded = bytes
+                .get(index + 1..index + 3)
+                .ok_or("invalid URL escape")?;
+            let text = std::str::from_utf8(encoded).map_err(|_| "invalid URL escape")?;
+            out.push(u8::from_str_radix(text, 16).map_err(|_| "invalid URL escape")?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "invalid UTF-8 in URL")
 }
 
 /// Whether stdin is a terminal: LaunchServices starts apps with stdin on
@@ -339,7 +393,7 @@ mod tests {
         let link = resolve_open_arg(Some(dir.path().to_string_lossy().into()), true)
             .unwrap()
             .unwrap();
-        let path = harness_ui::links::parse_folder_open_link(&link).unwrap();
+        let path = parse_folder_open_link(&link).unwrap();
         assert_eq!(Path::new(&path), std::fs::canonicalize(dir.path()).unwrap());
     }
 
@@ -351,7 +405,7 @@ mod tests {
         let link = resolve_open_arg(Some(file.to_string_lossy().into()), true)
             .unwrap()
             .unwrap();
-        let path = harness_ui::links::parse_folder_open_link(&link).unwrap();
+        let path = parse_folder_open_link(&link).unwrap();
         assert_eq!(Path::new(&path), std::fs::canonicalize(dir.path()).unwrap());
         assert!(resolve_open_arg(Some("/definitely/not/here".into()), true).is_err());
     }

@@ -185,7 +185,8 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // no assistant part has arrived yet.
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
-    const cull_offscreen = tweening;
+    const streaming = entries_.len > 0 and entries_[entries_.len - 1].status == .streaming;
+    const cull_offscreen = tweening or (streaming and a.view.rail.glide == null);
     const cull_pad: f32 = if (tweening) 250 else 600;
     for (entries_, 0..) |*e, i| {
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
