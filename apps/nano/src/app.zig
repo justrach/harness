@@ -107,6 +107,7 @@ pub const View = struct {
     /// The Settings page is open, in the sidebar's place; its search.
     settings_open: bool = false,
     settings_search: nanoui.ui.TextBuffer = .{},
+    settings_search_focus: bool = false,
     /// Settings › Shortcuts: the shortcut whose chip waits for keys, and
     /// why the last combination was refused.
     recording: ?usize = null,
@@ -306,6 +307,8 @@ pub const App = struct {
     spaces: workspace.Spaces,
     chats: workspace.Chats,
     sessions: workspace.Sessions,
+    /// Last status seen per chat, so a finish chimes once (`sound.zig`).
+    sound_seen: std.StringHashMapUnmanaged(struct { status: workspace.Status, seen: bool = false }) = .empty,
     devices: workspace.Devices,
     w_devices: Watch = .{},
     w_spaces: Watch = .{},
@@ -480,6 +483,11 @@ pub const App = struct {
         a.spaces.deinit();
         a.chats.deinit();
         a.sessions.deinit();
+        {
+            var it = a.sound_seen.keyIterator();
+            while (it.next()) |k| a.gpa.free(k.*);
+            a.sound_seen.deinit(a.gpa);
+        }
         a.devices.deinit();
         a.rememberTabs();
         a.tabs.deinit();
@@ -778,6 +786,7 @@ pub const App = struct {
             const only = active orelse return;
             if (a.findChat(only) == null) return;
             a.tabs.setCurrent(only);
+            a.tabs.clearShown();
             a.select(only, null);
             return;
         }
@@ -796,6 +805,7 @@ pub const App = struct {
         }
         if (wanted == 0) return;
         a.tabs.active = active_ix orelse 0;
+        a.tabs.clearShown();
         a.select(a.tabs.current(), null);
     }
 
@@ -969,8 +979,15 @@ pub const App = struct {
         if (i >= a.tabs.items.items.len or i == a.tabs.active) return;
         a.park();
         a.tabs.active = i;
+        a.tabs.noteShown();
         a.select(a.tabs.current(), null);
         if (a.tabs.unpark(i, null)) |d| drafts.adopt(a, d);
+    }
+
+    pub fn isOnlyNewChat(a: *const App) bool {
+        if (a.selected != null or a.tabs.items.items.len != 1) return false;
+        if (a.tabs.layout()) |s| return s.panes.items.len == 1 and s.groups[0].count() == 1;
+        return true;
     }
 
     pub fn closeTab(a: *App, i: usize) void {
@@ -980,9 +997,16 @@ pub const App = struct {
             a.rememberTabs();
             return a.redraw();
         }
+        if (a.isOnlyNewChat()) return a.redraw();
+        const was_chat = a.selected != null;
         a.tabs.close(i);
         a.select(a.tabs.current(), null);
-        if (a.tabs.unpark(a.tabs.active, null)) |d| drafts.adopt(a, d);
+        if (a.tabs.unpark(a.tabs.active, null)) |d| {
+            drafts.adopt(a, d);
+        } else if (was_chat and a.selected == null) {
+            @import("app_attachments.zig").clear(a);
+            a.composer.clear();
+        }
     }
 
     /// ⌘D, ⌘⇧D: the focused pane split, focus in the new pane: a new chat
@@ -1039,9 +1063,20 @@ pub const App = struct {
 
     /// ⌘] / ⌘[: the next pane in a split, else the next tab.
     pub fn stepPane(a: *App, forward: bool) void {
-        if (a.tabs.layout()) |s| return a.focusPane(s.cycled(forward));
-        const by: i32 = if (forward) 1 else -1;
-        if (a.tabs.canStep(by)) a.showTab(@intCast(@as(i64, @intCast(a.tabs.active)) + by));
+        if (a.tabs.layout()) |s| {
+            if (s.panes.items.len > 1) return a.focusPane(s.cycled(forward));
+            const group = &s.groups[s.focus];
+            const n = group.count();
+            if (n > 1) {
+                const next = if (forward) (group.active + 1) % n else (group.active + n - 1) % n;
+                return a.showPaneTab(next);
+            }
+        }
+        const n = a.tabs.items.items.len;
+        if (n > 1) {
+            const next = if (forward) (a.tabs.active + 1) % n else (a.tabs.active + n - 1) % n;
+            a.showTab(next);
+        }
     }
 
     /// ⌥⌘+arrow: the pane that way.
@@ -1053,9 +1088,10 @@ pub const App = struct {
     /// ⌘W (`close_chat_view_by_shortcut`): asks first until a choice is
     /// made, then closes, archiving per Settings › Archived.
     pub fn closeByShortcut(a: *App) void {
+        const strip = @import("view_tab_strip.zig");
         // AppKit consumes Cmd+W before view.keys; both entry points must
         // close the focused workspace surface, not its underlying chat.
-        switch (@import("view_tab_strip.zig").active(a)) {
+        switch (strip.active(a)) {
             .host => {
                 if (a.panels.active < a.panels.tabs.items.len) @import("app_panels.zig").closeTab(a, a.panels.active) else a.panels.host_open = false;
                 a.view.strip.menu = null;
@@ -1068,8 +1104,18 @@ pub const App = struct {
                 a.redraw();
                 return;
             },
-            .chat => {},
+            .chat => {
+                const zoomed = if (a.tabs.layout()) |s| s.zoomed else false;
+                if (strip.hasHost(a) and a.view.strip.expanded == null and !zoomed and a.panels.activeTab() != null) {
+                    a.view.close_choice = false;
+                    @import("app_panels.zig").closeTab(a, a.panels.active);
+                    a.view.strip.menu = null;
+                    a.redraw();
+                    return;
+                }
+            },
         }
+        if (a.isOnlyNewChat()) return a.redraw();
         const ac = @import("archive_close.zig");
         if (ac.asks(a.settings.get(.archive_on_close_chosen), a.settings.get(.archive_sessions_on_close), a.selected != null)) {
             a.view.close_choice = true;
@@ -1105,7 +1151,7 @@ pub const App = struct {
         if (id) |x| a.archiveClosed(x, a.settings.get(.archive_sessions_on_close));
     }
 
-    fn archiveClosed(a: *App, id: []const u8, may_archive: bool) void {
+    pub fn archiveClosed(a: *App, id: []const u8, may_archive: bool) void {
         const ac = @import("archive_close.zig");
         const st = workspace.statusOf(a.sessions.items, id);
         var sending = false;
@@ -1133,6 +1179,7 @@ pub const App = struct {
     pub fn closeFocused(a: *App) void {
         a.view.strip.menu = null;
         a.view.strip.pending_folder = null;
+        if (a.isOnlyNewChat()) return a.redraw();
         if (!a.tabs.closePaneTab()) return a.closePanel();
         a.restorePanelDraft();
     }
@@ -1141,6 +1188,7 @@ pub const App = struct {
     pub fn closePanel(a: *App) void {
         a.view.strip.menu = null;
         a.view.strip.pending_folder = null;
+        if (a.isOnlyNewChat()) return a.redraw();
         if (!a.tabs.closePane()) return a.closeTab(a.tabs.active);
         a.restorePanelDraft();
     }
@@ -1165,11 +1213,11 @@ pub const App = struct {
         var i: usize = 0;
         while (i < a.peers.items.len) {
             const p = &a.peers.items[i];
-            const keep = for (wanted) |w| {
+            const in_split = for (wanted) |w| {
                 if (w) |x| if (std.mem.eql(u8, x, p.id)) break true;
             } else false;
-            if (keep) {
-                if (p.watch == null and p.retry_at == null and live) a.watchPeer(p);
+            if (in_split or @import("app_panes.zig").otherSlotHas(a, p.id)) {
+                if (in_split and p.watch == null and p.retry_at == null and live) a.watchPeer(p);
                 i += 1;
                 continue;
             }
@@ -1252,6 +1300,7 @@ pub const App = struct {
             .done, .err => a.ended(&a.w_sessions),
             .ok => {},
         }
+        @import("sound.zig").observe(a);
         a.redraw();
     }
 
@@ -1345,8 +1394,11 @@ pub const App = struct {
         @import("app_panes.zig").select(a, chat_id);
         a.notice_len = 0;
         queue_mod.stop(a);
-        if (a.selected) |s| a.retired_ids.append(a.gpa, s) catch a.gpa.free(s);
-        a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
+        const same = if (a.selected) |s| (if (chat_id) |c| std.mem.eql(u8, s, c) else false) else chat_id == null;
+        if (!same) if (a.selected) |s| a.retired_ids.append(a.gpa, s) catch a.gpa.free(s);
+        if (!same) a.selected = if (chat_id) |c| a.gpa.dupe(u8, c) catch null else null;
+        // A leftover offset from the previous chat parks this one in padding.
+        if (!same) a.view.stick_end = true;
         if (space_id) |s| {
             if (a.space) |old| a.gpa.free(old);
             a.space = a.gpa.dupe(u8, s) catch null;
@@ -1358,9 +1410,9 @@ pub const App = struct {
             @import("app_panels.zig").chatChanged(a);
             return a.redraw();
         };
-        a.request(requests.focusChat(chat), .of(App, a, onNotice));
+        if (!same) a.request(requests.focusChat(chat), .of(App, a, onNotice));
         a.markSeen(chat);
-        if (a.w_doc.id == null and a.w_doc.retry_at == null) a.watchDoc(true);
+        if (!same and a.w_doc.id == null and a.w_doc.retry_at == null) a.watchDoc(true);
         queue_mod.watch(a);
         @import("app_panels.zig").chatChanged(a);
         a.ensureModels(a.target().harness);

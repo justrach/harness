@@ -341,6 +341,10 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// lens, rim or tone mapping. A plain translucent fill leaves text behind
 /// the history card legible instead of blurring its backdrop.
 fn frostedBackdrop(c: *ui.Context, k: theme.Colors) void {
+    frostedBackdropInset(c, k, .{ .c = c, .index = 0 }, 0);
+}
+
+pub fn frostedBackdropInset(c: *ui.Context, k: theme.Colors, parent: ui.Div, inset: f32) void {
     const surfaces = @import("surface_palette.zig");
     const canvas = surfaces.flatten(k.shell, k.background);
     const target = if (k.shell.a < 1) surfaces.flatten(k.background.alpha(0.4), canvas) else k.background;
@@ -350,10 +354,19 @@ fn frostedBackdrop(c: *ui.Context, k: theme.Colors) void {
     for (base, desired) |b, t| alpha = @max(alpha, if (t > b) (t - b) / @max(1 - b, std.math.floatEps(f32)) else (b - t) / @max(b, std.math.floatEps(f32)));
     var tint: [4]f32 = .{ 0, 0, 0, 0.15 };
     for (base, desired, 0..) |b, t, i| tint[i] = std.math.clamp((t - b * (1 - alpha)) / alpha, 0, 1);
-    const cv = ui.canvas(c, .{ .absolute = true, .width = .fill, .height = .fill });
+    const pr = if (inset > 0) c.rects.get(c.node(parent.index).id) else null;
+    if (inset > 0 and pr == null) c.changed = true;
+    const cv = ui.canvas(c, .{
+        .absolute = true,
+        .offset = .{ .x = -inset, .y = -inset },
+        .width = if (pr) |r| .{ .px = @max(0, r.w - 2) } else .fill,
+        .height = if (pr) |r| .{ .px = @max(0, r.h - 2) } else .fill,
+    });
+    const w = if (pr) |r| @max(0, r.w - 2) else cv.size.w;
+    const h = if (pr) |r| @max(0, r.h - 2) else cv.size.h;
     // Canvas exposes the renderer's Instance format (Kind.glass = 4).
     cv.shapes.append(c.alloc(), .{
-        .rect = .{ 0, 0, cv.size.w, cv.size.h },
+        .rect = .{ 0, 0, w, h },
         .color = tint,
         .uv = .{ 0, 0, 1, 0 },
         .border_color = .{ 0, 1, 1, 1 },

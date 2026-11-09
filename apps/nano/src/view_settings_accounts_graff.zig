@@ -21,6 +21,16 @@ const st = rows.st;
 /// What a graff row asks of its page.
 const GraffAction = enum { none, sign_in, sign_out };
 
+fn graffProviderIcon(provider: ?[]const u8) ?icons.Name {
+    const p = provider orelse return .@"openai-mark";
+    if (std.mem.eql(u8, p, "claude-agent") or std.mem.eql(u8, p, "anthropic")) return .@"claude-mark";
+    if (std.mem.eql(u8, p, "chatgpt-new")) return .@"openai-mark";
+    if (std.mem.eql(u8, p, "xai")) return .@"grok-mark";
+    if (std.mem.eql(u8, p, "kimi")) return .@"maker-kimi";
+    if (std.mem.eql(u8, p, "zai")) return .@"maker-zai";
+    return null;
+}
+
 /// One graff sign-in (`render_graff_row`): avatar, name and line, Signed
 /// in, then sign-out and the sign-in button for a provider of graff's own.
 fn graffRow(c: *ui.Context, a: *App, k: theme.Colors, first: bool, provider: ?[]const u8, name: []const u8, status: []const u8, signed_in: bool) GraffAction {
@@ -31,7 +41,11 @@ fn graffRow(c: *ui.Context, a: *App, k: theme.Colors, first: bool, provider: ?[]
     if (!first) rows.line(c, k);
     const r = ui.div(c).row().wFull().px(20).py(14).gap(12).itemsCenter();
     defer r.end();
-    rows.avatar(c, k, name);
+    if (graffProviderIcon(provider)) |mark| {
+        const b = ui.div(c).row().size(32, 32).center().roundedFull().border(k.border).borderW(1).bg(k.ink(0.03));
+        defer b.end();
+        icons.icon(c, mark, 18, k.muted, 0);
+    } else rows.avatar(c, k, name);
     var right_w: f32 = if (signed_in) rows.badgeActiveW(c, "Signed in") else 0;
     if (provider != null) right_w += (if (signed_in) @as(f32, 8 + rows.trash_w + 4) else 0) + rows.primaryW(c, label);
     const w = rows.rowInner() - 32 - 12 - 12 - right_w;

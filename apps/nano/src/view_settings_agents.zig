@@ -619,6 +619,10 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     cards.draftCard(c, a, k);
     cards.titlesCard(c, a, k);
+}
+
+pub fn overlays(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const p = &a.view.agents;
     if (p.device_menu) if (p.device_anchor) |at| cards.deviceMenu(c, a, k, at);
 }
 

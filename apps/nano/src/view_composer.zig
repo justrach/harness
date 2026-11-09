@@ -135,6 +135,7 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     // (`COMPOSER_MIN_HEIGHT`), its controls a point in from each edge.
     // The accent at 0.55 while the field has the keys (`pill_border`); the
     // field's id is last frame's, which `keepFocus` keeps current.
+    if (a.view.focus_composer and a.view.composer_id != 0) c.focus = a.view.composer_id;
     const focused = a.view.composer_id != 0 and c.focus == a.view.composer_id;
     const edge = if (focused) k.accent.alpha(0.55) else k.border;
     ui.key(c, "composer-surface");
@@ -147,7 +148,7 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     // The whole writing plane focuses the input, including its padding.
     // Picker controls keep their own focus when they open.
     if (box.clicked() and a.picker == .none) a.view.focus_composer = true;
-    if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r;
+    if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else c.animationFrame();
     if (shape == .expanded) attachmentStrip(c, a, k, w);
     {
         // Keep the field's keyed ancestry in both shapes. Only styles and
@@ -243,7 +244,8 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     else
         "Do anything…";
     attachments.paste(c, a);
-    const at = c.nodes.items.len;
+    const field_id = c.peekId(null);
+    keepFocus(c, a, field_id);
     const viewport = transcript_view.paneHeight(c, a) orelse c.size.h;
     const max_lines: u16 = @intFromFloat(@max(1, @min(11, @floor(viewport * 0.35 / 22.75))));
     const r = ui.textField(c, &a.composer, .{
@@ -260,6 +262,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .caret = message_caret,
         .caret_color = k.accent,
     });
+    _ = c.anims.remove(field_id);
     // "Send messages with" (Settings › Shortcuts): Enter sends, or starts a
     // new line and ⌘↩ sends (`composerSendBehavior`).
     a.view.composer_caret = r.caret;
@@ -287,8 +290,7 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     if (has_content and a.queues() and a.queue_edit == null and c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true, .alt = true })) {
         a.sendFollowUp(other);
     }
-    recall(c, a, c.node(@intCast(at)).id);
-    keepFocus(c, a, c.node(@intCast(at)).id);
+    recall(c, a, field_id);
     // ⌘↩ with nothing typed sends the newest queued message now.
     if (c.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true }) and std.mem.trim(u8, a.composer.text(), " \n\t").len == 0) {
         if (a.queue.items.len > 0) a.queueSendNow(a.queue.items[a.queue.items.len - 1].id);
@@ -336,9 +338,9 @@ fn keepFocus(c: *ui.Context, a: *App, id: u64) void {
     const moved = a.view.composer_id != 0 and id != a.view.composer_id and c.focus == a.view.composer_id;
     a.view.composer_frame = c.frame;
     if (a.view.focus_composer or moved) {
+        const pill_unfocused = a.view.composer_id == 0 or c.focus != a.view.composer_id;
         c.focus = id;
-        // Built again at once, focused: the next key finds it.
-        c.changed = true;
+        if (pill_unfocused) c.changed = true;
         a.view.focus_composer = false;
     }
     a.view.composer_id = id;

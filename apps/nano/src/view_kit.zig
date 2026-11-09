@@ -433,7 +433,7 @@ const glass_shadows = blk: {
 pub fn shadowLg(d: ui.Div) ui.Div {
     var pane = d;
     if (surface_frame) |s| if (s.context == d.c and s.frame == d.c.frame and s.frosted) {
-        pane = pane.bg(s.overlay);
+        pane = pane.bg(.{ .r = s.overlay.r, .g = s.overlay.g, .b = s.overlay.b, .a = 1 });
         // Transparent glass must not reveal the shadow inside its own box.
         if (comptime @hasField(ui.Shadow, "knockout")) return pane.shadows(&glass_shadows);
         return pane;

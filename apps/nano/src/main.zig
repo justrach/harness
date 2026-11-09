@@ -67,5 +67,7 @@ pub fn main(init: std.process.Init) !void {
     if (init.environ_map.get("HARNESS_NANO_CRASH_TEST")) |what| crash_log.selfTest(what);
     a.release.done = .{ .ctx = &a, .func = App.releaseCame };
     a.release.start();
+    @import("graff_update.zig").start(&a);
+    @import("frame_profile.zig").start(&a);
     try app.run();
 }

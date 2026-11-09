@@ -165,9 +165,10 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (@import("view_settings_accounts_rows.zig").errorStrip(c, k, p.failure.items, false)) p.failure.clearRetainingCapacity();
     }
     if (p.copied.items.len > 0) {
-        if (c.time >= p.copied_until) p.copied.clearRetainingCapacity() else c.frameIn(@floatCast(p.copied_until - c.time));
+        if (c.time >= p.copied_until) p.copied.clearRetainingCapacity() else c.frameIn(@floatCast(t_rem: {
+            break :t_rem p.copied_until - c.time;
+        }));
     }
-    defer renameDialog(c, a, k);
     const card = set.card(c, k);
     defer card.end();
     if (devices.len == 0) {
@@ -262,7 +263,7 @@ fn meta(c: *ui.Context, a: *App, k: theme.Colors, d: workspace.Device, on: bool,
 }
 
 /// "Rename device": the name in a field, Cancel and Rename.
-fn renameDialog(c: *ui.Context, a: *App, k: theme.Colors) void {
+pub fn dialog(c: *ui.Context, a: *App, k: theme.Colors) void {
     const p = &a.view.devices;
     if (!p.renaming) return;
     const back = dialogs.scrim(c, k);

@@ -41,7 +41,14 @@ pub const Browser = struct {
     }
 
     pub fn belongsTo(b: *const Browser, parent: ?[]const u8) bool {
-        return if (parent) |p| std.mem.eql(u8, b.parent, p) else false;
+        const p = parent orelse return false;
+        if (std.mem.eql(u8, b.parent, p)) return true;
+        if (b.app.selected) |sel| if (std.mem.eql(u8, sel, p)) {
+            if (b.app.tabs.layout()) |s| for (s.panes.items) |pane| if (pane) |id| {
+                if (std.mem.eql(u8, b.parent, id)) return true;
+            };
+        };
+        return false;
     }
 
     pub fn navigate(b: *Browser, input: []const u8) void {
@@ -106,7 +113,14 @@ pub fn openSaved(a: *App, parent: []const u8, view: saved.View) void {
 }
 
 fn open(a: *App, parent: []const u8, url: ?[]const u8, view: ?saved.View) void {
-    if (a.selected == null or !std.mem.eql(u8, a.selected.?, parent)) return;
+    const allowed = if (a.selected) |sel| std.mem.eql(u8, sel, parent) else false;
+    const in_split = if (!allowed) blk: {
+        if (a.tabs.layout()) |s| for (s.panes.items) |pane| if (pane) |id| {
+            if (std.mem.eql(u8, id, parent)) break :blk true;
+        };
+        break :blk false;
+    } else true;
+    if (!in_split) return;
     const b = Browser.create(a, parent) catch return;
     if (view) |v| {
         b.url = v.url(a.gpa) catch return b.destroy();
@@ -125,9 +139,10 @@ pub fn settleFrame(a: *App) void {
     const b = p.pending_browser orelse return;
     p.pending_browser = null;
     if (!b.belongsTo(a.selected)) return b.destroy();
-    p.tabs.append(p.gpa, .{ .kind = .browser, .browser = b }) catch return b.destroy();
+    p.tabs.append(p.gpa, .{ .kind = .browser, .browser = b, .shown = p.bumpShown() }) catch return b.destroy();
     p.active = p.tabs.items.len - 1;
     p.host_open = true;
+    a.view.strip.focused = .host;
 }
 
 /// Synchronize native visibility after the app has built its overlays.

@@ -78,9 +78,20 @@ pub fn bucketOf(bs: []const Bucket, ix: usize) ?usize {
 
 fn promptsInView(c: *ui.Context, ticks: []const Tick, box: u64) bool {
     const view = c.rects.get(box) orelse return false;
+    var first_top: ?f32 = null;
     for (ticks) |tick| if (tick.top) |top| {
+        if (first_top == null or top < first_top.?) first_top = top;
         if (top + 28 >= view.y and top <= view.y + view.h) return true;
     };
+    const top = first_top orelse return false;
+    // The reader may be inside a long assistant reply below the prompt whose
+    // turn opened it; as long as the first prompt isn't below the viewport
+    // and the scroll offset hasn't drifted past `scroll_max`, the turn is in view.
+    if (top > view.y + view.h) return false;
+    if (c.scroll_max.get(box)) |max| {
+        const at = c.scroll.get(box) orelse 0;
+        if (at <= max + 1) return true;
+    }
     return false;
 }
 

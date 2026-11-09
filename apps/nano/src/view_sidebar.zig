@@ -66,16 +66,22 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
     for (rows.items) |ix| {
         const id = a.tabs.items.items[ix];
         const title = if (id) |chat_id| (if (a.findChat(chat_id)) |chat| chat.title orelse "Untitled session" else "New session") else "New session";
+        const active = ix == a.tabs.active;
         ui.key(c, c.print("workspace-session-{d}", .{ix}));
         var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).clip().control();
-        row = if (ix == a.tabs.active) row.bg(k.selected) else row.hover(k.hover);
+        if (active) {
+            row = row.bg(if (k.is_harp) k.active else k.selected);
+            if (k.is_harp) row = row.border(k.border_strong).borderW(0.5).shadows(&.{.{ .color = .{ .a = if (k.dark) 0.16 else 0.06 }, .blur = 2, .y = 1 }});
+        } else {
+            row = row.hover(k.hover.alpha(0.45));
+        }
         defer row.end();
         {
             const mark = ui.div(c).row().size(20, 20).center();
             defer mark.end();
             icons.icon(c, .widget, 14, k.muted, 0);
         }
-        kit.ellipsisText(c, title, .{ .size = 12, .line_height = kit.measured(12 * 1.618), .color = k.text }, @max(0, widthOf(a) - 2 * 8 - 2 * 8 - 20 - 7));
+        kit.ellipsisText(c, title, .{ .size = 13, .line_height = kit.measured(13 * 1.618), .color = k.text }, @max(0, widthOf(a) - 2 * 8 - 2 * 8 - 20 - 7 - 22 - 7));
         if (row.clicked()) a.showTab(ix);
     }
 }
@@ -193,10 +199,60 @@ const Rows = struct {
     }
 };
 
+const ChatItem = struct {
+    listed: bool = false,
+    pinned: bool = false,
+    row_h: f32 = 30,
+    group_key: []const u8 = "",
+};
+
+fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool, by: Grouping) []const ChatItem {
+    const gpa = c.alloc();
+    const out = gpa.alloc(ChatItem, a.chats.items.len) catch return &.{};
+    const filter_space: ?[]const u8 = if (a.view.filter) |f| (if (a.findSpace(f) != null) f else null) else null;
+    const l = Look.of(a);
+    const show_updated = a.settings.get(.sidebar_show_updated);
+    var session_map: std.StringHashMapUnmanaged(workspace.Session) = .empty;
+    if (grouped and a.sessions.items.len > 8) {
+        session_map.ensureTotalCapacity(gpa, @intCast(a.sessions.items.len)) catch {};
+        for (a.sessions.items) |s| session_map.put(gpa, s.chat_id, s) catch {};
+    }
+    for (a.chats.items, 0..) |ch, idx| {
+        if (ch.parent_chat_id != null) {
+            out[idx] = .{};
+            continue;
+        }
+        if (ch.space_id) |sid| if (a.findSpace(sid) == null) {
+            out[idx] = .{};
+            continue;
+        };
+        if (filter_space) |f| if (ch.space_id == null or !std.mem.eql(u8, ch.space_id.?, f)) {
+            out[idx] = .{};
+            continue;
+        };
+        const row_h = contextHeight(l.label, l.branch and ch.branch != null, show_updated, l.harness or l.icon);
+        const is_pinned = !ch.archived and pinned(pins, ch.id) != null;
+        var gkey: []const u8 = "";
+        if (grouped and !ch.archived and !is_pinned) {
+            const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
+            const mark = workspace.markOf(ch, sess, by.now);
+            gkey = if (mark == .awaiting_input or mark == .errored)
+                "needs"
+            else switch (by.org) {
+                .by_status => workspace.statusGroup(mark, ch.timeMs(), by.now, by.offset).key(),
+                .by_project => ch.space_id orelse c.print("home:{s}", .{ch.device_id orelse ""}),
+                else => ch.device_id orelse "",
+            };
+        }
+        out[idx] = .{ .listed = true, .pinned = is_pinned, .row_h = row_h, .group_key = gkey };
+    }
+    return out;
+}
+
 // The input offset may overshoot the end before layout clamps it. Bound
 // the build window against the complete content, not the previous frame's
 // rows; otherwise an immediate jump to the bottom can produce a blank frame.
-fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8) f32 {
+fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []const ChatItem, grouped: bool, by: Grouping) f32 {
     var height: f32 = 4;
     if (pins.len > 0) {
         height += 30;
@@ -206,27 +262,25 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8) f32 {
                 height += rowHeight(a, ch) + 2;
             };
         }
-        if (a.settings.organization() == .in_one_list) height += 12;
+        if (!grouped) height += 12;
     }
     var active: usize = 0;
     var archived: usize = 0;
     var archive_height: f32 = 0;
     var keys: std.StringHashMapUnmanaged(void) = .empty;
-    const grouped = a.settings.organization() != .in_one_list;
-    const by = Grouping.of(a);
-    for (a.chats.items) |ch| if (listed(a, ch)) {
+    for (a.chats.items, items) |ch, it| if (it.listed) {
         if (ch.archived) {
-            if (archived < a.view.archived_limit) archive_height += rowHeight(a, ch) + 2;
+            if (archived < a.view.archived_limit) archive_height += it.row_h + 2;
             archived += 1;
-        } else if (pinned(pins, ch.id) == null) {
+        } else if (!it.pinned) {
             active += 1;
             if (grouped) {
-                const key = groupKey(c, a, ch, by);
+                const key = it.group_key;
                 const open = a.view.groupOpen(c.print("{s}:{s}", .{ by.prefix(), key }), true);
                 const entry = keys.getOrPut(c.alloc(), key) catch continue;
                 if (!entry.found_existing) height += if (open) @as(f32, 46) else 44;
-                if (open) height += rowHeight(a, ch) + 2;
-            } else if (a.view.sessions_open) height += rowHeight(a, ch) + 2;
+                if (open) height += it.row_h + 2;
+            } else if (a.view.sessions_open) height += it.row_h + 2;
         }
     };
     if (active == 0 and pins.len == 0) {
@@ -256,16 +310,19 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     window.eager = moving != null;
     const target = drag.sidebarTarget(a);
     const pins = visiblePins(a, c.alloc());
+    const grouped = a.settings.organization() != .in_one_list;
+    const by = Grouping.of(a);
+    const items = prepareItems(c, a, pins, grouped, by);
     if (!window.eager) {
-        const bounded = @min(offset, @max(0, contentHeight(c, a, pins) - c.size.h));
+        const bounded = @min(offset, @max(0, contentHeight(c, a, pins, items, grouped, by) - c.size.h));
         window.top = @max(0, bounded - 128);
         window.bottom = bounded + c.size.h + 128;
     }
     const source_pin = if (moving) |id| pinned(pins, id) else null;
     var active: usize = 0;
     var archived: usize = 0;
-    for (a.chats.items) |ch| if (listed(a, ch)) {
-        if (ch.archived) archived += 1 else if (pinned(pins, ch.id) == null) active += 1;
+    for (a.chats.items, items) |ch, it| if (it.listed) {
+        if (ch.archived) archived += 1 else if (!it.pinned) active += 1;
     };
     // Pinned, while there are pins or a session is being dragged.
     if (pins.len > 0 or moving != null) {
@@ -304,7 +361,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             if (pins.len == 0 and gap_at == null) _ = c.leaf(.{ .height = .{ .px = 0 } }, .none, null);
         } else a.view.pin_rows = null;
         // Groups bring their own 12 above them.
-        if (a.settings.organization() == .in_one_list) {
+        if (!grouped) {
             _ = c.leaf(.{ .height = .{ .px = 12 - 2 } }, .none, null);
             window.y += 12;
         }
@@ -312,7 +369,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         a.view.pin_header = null;
         a.view.pin_rows = null;
     }
-    if (a.settings.organization() != .in_one_list) {
+    if (grouped) {
         // Grouped or not, an empty list says so.
         if (active == 0 and pins.len == 0 and moving == null) {
             a.view.sessions_header = null;
@@ -321,7 +378,7 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
             defer empty.end();
             ui.text(c, "No sessions yet", .{ .size = 12, .line_height = empty_line, .color = k.faint });
             window.y += 8 + empty_line;
-        } else groups(c, a, k, pins, moving, &window);
+        } else groups(c, a, k, items, by, moving, &window);
     } else regular: {
         // GPUI has no Sessions disclosure when the regular list is empty.
         // A drag still needs that section as its drop target.
@@ -350,11 +407,11 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         window.y += 2;
         var rows: Rows = .{};
         const unpinning = source_pin != null and target != null and target.? == .regular;
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
             // Dragged to the pins, a session's row leaves the list.
             if (held and target != null and target.? == .pinned) continue;
-            if (rows.include(c, &window, rowHeight(a, ch))) slotRow(c, a, k, ch, 0, held);
+            if (rows.include(c, &window, it.row_h)) slotRow(c, a, k, ch, 0, held);
         };
         rows.flush(c);
         // An empty body still has its outer gap.
@@ -382,9 +439,9 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
         window.y += 2;
         var rows: Rows = .{};
         var shown: usize = 0;
-        for (a.chats.items) |ch| if (ch.archived and listed(a, ch)) {
+        for (a.chats.items, items) |ch, it| if (it.listed and ch.archived) {
             if (shown == a.view.archived_limit) break;
-            if (rows.include(c, &window, rowHeight(a, ch))) sessionRow(c, a, k, ch);
+            if (rows.include(c, &window, it.row_h)) sessionRow(c, a, k, ch);
             shown += 1;
         };
         rows.flush(c);
@@ -404,13 +461,12 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// By status, by project or by device (`sidebar_organization`): a
 /// disclosure for each, in the order their newest sessions come; this
 /// device's first, and "Needs you" above "Today" above "Earlier".
-fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, moving: ?[]const u8, window: *Window) void {
-    const by = Grouping.of(a);
+fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by: Grouping, moving: ?[]const u8, window: *Window) void {
     const by_project = by.org == .by_project;
     const gpa = c.alloc();
     var keys: std.ArrayList([]const u8) = .empty;
-    for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null) {
-        const key = groupKey(c, a, ch, by);
+    for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
+        const key = it.group_key;
         for (keys.items) |have| {
             if (std.mem.eql(u8, have, key)) break;
         } else keys.append(gpa, key) catch {};
@@ -437,9 +493,9 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
     for (keys.items) |key| {
         var count: usize = 0;
         var height: f32 = 0;
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, a, ch, by), key)) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
             count += 1;
-            height += rowHeight(a, ch) + 2;
+            height += it.row_h + 2;
         };
         const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
         const open = a.view.groupOpen(collapse, true);
@@ -485,9 +541,9 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, pins: []const []const u8, mo
         var inside = window.*;
         inside.y = start + 14 + 28 + 4;
         var rows: Rows = .{};
-        for (a.chats.items) |ch| if (!ch.archived and listed(a, ch) and pinned(pins, ch.id) == null and std.mem.eql(u8, groupKey(c, a, ch, by), key)) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
             const held = moving != null and std.mem.eql(u8, moving.?, ch.id);
-            if (rows.include(c, &inside, rowHeight(a, ch))) slotRow(c, a, k, ch, 0, held);
+            if (rows.include(c, &inside, it.row_h)) slotRow(c, a, k, ch, 0, held);
         };
         rows.flush(c);
     }
@@ -1023,7 +1079,10 @@ fn firstLine(s: []const u8) []const u8 {
 
 fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
     notice(c, a, k);
-    @import("view_sandbox_strip.zig").strip(c, a, k, 0);
+    if (a.offscreen or a.window != null)
+        @import("view_sandbox_strip.zig").computers(c, a, k)
+    else
+        @import("view_sandbox_strip.zig").strip(c, a, k, 0);
     const f = ui.div(c).row().wFull().h(44).px(10).itemsCenter();
     defer f.end();
     {

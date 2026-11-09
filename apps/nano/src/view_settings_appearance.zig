@@ -74,11 +74,18 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const cd = card(c, k);
         defer cd.end();
-        const r = set.row(c, k, true, false);
+        {
+            const r = set.row(c, k, true, false);
+            defer r.end();
+            set.tile(c, k, .@"eye-closed");
+            words(c, k, "Compact mode", "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.", 32);
+            if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
+        }
+        const r = set.row(c, k, false, false);
         defer r.end();
-        set.tile(c, k, .@"eye-closed");
-        words(c, k, "Compact mode", "Show progress while running, then fold the turn's work when it finishes. The final reply stays visible.", 32);
-        if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
+        set.tile(c, k, .widget);
+        words(c, k, "Task view", "Show open workspaces in the sidebar, with the All sessions dashboard, instead of your conversations.", 32);
+        if (switch_(c, k, a.settings.get(.sidebar_task_view), 0)) a.settings.toggle(.sidebar_task_view);
     }
     caption(c, k, "Motion");
     motionCard(c, a, k);
@@ -86,16 +93,14 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     import_view.warning(c, a, k);
 }
 
-/// The row's words, less the room a spacer's extra gap takes.
 fn words(c: *ui.Context, k: theme.Colors, title: []const u8, meta: []const u8, trailing: f32) void {
-    set.words(c, k, title, meta, trailing + 14);
+    set.words(c, k, title, meta, trailing);
 }
 
 /// A group's caption, 32 below what's above, 12 above its content.
 /// This page's switches: the bare 32 by 18 switch, `ml` points after the
 /// words, pinned to the row's end.
 fn switch_(c: *ui.Context, k: theme.Colors, on: bool, ml: f32) bool {
-    ui.spacer(c);
     const box = ui.div(c).row().pl(ml);
     defer box.end();
     const track = ui.div(c).row().w(32).h(18).roundedFull().bg(if (on) k.text else k.ink(0.15)).pl(if (on) 16 else 2).itemsCenter();
@@ -195,7 +200,6 @@ fn themeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer r.end();
         set.tile(c, k, t[0]);
         words(c, k, t[1], "Used whenever this appearance is active.", 218);
-        ui.spacer(c);
         const id = a.settings.themeId(t[2]);
         const v = themes.find(id);
         const open = a.view.theme_menu != null and a.view.theme_menu.? == t[2];
@@ -216,7 +220,6 @@ fn themeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         const chosen = if (a.settings.accent()) |n| presetNamed(n) else null;
         const meta = if (chosen) |p| c.print("{s} · Controls, glyphs, selections, code, and activity.", .{p.label}) else "Theme default · Uses the palette's intended color.";
         words(c, k, "Accent color", meta, 10 + 8 * 30 + 7 * 6);
-        ui.spacer(c);
         const sw = ui.div(c).row().pl(10).gap(6);
         defer sw.end();
         if (swatch(c, k, null, chosen == null)) a.settings.setAccent(null);
@@ -227,7 +230,6 @@ fn themeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer r.end();
         set.tile(c, k, .@"folder-with-files");
         words(c, k, "Theme library", "Import or link custom themes.", 92);
-        ui.spacer(c);
         const b = ui.div(c).row().px(12).py(6).rounded(8).bg(k.solid);
         defer b.end();
         ui.text(c, "Add theme", .{ .size = 13, .line_height = 13 * phi, .weight = .medium, .color = k.on_solid });
@@ -239,7 +241,7 @@ fn themeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// The theme picker's trigger: the variant's swatch, its name, and the
 /// up-down arrow (`render_theme_selector`).
 fn picker(c: *ui.Context, k: theme.Colors, t: theme.Colors, name: []const u8, open: bool) struct { clicked: bool, at: ?ui.Rect } {
-    var p = ui.div(c).row().w(218).h(34).px(11).gap(8).itemsCenter().rounded(8).border(if (open) k.border_strong else k.border).borderW(1).bg(k.raised.alpha(if (open) 0.75 else 0.42));
+    var p = ui.div(c).row().w(218).h(34).px(11).gap(8).itemsCenter().rounded(8).border(if (open) k.border_strong else k.border).borderW(1).bg(if (open and k.is_harp) k.active else k.raised.alpha(if (open) 0.75 else 0.42));
     if (!open) p = p.hover(k.raised);
     defer p.end();
     preview(c, k, t);
@@ -279,9 +281,9 @@ pub fn themeMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
         count += 1;
     };
     const heading_h = c.text.lineHeight(set.st(c, 10, .{ .weight = .medium })) + 10;
-    const row_h = @max(18, c.text.lineHeight(set.st(c, 13, .{}))) + 12;
-    const rows_h = @as(f32, @floatFromInt(count)) * (row_h + 2) - 2;
-    const rows_max = @max(0, c.size.h - 16 - 10 - heading_h - 2);
+    const row_h = @max(18, c.text.lineHeight(set.st(c, 13, .{}))) + 10;
+    const rows_h = @as(f32, @floatFromInt(count)) * (row_h + 1) - 1;
+    const rows_max = @min(360, @max(0, c.size.h - 16 - 10 - heading_h - 2));
     const h = 10 + heading_h + 2 + @min(rows_h, rows_max);
     const rules = @import("rules.zig");
     // Hung from the trigger's padding box, as GPUI's anchored menus are.
@@ -296,16 +298,16 @@ pub fn themeMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer hd.end();
         ui.text(c, if (dark) "D\u{200A}A\u{200A}R\u{200A}K\u{200A} \u{200A}T\u{200A}H\u{200A}E\u{200A}M\u{200A}E\u{200A}S" else "L\u{200A}I\u{200A}G\u{200A}H\u{200A}T\u{200A} \u{200A}T\u{200A}H\u{200A}E\u{200A}M\u{200A}E\u{200A}S", set.st(c, 10, .{ .weight = .medium, .color = k.muted }));
     }
-    ui.scroll(c, .{ .width = .fill, .max_height = rows_max, .direction = .column, .gap = 2, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } });
+    ui.scroll(c, .{ .width = .fill, .max_height = rows_max, .direction = .column, .gap = 1, .scrollbar = .{ .overlay = k.faint.alpha(0.5) } });
     defer ui.end(c);
     const picked = a.settings.themeId(dark);
     for (themes.all()) |*v| if (v.dark == dark) {
         ui.key(c, c.print("theme-{s}", .{v.id}));
         const active = std.mem.eql(u8, v.id, picked);
-        const base = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(7);
+        const base = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
         // `menu_row`'s hover is a listener's: a menu opening under a still
         // pointer doesn't light the row there.
-        const lh = kit.listenerHover(&a.view.hovers, if (active) base.bg(k.selected) else base, k.selected);
+        const lh = kit.listenerHover(&a.view.hovers, if (active) base.bg(if (k.is_harp) k.active else k.selected) else base, k.hover);
         const row = lh.div;
         defer row.end();
         const hot = lh.hovered;
@@ -367,7 +369,6 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors) void {
     set.tile(c, k, .@"file-image");
     // Choose image's own width: 10 before it, 10 a side, its words.
     words(c, k, "New thread composer background", "Add an image behind the composer on empty new threads.", 10 + 2 * 10 + @ceil(c.text.width("Choose image", .{ .size = 11.5 })));
-    ui.spacer(c);
     const act = ui.div(c).row().pl(10).gap(6);
     defer act.end();
     if (compactAction(c, k, "Choose image")) a.setNotice("A composer background isn't in Harness Nano yet: use Harness.");
@@ -407,13 +408,12 @@ fn motionCard(c: *ui.Context, a: *App, k: theme.Colors) void {
             seg_w += 2 * 10 + @ceil(c.text.width(o[0], .{ .size = 11, .weight = if (selected) .medium else .regular }));
         }
         words(c, k, "Reduce motion", copy, seg_w);
-        ui.spacer(c);
         const seg = ui.div(c).row().pl(10).gap(6);
         defer seg.end();
         inline for (.{ .{ "System", "system" }, .{ "On", "on" }, .{ "Off", "off" } }) |o| {
             const selected = std.mem.eql(u8, value, o[1]);
             var chip = ui.div(c).row().h(28).px(10).itemsCenter().rounded(7).borderW(1);
-            chip = if (selected) chip.border(k.accent).bg(k.accent_wash) else chip.border(k.border).bg(k.raised.alpha(0.28)).hover(k.raised);
+            chip = if (selected) chip.border(k.accent).bg(if (k.is_harp) k.active else k.accent_wash) else chip.border(k.border).bg(k.raised.alpha(0.28)).hover(k.raised);
             defer chip.end();
             ui.text(c, o[0], .{ .size = 11, .line_height = 11 * phi, .weight = if (selected) .medium else .regular, .color = if (selected) k.accent else k.muted });
             if (!selected and chip.clicked()) a.settings.setText("reduceMotion", o[1]);

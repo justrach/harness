@@ -33,6 +33,8 @@ pub const Tab = struct {
     path: []u8 = &.{},
     agent: ?*@import("app_subagents.zig").Agent = null,
     browser: ?*@import("app_browser.zig").Browser = null,
+    /// When this tab was last on screen (`showTab`); 0 until shown.
+    shown: u64 = 0,
 };
 
 /// A diff as last fetched: its files (into `arena`) and totals.
@@ -65,6 +67,7 @@ pub const Panels = struct {
     pending_agent: ?*@import("app_subagents.zig").Agent = null,
     pending_browser: ?*@import("app_browser.zig").Browser = null,
     active: usize = 0,
+    next_shown: u64 = 0,
     scope: Scope = .workingTree,
     scope_menu: bool = false,
     scope_anchor: ?@import("nanoui").ui.Rect = null,
@@ -117,6 +120,11 @@ pub const Panels = struct {
         p.git.deinit(p.gpa);
         p.arena.deinit();
         if (p.chat) |c| p.gpa.free(c);
+    }
+
+    pub fn bumpShown(p: *Panels) u64 {
+        p.next_shown += 1;
+        return p.next_shown;
     }
 
     pub fn activeTab(p: *const Panels) ?Tab {
@@ -196,7 +204,7 @@ pub fn toggleHost(a: *App) void {
 /// A tab showing the checkout's diff.
 pub fn addDiffsTab(a: *App) void {
     const p = &a.panels;
-    p.tabs.append(p.gpa, .{ .kind = .diffs }) catch return;
+    p.tabs.append(p.gpa, .{ .kind = .diffs, .shown = p.bumpShown() }) catch return;
     p.active = p.tabs.items.len - 1;
     p.host_open = true;
     openDiffs(a);
@@ -207,12 +215,25 @@ pub fn closeTab(a: *App, i: usize) void {
     const p = &a.panels;
     if (i >= p.tabs.items.len) return;
     p.retired.ensureUnusedCapacity(p.gpa, 1) catch return;
+    const was_active = p.active;
     const t = p.tabs.orderedRemove(i);
     if (t.agent) |s| s.stop();
     if (comptime @import("builtin").os.tag == .macos) if (t.browser) |b| if (b.native) |n| n.show(false);
     p.retired.appendAssumeCapacity(t);
-    if (i < p.active) p.active -= 1;
-    if (p.active >= p.tabs.items.len) p.active = p.tabs.items.len -| 1;
+    if (p.tabs.items.len == 0) {
+        p.host_open = false;
+        p.active = 0;
+        const chat_panel: @import("view_tab_strip.zig").Panel = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+        if (a.view.strip.focused == .host) a.view.strip.focused = chat_panel;
+        if (a.view.strip.expanded) |ex| if (ex == .host) {
+            a.view.strip.expanded = null;
+        };
+        return a.redraw();
+    }
+    var stamps: [64]u64 = undefined;
+    const n = @min(p.tabs.items.len, stamps.len);
+    for (p.tabs.items[0..n], 0..) |tab, ix| stamps[ix] = tab.shown;
+    p.active = @import("tabs.zig").activeAfterClose(stamps[0..n], was_active, i);
     showTab(a, p.active);
 }
 
@@ -220,6 +241,7 @@ pub fn showTab(a: *App, i: usize) void {
     const p = &a.panels;
     if (i >= p.tabs.items.len) return a.redraw();
     p.active = i;
+    p.tabs.items[i].shown = p.bumpShown();
     const t = p.tabs.items[i];
     switch (t.kind) {
         .diffs => openDiffs(a),

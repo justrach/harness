@@ -427,6 +427,10 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer f.end();
         ui.text(c, "Switching rewrites the CLI\u{2019}s stored login, so new agent sessions use the selected account immediately. On macOS, an already-\u{2060}running Claude Code can hold the previous login for up to ~30 seconds (Keychain cache).", .{ .size = 12, .line_height = 19, .wrap = true, .color = k.muted.alpha(0.6) });
     }
+}
+
+pub fn overlays(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const p = &a.view.accounts;
     if (p.menu) deviceMenu(c, a, k);
     login.dialog(c, a, k);
 }
@@ -519,8 +523,8 @@ fn deviceMenu(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.key(c, c.print("accounts-device-{s}", .{d.id}));
         const active = eqOpt(eff, d.id);
         const local = eqOpt(a.device_id, d.id);
-        var r = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(7);
-        r = if (active) r.bg(k.selected) else r.hover(k.selected);
+        var r = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
+        r = if (active) r.bg(if (k.is_harp) k.active else k.selected) else r.hover(k.hover);
         defer r.end();
         icons.icon(c, platformIcon(d.platform), 16, k.muted, 0);
         const you_w: f32 = if (local) 10 + c.text.width("You", .{ .size = 10.5 }) else 0;

@@ -99,6 +99,7 @@ pub const Prefs = struct {
     archive_on_close_chosen: bool = false,
     escape_stops_active_agent: bool = false,
     transcript_compact_mode: bool = true,
+    sidebar_task_view: bool = false,
     pause_animations_in_background: bool = false,
     /// The Write page starts in the interface sans; Aa offers a serif.
     write_sans: bool = true,
@@ -132,6 +133,7 @@ pub const Flag = enum {
     archive_on_close_chosen,
     escape_stops_active_agent,
     transcript_compact_mode,
+    sidebar_task_view,
     pause_animations_in_background,
     write_sans,
     sidebar_compact,
@@ -148,6 +150,10 @@ pub const Flag = enum {
 pub const sidebar_min: f32 = 224;
 pub const sidebar_max: f32 = 400;
 pub const sidebar_default: f32 = sidebar_min;
+
+/// A side panel's preferred width (`right_pane_width` in `ui_settings.rs`).
+pub const right_pane_min: f32 = 360;
+pub const right_pane_default: f32 = 520;
 
 /// The desktop's first-window size (`lib.rs`, 1320×880).
 pub const window_default_width: f64 = 1320;
@@ -626,6 +632,12 @@ pub const Store = struct {
         const value = s.number("sidebarWidth") orelse return sidebar_default;
         if (!std.math.isFinite(value)) return sidebar_default;
         return @floatCast(std.math.clamp(value, sidebar_min, sidebar_max));
+    }
+
+    pub fn rightPaneWidth(s: *const Store) f32 {
+        const value = s.number("rightPaneWidth") orelse return right_pane_default;
+        if (!std.math.isFinite(value)) return right_pane_default;
+        return @max(right_pane_min, @as(f32, @floatCast(value)));
     }
 
     /// The desktop window's last saved size, or the desktop's same first-run

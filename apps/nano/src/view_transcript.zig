@@ -87,6 +87,10 @@ fn recoverBlank(c: *ui.Context, a: *App, drawn: Drawn) void {
         any = true;
         if (top + 200 >= view.y - 80 and top <= view.y + view.h + 80) near = true;
     };
+    if (c.scroll_max.get(drawn.box)) |max| {
+        const at = c.scroll.get(drawn.box) orelse 0;
+        if (at <= max + 1) near = true;
+    }
     if (!any or near) return;
     // One correction. Repeating it rebuilds the window forever and the
     // beachball follows.
@@ -152,16 +156,15 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     const scroll = c.open(st, null);
     defer ui.end(c);
     var drawn: Drawn = .{ .box = c.node(scroll).id };
-    if (c.scroll_max.get(drawn.box)) |max| {
-        const at = c.scroll.get(drawn.box) orelse 0;
-        drawn.from_end = @max(0, max - at);
-    }
     // Just sent: past the end, which layout clamps to it, and moving the
     // offset there makes the box follow its end again (`follow_end`).
     if (subagent == null and t == &a.transcript and a.view.stick_end) {
         a.view.stick_end = false;
         c.scroll.put(c.gpa, drawn.box, std.math.floatMax(f32)) catch {};
-        c.changed = true;
+    }
+    if (c.scroll_max.get(drawn.box)) |max| {
+        const at = c.scroll.get(drawn.box) orelse 0;
+        drawn.from_end = @max(0, max - at);
     }
     var ticks: std.ArrayList(@import("view_rail.zig").Tick) = .empty;
     const body = ui.div(c).column().w(col);
@@ -174,11 +177,29 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // Loading does not itself imply work; the session row does, even when
     // no assistant part has arrived yet.
     _ = loading;
+    const scroll_rect = c.rects.get(drawn.box);
+    const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
     for (entries_, 0..) |*e, i| {
-        ui.key(c, c.print("entry-{s}", .{e.id}));
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
-        const at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = c.rects.get(drawn.box) };
+        ui.key(c, c.print("entry-{s}", .{e.id}));
+        const entry_id = c.peekId(null);
+        const prev = c.rects.get(entry_id);
+        if (prev) |r| if (r.h > 0) {
+            e.cached_h = r.h;
+        };
+        if (tweening and i + 2 < entries_.len and e.status != .streaming and e.cached_h > 0) {
+            if (scroll_rect) |view| if (prev) |r| {
+                if (r.y + r.h < view.y - 250 or r.y > view.y + view.h + 250) {
+                    _ = c.leaf(.{ .width = .fill, .height = .{ .px = e.cached_h } }, .none, null);
+                    if (e.role == .user) {
+                        ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
+                    }
+                    continue;
+                }
+            };
+        }
+        const at: At = .{ .chat_id = chat_id, .entries = entries_, .index = i, .col = col, .scroll = scroll_rect };
         switch (e.role) {
             .user => {
                 // Its row starts where the turn's gap does (`top_gap_for`).
@@ -653,6 +674,8 @@ fn attachment(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const 
 }
 
 fn system(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: At) void {
+    const col = ui.div(c).column().wFull();
+    defer col.end();
     for (e.parts.items) |*p| switch (p.kind) {
         .text => ui.text(c, p.text.items, kit.style(c, 12, 18, .{ .wrap = true, .color = k.faint })),
         .@"error" => errorPart(c, a, k, e, p, at),

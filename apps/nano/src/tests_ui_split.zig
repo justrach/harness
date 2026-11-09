@@ -127,3 +127,40 @@ test "a live transcript subscription keeps delivering through promotion and demo
         try testing.expectEqual(@as(usize, 1), subscriptions);
     }
 }
+
+test "a link in a split is not squeezed to an equal share" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.t.resize(1500, 780);
+    h.a.splitPane(.horizontal);
+    h.a.splitPane(.horizontal);
+    h.a.focusPane(0);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.layout().?.panes.items.len);
+    @import("app_browser.zig").openLink(&h.a, "a", "http://localhost:31997/split");
+    h.t.settle(1);
+    const chrome = @import("panel_chrome.zig");
+    const each_chat = chrome.paneSpan(h.a.view.chrome.chat_width, 1.0 / 3.0, 3, true);
+    try testing.expect(h.a.view.chrome.host_width > each_chat);
+    try testing.expectApproxEqAbs(@as(f32, 520), h.a.view.chrome.host_width, 0.5);
+}
+
+test "closing a split page leaves no empty panel to close again" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    h.a.focusPane(0);
+    h.t.settle(1);
+    const before_chat_width = h.a.view.chrome.chat_width;
+    @import("app_browser.zig").openLink(&h.a, "a", "http://localhost:31997/split");
+    h.t.settle(1);
+    try testing.expect(h.a.panels.host_open);
+    @import("app_panels.zig").closeTab(&h.a, 0);
+    h.t.settle(1);
+    try testing.expect(!h.a.panels.host_open);
+    try testing.expectEqual(@as(usize, 0), h.a.panels.tabs.items.len);
+    try testing.expectEqual(before_chat_width, h.a.view.chrome.chat_width);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+}

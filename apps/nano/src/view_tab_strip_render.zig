@@ -66,7 +66,7 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
     {
         const text = ui.div(c).column().grow().w(0).clip();
         defer text.end();
-        const controls: f32 = 18 + (if (width >= chrome.slot_room_for_add) @as(f32, 24) else 0);
+        const controls: f32 = 18 + (if (width >= chrome.slot_room_for_add) @as(f32, 24) else 0) + (if (width >= chrome.slot_room_for_close) @as(f32, 24) else 0);
         const room = @max(0, width - 7 - 4 - 14 - 12 - controls);
         kit.ellipsisText(c, name, .{ .size = 12, .line_height = 14, .color = if (on) k.text else k.muted }, room);
         const meta = ui.div(c).row().h(12).wFull().gap(6).itemsCenter().clip();
@@ -131,6 +131,19 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
             handled = true;
             strip.open(a, .panel, target, c.rects.get(c.node(button.index).id));
         }
+    }
+    if (width >= chrome.slot_room_for_close) {
+        ui.key(c, "slot-close");
+        if (hot or c.focus == c.node(box.index).id) {
+            if (kit.iconButton(c, k, .close, .{ .size = 18, .radius = 4, .icon = 11, .tip = .{ .text = "Close tab" } })) {
+                handled = true;
+                switch (target) {
+                    .chat => |pane| strip.queue(a, .{ .close_panel_tab = .{ .pane = pane, .tab = if (a.tabs.layout()) |s| s.groups[pane].active else 0 } }),
+                    .host => if (a.panels.active < a.panels.tabs.items.len) strip.queue(a, .{ .close_host_tab = a.panels.active }) else strip.queue(a, .{ .close = .host }),
+                    .files => strip.queue(a, .{ .close = .files }),
+                }
+            }
+        } else ui.div(c).size(18, 18).end();
     }
     if (!handled and box.clicked()) strip.queue(a, .{ .focus = target });
     if (kit.secondaryClicked(box)) strip.open(a, .panel, target, c.rects.get(c.node(box.index).id));
@@ -208,13 +221,15 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
 }
 
 fn devicePicker(c: *ui.Context, a: *App, k: theme.Colors) void {
-    ui.key(c, "panel-device-trigger");
     const target = strip.active(a);
     const editable = switch (target) {
         .chat => |pane| strip.chatId(a, pane) == null,
         else => false,
     };
-    var box = ui.div(c).fixed().offset(c.size.w - chrome.device_room - 12, chrome.tab_top).size(chrome.device_room, chrome.tab_height).pl(8).gap(3).row().itemsCenter().justifyEnd().rounded(4).clip().layer(3);
+    const lane = ui.div(c).fixed().offset(c.size.w - chrome.device_room - 12, chrome.tab_top).size(chrome.device_room, chrome.tab_height).pl(8).row().itemsCenter().justifyEnd().layer(3);
+    defer lane.end();
+    ui.key(c, "panel-device-trigger");
+    var box = ui.div(c).row().h(18).px(if (editable) 4 else 0).gap(3).itemsCenter().rounded(4).clip();
     if (editable) box = box.hover(k.ink(0.10)).control();
     defer box.end();
     // Once a menu opens, retain the anchor of the control actually clicked
@@ -223,7 +238,7 @@ fn devicePicker(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (c.rects.get(c.node(box.index).id)) |r| a.view.strip.device_anchor = r;
     }
     icons.icon(c, .monitor, 10, k.muted, 0);
-    kit.ellipsisText(c, strip.deviceLabel(a, strip.device(a, target)), .{ .size = 10, .line_height = 12, .color = k.muted }, chrome.device_room - 21 - (if (editable) @as(f32, 9) else 0));
+    kit.ellipsisText(c, strip.deviceLabel(a, strip.device(a, target)), .{ .size = 10, .line_height = 12, .color = k.muted }, chrome.device_room - 21 - (if (editable) @as(f32, 17) else 0));
     if (editable) {
         icons.icon(c, .@"alt-arrow-down", 9, k.muted, 0);
         if (box.clicked()) {

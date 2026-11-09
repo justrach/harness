@@ -676,7 +676,20 @@ fn repoRow(c: *ui.Context, a: *App, k: theme.Colors, inst: *const runners.Instal
         defer sw.end();
         if (set.toggle(c, k, repo.enabled, true)) setRepoEnabled(a, id, name, !repo.enabled);
     }
-    if (menu_open) if (p.size_anchor) |at| sizeMenu(c, a, k, inst, repo, sizes, at);
+}
+
+pub fn overlays(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const p = &a.view.github_ci;
+    if (p.phase != .ready) return;
+    const rs = if (p.runners) |*r| r else return;
+    const menu = p.size_menu orelse return;
+    const at = p.size_anchor orelse return;
+    for (rs.installations) |*inst| for (inst.repos) |*repo| {
+        if (std.mem.eql(u8, menu, c.print("{s}\n{s}", .{ inst.installation_id, repo.full_name }))) {
+            sizeMenu(c, a, k, inst, repo, rs.sizes, at);
+            return;
+        }
+    };
 }
 
 /// The size dropdown under its trigger, right-aligned to it
@@ -705,8 +718,8 @@ fn sizeMenu(c: *ui.Context, a: *App, k: theme.Colors, inst: *const runners.Insta
     for (sizes) |*size| {
         ui.key(c, c.print("github-ci-size-{s}", .{size.key}));
         const active = if (repo.default_size) |d| std.mem.eql(u8, d, size.key) else false;
-        var row = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(7);
-        row = if (active) row.bg(k.selected) else row.hover(k.selected);
+        var row = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
+        row = if (active) row.bg(if (k.is_harp) k.active else k.selected) else row.hover(k.hover);
         defer row.end();
         const hot = row.hovered();
         kit.ellipsisText(c, runners.sizeOptionLabel(c.alloc(), size) catch "", set.st(c, 13, .{ .color = if (active or hot) k.text else k.text.alpha(0.9) }), w - 2 * 5 - 16);

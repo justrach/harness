@@ -266,3 +266,118 @@ test "unified strip: panel menus work with keyboard and close without losing the
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[1].count());
 }
+
+test "closing the only tab moves on to a new chat" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.settings.set(.archive_on_close_chosen, true);
+    h.a.closeTabArchiving(0);
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    try testing.expect(h.a.selected == null);
+    try testing.expect(h.a.tabs.current() == null);
+    h.a.composer.set("Keep this draft on repeated close");
+    h.a.closeByShortcut();
+    h.t.settle(1);
+    try testing.expectEqualStrings("Keep this draft on repeated close", h.a.composer.text());
+    h.a.closeFocused();
+    h.t.settle(1);
+    try testing.expectEqualStrings("Keep this draft on repeated close", h.a.composer.text());
+}
+
+test "closing the tab you are on goes back to the one before it" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+        \\ {"id":"b","deviceId":"remote","title":"Beta","spaceId":"remote-project","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","spaceId":"local-project","archived":false}]
+    );
+    h.a.newTab();
+    h.a.openChat("b", null);
+    h.a.newTab();
+    h.a.openChat("c", null);
+    // Visit c -> a -> b, then close b: should return to a, not neighbour c.
+    h.a.showTab(2);
+    h.a.showTab(0);
+    h.a.showTab(1);
+    h.a.closeTab(1);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    // After a restart (clearShown), closing the active tab falls back to its neighbour.
+    h.a.showTab(1);
+    h.a.newTab();
+    h.a.openChat("b", null);
+    // Tabs are now [a, c, b] with b (index 2) active; switch to c (index 1) and clearShown.
+    h.a.showTab(1);
+    h.a.tabs.clearShown();
+    h.a.closeTab(1);
+    try testing.expectEqualStrings("b", h.a.selected.?);
+}
+
+test "strip slot close button closes a tab and then its panel" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    // Add a second tab in the right pane (pane 1).
+    h.press(.{ .key = 't', .cmd = true });
+    h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[1].count());
+    const slot_title = h.topText("New tab") orelse return error.MissingRightSlot;
+    h.t.moveTo(slot_title.x + 8, slot_title.y + 4);
+    h.t.settle(1);
+    // Click the slot's ✕ button on the right edge of the second slot.
+    var close_rect: ?ui.Rect = null;
+    for (h.t.ctx.nodes.items) |node| {
+        if (node.rect.y < chrome.header_height and node.rect.x > slot_title.x and @abs(node.rect.w - 18) < 0.5 and @abs(node.rect.h - 18) < 0.5) {
+            if (close_rect == null or node.rect.x > close_rect.?.x) close_rect = node.rect;
+        }
+    }
+    const r = close_rect orelse return error.MissingSlotCloseButton;
+    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.settle(1);
+    // First click closes the active tab in pane 1, leaving 1 tab in pane 1.
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[1].count());
+    // Second click on the same slot's ✕ closes the last tab and removes pane 1.
+    h.t.moveTo(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.settle(1);
+    h.t.click(r.x + r.w / 2, r.y + r.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.a.tabs.layout() == null);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+}
+
+test "Cmd+[ and Cmd+] step single-pane panel tabs and retain loaded transcripts in one pass" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","spaceId":"local-project","archived":false}]
+    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"reset":[{"id":"u","role":"user","parts":[{"id":"p","kind":"text","text":"Synthetic prompt"}]}]}
+    , .{});
+    defer parsed.deinit();
+    try h.a.transcript.apply(parsed.value);
+    const entries_ptr = h.a.transcript.entries.items.ptr;
+    h.a.openChatInTab("c");
+    h.t.settle(1);
+    try testing.expectEqualStrings("c", h.a.selected.?);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.panes.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
+    _ = h.t.shortcut(.{ .key = '[', .cmd = true });
+    try testing.expectEqual(@as(u8, 1), h.t.ctx.stats.passes);
+    try testing.expectEqualStrings("a", h.a.selected.?);
+    try testing.expectEqual(entries_ptr, h.a.transcript.entries.items.ptr);
+    _ = h.t.shortcut(.{ .key = ']', .cmd = true });
+    try testing.expectEqual(@as(u8, 1), h.t.ctx.stats.passes);
+    try testing.expectEqualStrings("c", h.a.selected.?);
+    _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
+    try testing.expectEqual(@as(u8, 1), h.t.ctx.stats.passes);
+}

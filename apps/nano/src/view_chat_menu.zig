@@ -259,14 +259,20 @@ fn startRename(a: *App, ch: workspace.Chat) void {
 /// focus when a menu drawn before it goes.
 pub fn scrim(c: *ui.Context, k: theme.Colors) ui.Div {
     ui.key(c, "dialog-scrim");
-    return ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(6).bg(.{ .a = if (k.dark) 0.35 else 0.32 }).center();
+    const d = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(6).bg(.{ .a = if (k.dark) 0.35 else 0.32 }).center();
+    _ = d.interaction();
+    return d;
 }
 
 /// The dialog card (`dialog_card`): 360 wide, 20 in (and its border),
 /// rounded 16.
 pub fn dialog(c: *ui.Context, k: theme.Colors) ui.Div {
-    return kit.shadowLg(ui.div(c).w(360).p(21).column().rounded(16).bg(k.composer)
-        .border(if (k.dark) ui.Color{ .r = 1, .g = 1, .b = 1, .a = 0.10 } else ui.Color{ .a = 0.135 }).borderW(1));
+    var d = ui.div(c).w(360).p(21).column().rounded(16)
+        .bg(if (k.frosted) .transparent else k.composer)
+        .border(if (k.dark) ui.Color{ .r = 1, .g = 1, .b = 1, .a = 0.10 } else ui.Color{ .a = 0.135 }).borderW(1);
+    if (!k.frosted) d = kit.shadowLg(d);
+    if (k.frosted) @import("view_palette.zig").frostedBackdropInset(c, k, d, 20);
+    return d;
 }
 
 pub fn buttons(c: *ui.Context, k: theme.Colors, confirm: []const u8, danger: bool) enum { none, cancel, confirm } {

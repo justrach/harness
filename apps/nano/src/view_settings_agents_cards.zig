@@ -108,8 +108,8 @@ pub fn deviceMenu(c: *ui.Context, a: *App, k: theme.Colors, at: ui.Rect) void {
         ui.key(c, c.print("agents-device-{s}", .{d.id}));
         const active = eqlOpt(d.id, effective);
         const local = eqlOpt(d.id, a.device_id);
-        var r = ui.div(c).row().wFull().px(8).py(6).gap(10).itemsCenter().rounded(7);
-        r = if (active) r.bg(k.selected) else r.hover(k.selected);
+        var r = ui.div(c).row().wFull().px(8).py(5).gap(10).itemsCenter().rounded(7);
+        r = if (active) r.bg(if (k.is_harp) k.active else k.selected) else r.hover(k.hover);
         defer r.end();
         const hot = r.hovered();
         icons.icon(c, platformIcon(d.platform), 16, k.muted, 0);

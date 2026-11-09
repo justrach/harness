@@ -40,9 +40,10 @@ const Harness = struct {
     }
 
     fn caretX(h: *const Harness) !f32 {
+        const mc = @import("view_composer.zig").message_caret;
         for (h.t.ctx.nodes.items) |n| {
             if (n.content == .none and n.style.absolute and n.style.width == .px and
-                n.style.width.px == 3 and n.style.height == .px and n.style.height.px == 22.75 - 4)
+                n.style.width.px == mc.width and n.style.height == .px and n.style.height.px == 22.75 - 2 * mc.inset)
                 return n.rect.x;
         }
         return error.NoComposerCaret;

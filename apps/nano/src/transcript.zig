@@ -148,6 +148,8 @@ pub const Entry = struct {
     duration_ms: ?i64 = null,
     /// When it was made (`createdAt`); 0 for one that hasn't said.
     created_ms: i64 = 0,
+    /// Last laid-out height for offscreen culling during width tweens.
+    cached_h: f32 = 0,
 
     pub fn deinit(e: *Entry, gpa: Allocator) void {
         gpa.free(e.id);
@@ -273,6 +275,7 @@ pub const Transcript = struct {
             try undo.append(temp, .{ .appended = .{ .part = part, .len = part.text.items.len } });
             try part.text.appendSlice(t.gpa, string(a.object.get("text")) orelse "");
             if (part.text.items.len != uint(a.object.get("len")) orelse return error.Desync) return error.Desync;
+            t.entries.items[i].cached_h = 0;
         }
         if (o.get("count")) |n| if (t.entries.items.len != uint(n) orelse return error.Desync) return error.Desync;
         // Only an accepted frame releases the entries it replaced/removed.
@@ -333,7 +336,10 @@ fn parsePart(gpa: Allocator, o: json.ObjectMap) !Part {
     var p: Part = .{ .id = try gpa.dupe(u8, string(o.get("id")) orelse ""), .kind = kind };
     errdefer p.deinit(gpa);
     switch (kind) {
-        .text, .reasoning => try p.text.appendSlice(gpa, string(o.get("text")) orelse ""),
+        .text => try p.text.appendSlice(gpa, string(o.get("text")) orelse ""),
+        // The doc stores thinking in `reasoning`, not `text`. Reading only
+        // `text` dropped the body, so a thinking-heavy turn painted blank.
+        .reasoning => try p.text.appendSlice(gpa, string(o.get("reasoning")) orelse string(o.get("text")) orelse ""),
         .@"error" => {
             try p.text.appendSlice(gpa, string(o.get("message")) orelse "");
             p.reauth = @import("reauth_recovery.zig").Provider.parse(string(o.get("reauth")) orelse "");

@@ -28,6 +28,7 @@ pub fn st(c: *ui.Context, size: f32, base: ui.TextStyle) ui.TextStyle {
 }
 
 pub fn open(a: *App) void {
+    if (!a.view.settings_open) a.view.settings_search_focus = true;
     a.view.settings_open = true;
     a.view.account_menu = false;
     a.redraw();
@@ -35,6 +36,7 @@ pub fn open(a: *App) void {
 
 pub fn close(a: *App) void {
     a.view.settings_open = false;
+    a.view.settings_search_focus = false;
     a.view.settings_search.clear();
     a.redraw();
 }
@@ -88,6 +90,17 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
             icons.icon(c, .magnifer, 14, k.muted, 0);
             const f = ui.div(c).row().grow().w(0);
             defer f.end();
+            ui.key(c, "settings-search-field");
+            const field_id = c.peekId(null);
+            if (a.view.settings_search_focus) {
+                c.focus = field_id;
+                c.changed = true;
+                a.view.settings_search_focus = false;
+            }
+            var anim_h = std.hash.Wyhash.init(field_id);
+            const salt: u32 = 0;
+            anim_h.update(std.mem.asBytes(&salt));
+            _ = c.anims.remove(anim_h.final());
             _ = ui.textField(c, &a.view.settings_search, .{ .placeholder = "Search settings", .placeholder_color = k.faint, .width = .fill, .bare = true, .size = 14, .line_height = 22.75 });
         }
         const rows = ui.div(c).column().wFull().gap(2);
@@ -116,9 +129,10 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
         }
     }
     // A running cloud sandbox stays in view on every settings page too.
-    @import("view_sandbox_strip.zig").strip(c, a, k, 4);
+    if (!a.offscreen) @import("view_sandbox_strip.zig").strip(c, a, k, 4);
     const foot = ui.div(c).column().wFull().px(8).pb(12);
     defer foot.end();
+    ui.key(c, "settings-back");
     const back = ui.div(c).row().wFull().px(8).py(6).gap(6).itemsCenter().rounded(8).hover(k.hover);
     defer back.end();
     const hot = back.hovered();
@@ -130,7 +144,12 @@ pub fn nav(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
     ui.key(c, s.key());
     var r = ui.div(c).row().wFull().px(8).py(6).gap(8).itemsCenter().rounded(8);
-    r = if (selected) r.bg(k.selected) else r.hover(k.hover);
+    if (selected) {
+        r = r.bg(if (k.is_harp) k.active else k.selected);
+        if (k.is_harp) r = r.border(k.border_strong).borderW(0.5).shadows(&.{.{ .color = .{ .a = if (k.dark) 0.16 else 0.06 }, .blur = 2, .y = 1 }});
+    } else {
+        r = r.hover(k.hover);
+    }
     defer r.end();
     const hot = r.hovered();
     icons.icon(c, s.icon(), 16, k.muted, 0);
@@ -140,43 +159,48 @@ fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
 
 /// The open section's page.
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
-    // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
-    // with a nanoui that has overlay bars (justrach/nanoui#21).
-    var page_style: ui.Style = .{ .grow = 1, .width = .fill, .align_items = .center };
-    if (@hasField(ui.Style, "scrollbar")) page_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
-    ui.scroll(c, page_style);
-    defer ui.end(c);
-    // `page_column`: 768 wide at most, centred, 24 either side, 32 above.
-    const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64);
-    defer col.end();
-    // The column's inside: wrapped text needs its width up front.
-    const main_w = c.size.w - sidebar.width;
-    inner_w = @min(main_w, 768) - 2 * 24;
-    // Appearance's theme menu doesn't outlive its page.
-    if (a.settings.section != .appearance) a.view.theme_menu = null;
+    {
+        // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
+        // with a nanoui that has overlay bars (justrach/nanoui#21).
+        var page_style: ui.Style = .{ .grow = 1, .width = .fill, .align_items = .center };
+        if (@hasField(ui.Style, "scrollbar")) page_style.scrollbar = .{ .overlay = k.faint.alpha(0.5) };
+        ui.scroll(c, page_style);
+        defer ui.end(c);
+        // `page_column`: 768 wide at most, centred, 24 either side, 32 above.
+        const col = ui.div(c).column().wFull().maxW(768).px(24).pt(32).pb(64);
+        defer col.end();
+        // The column's inside: wrapped text needs its width up front.
+        const main_w = c.size.w - sidebar.width;
+        inner_w = @min(main_w, 768) - 2 * 24;
+        // Appearance's theme menu doesn't outlive its page.
+        if (a.settings.section != .appearance) a.view.theme_menu = null;
+        switch (a.settings.section) {
+            .notifications => notifications(c, a, k),
+            .files => files(c, a, k),
+            .archived => @import("view_settings_archived.zig").page(c, a, k),
+            .devices => @import("view_settings_devices.zig").page(c, a, k),
+            .shortcuts => @import("view_settings_shortcuts.zig").page(c, a, k),
+            .appearance => @import("view_settings_appearance.zig").page(c, a, k),
+            .mcp => @import("view_settings_mcp.zig").page(c, a, k),
+            .appshots => @import("view_settings_appshots.zig").page(c, a, k),
+            .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
+            .harnesses => @import("view_settings_agents.zig").page(c, a, k),
+            .agents => @import("view_settings_accounts.zig").page(c, a, k),
+        }
+    }
     switch (a.settings.section) {
-        .notifications => notifications(c, a, k),
-        .files => files(c, a, k),
-        .archived => {
-            const archived = @import("view_settings_archived.zig");
-            archived.page(c, a, k);
-            archived.dialog(c, a, k);
-        },
-        .devices => @import("view_settings_devices.zig").page(c, a, k),
-        .shortcuts => @import("view_settings_shortcuts.zig").page(c, a, k),
+        .archived => @import("view_settings_archived.zig").dialog(c, a, k),
+        .devices => @import("view_settings_devices.zig").dialog(c, a, k),
         .appearance => {
-            const look = @import("view_settings_appearance.zig");
-            look.page(c, a, k);
-            look.themeMenu(c, a, k);
+            @import("view_settings_appearance.zig").themeMenu(c, a, k);
             const library = @import("view_settings_theme_import.zig");
             library.dialog(c, a, k);
             library.reviewDialog(c, a, k);
         },
-        .mcp => @import("view_settings_mcp.zig").page(c, a, k),
-        .appshots => @import("view_settings_appshots.zig").page(c, a, k),
-        .github_ci => @import("view_settings_github_ci.zig").page(c, a, k),
-        .harnesses => @import("view_settings_agents.zig").page(c, a, k),
-        .agents => @import("view_settings_accounts.zig").page(c, a, k),
+        .github_ci => @import("view_settings_github_ci.zig").overlays(c, a, k),
+        .harnesses => @import("view_settings_agents.zig").overlays(c, a, k),
+        .agents => @import("view_settings_accounts.zig").overlays(c, a, k),
+        else => {},
     }
 }
 
@@ -221,7 +245,7 @@ pub fn card(c: *ui.Context, k: theme.Colors) ui.Div {
 /// `card_row`: 20 by 14 inside, a line above all but the first.
 pub fn row(c: *ui.Context, k: theme.Colors, first: bool, dim: bool) ui.Div {
     if (!first) _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
-    var r = ui.div(c).row().wFull().px(20).py(14).gap(14).itemsCenter().hover(k.ink(0.015));
+    var r = ui.div(c).row().wFull().px(20).py(14).gap(14).itemsCenter().hover(k.hover);
     if (dim) r = r.opacity(0.55);
     return r;
 }

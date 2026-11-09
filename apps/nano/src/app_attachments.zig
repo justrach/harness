@@ -214,6 +214,7 @@ pub fn stage(a: *App, name: []const u8, bytes: []const u8) !void {
     _ = @import("ids.zig").uuid(a.io, &item.id);
     try a.attachments.items.append(a.gpa, item);
     item.start();
+    @import("sound.zig").play(a, .attach);
     a.view.focus_composer = true;
     a.redraw();
 }

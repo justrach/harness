@@ -160,8 +160,29 @@ pub fn settle(a: *App) void {
             a.showPaneTab(at.tab);
         },
         .close_panel_tab => |at| {
+            if (a.tabs.layout()) |s| if (at.pane < s.panes.items.len) {
+                const group = &s.groups[at.pane];
+                if (at.tab < group.items.items.len and at.tab != group.active) {
+                    var removed = group.items.orderedRemove(at.tab);
+                    if (group.active > at.tab) group.active -= 1;
+                    const closed_id = removed.chat;
+                    removed.chat = null;
+                    if (removed.draft) |*d| d.deinit(a.gpa);
+                    defer if (closed_id) |x| a.gpa.free(x);
+                    if (s.panes.items.len == 1 and group.count() == 1) {
+                        if (a.tabs.drafts.items[a.tabs.active]) |*d| d.deinit(a.gpa);
+                        a.tabs.drafts.items[a.tabs.active] = s.drafts.items[0];
+                        s.drafts.items[0] = null;
+                        s.deinit(a.gpa);
+                        a.tabs.splits.items[a.tabs.active] = null;
+                    }
+                    a.rememberTabs();
+                    if (closed_id) |x| a.archiveClosed(x, a.settings.get(.archive_sessions_on_close));
+                    a.redraw();
+                    return;
+                }
+            };
             focus(a, .{ .chat = at.pane });
-            a.showPaneTab(at.tab);
             a.closeArchiving(a.settings.get(.archive_sessions_on_close));
         },
         .host_tab => |ix| {
@@ -247,9 +268,11 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
     const state = &a.view.strip;
     var handled = true;
     if (c.shortcut(.{ .key = '[', .cmd = true })) {
+        @import("frame_profile.zig").note(a, "cmd-[");
         a.stepPane(false);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = ']', .cmd = true })) {
+        @import("frame_profile.zig").note(a, "cmd-]");
         a.stepPane(true);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = 'l', .cmd = true })) {
@@ -267,7 +290,7 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
     if (!handled) return false;
     state.menu = null;
     state.pending_folder = null;
-    c.focus = 0;
+    c.changed = false;
     a.view.focus_composer = true;
     a.redraw();
     return true;

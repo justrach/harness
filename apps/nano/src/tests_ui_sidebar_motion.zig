@@ -399,3 +399,38 @@ test "Settings keeps its full navigation and reduced motion snaps both direction
     h.t.frame();
     try testing.expect(!h.t.ctx.animating);
 }
+
+test "Cmd+B culls offscreen transcript entries during the sidebar tween" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(gpa, "{\"reset\":[");
+    for (0..80) |i| {
+        if (i > 0) try text.appendSlice(gpa, ",");
+        try text.appendSlice(gpa, try std.fmt.allocPrint(gpa,
+            \\{{"id":"u-{d}","role":"user","parts":[{{"id":"p","kind":"text","text":"Synthetic prompt {d}"}}]}},
+            \\{{"id":"a-{d}","role":"assistant","status":"complete","parts":[{{"id":"p","kind":"text","text":"Synthetic reply {d} with a body line."}}]}}
+        , .{ i, i, i, i }));
+    }
+    try text.appendSlice(gpa, "]}");
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text.items, .{});
+    try h.a.transcript.apply(parsed.value);
+    h.t.settle(1);
+    const settled_nodes = h.t.ctx.stats.nodes;
+    h.toggle();
+    h.t.advance(0.08);
+    try testing.expect(h.a.view.sidebar_tween != null);
+    const tween_nodes = h.t.ctx.stats.nodes;
+    try testing.expect(tween_nodes * 2 < settled_nodes);
+    try testing.expect(h.t.hasText("Synthetic reply 79 with a body line."));
+    h.t.advance(0.3);
+    try testing.expect(h.a.view.sidebar_tween == null);
+    try testing.expect(h.t.ctx.stats.nodes > tween_nodes * 2);
+    h.toggle();
+    h.t.advance(0.3);
+    try testing.expect(h.t.ctx.stats.nodes >= settled_nodes - 1);
+}

@@ -201,18 +201,64 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
 }
 
 fn table(c: *ui.Context, header: []const md.Inline, rows: []const []const md.Inline) void {
-    const box = ui.div(c).column().wFull().p(1).rounded(8).border(k.border).clip();
+    const cols = tableCols(header, rows);
+    if (cols == 0) return;
+    // GPUI sizes a cell by its content (`table_columns`), not an equal
+    // share of the row. Equal fill made a narrow pane wrap one word a line,
+    // so the rest of the cell — the text on the right — never appeared.
+    var content: [16]f32 = @splat(0);
+    const n = @min(cols, content.len);
+    measureTable(c, header, &content, n, true);
+    for (rows) |r| measureTable(c, r, &content, n, false);
+    const box = ui.div(c).column().wFull().p(1).rounded(8).border(k.border);
+    const room = if (c.rects.get(c.node(box.index).id)) |r| @max(0, r.w - 2) else 0;
+    var widths: [16]f32 = @splat(0);
+    columnWidths(content[0..n], room, widths[0..n]);
     defer box.end();
-    tableRow(c, header, true, false);
-    for (rows, 0..) |r, i| tableRow(c, r, false, i % 2 == 1);
+    tableRow(c, header, widths[0..n], true, false);
+    for (rows, 0..) |r, i| tableRow(c, r, widths[0..n], false, i % 2 == 1);
 }
 
-fn tableRow(c: *ui.Context, cells: []const md.Inline, head: bool, zebra: bool) void {
+fn tableCols(header: []const md.Inline, rows: []const []const md.Inline) usize {
+    var n = header.len;
+    for (rows) |r| n = @max(n, r.len);
+    return n;
+}
+
+fn measureTable(c: *ui.Context, cells: []const md.Inline, content: []f32, n: usize, head: bool) void {
+    var st = body;
+    st.size = 13;
+    st.leading = 1.35;
+    st.wrap = false;
+    if (head) st.weight = .semibold;
+    st = kit.style(c, 13, 20, st);
+    for (cells, 0..) |cell, i| {
+        if (i >= n) break;
+        content[i] = @max(content[i], richWidth(c, cell, st, 0, cell.text.len));
+    }
+}
+
+/// Content-proportional column widths (`table_columns` / `flex_grow(natural)`).
+/// `room` 0 is the first frame, before layout: use the content width so a
+/// cell is not crushed to one word. Later frames share the table's width.
+fn columnWidths(content: []const f32, room: f32, out: []f32) void {
+    var sum: f32 = 0;
+    for (content) |n| sum += @max(n, 48);
+    if (sum < 1 or room < 1) {
+        for (content, 0..) |n, i| out[i] = @max(n, 48) + 20;
+        return;
+    }
+    const fit = room / sum;
+    for (content, 0..) |n, i| out[i] = @max(n, 48) * fit;
+}
+
+fn tableRow(c: *ui.Context, cells: []const md.Inline, widths: []const f32, head: bool, zebra: bool) void {
     var r = ui.div(c).row().wFull();
     if (head) r = r.bg(k.code_header) else if (zebra) r = r.bg(k.ink(0.02));
     defer r.end();
-    for (cells) |cell| {
-        const d = ui.div(c).column().wFull().px(10).py(6);
+    for (widths, 0..) |width, i| {
+        const cell = if (i < cells.len) cells[i] else md.Inline{ .text = "", .spans = &.{}, .links = &.{} };
+        const d = ui.div(c).column().w(width).px(10).py(6);
         defer d.end();
         var st = body;
         st.size = 13;
@@ -221,4 +267,14 @@ fn tableRow(c: *ui.Context, cells: []const md.Inline, head: bool, zebra: bool) v
         st = kit.style(c, 13, 20, st);
         rich(c, cell, st);
     }
+}
+
+test "a wide table cell keeps its share instead of an equal slice" {
+    const content = [_]f32{ 400, 40, 40 };
+    var widths: [3]f32 = undefined;
+    columnWidths(&content, 520, &widths);
+    try std.testing.expect(widths[0] > widths[1] * 4);
+    try std.testing.expectApproxEqAbs(@as(f32, 520), widths[0] + widths[1] + widths[2], 0.5);
+    columnWidths(&content, 0, &widths);
+    try std.testing.expect(widths[0] >= 400);
 }

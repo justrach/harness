@@ -108,6 +108,7 @@ pub fn view(a: *App, c: *ui.Context) void {
         @import("view_open_chooser.zig").overlay(c, a, surfaces.popup(k));
         @import("view_setup.zig").overlay(c, a, k);
         @import("app_browser.zig").syncNative(a, c);
+        @import("frame_profile.zig").frame(a, c);
         return;
     }
     {
@@ -150,6 +151,7 @@ pub fn view(a: *App, c: *ui.Context) void {
                 } else {
                     const eased = ui.motion.Easing.css_ease_out.sample(raw)[0];
                     a.view.sidebar_width = tw.from + (tw.to - tw.from) * eased;
+                    c.frame_in = null;
                     c.animationFrame();
                 }
             }
@@ -168,18 +170,26 @@ pub fn view(a: *App, c: *ui.Context) void {
                 if (a.view.settings_open) settings_view.nav(c, a, k) else sidebar.sidebar(c, a, k);
                 // Workspace panels own their entire rounded outline; there is
                 // no longer a full-height border at the sidebar's edge.
-                if (a.view.settings_open) ui.div(c).absolute().offset(side_width - 1, 0).size(1, c.size.h).bg(k.border).end();
+                if (a.view.settings_open and !k.is_harp) ui.div(c).absolute().offset(side_width - 1, 0).size(1, c.size.h).bg(k.border).end();
             }
         }
         a.view.seam_inset = 2;
         const layout = a.tabs.layout();
-        a.view.chrome = chrome.frame(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal else true, strip.hasHost(a), strip.hasFiles(a));
+        a.view.chrome = chrome.frameWithSide(c.size.w, c.size.h, a.view.sidebar_width, side_width, strip.chatCount(a), if (layout) |s| s.axis == .horizontal else true, strip.hasHost(a), strip.hasFiles(a), a.settings.rightPaneWidth());
         ui.key(c, "main-column");
         const main = ui.div(c).column().grow().w(0).hFull();
         defer main.end();
         if (a.view.settings_open) {
-            _ = c.leaf(.{ .width = .fill, .height = .{ .px = sidebar.titlebar_h } }, .none, null);
-            settings_view.page(c, a, k);
+            if (k.is_harp) {
+                const wrap = ui.div(c).row().pt(sidebar.titlebar_h + 8).pr(8).pb(8).hFull().wFull();
+                defer wrap.end();
+                const card = ui.div(c).column().grow().w(0).hFull().p(1).rounded(10).border(k.border).borderW(1).bg(k.background);
+                defer card.end();
+                settings_view.page(c, a, k);
+            } else {
+                _ = c.leaf(.{ .width = .fill, .height = .{ .px = sidebar.titlebar_h } }, .none, null);
+                settings_view.page(c, a, k);
+            }
         } else {
             const workspace = ui.div(c).row().pt(chrome.header_height).pl(a.view.chrome.leading).pr(chrome.gutter).pb(chrome.gutter).hFull().wFull();
             defer workspace.end();
@@ -244,6 +254,7 @@ pub fn view(a: *App, c: *ui.Context) void {
         a.view.focus_composer = true;
         c.frameIn(0);
     }
+    @import("frame_profile.zig").frame(a, c);
 }
 
 /// A menu that takes the keys for itself (`window.focus` as it opens): the
@@ -349,7 +360,12 @@ fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
             const inverse = 1 - raw;
             reveal_t = if (c.reduced_motion) 1 else 1 - inverse * inverse * inverse * inverse * inverse;
             reveal = r;
-            if (raw >= 1) a.view.split_reveal = null else c.frameIn(1.0 / 60.0);
+            if (raw >= 1) {
+                a.view.split_reveal = null;
+            } else {
+                c.frame_in = null;
+                c.animationFrame();
+            }
         }
     }
 
@@ -499,7 +515,11 @@ fn keys(c: *ui.Context, a: *App) void {
         // The session search, while it holds the keys.
         @import("view_sidebar_search.zig").keys(c, a);
     }
-    if (c.shortcut(.{ .key = 'b', .cmd = true })) toggleSidebar(c, a, false);
+    if (c.shortcut(.{ .key = 'b', .cmd = true })) {
+        @import("frame_profile.zig").note(a, "cmd-b");
+        c.changed = false;
+        toggleSidebar(c, a, false);
+    }
     if (c.shortcut(.{ .key = ',', .cmd = true })) settings_view.open(a);
     if (boundShortcut(c, a, "newProject")) {
         @import("app_open_chooser.zig").open(a, .new_project);

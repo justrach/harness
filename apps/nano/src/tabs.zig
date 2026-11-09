@@ -65,6 +65,8 @@ fn dropDraft(gpa: Allocator, d: *?Draft) void {
 pub const PanelTab = struct {
     chat: ?[]u8 = null,
     draft: ?Draft = null,
+    /// When this tab was last on screen (`noteShown`); 0 until shown.
+    shown: u64 = 0,
 
     fn deinit(tab: *PanelTab, gpa: Allocator) void {
         if (tab.chat) |id| gpa.free(id);
@@ -72,6 +74,22 @@ pub const PanelTab = struct {
         tab.* = .{};
     }
 };
+
+/// The tab to show after closing `closed` (`active_after_close` in
+/// `workspace_panels.rs`): the one already on screen if a background tab was
+/// closed, else the surviving tab with the largest `shown > 0`, else the
+/// neighbour at `@min(closed, shown.len - 1)`.
+pub fn activeAfterClose(shown: []const u64, active: usize, closed: usize) usize {
+    if (shown.len == 0) return 0;
+    if (closed != active) return if (active > closed) active - 1 else @min(active, shown.len - 1);
+    var best: ?usize = null;
+    var best_stamp: u64 = 0;
+    for (shown, 0..) |stamp, i| if (stamp > best_stamp) {
+        best_stamp = stamp;
+        best = i;
+    };
+    return best orelse @min(closed, shown.len - 1);
+}
 
 pub const PanelTabs = struct {
     items: std.ArrayList(PanelTab) = .empty,
@@ -190,11 +208,17 @@ pub const Tabs = struct {
     /// Each tab's parked new-chat draft, alongside `items`; the active
     /// tab's is live.
     drafts: std.ArrayList(?Draft) = .empty,
+    /// When each tab was last on screen (`noteShown`), alongside `items`.
+    /// Not saved: after a restart (`clearShown`), only the active tab is
+    /// marked, so closing it falls back to its neighbour.
+    shown: std.ArrayList(u64) = .empty,
+    next_shown: u64 = 0,
     active: usize = 0,
 
     pub fn init(gpa: Allocator) Tabs {
         var t: Tabs = .{ .gpa = gpa };
         t.append() catch {};
+        t.noteShown();
         return t;
     }
 
@@ -204,6 +228,8 @@ pub const Tabs = struct {
         try t.splits.append(t.gpa, null);
         errdefer _ = t.splits.pop();
         try t.drafts.append(t.gpa, null);
+        errdefer _ = t.drafts.pop();
+        try t.shown.append(t.gpa, 0);
     }
 
     pub fn deinit(t: *Tabs) void {
@@ -213,6 +239,32 @@ pub const Tabs = struct {
         t.splits.deinit(t.gpa);
         for (t.drafts.items) |*d| dropDraft(t.gpa, d);
         t.drafts.deinit(t.gpa);
+        t.shown.deinit(t.gpa);
+    }
+
+    pub fn bumpShown(t: *Tabs) u64 {
+        t.next_shown += 1;
+        return t.next_shown;
+    }
+
+    pub fn noteShown(t: *Tabs) void {
+        if (t.active < t.shown.items.len) t.shown.items[t.active] = t.bumpShown();
+        if (t.layout()) |s| {
+            const group = &s.groups[s.focus];
+            if (group.active < group.items.items.len) group.items.items[group.active].shown = t.bumpShown();
+        }
+    }
+
+    /// After restoring tabs from disk: no tab has a prior-shown history except
+    /// the one currently on screen, so closing it falls back to its neighbour.
+    pub fn clearShown(t: *Tabs) void {
+        t.next_shown = 0;
+        for (t.shown.items) |*s| s.* = 0;
+        for (t.splits.items) |*sp| if (sp.*) |*s| for (&s.groups) |*group| {
+            for (group.items.items) |*tab| tab.shown = 0;
+            if (group.active < group.items.items.len) group.items.items[group.active].shown = t.bumpShown();
+        };
+        t.noteShown();
     }
 
     /// Parks `d` with tab `i` (or, `pane` given, that pane of the active
@@ -279,10 +331,12 @@ pub const Tabs = struct {
         if (t.paneOf(t.active, id)) |ix| return t.focusPane(ix);
         for (t.items.items, 0..) |c, i| if (c) |have| if (std.mem.eql(u8, have, id)) {
             t.active = i;
+            t.noteShown();
             return;
         };
         for (0..t.splits.items.len) |i| if (t.paneOf(i, id)) |ix| {
             t.active = i;
+            t.noteShown();
             return t.focusPane(ix);
         };
         t.setCurrent(id);
@@ -298,10 +352,12 @@ pub const Tabs = struct {
             };
             t.items.items[0] = copy;
             t.active = 0;
+            t.noteShown();
             return;
         }
         if (t.items.items[t.active]) |old| t.gpa.free(old);
         t.items.items[t.active] = copy;
+        t.noteShown();
     }
 
     /// Give an independent workspace a structural boundary even before its
@@ -329,19 +385,34 @@ pub const Tabs = struct {
             _ = t.splits.orderedRemove(at);
             return;
         };
+        t.shown.insert(t.gpa, at, 0) catch {
+            _ = t.items.orderedRemove(at);
+            _ = t.splits.orderedRemove(at);
+            _ = t.drafts.orderedRemove(at);
+            return;
+        };
         t.active = at;
+        t.noteShown();
     }
 
     /// A new tab after the last, shown (`create_chat_tab`'s push).
     pub fn appendTab(t: *Tabs) void {
         t.append() catch return;
         t.active = t.items.items.len - 1;
+        t.noteShown();
     }
 
     /// Closes tab `i`; the last tab left becomes a new chat instead.
     pub fn close(t: *Tabs, i: usize) void {
         if (i >= t.items.items.len) return;
-        if (t.items.items.len == 1) return t.setCurrent(null);
+        if (t.items.items.len == 1) {
+            if (t.splits.items[0]) |*s| if (s.panes.items.len == 1 and s.groups[0].items.items.len <= 1) {
+                s.deinit(t.gpa);
+                t.splits.items[0] = null;
+            };
+            dropDraft(t.gpa, &t.drafts.items[0]);
+            return t.setCurrent(null);
+        }
         if (t.items.orderedRemove(i)) |id| t.gpa.free(id);
         if (t.splits.orderedRemove(i)) |s| {
             var x = s;
@@ -349,7 +420,9 @@ pub const Tabs = struct {
         }
         var d = t.drafts.orderedRemove(i);
         dropDraft(t.gpa, &d);
-        if (t.active > i or t.active == t.items.items.len) t.active -|= 1;
+        if (i < t.shown.items.len) _ = t.shown.orderedRemove(i);
+        t.active = activeAfterClose(t.shown.items, t.active, i);
+        t.noteShown();
     }
 
     pub fn canStep(t: *const Tabs, by: i32) bool {
@@ -360,6 +433,7 @@ pub const Tabs = struct {
     pub fn step(t: *Tabs, by: i32) void {
         if (!t.canStep(by)) return;
         t.active = @intCast(@as(i64, @intCast(t.active)) + by);
+        t.noteShown();
     }
 
     /// A chat went away (deleted, or archived elsewhere): its tabs close,
@@ -439,7 +513,8 @@ pub const Tabs = struct {
                 const group = &s.groups[0];
                 try group.items.ensureTotalCapacity(t.gpa, t.items.items.len);
                 for (t.items.items, t.drafts.items, 0..) |chat, draft, ix| {
-                    group.items.appendAssumeCapacity(if (ix == t.active) .{} else .{ .chat = chat, .draft = draft });
+                    const stamp = if (ix < t.shown.items.len) t.shown.items[ix] else 0;
+                    group.items.appendAssumeCapacity(if (ix == t.active) .{ .shown = stamp } else .{ .chat = chat, .draft = draft, .shown = stamp });
                 }
                 group.active = t.active;
                 const chat = t.items.items[t.active];
@@ -447,9 +522,11 @@ pub const Tabs = struct {
                 t.items.items.len = 1;
                 t.drafts.items.len = 1;
                 t.splits.items.len = 1;
+                t.shown.items.len = 1;
                 t.items.items[0] = chat;
                 t.drafts.items[0] = draft;
                 t.splits.items[0] = null;
+                t.shown.items[0] = t.bumpShown();
                 t.active = 0;
                 slot = &t.splits.items[0];
             }
@@ -496,6 +573,7 @@ pub const Tabs = struct {
         s.panes.items[ix] = null;
         s.focus = ix;
         s.zoomed = false;
+        t.noteShown();
     }
 
     /// ⌘W in a split: the focused pane closes, its share to the pane before
@@ -530,6 +608,7 @@ pub const Tabs = struct {
             s.deinit(t.gpa);
             t.splits.items[t.active] = null;
         }
+        t.noteShown();
         return true;
     }
 
@@ -548,11 +627,12 @@ pub const Tabs = struct {
         const s = t.layout() orelse return error.NoSplit;
         const group = &s.groups[s.focus];
         try group.items.ensureUnusedCapacity(t.gpa, if (group.items.items.len == 0) 2 else 1);
-        if (group.items.items.len == 0) group.items.appendAssumeCapacity(.{});
-        group.items.items[group.active] = .{ .chat = t.items.items[t.active], .draft = draft };
+        if (group.items.items.len == 0) group.items.appendAssumeCapacity(.{ .shown = t.bumpShown() });
+        const prev_shown = group.items.items[group.active].shown;
+        group.items.items[group.active] = .{ .chat = t.items.items[t.active], .draft = draft, .shown = if (prev_shown > 0) prev_shown else t.bumpShown() };
         t.items.items[t.active] = null;
         const at = if (at_end) group.items.items.len else group.active + 1;
-        group.items.insertAssumeCapacity(at, .{});
+        group.items.insertAssumeCapacity(at, .{ .shown = t.bumpShown() });
         group.active = at;
     }
 
@@ -562,9 +642,10 @@ pub const Tabs = struct {
         const s = t.layout() orelse return error.NoSplit;
         const group = &s.groups[s.focus];
         if (ix >= group.items.items.len or ix == group.active) return error.NoTab;
-        group.items.items[group.active] = .{ .chat = t.items.items[t.active], .draft = draft };
+        const prev_shown = group.items.items[group.active].shown;
+        group.items.items[group.active] = .{ .chat = t.items.items[t.active], .draft = draft, .shown = if (prev_shown > 0) prev_shown else t.bumpShown() };
         const incoming = group.items.items[ix];
-        group.items.items[ix] = .{};
+        group.items.items[ix] = .{ .shown = t.bumpShown() };
         group.active = ix;
         t.items.items[t.active] = incoming.chat;
         return incoming.draft;
@@ -576,10 +657,14 @@ pub const Tabs = struct {
         const group = &s.groups[s.focus];
         if (group.items.items.len <= 1) return false;
         if (t.items.items[t.active]) |id| t.gpa.free(id);
-        _ = group.items.orderedRemove(group.active);
-        group.active = @min(group.active, group.items.items.len - 1);
+        const closed = group.active;
+        _ = group.items.orderedRemove(closed);
+        var stamps: [64]u64 = undefined;
+        const n = @min(group.items.items.len, stamps.len);
+        for (group.items.items[0..n], 0..) |tab, i| stamps[i] = tab.shown;
+        group.active = activeAfterClose(stamps[0..n], closed, closed);
         const incoming = group.items.items[group.active];
-        group.items.items[group.active] = .{};
+        group.items.items[group.active] = .{ .shown = t.bumpShown() };
         t.items.items[t.active] = incoming.chat;
         dropDraft(t.gpa, &s.drafts.items[s.focus]);
         s.drafts.items[s.focus] = incoming.draft;

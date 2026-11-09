@@ -394,11 +394,10 @@ fn urlField(c: *ui.Context, a: *App, k: theme.Colors, url: []const u8) void {
 /// The dialog over the page, while a sign-in is under way.
 pub fn dialog(c: *ui.Context, a: *App, k: theme.Colors) void {
     const f = flowPtr(a) orelse return;
-    ui.key(c, "accounts-login-scrim");
-    const back = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(6).bg(.{ .a = if (k.dark) 0.35 else 0.32 }).center();
+    const dialogs = @import("view_chat_menu.zig");
+    const back = dialogs.scrim(c, k);
     defer back.end();
-    const card = kit.shadowLg(ui.div(c).w(360).p(21).column().rounded(16).bg(k.composer)
-        .border(if (k.dark) ui.Color{ .r = 1, .g = 1, .b = 1, .a = 0.10 } else ui.Color{ .a = 0.135 }).borderW(1));
+    const card = dialogs.dialog(c, k);
     defer card.end();
     var tb: [64]u8 = undefined;
     ui.text(c, c.print("{s}", .{accounts.loginTitle(&tb, f.harness, f.provider, f.reauthenticate)}), .{ .size = 15, .line_height = kit.measured(15 * phi), .weight = .semibold, .color = k.text });

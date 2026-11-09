@@ -109,6 +109,7 @@ pub fn restore(a: *App) bool {
     var previous = a.tabs;
     a.tabs = next;
     previous.deinit();
+    a.tabs.clearShown();
     a.tabs_ready = true;
     a.select(a.tabs.current(), null);
     return true;
