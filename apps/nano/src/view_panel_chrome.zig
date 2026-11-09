@@ -99,12 +99,60 @@ test "selected panel cap carries both surface shadows before its opaque fill" {
             }
         }
         try testing.expectEqual(@as(usize, 2), count);
+        // Shoulders must never paint an opaque k.shell box over k.background
+        // in the titlebar strip (`y < 59`), preserving frosted glass vibrancy.
+        for (t.ctx.nodes.items) |node| {
+            if (node.rect.y < 59 and node.style.background != null) {
+                try testing.expect(!@import("std").meta.eql(node.style.background.?, theme.colors(dark).shell));
+            }
+        }
     }
 }
 
+const shoulder_fill_l_svg =
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9 9">
+    \\  <path fill="black" d="M0 8 Q8 8 8 0 L9 0 L9 9 L0 9 Z"/>
+    \\</svg>
+;
+const shoulder_fill_r_svg =
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9 9">
+    \\  <path fill="black" d="M1 0 Q1 8 9 8 L9 9 L0 9 L0 0 Z"/>
+    \\</svg>
+;
+const shoulder_edge_l_svg =
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9 9">
+    \\  <path fill="none" stroke="black" stroke-width="1" d="M0 8.5 Q8.5 8.5 8.5 0"/>
+    \\</svg>
+;
+const shoulder_edge_r_svg =
+    \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9 9">
+    \\  <path fill="none" stroke="black" stroke-width="1" d="M0.5 0 Q0.5 8.5 9 8.5"/>
+    \\</svg>
+;
+
 fn shoulder(c: *ui.Context, k: theme.Colors, x: f32, y: f32, leading: bool) void {
     const r = chrome.shoulder;
-    const quadrant = ui.div(c).absolute().offset(x, y).size(r + 1, r + 1).bg(k.background).clip();
-    defer quadrant.end();
-    ui.div(c).absolute().offset(if (leading) -r else 0, -r).size(2 * r, 2 * r).rounded(r).border(edge(k)).borderW(1).bg(k.shell).end();
+    // Erase the body's straight 1pt top border under the shoulder's foot (`y = -1`)
+    // without painting any background into the titlebar (`y < -1`).
+    ui.div(c).absolute().offset(x, y + r).size(r + 1, 1).bg(k.background).end();
+    {
+        const fill_box = ui.div(c).absolute().offset(x, y).size(r + 1, r + 1);
+        defer fill_box.end();
+        _ = ui.svg(c, .{
+            .key = if (leading) "panel-shoulder-fill-l" else "panel-shoulder-fill-r",
+            .bytes = if (leading) shoulder_fill_l_svg else shoulder_fill_r_svg,
+            .size = r + 1,
+            .color = k.background,
+        });
+    }
+    {
+        const edge_box = ui.div(c).absolute().offset(x, y).size(r + 1, r + 1);
+        defer edge_box.end();
+        _ = ui.svg(c, .{
+            .key = if (leading) "panel-shoulder-edge-l" else "panel-shoulder-edge-r",
+            .bytes = if (leading) shoulder_edge_l_svg else shoulder_edge_r_svg,
+            .size = r + 1,
+            .color = edge(k),
+        });
+    }
 }

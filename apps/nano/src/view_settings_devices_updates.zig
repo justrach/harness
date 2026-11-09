@@ -295,7 +295,9 @@ pub fn panel(c: *ui.Context, a: *App, k: theme.Colors, d: workspace.Device, loca
     if (selected and !online and s.watch != null) stopWatch(a);
     const p = ui.div(c).column().wFull().pl(66).pr(16).pb(12).gap(6);
     defer p.end();
-    if (action(c, k, c.print("device-updates-{s}", .{d.id}), if (selected) "Hide updates" else "Updates")) {
+    const older = if (d.version) |cur| if (a.release.version()) |latest| @import("graff_update.zig").newer(latest, cur) else false else false;
+    const toggle_label = if (selected) "Hide updates" else if (older) "Update available · Details" else "Updates";
+    if (action(c, k, c.print("device-updates-{s}", .{d.id}), toggle_label)) {
         if (selected) collapse(a) else if (online) watch(a, d.id) else {
             stopWatch(a);
             s.device.clearRetainingCapacity();

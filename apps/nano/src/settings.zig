@@ -114,6 +114,8 @@ pub const Prefs = struct {
     // Settings › Appshots.
     appshots_enabled: bool = false,
     appshot_sound_enabled: bool = true,
+    // Settings › Devices.
+    restart_to_install_updates: bool = true,
 };
 
 /// One of `Prefs`'s switches.
@@ -145,6 +147,7 @@ pub const Flag = enum {
     sidebar_show_archived,
     appshots_enabled,
     appshot_sound_enabled,
+    restart_to_install_updates,
 };
 
 pub const sidebar_min: f32 = 224;

@@ -97,6 +97,12 @@ pub const View = struct {
     /// The new chat's checkout menu (`PickerKind::Checkout`) and its chip.
     checkout_menu: bool = false,
     checkout_anchor: ?nanoui.ui.Rect = null,
+    /// The new chat's git ref menu (`PickerKind::Branch`) and its chip.
+    ref_menu: bool = false,
+    ref_anchor: ?nanoui.ui.Rect = null,
+    ref_loading: bool = false,
+    ref_space: ?[]u8 = null,
+    refs: std.ArrayList([]u8) = .empty,
     account_menu: bool = false,
     /// Where the controls that open popovers were, as last laid out.
     filter_anchor: ?nanoui.ui.Rect = null,
@@ -220,6 +226,9 @@ pub const View = struct {
             gpa.destroy(d);
         }
         v.shortcut_notice.deinit(gpa);
+        if (v.ref_space) |s| gpa.free(s);
+        for (v.refs.items) |r| gpa.free(r);
+        v.refs.deinit(gpa);
         v.drag.deinit(gpa);
         v.chat_menu.id.deinit(gpa);
         v.dialogs.deinit(gpa);
@@ -365,6 +374,8 @@ pub const App = struct {
     /// default (`CheckoutKind::NewWorktree`), unless the project's own
     /// checkout was picked.
     new_checkout_local: bool = false,
+    /// Optional base branch/ref for a new chat's worktree (`Select ref`).
+    new_ref: ?[]u8 = null,
     /// The new chat is a plain chat (chat_mode.zig), not a coding session.
     new_chat_mode: bool = false,
     /// An explicit projectless draft, unlike an uninitialized folder pick.
@@ -529,6 +540,7 @@ pub const App = struct {
         if (a.new_model) |m| a.gpa.free(m);
         if (a.new_reasoning) |m| a.gpa.free(m);
         if (a.new_device) |id| a.gpa.free(id);
+        if (a.new_ref) |r| a.gpa.free(r);
         a.gpa.free(a.models_for);
         a.gpa.free(a.new_harness);
         a.harnesses.deinit();
@@ -578,7 +590,7 @@ pub const App = struct {
 
     pub fn releaseCame(ctx: *anyopaque) void {
         const a: *App = @ptrCast(@alignCast(ctx));
-        a.redraw();
+        @import("view_updates.zig").onReleaseChecked(a);
     }
 
     pub fn redraw(a: *App) void {
@@ -1616,7 +1628,7 @@ pub const App = struct {
             // own checkout was picked (`CheckoutPlan::NewWorktree`); cwd
             // stays the repo, where an older host runs it.
             if (space) |s| if (s.git and !a.new_checkout_local) {
-                worktree = .{ .repoPath = s.path, .spaceId = s.id };
+                worktree = .{ .repoPath = s.path, .base = a.new_ref orelse "", .spaceId = s.id };
             };
             const t = agent_mod.target(a);
             const plain = a.new_chat_mode;

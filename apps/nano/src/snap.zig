@@ -131,6 +131,7 @@ fn parity(init: std.process.Init, scene: json.ObjectMap, name: []const u8, out: 
     const arena = init.arena.allocator();
     var a: App = .init(gpa, init.io, 1);
     defer a.deinit();
+    a.updates.desktop_update = false;
     a.new_harness = try gpa.dupe(u8, "graff");
     // A data folder of its own, empty, as the renderer's temporary one: what
     // a scene saves (a theme it imports) goes there, never in ~/.harness.

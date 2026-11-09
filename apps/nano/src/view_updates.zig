@@ -52,11 +52,30 @@ pub const State = struct {
     restart_dismissed_len: usize = 0,
     titlebar_dismissed: [32]u8 = undefined,
     titlebar_dismissed_len: usize = 0,
+    /// True in the desktop app and unit tests; false only in legacy GPUI
+    /// parity scenes recorded against an unmanaged binary.
+    desktop_update: bool = true,
     app_ready: bool = false,
     app_downloading: bool = false,
+    app_checking: bool = false,
+    app_checked_ms: i64 = 0,
+    app_failed: [160]u8 = undefined,
+    app_failed_len: usize = 0,
+    app_relaunch_when_ready: bool = false,
     app_updated: [32]u8 = undefined,
     app_updated_len: usize = 0,
     app_updated_until: f64 = 0,
+
+    pub fn appFailed(s: *const State) ?[]const u8 {
+        return if (s.app_failed_len == 0) null else s.app_failed[0..s.app_failed_len];
+    }
+
+    pub fn setAppFailed(s: *State, msg: []const u8) void {
+        const trimmed = std.mem.trim(u8, msg, " \t\r\n");
+        const n = @min(trimmed.len, s.app_failed.len);
+        @memcpy(s.app_failed[0..n], trimmed[0..n]);
+        s.app_failed_len = n;
+    }
 
     pub fn graffFrom(s: *const State) ?[]const u8 {
         return if (s.graff_from_len == 0) null else s.graff_from[0..s.graff_from_len];
@@ -255,25 +274,231 @@ pub fn dismissGraff(a: *App) void {
     a.redraw();
 }
 
-fn triggerAppUpdate(a: *App, ver: []const u8) void {
-    if (std.mem.eql(u8, ver, "preview")) return;
-    if (a.device_id) |dev| {
-        if (a.engine.state == .connected) {
-            _ = a.send_(@import("requests.zig").queueUpdate(dev), .of(App, a, onAppUpdateQueued));
-            a.updates.app_downloading = true;
-            a.redraw();
+pub const UpdateAction = union(enum) {
+    none,
+    check,
+    downloading,
+    update: []const u8,
+    restart: []const u8,
+    retry: []const u8,
+};
+
+pub const UpdateSummary = struct {
+    line: []const u8,
+    action: UpdateAction,
+};
+
+/// Pure status line and button for Settings › Devices (`update_summary` in
+/// `crates/ui/src/settings/devices.rs`).
+pub fn updateSummary(buf: []u8, a: *const App, now_ms: i64) UpdateSummary {
+    const latest = appUpdateVersion(a);
+    if (!a.updates.desktop_update) {
+        if (latest) |ver| {
+            return .{
+                .line = std.fmt.bufPrint(buf, "Update v{s} is available. Install the latest release to update.", .{ver}) catch "An update is available.",
+                .action = .none,
+            };
+        }
+        return .{
+            .line = "This build doesn't update itself. Install the latest release to update.",
+            .action = .none,
+        };
+    }
+    if (a.updates.app_ready) {
+        const ver = latest orelse @import("build_info").version;
+        return .{
+            .line = std.fmt.bufPrint(buf, "Harness v{s} is downloaded and ready to install.", .{ver}) catch "Update downloaded and ready to install.",
+            .action = .{ .restart = ver },
+        };
+    }
+    if (a.updates.app_downloading) {
+        const line = if (latest) |ver|
+            std.fmt.bufPrint(buf, "Downloading v{s}…", .{ver}) catch "Downloading update…"
+        else
+            "Downloading update…";
+        return .{ .line = line, .action = .downloading };
+    }
+    if (a.updates.appFailed()) |err| {
+        if (latest) |ver| {
+            return .{
+                .line = std.fmt.bufPrint(buf, "Updating to v{s} failed: {s}", .{ ver, err }) catch "Update failed.",
+                .action = .{ .retry = ver },
+            };
+        }
+    }
+    if (a.updates.app_checking) {
+        return .{ .line = "Checking for updates…", .action = .none };
+    }
+    if (latest) |ver| {
+        return .{
+            .line = std.fmt.bufPrint(buf, "Harness v{s} is available.", .{ver}) catch "An update is available.",
+            .action = .{ .update = ver },
+        };
+    }
+    if (a.updates.appFailed()) |err| {
+        return .{
+            .line = std.fmt.bufPrint(buf, "Couldn't check for updates: {s}", .{err}) catch "Couldn't check for updates.",
+            .action = .check,
+        };
+    }
+    if (a.updates.app_checked_ms > 0) {
+        var seen_buf: [32]u8 = undefined;
+        const seen = @import("view_settings_devices.zig").lastSeen(&seen_buf, a.updates.app_checked_ms, now_ms);
+        return .{
+            .line = std.fmt.bufPrint(buf, "Up to date · checked {s}", .{seen}) catch "Up to date.",
+            .action = .check,
+        };
+    }
+    return .{ .line = "Up to date.", .action = .check };
+}
+
+pub fn checkForUpdates(a: *App) void {
+    a.updates.app_checking = true;
+    a.updates.app_failed_len = 0;
+    if (!a.offscreen and !builtin.is_test) {
+        a.release.start();
+    }
+    a.redraw();
+}
+
+pub fn onReleaseChecked(a: *App) void {
+    a.updates.app_checking = false;
+    a.updates.app_checked_ms = a.nowMs();
+    if (!a.offscreen and !builtin.is_test and a.updates.desktop_update) {
+        if (appUpdateVersion(a) != null and !a.updates.app_ready and !a.updates.app_downloading) {
+            startAppDownload(a, false);
             return;
         }
     }
-    var buf: [160]u8 = undefined;
-    const url = std.fmt.bufPrint(&buf, "https://github.com/justrach/harness/releases/tag/v{s}", .{ver}) catch return;
-    openExternalUrl(url);
+    a.redraw();
 }
 
-fn onAppUpdateQueued(a: *App, _: u64, r: @import("rpc.zig").Reply) void {
-    a.updates.app_downloading = false;
-    if (r == .ok) a.updates.app_ready = true;
+pub fn triggerAppUpdate(a: *App, ver: []const u8) void {
+    if (std.mem.eql(u8, ver, "preview")) return;
+    if (a.updates.app_ready) {
+        restartIntoUpdate(a);
+        return;
+    }
+    startAppDownload(a, true);
+}
+
+fn startAppDownload(a: *App, relaunch_when_ready: bool) void {
+    a.updates.acquire();
+    const already = a.updates.app_downloading;
+    a.updates.app_downloading = true;
+    a.updates.app_failed_len = 0;
+    if (relaunch_when_ready) a.updates.app_relaunch_when_ready = true;
+    a.updates.release();
     a.redraw();
+    if (already or a.offscreen or builtin.is_test) return;
+    const t = std.Thread.spawn(.{}, appUpdateWorker, .{a}) catch {
+        a.updates.acquire();
+        a.updates.app_downloading = false;
+        a.updates.setAppFailed("couldn't start background installer");
+        a.updates.release();
+        a.redraw();
+        return;
+    };
+    t.detach();
+}
+
+fn findHarnessCli(gpa: std.mem.Allocator, io: std.Io, env: ?*const std.process.Environ.Map) ?[]u8 {
+    const app_bin = "/Applications/Harness.app/Contents/MacOS/harness";
+    if (std.Io.Dir.cwd().access(io, app_bin, .{})) |_| {
+        return gpa.dupe(u8, app_bin) catch null;
+    } else |_| {}
+    if (env) |e| return @import("engine_start.zig").find(gpa, io, e);
+    return null;
+}
+
+fn appUpdateWorker(a: *App) void {
+    const bin = findHarnessCli(a.gpa, a.io, a.env) orelse {
+        a.updates.acquire();
+        a.updates.app_downloading = false;
+        a.updates.setAppFailed("Harness CLI not found in /Applications/Harness.app");
+        a.updates.dirty = true;
+        a.updates.release();
+        nanoui.App.after(0, a, appUpdateDelivered);
+        return;
+    };
+    defer a.gpa.free(bin);
+    const res = std.process.run(a.gpa, a.io, .{
+        .argv = &.{ bin, "update" },
+        .stdout_limit = .limited(64 << 10),
+        .stderr_limit = .limited(64 << 10),
+    }) catch |err| {
+        a.updates.acquire();
+        a.updates.app_downloading = false;
+        var ebuf: [96]u8 = undefined;
+        a.updates.setAppFailed(std.fmt.bufPrint(&ebuf, "{t}", .{err}) catch "update command failed");
+        a.updates.dirty = true;
+        a.updates.release();
+        nanoui.App.after(0, a, appUpdateDelivered);
+        return;
+    };
+    defer a.gpa.free(res.stdout);
+    defer a.gpa.free(res.stderr);
+    const ok = switch (res.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    a.updates.acquire();
+    a.updates.app_downloading = false;
+    if (ok) {
+        a.updates.app_ready = true;
+        a.updates.app_failed_len = 0;
+    } else {
+        const line = firstLine(res.stderr) orelse firstLine(res.stdout) orelse "update exited with an error";
+        a.updates.setAppFailed(line);
+    }
+    a.updates.dirty = true;
+    a.updates.release();
+    nanoui.App.after(0, a, appUpdateDelivered);
+}
+
+fn firstLine(s: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, s, '\n');
+    while (it.next()) |raw| {
+        const t = std.mem.trim(u8, raw, " \t\r");
+        if (t.len > 0) return t;
+    }
+    return null;
+}
+
+fn appUpdateDelivered(ctx: ?*anyopaque) callconv(.c) void {
+    const a: *App = @ptrCast(@alignCast(ctx.?));
+    a.updates.acquire();
+    const ready = a.updates.app_ready;
+    const relaunch = a.updates.app_relaunch_when_ready;
+    a.updates.app_relaunch_when_ready = false;
+    a.updates.release();
+    a.redraw();
+    if (ready and (relaunch or a.settings.get(.restart_to_install_updates))) {
+        restartIntoUpdate(a);
+    }
+}
+
+pub fn restartIntoUpdate(a: *App) void {
+    if (builtin.is_test or a.offscreen) return;
+    if (builtin.os.tag == .macos) {
+        const pid = std.c.getpid();
+        var cmd_buf: [256]u8 = undefined;
+        const cmd = std.fmt.bufPrint(
+            &cmd_buf,
+            "while /bin/kill -0 {d} 2>/dev/null; do /bin/sleep 0.2; done; /usr/bin/open \"/Applications/Harness.app\"",
+            .{pid},
+        ) catch return;
+        if (std.process.spawn(a.io, .{
+            .argv = &.{ "/bin/sh", "-c", cmd },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        })) |child| {
+            var c = child;
+            _ = &c;
+            std.process.exit(0);
+        } else |_| {}
+    }
 }
 
 pub fn openExternalUrl(url: []const u8) void {
@@ -285,7 +510,7 @@ pub fn openExternalUrl(url: []const u8) void {
 pub fn sidebarFooterExtraHeight(a: *const App) f32 {
     var h: f32 = 0;
     if (graffVisible(a)) h += 34;
-    if (restartPlace(appRestartVersion(a), sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row) h += 34;
+    if (restartPlace(appUpdateVersion(a), sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row) h += 34;
     return h;
 }
 
@@ -299,8 +524,8 @@ pub fn sidebarFooterRows(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (was_dirty) c.changed = true;
 
     const show_graff = graffVisible(a);
-    const restart_ver = appRestartVersion(a);
-    const show_app = restartPlace(restart_ver, sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row;
+    const update_ver = appUpdateVersion(a);
+    const show_app = restartPlace(update_ver, sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row;
     if (!show_graff and !show_app) return;
 
     const wrap = ui.div(c).column().wFull().pt(6).pb(2);
@@ -310,7 +535,7 @@ pub fn sidebarFooterRows(c: *ui.Context, a: *App, k: theme.Colors) void {
         sidebarGraffRow(c, a, k);
     }
     if (show_app) {
-        if (restart_ver) |ver| sidebarAppUpdateRow(c, a, k, ver);
+        if (update_ver) |ver| sidebarAppUpdateRow(c, a, k, ver);
     }
 }
 

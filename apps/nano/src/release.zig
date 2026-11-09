@@ -44,9 +44,9 @@ pub const Check = struct {
     fn loaded(c: *Check, r: nanoui.http.Response) void {
         if (r.status != 200) {
             std.log.info("harness-nano: no release manifest: {s} ({d})", .{ r.err, r.status });
-            return;
+        } else {
+            _ = c.take(r.body);
         }
-        if (!c.take(r.body)) return;
         if (c.done) |d| d.func(d.ctx);
     }
 
@@ -61,13 +61,12 @@ pub const Check = struct {
     }
 
     fn work(c: *Check) void {
-        const body = fetch(c.gpa, c.io, manifest_url) catch |e| {
+        if (fetch(c.gpa, c.io, manifest_url)) |body| {
+            defer c.gpa.free(body);
+            _ = c.take(body);
+        } else |e| {
             std.log.info("harness-nano: no release manifest: {t}", .{e});
-            return;
-        };
-        defer c.gpa.free(body);
-        // Written before the UI thread is told; read only after.
-        if (!c.take(body)) return;
+        }
         nanoui.App.after(0, c, delivered);
     }
 

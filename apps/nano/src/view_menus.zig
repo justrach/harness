@@ -23,7 +23,7 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
         v.strip.footer_folder = true;
     };
     strip.menus(c, a, k);
-    if (!v.account_menu and !v.space_menu and !v.checkout_menu) return;
+    if (!v.account_menu and !v.space_menu and !v.checkout_menu and !v.ref_menu) return;
     {
         // Behind the menu: a click anywhere else closes it.
         const back = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(4);
@@ -32,23 +32,110 @@ pub fn menus(c: *ui.Context, a: *App, k: theme.Colors) void {
             v.account_menu = false;
             v.space_menu = false;
             v.checkout_menu = false;
+            v.ref_menu = false;
             return;
         }
     }
     // Where the new chat runs (`render_checkout_popover`): the project's
-    // own checkout, or a fresh worktree made off the base on send.
+    // own checkout, or a fresh worktree made off the base on send. Opens
+    // upward when the trigger is docked near the bottom of the window.
     if (v.checkout_menu) if (v.checkout_anchor) |r| {
-        const m = panel(c, k, r.x, r.y + r.h + 4, 220);
+        const w: f32 = 224;
+        const h: f32 = 2 * 32 + 10;
+        const x = rules.snapToWindow(r.x, w, c.size.w, 8);
+        const y = upwardOrBelow(r, h, c.size.h);
+        ui.key(c, "checkout-popover");
+        const m = panel(c, k, x, y, w);
         defer m.end();
         const newchat = @import("view_newchat.zig");
-        inline for (.{ .{ true, icons.Name.folder }, .{ false, icons.Name.@"git-branch" } }) |opt| {
+        inline for (.{ .{ true, icons.Name.folder }, .{ false, icons.Name.@"folder-with-files" } }) |opt| {
             if (item(c, k, opt[1], newchat.checkoutLabel(opt[0]), a.new_checkout_local == opt[0])) {
                 a.new_checkout_local = opt[0];
                 v.checkout_menu = false;
             }
         }
     };
+    if (v.ref_menu) if (v.ref_anchor) |r| {
+        refMenu(c, a, k, r);
+    };
     if (v.account_menu) if (v.account_anchor) |r| accountMenu(c, a, k, r);
+}
+
+/// Place a compact popover above `anchor` when docked near the bottom edge
+/// (6pt gap), falling back below when the anchor is near the top.
+pub fn upwardOrBelow(anchor: ui.Rect, h: f32, win_h: f32) f32 {
+    const below = @max(0, win_h - (anchor.y + anchor.h) - 10);
+    if (below < h and anchor.y > h + 14) {
+        return @max(8, anchor.y - h - 6);
+    }
+    return rules.snapToWindow(anchor.y + anchor.h + 6, h, win_h, 8);
+}
+
+pub fn ensureRefs(a: *App, space: @import("workspace.zig").Space) void {
+    const v = &a.view;
+    if (v.ref_space) |prev| {
+        if (!std.mem.eql(u8, prev, space.id)) {
+            a.gpa.free(prev);
+            v.ref_space = null;
+            for (v.refs.items) |r| a.gpa.free(r);
+            v.refs.clearRetainingCapacity();
+        }
+    }
+    if (v.ref_space == null) {
+        v.ref_space = a.gpa.dupe(u8, space.id) catch null;
+    }
+    if (v.ref_loading or !a.engine.up()) return;
+    v.ref_loading = true;
+    const host: ?[]const u8 = if (space.device_id) |dev| (if (a.device_id) |me| (if (std.mem.eql(u8, me, dev)) null else dev) else dev) else null;
+    a.request(@import("requests.zig").listRefs(space.path, host), .of(App, a, onRefs));
+}
+
+fn onRefs(a: *App, _: u64, reply: @import("rpc.zig").Reply) void {
+    const v = &a.view;
+    v.ref_loading = false;
+    switch (reply) {
+        .ok => |val| if (val == .array) {
+            for (v.refs.items) |old| a.gpa.free(old);
+            v.refs.clearRetainingCapacity();
+            for (val.array.items) |entry| {
+                if (entry != .object) continue;
+                const name_val = entry.object.get("name") orelse continue;
+                if (name_val != .string or name_val.string.len == 0) continue;
+                const dup = a.gpa.dupe(u8, name_val.string) catch continue;
+                v.refs.append(a.gpa, dup) catch a.gpa.free(dup);
+            }
+        },
+        else => {},
+    }
+    a.redraw();
+}
+
+fn refMenu(c: *ui.Context, a: *App, k: theme.Colors, r: ui.Rect) void {
+    const v = &a.view;
+    const w: f32 = 240;
+    const count: usize = 1 + @min(v.refs.items.len, 8);
+    const h: f32 = @as(f32, @floatFromInt(count)) * 32 + 12;
+    const x = rules.snapToWindow(r.x, w, c.size.w, 8);
+    const y = upwardOrBelow(r, h, c.size.h);
+    ui.key(c, "branch-popover");
+    const m = panel(c, k, x, y, w);
+    defer m.end();
+    if (item(c, k, .@"git-branch", "Default branch", a.new_ref == null)) {
+        if (a.new_ref) |old| a.gpa.free(old);
+        a.new_ref = null;
+        v.ref_menu = false;
+        a.redraw();
+    }
+    for (v.refs.items[0..@min(v.refs.items.len, 8)]) |branch| {
+        const selected = if (a.new_ref) |cur| std.mem.eql(u8, cur, branch) else false;
+        if (item(c, k, .@"git-branch", branch, selected)) {
+            const copy = a.gpa.dupe(u8, branch) catch return;
+            if (a.new_ref) |old| a.gpa.free(old);
+            a.new_ref = copy;
+            v.ref_menu = false;
+            a.redraw();
+        }
+    }
 }
 
 /// The account badge's menu (`render_user_menu`): who this is, the

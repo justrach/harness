@@ -21,7 +21,14 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (menu == .folder) return folderMenu(c, a, k, anchor);
     const width: f32 = @import("strip_folder_search.zig").menu_width;
     const x = rules.snapToWindow(anchor.x, width, c.size.w, 8);
-    const y = @min(anchor.y + anchor.h + 4, @max(8, c.size.h - 220));
+    const est_h: f32 = if (menu == .device)
+        @min(220, @as(f32, @floatFromInt(@max(1, 1 + a.devices.items.len))) * 34 + 12)
+    else
+        220;
+    const y = if (c.size.h - (anchor.y + anchor.h) < est_h + 14 and anchor.y > est_h + 14)
+        @max(8, anchor.y - est_h - 6)
+    else
+        @min(anchor.y + anchor.h + 4, @max(8, c.size.h - est_h));
     {
         const scrim_top = @import("motion_rules.zig").scrimTop(false, @import("panel_chrome.zig").header_height);
         const scrim = ui.div(c).fixed().offset(0, scrim_top).size(c.size.w, @max(0, c.size.h - scrim_top)).layer(4);

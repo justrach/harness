@@ -150,8 +150,18 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
         if (a.newChatSpace()) |space| {
             projectChip(c, a, k, space.name);
             if (space.git) {
-                if (footerChipAt(c, k, if (a.new_checkout_local) .folder else .@"folder-with-files", checkoutLabel(a.new_checkout_local), &a.view.checkout_anchor)) a.view.checkout_menu = !a.view.checkout_menu;
-                if (footerChip(c, k, .@"git-branch", "Select ref")) a.setNotice("Choosing a ref isn't in Harness Nano yet.");
+                ui.key(c, "picker-checkout");
+                if (footerChipAt(c, k, if (a.new_checkout_local) .folder else .@"folder-with-files", checkoutLabel(a.new_checkout_local), &a.view.checkout_anchor)) {
+                    a.view.checkout_menu = !a.view.checkout_menu;
+                    a.view.ref_menu = false;
+                }
+                ui.key(c, "picker-branch");
+                const ref_label = if (a.new_ref) |ref| (if (a.new_checkout_local) ref else c.print("From {s}", .{ref})) else "Select ref";
+                if (footerChipAt(c, k, .@"git-branch", ref_label, &a.view.ref_anchor)) {
+                    a.view.ref_menu = !a.view.ref_menu;
+                    a.view.checkout_menu = false;
+                    if (a.view.ref_menu) @import("view_menus.zig").ensureRefs(a, space);
+                }
             }
         } else {
             projectChip(c, a, k, "No project");

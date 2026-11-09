@@ -268,7 +268,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 /// no focus of its own, so it isn't one.
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
-    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.chat_menu.open or
+    return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or
         v.menus.ctx_at != null or v.menus.overview.open or v.palette.open or a.picker != .none;
 }
 

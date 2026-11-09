@@ -152,17 +152,54 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     const devices = a.devices.items;
     set.header(c, k, "Devices", if (devices.len > 0) devices.len else null);
     set.subtitle(c, k, subtitle(a.account.scope), false);
-    {
-        // This build's version: a row on the page, not in a card. Harness
-        // Nano doesn't update itself (`update_summary` without an updater).
+    const now = a.nowMs();
+    const upd = @import("view_updates.zig");
+    var summary_buf: [200]u8 = undefined;
+    const summary = upd.updateSummary(&summary_buf, a, now);
+    if (a.updates.desktop_update) {
+        const ucard = set.card(c, k);
+        defer ucard.end();
+        {
+            const r = set.row(c, k, true, false);
+            defer r.end();
+            set.tile(c, k, .refresh);
+            const reserve: f32 = switch (summary.action) {
+                .none => 0,
+                .check, .downloading => 148,
+                .update, .restart, .retry => 156,
+            };
+            set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), c.print("{s}", .{summary.line}), reserve);
+            switch (summary.action) {
+                .none => {},
+                .check => if (updateButton(c, k, "check-for-updates", "Check for updates", false, false)) upd.checkForUpdates(a),
+                .downloading => _ = updateButton(c, k, "app-update-downloading", "Downloading…", false, true),
+                .update => |ver| if (updateButton(c, k, "start-app-update", c.print("Update to v{s}", .{ver}), true, false)) upd.triggerAppUpdate(a, ver),
+                .restart => |ver| if (updateButton(c, k, "restart-app-update", "Restart to update", true, false)) upd.triggerAppUpdate(a, ver),
+                .retry => |ver| if (updateButton(c, k, "retry-app-update", "Try again", true, false)) upd.triggerAppUpdate(a, ver),
+            }
+        }
+        {
+            ui.key(c, "restart-to-install-updates");
+            const r = set.row(c, k, false, true);
+            defer r.end();
+            set.tile(c, k, .restart);
+            set.words(
+                c,
+                k,
+                "Restart automatically to install updates",
+                "Once an update has downloaded, Harness restarts into it when no agent is running, nothing is unsaved and you've stepped away. Your windows, tabs and chats come back. Off, it installs when you quit.",
+                56,
+            );
+            if (set.toggle(c, k, a.settings.get(.restart_to_install_updates), true) or r.clicked()) {
+                a.settings.toggle(.restart_to_install_updates);
+                a.redraw();
+            }
+        }
+    } else {
         const r = set.row(c, k, true, false);
         defer r.end();
         set.tile(c, k, .refresh);
-        const sub = if (@import("view_updates.zig").appUpdateVersion(a)) |latest|
-            c.print("Update v{s} is available. Install the latest release to update.", .{latest})
-        else
-            "This build doesn't update itself. Install the latest release to update.";
-        set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), sub, 0);
+        set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), c.print("{s}", .{summary.line}), 0);
     }
     const p = &a.view.devices;
     if (p.failure.items.len > 0) {
@@ -181,7 +218,6 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.text(c, "No devices registered", set.st(c, 14, .{ .color = k.muted.alpha(0.6) }));
         return;
     }
-    const now = a.nowMs();
     for (devices, 0..) |d, ix| {
         ui.key(c, d.id);
         const local = if (a.device_id) |me| std.mem.eql(u8, me, d.id) else false;
@@ -294,6 +330,30 @@ pub fn dialog(c: *ui.Context, a: *App, k: theme.Colors) void {
         .cancel => p.renaming = false,
         .confirm => submitRename(a),
     }
+}
+
+/// Primary or ghost button on the top version row (`popover::btn_primary` /
+/// `popover::btn_ghost` in `crates/ui/src/settings/devices.rs`).
+fn updateButton(c: *ui.Context, k: theme.Colors, key: []const u8, label: []const u8, primary: bool, disabled: bool) bool {
+    ui.key(c, key);
+    var b = ui.div(c).row().px(12).py(6).itemsCenter().rounded(8);
+    b = if (primary)
+        b.bg(k.solid).border(k.solid).borderW(1)
+    else
+        b.border(k.border).borderW(1).bg(k.ink(0.03));
+    if (disabled) {
+        b = b.opacity(0.6);
+    } else if (primary) {
+        if (b.hovered()) b = b.opacity(0.9);
+    } else {
+        b = b.hover(k.hover);
+    }
+    defer b.end();
+    ui.text(c, label, set.st(c, 12, .{
+        .weight = .medium,
+        .color = if (primary) k.on_solid else k.text,
+    }));
+    return !disabled and b.clicked();
 }
 
 /// `ghost_action` at 70%, full under the pointer; red and full when it

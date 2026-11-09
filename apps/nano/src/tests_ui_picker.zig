@@ -551,3 +551,19 @@ test "large model catalogs only build the rows in view" {
     try testing.expect(h.t.ctx.stats.nodes <= small_nodes * 2);
     std.log.info("model picker: 3 models {d} nodes; 2000 models {d} nodes", .{ small_nodes, large_nodes });
 }
+
+test "the model picker keeps its agent tabs below the titlebar in a short window and shows keyboard hints" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    for ([_][]const u8{ "Navigate", "Configure", "Close", "Plan", "500k", "128k" }) |label| {
+        try testing.expect(h.t.hasText(label));
+    }
+    h.t.size.h = 460;
+    h.t.settle(1);
+    const starred = inPicker(&h, "Starred") orelse return error.MissingStarredTab;
+    try testing.expect(starred.y >= @import("panel_chrome.zig").header_height + 6);
+    for ([_][]const u8{ "Navigate", "Configure", "Close", "Plan", "500k" }) |label| {
+        try testing.expect(h.t.hasText(label));
+    }
+}

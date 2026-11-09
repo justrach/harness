@@ -2062,3 +2062,75 @@ test "an agent's question shows its Markdown, not its markup" {
     try testing.expect(h.t.hasText("stage.tsx:72 sets original = active."));
     try testing.expect(h.t.hasText("The slide loads the original."));
 }
+
+test "bottom-docked checkout and ref popovers open upward above the composer footer" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var ws_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"ws-1","name":"demo","path":"/work/demo","gitDetected":true}]
+    , .{});
+    defer ws_parsed.deinit();
+    try h.a.spaces.replace(ws_parsed.value);
+    if (h.a.space) |old| h.a.gpa.free(old);
+    h.a.space = try h.a.gpa.dupe(u8, "ws-1");
+    h.a.select(null, null);
+    h.t.settle(1);
+
+    try h.t.clickText("New worktree");
+    h.t.settle(1);
+    const checkout_anchor = h.a.view.checkout_anchor orelse return error.MissingCheckoutAnchor;
+    const current_checkout = h.t.findText("Current checkout") orelse return error.MissingCheckoutMenu;
+    try testing.expect(current_checkout.y < checkout_anchor.y);
+
+    // Close checkout menu and open Select ref menu with synthetic branches.
+    h.a.view.checkout_menu = false;
+    try h.a.view.refs.append(h.a.gpa, try h.a.gpa.dupe(u8, "main"));
+    try h.a.view.refs.append(h.a.gpa, try h.a.gpa.dupe(u8, "feature/popover-upward"));
+    h.a.view.ref_space = try h.a.gpa.dupe(u8, "ws-1");
+    h.t.settle(1);
+    try h.t.clickText("Select ref");
+    h.t.settle(1);
+    const ref_anchor = h.a.view.ref_anchor orelse return error.MissingRefAnchor;
+    const branch_row = h.t.findText("feature/popover-upward") orelse return error.MissingBranchRow;
+    try testing.expect(branch_row.y < ref_anchor.y);
+    try h.t.clickText("feature/popover-upward");
+    h.t.settle(1);
+    try testing.expectEqualStrings("From feature/popover-upward", if (h.t.findText("From feature/popover-upward")) |_| "From feature/popover-upward" else "");
+    try testing.expectEqualStrings("feature/popover-upward", h.a.new_ref.?);
+}
+
+test "Settings Devices and the sidebar footer surface desktop app updates and auto-restart" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const ver = "99.0.0";
+    @memcpy(h.a.release.latest[0..ver.len], ver);
+    h.a.release.latest_len = ver.len;
+    if (h.a.device_id) |old| h.a.gpa.free(old);
+    h.a.device_id = try h.a.gpa.dupe(u8, "dev-local");
+    var dev_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\[{"id":"dev-remote","name":"Synthetic Linux Box","platform":"linux","version":"0.2.100","lastSeenAt":"2026-10-03T00:00:00Z"},
+        \\ {"id":"dev-local","name":"Synthetic Mac","platform":"macos","version":"0.2.176","lastSeenAt":"2026-10-03T00:00:00Z"}]
+    , .{});
+    defer dev_parsed.deinit();
+    try h.a.devices.replace(dev_parsed.value);
+    h.t.settle(1);
+
+    // Sidebar footer surfaces the update row immediately when a newer release is known.
+    try testing.expect(h.t.hasText("Update to v99.0.0"));
+
+    // Open Settings -> Devices and verify the update card, button, auto-restart toggle, and remote badge.
+    h.a.settings.setSection(.devices);
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(1);
+    h.snap("settings-devices-update-card");
+    try testing.expect(h.t.hasText("Harness v99.0.0 is available."));
+    try testing.expect(h.t.hasText("Update to v99.0.0"));
+    try testing.expect(h.t.hasText("Restart automatically to install updates"));
+    try testing.expect(h.t.hasText("Update available · Details"));
+    try testing.expect(h.a.settings.get(.restart_to_install_updates));
+    try h.t.clickText("Restart automatically to install updates");
+    h.t.settle(1);
+    try testing.expect(!h.a.settings.get(.restart_to_install_updates));
+}

@@ -24,8 +24,11 @@ const stage_height: f32 = 330;
 
 /// GPUI's menu_geometry and measure_trigger: new-chat menus prefer down
 /// when 180 points fit; established chats prefer up, flipping near the top.
+/// Clamps the top edge below the 38pt window titlebar (`header_height + 6`)
+/// so agent tabs are never clipped against the top bar.
 pub fn placement(anchor: ui.Rect, size: ui.Size, new_chat: bool, wanted: f32) struct { x: f32, y: f32, h: f32 } {
-    const above = @max(0, anchor.y - 14);
+    const top_margin: f32 = @import("panel_chrome.zig").header_height + 6;
+    const above = @max(0, anchor.y - top_margin - 6);
     const below = @max(0, size.h - anchor.y - anchor.h - 14);
     const down = (new_chat and below >= 180) or (above < 180 and below > above);
     const h = @min(wanted, @min(640, if (down) below else above));
@@ -34,7 +37,7 @@ pub fn placement(anchor: ui.Rect, size: ui.Size, new_chat: bool, wanted: f32) st
         // From the chip's leading edge: it sits at the footer's left now
         // (pickers.rs `attach_overlay`, no longer `attach_overlay_end`).
         .x = std.math.clamp(anchor.x, 8, @max(8, size.w - w - 8)),
-        .y = if (down) anchor.y + anchor.h + 6 else @max(8, anchor.y - h - 6),
+        .y = if (down) anchor.y + anchor.h + 6 else @max(top_margin, anchor.y - h - 6),
         .h = h,
     };
 }
@@ -349,7 +352,40 @@ pub fn popover(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The full-bleed hairline over the search (`crate::theme::hairline(0.08)`).
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
     search(c, a, k);
-    modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35, open, motion);
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.06) }, .none, null);
+    modelList(c, a, k, w - 2, h - 2 - 39 - 1 - 35 - 1 - 1 - 28, open, motion);
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.ink(0.08) }, .none, null);
+    pickerFooter(c, k);
+}
+
+fn keycap(c: *ui.Context, k: theme.Colors, text: []const u8) void {
+    const box = ui.div(c).row().px(5).py(1).rounded(4).bg(k.ink(if (k.dark) 0.06 else 0.04)).border(k.border).borderW(1).itemsCenter();
+    defer box.end();
+    ui.text(c, text, .{ .size = 10, .line_height = 13, .mono = true, .weight = .medium, .color = k.muted });
+}
+
+fn pickerFooter(c: *ui.Context, k: theme.Colors) void {
+    const bar = ui.div(c).row().wFull().h(28).px(10).gap(10).itemsCenter().bg(k.ink(if (k.dark) 0.02 else 0.015));
+    defer bar.end();
+    {
+        const nav = ui.div(c).row().gap(4).itemsCenter();
+        defer nav.end();
+        keycap(c, k, "↑↓");
+        ui.text(c, "Navigate", .{ .size = 10.5, .line_height = 14, .color = k.muted });
+    }
+    {
+        const sel = ui.div(c).row().gap(4).itemsCenter();
+        defer sel.end();
+        keycap(c, k, "↵");
+        ui.text(c, "Configure", .{ .size = 10.5, .line_height = 14, .color = k.muted });
+    }
+    ui.spacer(c);
+    {
+        const esc = ui.div(c).row().gap(4).itemsCenter();
+        defer esc.end();
+        keycap(c, k, "esc");
+        ui.text(c, "Close", .{ .size = 10.5, .line_height = 14, .color = k.muted });
+    }
 }
 
 /// The models: a 34-point row each, in sections by route while browsing
@@ -443,30 +479,46 @@ fn hoverDetail(c: *ui.Context, a: *App, hovered: ?usize) void {
 fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, grouped: bool, inner: f32, open: bool) struct { hovered: bool = false, rect: ?ui.Rect = null } {
     const p = &a.view.model_picker;
     if (r.header) |title| {
-        // A section's heading: the route's mark, its name.
-        const head = ui.div(c).row().wFull().h(34).px(10).pt(1).gap(7).itemsCenter();
+        // A section's heading: the route's mark, its name, and a subtle
+        // plan badge when included in the user's subscription.
+        const head = ui.div(c).row().wFull().h(34).px(10).pt(2).gap(7).itemsCenter();
         defer head.end();
-        icons.icon(c, models.providerInfo(models.route(r.model)).icon, 14, k.text, 14);
-        kit.ellipsisText(c, title, .{ .size = 11, .weight = .semibold, .color = k.muted }, inner - 41);
+        icons.icon(c, models.providerInfo(models.route(r.model)).icon, 13, k.muted, 13);
+        kit.ellipsisText(c, title, .{ .size = 11, .weight = .semibold, .color = k.muted }, inner - 96);
+        ui.spacer(c);
+        if (models.billingRank(r.model.billing) == 0) {
+            const pill = ui.div(c).row().px(6).py(1).rounded(4).bg(k.accent_wash);
+            defer pill.end();
+            ui.text(c, "Plan", .{ .size = 10, .line_height = 13, .weight = .semibold, .color = k.accent });
+        }
         return .{};
     }
     const current = a.target().model orelse if (a.models.items.len > 0) a.models.items[0].id else "";
     const selected = std.mem.eql(u8, r.harness, a.target().harness) and std.mem.eql(u8, current, r.model.id);
     // `menu_row_nav`: the selected row and the keyboard's lit, a hover wash.
-    var row = ui.div(c).row().wFull().h(34).px(8).gap(10).itemsCenter().rounded(8);
+    var row = ui.div(c).row().wFull().h(34).px(8).gap(9).itemsCenter().rounded(8);
     row = if (selected or at == p.active or p.detail == at) row.bg(k.selected) else row.hover(k.selected);
     defer row.end();
     const hot = row.hovered();
     const pick = row.clicked();
     if (open and hot) p.active = at;
-    if (!grouped) icons.icon(c, models.modelIcon(r.model), 15, k.text, 15);
-    const room = inner - 16 - 24 - 10 - (if (selected) @as(f32, 22) else 0) - (if (!grouped) @as(f32, 25) else 0);
+    const icon_sz: f32 = if (grouped) 14 else 15;
+    icons.icon(c, models.modelIcon(r.model), icon_sz, if (hot or selected) k.text else k.muted.alpha(0.8), icon_sz);
+    var ctx_buf: [24]u8 = undefined;
+    const ctx_tag: ?[]const u8 = rowContextBadge(&ctx_buf, r.model);
+    const tag_w: f32 = if (ctx_tag) |t| c.text.width(t, .{ .size = 10, .mono = true }) + 16 else 0;
+    const room = inner - 16 - 24 - 9 - 23 - tag_w - (if (selected) @as(f32, 20) else 0);
     {
         const t = ui.div(c).row().grow().w(0).clip();
         defer t.end();
-        kit.ellipsisText(c, r.model.label, .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = if (hot or selected) k.text else k.text.alpha(0.9) }, room);
+        kit.ellipsisText(c, r.model.label, .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = if (hot or selected) k.text else k.text.alpha(0.92) }, @max(40, room));
     }
-    if (selected) icons.icon(c, .check, 12, k.muted, 12);
+    if (ctx_tag) |tag| {
+        const badge = ui.div(c).row().px(5).py(1).rounded(4).bg(k.ink(if (k.dark) 0.05 else 0.035));
+        defer badge.end();
+        ui.text(c, tag, .{ .size = 10, .line_height = 13, .mono = true, .color = k.muted.alpha(0.85) });
+    }
+    if (selected) icons.icon(c, .check, 12, k.accent, 12);
     const starred = p.favorite(r.harness, r.model.id);
     ui.key(c, "model-star");
     const star = ui.div(c).row().size(24, 24).center().rounded(5).hover(k.raised);
@@ -474,7 +526,7 @@ fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, 
     {
         defer star.end();
         toggled = star.clicked();
-        icons.icon(c, if (starred) .@"star-bold" else .star, 12, k.muted, 12);
+        icons.icon(c, if (starred) .@"star-bold" else .star, 12, if (starred) k.accent else k.muted, 12);
     }
     if (toggled and open) {
         p.toggleFavorite(a.gpa, r.harness, r.model.id);
@@ -482,6 +534,20 @@ fn modelRow(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, at: usize, 
         c.changed = true;
     } else if (pick and open) stage(c, a, r);
     return .{ .hovered = hot, .rect = c.rects.get(c.node(row.index).id) };
+}
+
+fn rowContextBadge(buf: []u8, m: workspace.Model) ?[]const u8 {
+    if (m.context) |n| return models.contextLabel(buf, n);
+    const desc = m.description orelse return null;
+    var it = std.mem.tokenizeAny(u8, desc, " \t·,()");
+    var prev: ?[]const u8 = null;
+    while (it.next()) |tok| {
+        if (std.ascii.eqlIgnoreCase(tok, "context")) {
+            if (prev) |p| if (p.len >= 2 and p.len <= 8 and std.ascii.isDigit(p[0])) return p;
+        }
+        prev = tok;
+    }
+    return null;
 }
 
 /// The detail card beside its row (`preview_detail`, `nested_menu`): 10
@@ -492,25 +558,31 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
     const right = row.x + row.w + 10;
     const left = c.size.w - right < detail_width + 8 and row.x - 10 >= detail_width + 8;
     const x = if (left) row.x - 10 - detail_width else @min(right, @max(8, c.size.w - detail_width - 8));
-    const est: f32 = if (p.detail_rect) |d| d.h else 160;
-    const y = std.math.clamp(row.y, 8, @max(8, c.size.h - est - 8));
+    const est: f32 = if (p.detail_rect) |d| d.h else 172;
+    const top_margin: f32 = @import("panel_chrome.zig").header_height + 6;
+    const y = std.math.clamp(row.y, top_margin, @max(top_margin, c.size.h - est - 8));
     ui.key(c, "model-detail-card");
-    const card = kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(detail_width).layer(7).column().p(16 + 1).gap(12)
+    const card = kit.shadowLg(ui.div(c).fixed().offset(x, y).motion(exit).w(detail_width).layer(7).column().p(16 + 1).gap(11)
         .bg(k.composer).border(k.border).borderW(1).rounded(12));
     defer card.end();
     if (c.rects.get(c.node(card.index).id)) |rect| p.detail_rect = rect;
     const inner = detail_width - 34;
-    // A line's height up to a device pixel, as GPUI measures one.
     const st: ui.TextStyle = .{ .size = 11, .line_height = kit.measured(11 * 1.618), .weight = .medium, .color = k.text };
-    {
-        const head = ui.div(c).row().gap(8).itemsCenter();
-        defer head.end();
-        icons.icon(c, models.modelIcon(m), 20, k.text, 20);
-        kit.ellipsisText(c, m.label, st, inner - 28);
-    }
     var muted = st;
     muted.color = k.muted;
-    ui.text(c, c.print("via {s}", .{models.providerInfo(models.route(m)).name}), muted);
+    {
+        const head = ui.div(c).row().gap(10).itemsCenter();
+        defer head.end();
+        {
+            const tile = ui.div(c).row().size(32, 32).center().rounded(8).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1);
+            defer tile.end();
+            icons.icon(c, models.modelIcon(m), 17, k.text, 17);
+        }
+        const col = ui.div(c).column().gap(1);
+        defer col.end();
+        kit.ellipsisText(c, m.label, .{ .size = 13, .line_height = 17, .weight = .semibold, .color = k.text }, inner - 42);
+        ui.text(c, c.print("via {s}", .{models.providerInfo(models.route(m)).name}), muted);
+    }
     // Only what the catalog says.
     const range_buf = c.alloc().alloc(u8, 48) catch return;
     const ctx_buf = c.alloc().alloc(u8, 24) catch return;
@@ -525,10 +597,12 @@ fn detail(c: *ui.Context, a: *App, k: theme.Colors, r: models.Row, row: ui.Rect,
         defer line_.end();
         ui.text(c, f[0], st);
         ui.spacer(c);
+        const chip = ui.div(c).row().px(6).py(1).rounded(5).bg(k.ink(if (k.dark) 0.05 else 0.035));
+        defer chip.end();
         ui.text(c, value, muted);
     };
     if (m.description) |d| {
-        const desc = ui.div(c).column().wFull().gap(12);
+        const desc = ui.div(c).column().wFull().gap(10);
         defer desc.end();
         _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
         // Wrapped lines keep their exact spacing: only the block is rounded.
@@ -563,7 +637,13 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
     const m: workspace.Model = staged(a) orelse .{ .id = st.model, .label = st.model };
     const levels = levelsOf(a, st.harness, m);
     const is_binary = models.binary(levels);
-    const accent: ui.Color = if (models.brandHex(m, st.harness, k.dark)) |hx| ui.Color.hex(hx) else k.text;
+    const raw_accent: ui.Color = if (models.brandHex(m, st.harness, k.dark)) |hx| ui.Color.hex(hx) else k.accent;
+    // Ensure high contrast on warm light surfaces when the brand hex is a
+    // light sky blue (`0x66b5ff`).
+    const accent: ui.Color = if (!k.dark and raw_accent.b > 0.85 and raw_accent.r > 0.3)
+        ui.Color.hex(0x2563eb)
+    else
+        raw_accent;
     {
         const body = ui.div(c).column().wFull().grow().h(0).clip();
         defer body.end();
@@ -574,21 +654,27 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             measured += 1;
         }
         {
+            const top_row = ui.div(c).row().wFull().itemsCenter();
+            defer top_row.end();
             ui.key(c, "model-page-back");
-            const b = ui.div(c).row().gap(6).itemsCenter();
-            defer b.end();
+            const b = ui.div(c).row().h(26).px(8).gap(6).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.04 else 0.03)).hover(k.hover);
             if (b.clicked() and open) back(c, a);
-            icons.icon(c, .@"arrow-left", 14, k.text, 14);
+            icons.icon(c, .@"arrow-left", 13, k.text, 13);
             ui.text(c, "Models", .{ .size = 12, .line_height = 12 * 1.618, .weight = .medium, .color = if (b.hovered()) k.text else k.text.alpha(0.9) });
+            b.end();
+            ui.spacer(c);
+            keycap(c, k, "esc");
         }
         {
             const head = ui.div(c).row().gap(12).itemsCenter();
             defer head.end();
+            const tile = ui.div(c).row().size(38, 38).center().rounded(10).bg(k.ink(if (k.dark) 0.05 else 0.035)).border(k.border).borderW(1);
             icons.icon(c, models.modelIcon(m), 20, k.text, 20);
-            const words = ui.div(c).column().gap(4);
+            tile.end();
+            const words = ui.div(c).column().gap(3);
             defer words.end();
             // GPUI's own line height, φ, everywhere on this page.
-            kit.ellipsisText(c, m.label, .{ .size = 16, .line_height = 16 * 1.618, .weight = .semibold, .color = k.text }, w - 32 - 32);
+            kit.ellipsisText(c, m.label, .{ .size = 16, .line_height = 16 * 1.618, .weight = .semibold, .color = k.text }, w - 32 - 50);
             ui.text(c, c.print("via {s}", .{models.providerInfo(models.route(m)).name}), .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.muted });
         }
         {
@@ -599,11 +685,13 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
             ui.text(c, if (is_binary) "Thinking" else "Reasoning", st13);
             ui.spacer(c);
             const label = if (st.level) |i| (if (i < levels.len) models.levelLabel(levels[i], is_binary) else "Model default") else "Model default";
-            ui.text(c, label, st13);
+            const badge = ui.div(c).row().px(8).py(2).rounded(6).bg(accent.alpha(0.14)).border(accent.alpha(0.28)).borderW(1);
+            defer badge.end();
+            ui.text(c, label, .{ .size = 12.5, .line_height = 18, .weight = .semibold, .color = k.text });
         }
         if (levels.len > 1) {
             slider(c, a, k, accent, levels.len, w - 32 - 28, open);
-            const ends = ui.div(c).row().wFull();
+            const ends = ui.div(c).row().wFull().itemsCenter();
             defer ends.end();
             ui.text(c, if (is_binary) "Off" else "Faster", .{ .size = 11, .line_height = 11 * 1.618, .weight = .medium, .color = k.muted });
             ui.spacer(c);
@@ -620,15 +708,15 @@ fn page(c: *ui.Context, a: *App, k: theme.Colors, w: f32, open: bool) void {
         measured += 1;
     }
     ui.key(c, "model-use");
-    var b = ui.div(c).row().wFull().px(12).py(6).center().rounded(8).bg(k.solid);
+    var b = ui.div(c).row().wFull().h(36).px(12).gap(8).center().rounded(8).bg(k.solid);
     if (b.hovered()) b = b.opacity(0.9);
     defer b.end();
     if (b.clicked() and open) commit(c, a);
     ui.text(c, "Use model", .{ .size = 13, .line_height = 13 * 1.618, .weight = .medium, .color = k.on_solid });
 }
 
-/// The reasoning slider: a 24-point pill track, filled to the level in
-/// the model's colour, a dot per level, a white thumb; a press or a drag
+/// The reasoning slider: a 26-point capsule rail, filled to the level in
+/// the model's colour, a dot per level, a crisp thumb; a press or a drag
 /// anywhere on it picks the nearest level, and the thumb settles in 150 ms.
 fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, tw: f32, open: bool) void {
     const p = &a.view.model_picker;
@@ -657,12 +745,12 @@ fn slider(c: *ui.Context, a: *App, k: theme.Colors, accent: ui.Color, n: usize, 
             c.changed = true;
         }
     }
-    ui.div(c).absolute().offset(-14, 5).size(tw + 28, 24).rounded(12).bg(k.raised).end();
-    ui.div(c).absolute().offset(-14, 5).size(percent * tw + 28, 24).rounded(12).bg(accent).end();
+    ui.div(c).absolute().offset(-14, 4).size(tw + 28, 26).rounded(13).bg(k.ink(if (k.dark) 0.08 else 0.055)).border(k.border).borderW(1).end();
+    ui.div(c).absolute().offset(-14, 4).size(percent * tw + 28, 26).rounded(13).bg(accent).end();
     for (0..n) |i| {
         const f = @as(f32, @floatFromInt(i)) / last;
-        const dot = if (f <= percent + 0.001) k.on_solid.alpha(0.55) else k.muted.alpha(0.4);
-        _ = c.leaf(.{ .absolute = true, .width = .{ .px = 4 }, .height = .{ .px = 4 }, .radius = 2, .background = dot, .offset = .{ .x = f * tw - 2, .y = 15 } }, .none, null);
+        const dot = if (f <= percent + 0.001) ui.Color.hex(0xffffff).alpha(0.85) else k.muted.alpha(0.45);
+        _ = c.leaf(.{ .absolute = true, .width = .{ .px = 5 }, .height = .{ .px = 5 }, .radius = 2.5, .background = dot, .offset = .{ .x = f * tw - 2.5, .y = 14.5 } }, .none, null);
     }
     const th: f32 = if (p.dragging) 30 else 28;
     ui.div(c).absolute().offset(percent * tw - th / 2, (34 - th) / 2).size(th, th).roundedFull().bg(ui.Color.hex(0xfffefa)).border(k.border).borderW(1).shadowSm().end();

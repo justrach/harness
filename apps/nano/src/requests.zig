@@ -70,6 +70,10 @@ pub fn listDrives(host: ?[]const u8) Request(struct { targetDeviceId: ?[]const u
     return .{ .method = "ListDrives", .params = .{ .targetDeviceId = host } };
 }
 
+pub fn listRefs(repo_path: []const u8, host: ?[]const u8) Request(struct { repoPath: []const u8, targetDeviceId: ?[]const u8 }) {
+    return .{ .method = "ListRefs", .params = .{ .repoPath = repo_path, .targetDeviceId = host } };
+}
+
 pub fn focusChat(chat_id: []const u8) Request(struct { chatId: []const u8 }) {
     return .{ .method = "FocusChat", .params = .{ .chatId = chat_id } };
 }
