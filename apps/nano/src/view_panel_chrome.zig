@@ -39,7 +39,7 @@ pub fn join(c: *ui.Context, k: theme.Colors, panel_width: f32, selected_left: f3
     // GPUI shadows the selected cap as well as the body. Keep this outside
     // the cap's clip and before every opaque fill; title layout is untouched.
     ui.key(c, "panel-selected-cap-shadow");
-    ui.div(c).absolute().offset(left, top).size(right - left, foot - top).rounded(10)
+    ui.div(c).absolute().offset(left, top).size(right - left, foot - r - top).rounded(10)
         .shadows(if (k.dark) &dark_shadow else &light_shadow).end();
     {
         // Only the top half of the rounded box: the shoulder, not a second
@@ -49,6 +49,14 @@ pub fn join(c: *ui.Context, k: theme.Colors, panel_width: f32, selected_left: f3
         ui.div(c).absolute().offset(0, 0).size(right - left, foot - top + 20).rounded(10).border(edge(k)).borderW(1).bg(k.background).end();
     }
     ui.div(c).absolute().offset(left + 1, foot - r).size(right - left - 2, r + 2).bg(k.background).end();
+    // Mask the downward blur of `panel-selected-cap-shadow` where it falls onto
+    // the already-painted `body` surface below `y = 0`, so the selected tab cap
+    // joins seamlessly into the panel plane without a horizontal shadow band.
+    const mask_left = if (flush_left) @as(f32, 0) else @max(chrome.body_radius, left - 14);
+    const mask_right = if (flush_right) panel_width - 2 else @min(panel_width - chrome.body_radius, right + 14);
+    if (mask_right > mask_left) {
+        ui.div(c).absolute().offset(mask_left, 0).size(mask_right - mask_left, 14).bg(k.background).end();
+    }
     if (flush_left) {
         // First tab and body have the same straight leading edge.
         ui.div(c).absolute().offset(left + 1, foot).size(@min(chrome.body_radius, right - left - 2), chrome.body_radius + 1).bg(k.background).end();

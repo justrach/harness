@@ -35,18 +35,25 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     var aligned: [tabs.max_panes + 2]f32 = undefined;
     const other_tabs: usize = if (a.tabs.items.items.len > 1) a.tabs.items.items.len - 1 else 0;
-    const other_pill_w: f32 = 128;
-    const other_reserve: f32 = if (other_tabs > 0) @as(f32, @floatFromInt(other_tabs)) * (other_pill_w + 6) else 0;
-    const in_row = other_tabs == 0 and (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
+    const avail_bar = @max(0, c.size.w - a.view.sidebar_width - left - 8 - 32);
+    const max_other_budget = avail_bar * 0.38;
+    const other_shown: usize = if (other_tabs > 0) @min(other_tabs, @as(usize, @intFromFloat(@max(1, @floor(max_other_budget / 76))))) else 0;
+    const other_pill_w: f32 = if (other_shown > 0) @min(128, @max(72, max_other_budget / @as(f32, @floatFromInt(other_shown)) - 4)) else 0;
+    const other_reserve: f32 = if (other_shown > 0) @as(f32, @floatFromInt(other_shown)) * (other_pill_w + 4) else 0;
+    const in_row = other_shown == 0 and (if (split) |s| s.axis == .horizontal and !s.zoomed else true) and a.view.strip.expanded == null and a.view.chrome.width <= c.size.w - a.view.chrome.x + 0.5;
     const columns = in_row and chrome.columns(widths[0..n], a.view.chrome.leading, left, 8, &aligned);
     const shared = @min(chrome.slot_max, chrome.sharedSlotRoom(@max(240, c.size.w - a.view.sidebar_width - other_reserve), left, 8, n));
     ui.key(c, "instrument-strip");
     const row = ui.div(c).fixed().offset(a.view.sidebar_width, 0).w(c.size.w - a.view.sidebar_width).h(chrome.titlebar_height).pt(chrome.top_pad).pl(left).pr(8).row().gap(if (columns) chrome.gutter else 4).itemsCenter().layer(2);
     defer row.end();
     for (targets[0..n], 0..) |target, ix| slot(c, a, k, target, ix, @max(0, if (columns) aligned[ix] else shared));
-    if (other_tabs > 0) {
+    if (other_shown > 0) {
+        var rendered: usize = 0;
         for (0..a.tabs.items.items.len) |ws| {
-            if (ws != a.tabs.active) topWorkspacePill(c, a, k, ws, other_pill_w);
+            if (ws != a.tabs.active and rendered < other_shown) {
+                topWorkspacePill(c, a, k, ws, other_pill_w);
+                rendered += 1;
+            }
         }
     }
     ui.key(c, "instrument-new-tab");
@@ -93,27 +100,32 @@ fn topWorkspacePill(c: *ui.Context, a: *App, k: theme.Colors, ws: usize, pill_w:
 }
 
 fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32) void {
-    if (target == .chat and width >= 200) {
+    if (target == .chat) {
         if (a.tabs.layout()) |s| {
             const pane = target.chat;
             const g = &s.groups[pane];
             const tab_n = g.count();
             if (tab_n > 1) {
-                ui.key(c, c.print("instrument-slot-group-{d}", .{ix}));
-                const group_row = ui.div(c).row().size(width, chrome.tab_height).gap(3).itemsCenter();
-                defer group_row.end();
-                const group_hot = group_row.hovered();
                 const inactive_n: f32 = @floatFromInt(tab_n - 1);
-                const inactive_w = @min(132, @max(68, (width - 3 * inactive_n) * 0.34 / inactive_n));
-                const active_w = @max(140, width - inactive_n * (inactive_w + 3));
-                for (0..tab_n) |t_ix| {
-                    if (t_ix == g.active) {
-                        slotBox(c, a, k, target, ix, active_w, group_hot);
-                    } else {
-                        inactiveTabPill(c, a, k, ix, pane, t_ix, g.items.items[t_ix].chat, inactive_w);
+                const min_active_w: f32 = 148;
+                const min_inactive_w: f32 = 72;
+                if (width >= min_active_w + inactive_n * (min_inactive_w + 3)) {
+                    ui.key(c, c.print("instrument-slot-group-{d}", .{ix}));
+                    const group_row = ui.div(c).row().size(width, chrome.tab_height).gap(3).itemsCenter().clip();
+                    defer group_row.end();
+                    const group_hot = group_row.hovered();
+                    const max_inactive = (width - min_active_w) / inactive_n - 3;
+                    const inactive_w = @min(132, @min(max_inactive, @max(min_inactive_w, (width - 3 * inactive_n) * 0.34 / inactive_n)));
+                    const active_w = @max(min_active_w, width - inactive_n * (inactive_w + 3));
+                    for (0..tab_n) |t_ix| {
+                        if (t_ix == g.active) {
+                            slotBox(c, a, k, target, ix, active_w, group_hot);
+                        } else {
+                            inactiveTabPill(c, a, k, ix, pane, t_ix, g.items.items[t_ix].chat, inactive_w);
+                        }
                     }
+                    return;
                 }
-                return;
             }
         }
     }
