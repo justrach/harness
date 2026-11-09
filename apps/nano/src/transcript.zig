@@ -168,6 +168,9 @@ pub const Transcript = struct {
     tokens: ?u64 = null,
     window: ?u64 = null,
     savings: ?Savings = null,
+    /// Latest turn's prompt-cache delta and input tokens, for live hit rate %.
+    turn_cache_read_tokens: ?u64 = null,
+    turn_input_tokens: ?u64 = null,
 
     pub fn deinit(t: *Transcript) void {
         t.clear();
@@ -181,6 +184,8 @@ pub const Transcript = struct {
         t.tokens = null;
         t.window = null;
         t.savings = null;
+        t.turn_cache_read_tokens = null;
+        t.turn_input_tokens = null;
     }
 
     /// Applies one `TranscriptUpdate`, retaining the last verified state on
@@ -191,17 +196,39 @@ pub const Transcript = struct {
             .object => |o| o,
             else => return error.Desync,
         };
+        const was_reset = o.get("reset") != null;
+        const prev_tokens = t.tokens;
+        const prev_savings = t.savings;
         try t.applyFrame(o);
         if (o.get("contextUsage")) |u| if (u == .object) {
             t.tokens = uint(u.object.get("tokens"));
             t.window = uint(u.object.get("window"));
             t.savings = null;
             if (u.object.get("savings")) |s| if (s == .object) {
-                t.savings = .{
+                const next_savings: Savings = .{
                     .handle_bytes = uint(s.object.get("handleBytes")) orelse 0,
                     .compacted_tokens = uint(s.object.get("compactedTokens")) orelse 0,
                     .cache_read_tokens = uint(s.object.get("cacheReadTokens")) orelse 0,
                 };
+                t.savings = next_savings;
+                if (was_reset) {
+                    t.turn_cache_read_tokens = null;
+                    t.turn_input_tokens = null;
+                } else if (prev_savings) |prev| {
+                    if (next_savings.cache_read_tokens > prev.cache_read_tokens) {
+                        t.turn_cache_read_tokens = next_savings.cache_read_tokens - prev.cache_read_tokens;
+                        t.turn_input_tokens = t.tokens orelse prev_tokens;
+                    } else if (next_savings.cache_read_tokens < prev.cache_read_tokens) {
+                        t.turn_cache_read_tokens = next_savings.cache_read_tokens;
+                        t.turn_input_tokens = t.tokens;
+                    } else if (t.tokens != null and prev_tokens != null and t.tokens.? != prev_tokens.? and next_savings.cache_read_tokens == 0) {
+                        t.turn_cache_read_tokens = 0;
+                        t.turn_input_tokens = t.tokens;
+                    }
+                } else {
+                    t.turn_cache_read_tokens = next_savings.cache_read_tokens;
+                    t.turn_input_tokens = t.tokens;
+                }
             };
         };
     }

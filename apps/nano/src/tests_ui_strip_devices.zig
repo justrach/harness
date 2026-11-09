@@ -109,7 +109,7 @@ test "strip device target: splits and their tabs park and restore execution devi
     try testing.expectEqualStrings("A synthetic remote draft", h.a.composer.text());
     try testing.expect(h.a.new_no_project);
     h.a.focusPane(1);
-    h.a.newTab();
+    h.a.addChatTab(false);
     try testing.expectEqualStrings("local", h.a.new_device.?);
     try testing.expectEqualStrings("", h.a.composer.text());
     h.a.showPaneTab(0);

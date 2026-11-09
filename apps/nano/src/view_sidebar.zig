@@ -38,51 +38,131 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     footer(c, a, k);
 }
 
-/// Multi-panel workspaces and unsent drafts need a way back from another
-/// workspace. A single listed conversation already provides that shortcut.
+const OpenRow = struct {
+    ws: usize,
+    pane: ?usize = null,
+    tab: ?usize = null,
+    chat_id: ?[]const u8 = null,
+    active: bool = false,
+};
+
+/// Multi-panel workspaces, split panes (⌘D), panel tabs (⌘T), and unsent
+/// drafts shown at the top of the ⌘B sidebar.
 fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
-    if (a.tabs.items.items.len < 2) return;
-    var rows: std.ArrayList(usize) = .empty;
-    for (a.tabs.items.items, 0..) |id, ix| {
-        if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
-            const project = a.workspaceProject(ix) orelse continue;
-            if (!std.mem.eql(u8, project, filter)) continue;
-        };
-        // An implicit group still has its workspace placeholder. Only a
-        // known, explicit singleton can be represented by the chat list alone.
-        const singleton = if (a.tabs.splits.items[ix]) |split|
-            split.panes.items.len == 1 and split.groups[0].items.items.len == 1
-        else
-            true;
-        if (singleton) if (id) |chat_id| if (a.findChat(chat_id)) |chat| {
-            if (!chat.archived and listed(a, chat)) continue;
-        };
-        rows.append(c.alloc(), ix) catch return;
+    var rows: std.ArrayList(OpenRow) = .empty;
+    if (a.tabs.items.items.len == 1) {
+        if (a.tabs.splits.items[0]) |split| {
+            if (split.panes.items.len > 1) {
+                for (0..split.panes.items.len) |pane_ix| {
+                    const cid = if (pane_ix == split.focus) a.selected else split.panes.items[pane_ix];
+                    rows.append(c.alloc(), .{
+                        .ws = 0,
+                        .pane = pane_ix,
+                        .chat_id = cid,
+                        .active = pane_ix == split.focus,
+                    }) catch return;
+                }
+            } else if (split.groups[0].items.items.len > 1) {
+                const g = &split.groups[0];
+                for (0..g.items.items.len) |pt_ix| {
+                    const cid = if (pt_ix == g.active) a.selected else g.items.items[pt_ix].chat;
+                    rows.append(c.alloc(), .{
+                        .ws = 0,
+                        .pane = 0,
+                        .tab = pt_ix,
+                        .chat_id = cid,
+                        .active = pt_ix == g.active,
+                    }) catch return;
+                }
+            }
+        }
+    } else {
+        for (a.tabs.items.items, 0..) |id, ix| {
+            if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
+                const project = a.workspaceProject(ix) orelse continue;
+                if (!std.mem.eql(u8, project, filter)) continue;
+            };
+            if (a.tabs.splits.items[ix]) |split| {
+                if (split.panes.items.len > 1) {
+                    for (0..split.panes.items.len) |pane_ix| {
+                        const cid = if (ix == a.tabs.active and pane_ix == split.focus) a.selected else split.panes.items[pane_ix];
+                        rows.append(c.alloc(), .{
+                            .ws = ix,
+                            .pane = pane_ix,
+                            .chat_id = cid,
+                            .active = ix == a.tabs.active and pane_ix == split.focus,
+                        }) catch return;
+                    }
+                    continue;
+                }
+            }
+            const singleton = if (a.tabs.splits.items[ix]) |split|
+                split.panes.items.len == 1 and split.groups[0].items.items.len == 1
+            else
+                true;
+            if (singleton) if (id) |chat_id| if (a.findChat(chat_id)) |chat| {
+                if (!chat.archived and listed(a, chat)) continue;
+            };
+            rows.append(c.alloc(), .{
+                .ws = ix,
+                .chat_id = if (ix == a.tabs.active) a.selected else id,
+                .active = ix == a.tabs.active,
+            }) catch return;
+        }
     }
     if (rows.items.len == 0) return;
     ui.key(c, "sidebar-open-workspaces");
     const list = ui.div(c).column().wFull().maxH(240).px(8).pt(6).gap(2).scrollY();
     defer list.end();
-    for (rows.items) |ix| {
-        const id = a.tabs.items.items[ix];
-        const title = if (id) |chat_id| (if (a.findChat(chat_id)) |chat| chat.title orelse "Untitled session" else "New session") else "New session";
-        const active = ix == a.tabs.active;
-        ui.key(c, c.print("workspace-session-{d}", .{ix}));
+    if (a.tabs.items.items.len == 1 and rows.items.len > 1) {
+        const h = ui.div(c).row().px(4).pb(2);
+        defer h.end();
+        ui.text(c, c.print("Tabs · {d}", .{rows.items.len}), .{ .size = 11, .line_height = 18, .color = k.muted.alpha(0.8) });
+    }
+    for (rows.items, 0..) |r, idx| {
+        const title = if (r.chat_id) |chat_id| (if (a.findChat(chat_id)) |chat| chatLabel(chat) else "New session") else "New session";
+        ui.key(c, c.print("workspace-session-{d}", .{idx}));
         var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).clip().control();
-        if (active) {
+        if (r.active) {
             row = row.bg(if (k.is_harp) k.active else k.selected);
             if (k.is_harp) row = row.border(k.border_strong).borderW(0.5).shadows(&.{.{ .color = .{ .a = if (k.dark) 0.16 else 0.06 }, .blur = 2, .y = 1 }});
         } else {
             row = row.hover(k.hover.alpha(0.45));
         }
         defer row.end();
+        const hovered = row.hovered();
+        var closed = false;
         {
             const mark = ui.div(c).row().size(20, 20).center();
             defer mark.end();
-            icons.icon(c, .widget, 14, k.muted, 0);
+            if (hovered and rows.items.len > 1 and (r.pane != null or r.tab != null)) {
+                const close_btn = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.12));
+                defer close_btn.end();
+                if (close_btn.clicked()) {
+                    closed = true;
+                    if (r.ws != a.tabs.active) a.showTab(r.ws);
+                    if (r.tab) |t| {
+                        @import("view_tab_strip.zig").queue(a, .{ .close_panel_tab = .{ .pane = r.pane orelse 0, .tab = t } });
+                    } else if (r.pane) |p| {
+                        @import("view_tab_strip.zig").queue(a, .{ .close = .{ .chat = p } });
+                    }
+                }
+                icons.icon(c, .close, 12, k.muted, 0);
+            } else if (r.pane != null and a.tabs.items.items.len == 1) {
+                ui.text(c, c.print("{d}", .{idx + 1}), .{ .size = 11, .color = k.muted.alpha(0.7) });
+            } else {
+                icons.icon(c, .widget, 14, k.muted, 0);
+            }
         }
         kit.ellipsisText(c, title, .{ .size = 13, .line_height = kit.measured(13 * 1.618), .color = k.text }, @max(0, widthOf(a) - 2 * 8 - 2 * 8 - 20 - 7 - 22 - 7));
-        if (row.clicked()) a.showTab(ix);
+        if (!closed and row.clicked()) {
+            if (r.ws != a.tabs.active) a.showTab(r.ws);
+            if (r.pane) |p| {
+                a.focusPane(p);
+                a.view.strip.focused = .{ .chat = p };
+            }
+            if (r.tab) |t| a.showPaneTab(t);
+        }
     }
 }
 

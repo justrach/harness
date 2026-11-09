@@ -145,8 +145,7 @@ fn shrinkDone(image: *Image, jpeg: ?[]u8) void {
 
 pub fn tileBytes(image: *Image) []const u8 {
     if (image.preview.items.len > 0) return image.preview.items;
-    if (image.status == .ready and image.bytes.items.len <= 256 * 1024) return image.bytes.items;
-    if (image.status == .ready) image.shrink();
+    if (image.status == .ready and image.bytes.items.len <= attachments.max_bytes) return image.bytes.items;
     return "";
 }
 

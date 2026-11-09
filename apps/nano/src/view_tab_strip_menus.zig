@@ -35,7 +35,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     defer card.end();
     if (menu == .device) {
         const id = strip.device(a, target);
-        const editable = target == .chat and strip.chatId(a, target.chat) == null;
+        const editable = target == .chat;
         if (!editable) {
             ui.text(c, strip.deviceLabel(a, id), .{ .size = 13, .color = k.text });
             ui.text(c, "A session's computer can't be changed.", .{ .size = 12, .color = k.muted, .wrap = true });

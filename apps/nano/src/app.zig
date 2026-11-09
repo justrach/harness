@@ -954,10 +954,20 @@ pub const App = struct {
     /// "+", ⌘T: a new chat in a tab of its own, with the picks of the one
     /// left and an empty prompt.
     pub fn newTab(a: *App) void {
-        a.addChatTab(false);
+        var d = drafts.canvas(a) catch return;
+        const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
+        const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
+        a.tabs.park(a.tabs.active, focus_pane, d);
+        a.tabs.newTab();
+        a.view.strip.focused = .{ .chat = 0 };
+        a.view.strip.expanded = null;
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
+        a.select(null, null);
+        drafts.adopt(a, fresh);
     }
 
-    fn addChatTab(a: *App, append: bool) void {
+    pub fn addChatTab(a: *App, append: bool) void {
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
         if (a.tabs.layout() != null) {
@@ -1009,8 +1019,24 @@ pub const App = struct {
         a.park();
         a.tabs.active = i;
         a.tabs.noteShown();
+        a.view.split_reveal = null;
+        a.view.strip.expanded = null;
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
+        const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
+        a.view.strip.focused = .{ .chat = focus_pane orelse 0 };
         a.select(a.tabs.current(), null);
-        if (a.tabs.unpark(i, null)) |d| drafts.adopt(a, d);
+        if (a.tabs.unpark(i, focus_pane)) |d| {
+            if (a.selected == null) drafts.adopt(a, d) else {
+                var unused = d;
+                unused.deinit(a.gpa);
+            }
+        } else if (a.tabs.unpark(i, null)) |d| {
+            if (a.selected == null) drafts.adopt(a, d) else {
+                var unused = d;
+                unused.deinit(a.gpa);
+            }
+        }
     }
 
     pub fn isOnlyNewChat(a: *const App) bool {
@@ -1029,9 +1055,23 @@ pub const App = struct {
         if (a.isOnlyNewChat()) return a.redraw();
         const was_chat = a.selected != null;
         a.tabs.close(i);
+        a.view.split_reveal = null;
+        a.view.strip.expanded = null;
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
+        const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
+        a.view.strip.focused = .{ .chat = focus_pane orelse 0 };
         a.select(a.tabs.current(), null);
-        if (a.tabs.unpark(a.tabs.active, null)) |d| {
-            drafts.adopt(a, d);
+        if (a.tabs.unpark(a.tabs.active, focus_pane)) |d| {
+            if (a.selected == null) drafts.adopt(a, d) else {
+                var unused = d;
+                unused.deinit(a.gpa);
+            }
+        } else if (a.tabs.unpark(a.tabs.active, null)) |d| {
+            if (a.selected == null) drafts.adopt(a, d) else {
+                var unused = d;
+                unused.deinit(a.gpa);
+            }
         } else if (was_chat and a.selected == null) {
             @import("app_attachments.zig").clear(a);
             a.composer.clear();
@@ -1118,39 +1158,50 @@ pub const App = struct {
     /// made, then closes, archiving per Settings › Archived.
     pub fn closeByShortcut(a: *App) void {
         const strip = @import("view_tab_strip.zig");
-        // AppKit consumes Cmd+W before view.keys; both entry points must
-        // close the focused workspace surface, not its underlying chat.
-        switch (strip.active(a)) {
-            .host => {
+        const rules = @import("motion_rules.zig");
+        const active_surface: rules.CloseSurface = switch (strip.active(a)) {
+            .chat => .chat,
+            .host => .host,
+            .files => .files,
+        };
+        const split_panes = strip.chatCount(a);
+        const group_tabs = if (a.tabs.layout()) |s| s.groups[s.focus].count() else 1;
+        const zoomed = if (a.tabs.layout()) |s| s.zoomed else false;
+        const host_bg_open = strip.hasHost(a) and a.panels.activeTab() != null;
+        const expanded = a.view.strip.expanded != null or zoomed;
+        const ac = @import("archive_close.zig");
+        const needs_ask = ac.asks(a.settings.get(.archive_on_close_chosen), a.settings.get(.archive_sessions_on_close), a.selected != null);
+        switch (rules.decideCloseTarget(
+            active_surface,
+            a.view.close_choice,
+            group_tabs,
+            split_panes,
+            host_bg_open,
+            expanded,
+            a.isOnlyNewChat(),
+            needs_ask,
+        )) {
+            .confirm_choice => return a.chooseCloseArchiving(false),
+            .close_host => {
+                a.view.close_choice = false;
                 if (a.panels.active < a.panels.tabs.items.len) @import("app_panels.zig").closeTab(a, a.panels.active) else a.panels.host_open = false;
                 a.view.strip.menu = null;
-                a.redraw();
-                return;
+                return a.redraw();
             },
-            .files => {
+            .close_files => {
                 a.panels.files_open = false;
                 a.view.strip.menu = null;
-                a.redraw();
-                return;
+                return a.redraw();
             },
-            .chat => {
-                const zoomed = if (a.tabs.layout()) |s| s.zoomed else false;
-                if (strip.hasHost(a) and a.view.strip.expanded == null and !zoomed and a.panels.activeTab() != null) {
-                    a.view.close_choice = false;
-                    @import("app_panels.zig").closeTab(a, a.panels.active);
-                    a.view.strip.menu = null;
-                    a.redraw();
-                    return;
-                }
+            .noop => return a.redraw(),
+            .ask_choice => {
+                a.view.close_choice = true;
+                return a.redraw();
+            },
+            .close_pane_tab, .close_split_pane, .close_tab => {
+                a.closeArchiving(a.settings.get(.archive_sessions_on_close));
             },
         }
-        if (a.isOnlyNewChat()) return a.redraw();
-        const ac = @import("archive_close.zig");
-        if (ac.asks(a.settings.get(.archive_on_close_chosen), a.settings.get(.archive_sessions_on_close), a.selected != null)) {
-            a.view.close_choice = true;
-            return a.redraw();
-        }
-        a.closeArchiving(a.settings.get(.archive_sessions_on_close));
     }
 
     /// The question's answer: saved as the default, then this close.
@@ -1208,6 +1259,7 @@ pub const App = struct {
     pub fn closeFocused(a: *App) void {
         a.view.strip.menu = null;
         a.view.strip.pending_folder = null;
+        a.view.split_reveal = null;
         if (a.isOnlyNewChat()) return a.redraw();
         if (!a.tabs.closePaneTab()) return a.closePanel();
         a.restorePanelDraft();
@@ -1217,8 +1269,11 @@ pub const App = struct {
     pub fn closePanel(a: *App) void {
         a.view.strip.menu = null;
         a.view.strip.pending_folder = null;
+        a.view.split_reveal = null;
+        a.view.strip.expanded = null;
         if (a.isOnlyNewChat()) return a.redraw();
         if (!a.tabs.closePane()) return a.closeTab(a.tabs.active);
+        a.view.strip.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
         a.restorePanelDraft();
     }
 

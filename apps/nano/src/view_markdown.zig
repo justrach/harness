@@ -21,6 +21,29 @@ var body: ui.TextStyle = .{ .size = 15, .leading = 1.5, .wrap = true };
 var k: theme.Colors = undefined;
 const LinkOwner = struct { app: *@import("app.zig").App, parent: []const u8 };
 var link_owner: ?LinkOwner = null;
+var mermaid_source_ids: [32]u64 = @splat(0);
+var mermaid_source_len: usize = 0;
+
+fn mermaidShowsSource(id: u64) bool {
+    for (mermaid_source_ids[0..mermaid_source_len]) |k_id| if (k_id == id) return true;
+    return false;
+}
+
+fn toggleMermaidSource(id: u64) void {
+    for (mermaid_source_ids[0..mermaid_source_len], 0..) |k_id, i| {
+        if (k_id == id) {
+            mermaid_source_ids[i] = mermaid_source_ids[mermaid_source_len - 1];
+            mermaid_source_len -= 1;
+            return;
+        }
+    }
+    if (mermaid_source_len < mermaid_source_ids.len) {
+        mermaid_source_ids[mermaid_source_len] = id;
+        mermaid_source_len += 1;
+    } else {
+        mermaid_source_ids[0] = id;
+    }
+}
 
 /// A transcript or workspace preview keeps links in its containing chat,
 /// including when a subagent is drawn beside it.
@@ -175,6 +198,11 @@ fn item(c: *ui.Context, it: @FieldType(md.Block, "item")) void {
 }
 
 fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
+    const is_mermaid = std.ascii.eqlIgnoreCase(lang, "mermaid");
+    const parsed_mermaid = if (is_mermaid) @import("mermaid.zig").parse(c.alloc(), src) else @import("mermaid.zig").Diagram{ .other = "" };
+    const can_draw_mermaid = is_mermaid and parsed_mermaid.drawable();
+    const block_id = c.peekId("code-block");
+    const show_source = !can_draw_mermaid or mermaidShowsSource(block_id);
     // GPUI's `border_1` is inside the box: header and code a point in.
     const box = ui.div(c).column().wFull().bg(k.code_bg).rounded(10).border(k.border).borderW(1).p(1).clip();
     defer box.end();
@@ -184,11 +212,28 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
         defer h.end();
         ui.text(c, if (lang.len > 0) lang else "code", .{ .size = 11, .color = k.muted });
         ui.spacer(c);
-        // The fit toggle (`CodeBlockTooltip`); nano's blocks always scroll.
-        _ = kit.iconButton(c, k, .@"wrap-text", .{ .size = 22, .radius = 6, .icon = 13, .tip = .{ .text = "Fit content" } });
+        if (can_draw_mermaid) {
+            ui.key(c, "mermaid-source-toggle");
+            if (kit.iconButton(c, k, if (show_source) .eye else .@"file-code", .{ .size = 22, .radius = 6, .icon = 13, .tip = .{ .text = if (show_source) "Show diagram" else "Show source" } })) {
+                toggleMermaidSource(block_id);
+                c.changed = true;
+            }
+        }
+        if (show_source) {
+            // The fit toggle (`CodeBlockTooltip`); nano's blocks always scroll.
+            _ = kit.iconButton(c, k, .@"wrap-text", .{ .size = 22, .radius = 6, .icon = 13, .tip = .{ .text = "Fit content" } });
+        }
         if (kit.iconButton(c, k, .copy, .{ .size = 22, .radius = 5, .icon = 12 })) c.clipboard.write(c.clipboard.ctx, src);
     }
     _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    if (can_draw_mermaid and !show_source) {
+        ui.key(c, "mermaid-diagram");
+        const d = ui.div(c).column().wFull().p(12);
+        defer d.end();
+        const fallback_room = if (link_owner) |o| @max(220, @min(@import("view_transcript.zig").paneWidth(c, o.app) - 32, @import("view_transcript.zig").column_w) - 26) else @max(220, c.size.w - 200);
+        const room = if (c.rects.get(c.node(d.index).id)) |r| (if (r.w > 40) r.w - 24 else fallback_room) else fallback_room;
+        if (@import("view_mermaid.zig").draw(c, parsed_mermaid, room, k)) return;
+    }
     const pal = k.syntax;
     const lines = ui.div(c).column().wFull().px(12).py(10).gap(0);
     defer lines.end();

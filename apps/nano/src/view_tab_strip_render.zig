@@ -42,7 +42,7 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
     defer row.end();
     for (targets[0..n], 0..) |target, ix| slot(c, a, k, target, ix, @max(0, if (columns) aligned[ix] else shared));
     ui.key(c, "instrument-new-tab");
-    if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) strip.queue(a, .{ .new = strip.active(a) });
+    if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
 }
 
 fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32) void {
@@ -53,9 +53,10 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
     const project = strip.folder(a, target);
     const tooltip = if (project) |f| c.print("{s} · {s} · {s}", .{ name, computer, f.name }) else c.print("{s} · {s}", .{ name, computer });
     var box = ui.div(c).row().size(width, chrome.tab_height).pl(7).pr(4).gap(6).itemsCenter().rounded(6).clip().control();
-    box = tip.on(if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.hover(k.hover), k, .{ .text = tooltip, .look = .tab });
+    box = tip.on(if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover), k, .{ .text = tooltip, .look = .tab });
     defer box.end();
     const hot = box.hovered();
+    const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
     var handled = false;
     if (strip.attention(a, target, k)) |color| {
@@ -66,17 +67,11 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
     {
         const text = ui.div(c).column().grow().w(0).clip();
         defer text.end();
-        const controls: f32 = 18 + (if (width >= chrome.slot_room_for_add) @as(f32, 24) else 0) + (if (width >= chrome.slot_room_for_close) @as(f32, 24) else 0);
-        const room = @max(0, width - 7 - 4 - 14 - 12 - controls);
+        const room = @import("motion_rules.zig").slotTextRoom(width, show_controls, menu_count);
         kit.ellipsisText(c, name, .{ .size = 12, .line_height = 14, .color = if (on) k.text else k.muted }, room);
         const meta = ui.div(c).row().h(14).wFull().gap(6).itemsCenter().clip();
         defer meta.end();
-        // A new, unsent session can move computers from this label; its
-        // project belongs to the old computer, so that choice clears it.
-        const device_editable = switch (target) {
-            .chat => |pane| strip.chatId(a, pane) == null,
-            else => false,
-        };
+        const device_editable = target == .chat;
         const dev_text_w = c.text.width(computer, .{ .size = 10 });
         const pick_text_w: ?f32 = if (project) |f| c.text.width(f.name, .{ .size = 10 }) else null;
         const pick_changeable = if (project) |f| f.changeable else false;
@@ -134,21 +129,19 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
             }
         }
     }
-    if (width >= chrome.slot_room_for_add) {
+    if (show_controls and width >= 220) {
         ui.key(c, "slot-add");
-        if (hot or c.focus == c.node(box.index).id) {
-            if (kit.iconButton(c, k, .plus, .{ .size = 18, .radius = 4, .icon = 11, .tip = .{ .text = "New tab in this panel" } })) {
-                handled = true;
-                strip.queue(a, .{ .new = target });
-            }
-        } else ui.div(c).size(18, 18).end();
+        if (kit.iconButton(c, k, .plus, .{ .size = 18, .radius = 4, .icon = 11, .tip = .{ .text = "New tab" } })) {
+            handled = true;
+            a.newTab();
+        }
     }
-    {
+    if (menu_count > 1 or show_controls) {
         ui.key(c, "slot-menu");
         const button = ui.div(c).row().h(18).minW(18).px(3).gap(2).center().rounded(4).hover(k.ink(0.10)).control();
         defer button.end();
         if (menu_count > 1) ui.text(c, c.print("{d}", .{menu_count}), .{ .size = 11, .color = k.muted });
-        if (menu_count > 1 or hot) icons.icon(c, .@"alt-arrow-down", 11, k.muted, 0);
+        icons.icon(c, .@"alt-arrow-down", 11, k.muted, 0);
         if (button.clicked()) {
             handled = true;
             const state = &a.view.strip;
@@ -159,18 +152,16 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
             }
         }
     }
-    if (width >= chrome.slot_room_for_close) {
+    if (show_controls and width >= chrome.slot_room_for_close) {
         ui.key(c, "slot-close");
-        if (hot or c.focus == c.node(box.index).id) {
-            if (kit.iconButton(c, k, .close, .{ .size = 18, .radius = 4, .icon = 11, .tip = .{ .text = "Close tab" } })) {
-                handled = true;
-                switch (target) {
-                    .chat => |pane| strip.queue(a, .{ .close_panel_tab = .{ .pane = pane, .tab = if (a.tabs.layout()) |s| s.groups[pane].active else 0 } }),
-                    .host => if (a.panels.active < a.panels.tabs.items.len) strip.queue(a, .{ .close_host_tab = a.panels.active }) else strip.queue(a, .{ .close = .host }),
-                    .files => strip.queue(a, .{ .close = .files }),
-                }
+        if (kit.iconButton(c, k, .close, .{ .size = 18, .radius = 4, .icon = 11, .tip = .{ .text = "Close tab" } })) {
+            handled = true;
+            switch (target) {
+                .chat => |pane| strip.queue(a, .{ .close_panel_tab = .{ .pane = pane, .tab = if (a.tabs.layout()) |s| s.groups[pane].active else 0 } }),
+                .host => if (a.panels.active < a.panels.tabs.items.len) strip.queue(a, .{ .close_host_tab = a.panels.active }) else strip.queue(a, .{ .close = .host }),
+                .files => strip.queue(a, .{ .close = .files }),
             }
-        } else ui.div(c).size(18, 18).end();
+        }
     }
     if (!handled and box.clicked()) strip.queue(a, .{ .focus = target });
     if (kit.secondaryClicked(box)) strip.open(a, .panel, target, c.rects.get(c.node(box.index).id));
@@ -179,7 +170,7 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
 pub const Selected = struct { left: f32, right: f32 };
 pub fn selectedBounds(a: *const App) ?Selected {
     if (strip.count(a) != 1) return null;
-    const group = if (a.tabs.layout()) |s| &s.groups[s.focus] else null;
+    const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
     const selected = if (group) |g| g.active else a.tabs.active;
     const left = @max(strip.leftInset(a), a.view.chrome.leading);
@@ -191,7 +182,7 @@ pub fn selectedBounds(a: *const App) ?Selected {
 }
 
 fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
-    const group = if (a.tabs.layout()) |s| &s.groups[s.focus] else null;
+    const group = if (a.tabs.layout()) |s| (if (s.groups[s.focus].count() > 1 or a.tabs.items.items.len <= 1) &s.groups[s.focus] else null) else null;
     const n = if (group) |g| g.count() else a.tabs.items.items.len;
     const selected = if (group) |g| g.active else a.tabs.active;
     const available = @max(0, a.view.chrome.width - left - chrome.device_room - 4);
@@ -203,7 +194,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     const row = ui.div(c).absolute().offset(-scroll, 0).row().h(chrome.tab_height).gap(3).itemsCenter();
     defer row.end();
     for (0..n) |ix| {
-        const chat = if (group) |g| (if (ix == selected) a.selected else g.items.items[ix].chat) else a.tabs.items.items[ix];
+        const chat = if (group) |g| (if (ix == selected) a.selected else g.items.items[ix].chat) else (if (ix == selected) a.selected else a.tabs.items.items[ix]);
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
@@ -241,7 +232,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
     }
     ui.key(c, "panel-add-tab");
     if (lane.hovered()) {
-        if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab in panel" } })) strip.queue(a, .{ .new = strip.active(a) });
+        if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab" } })) a.newTab();
     } else ui.div(c).size(24, 24).end();
     // Device is its own fixed trailing lane, never a tab's suffix.
     devicePicker(c, a, k);
@@ -249,10 +240,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
 
 fn devicePicker(c: *ui.Context, a: *App, k: theme.Colors) void {
     const target = strip.active(a);
-    const editable = switch (target) {
-        .chat => |pane| strip.chatId(a, pane) == null,
-        else => false,
-    };
+    const editable = target == .chat;
     const lane = ui.div(c).fixed().offset(c.size.w - chrome.device_room - 12, chrome.tab_top).size(chrome.device_room, chrome.tab_height).pl(8).row().itemsCenter().justifyEnd().layer(3);
     defer lane.end();
     ui.key(c, "panel-device-trigger");

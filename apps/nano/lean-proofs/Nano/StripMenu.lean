@@ -165,4 +165,47 @@ def menuFocusPreservedCube : Bool :=
 theorem settle_never_steals_menu_focus : menuFocusPreservedCube = true := by
   native_decide
 
+/-- Right-side control reservation inside a top-strip slot (`slotControlsWidth`).
+When the pointer is not hovering the slot (`hovered = false`) and `menuCount ≤ 1`,
+no `+`, `⌄`, or `✕` buttons are drawn, so `0px` is reserved instead of `66px`. -/
+def slotControlsWidth (slotW : Nat) (hovered : Bool) (menuCount : Nat) : Nat :=
+  if hovered then
+    18 + (if slotW >= 220 then 24 else 0) + (if slotW >= 136 then 24 else 0)
+  else if menuCount > 1 then
+    18
+  else
+    0
+
+/-- Available horizontal room for the slot's title and `🖥 <computer> ⌄ 📁 <folder> ⌄`
+chips (`slotTextRoom`). -/
+def slotTextRoom (slotW : Nat) (hovered : Bool) (menuCount : Nat) : Nat :=
+  let ctrl := slotControlsWidth slotW hovered menuCount
+  let ctrlReserve := if ctrl > 0 then 6 + ctrl else 0
+  slotW - Nat.min slotW (7 + 4 + 14 + 6 + ctrlReserve)
+
+/-- Theorem: On a 184px split slot (`Backend R...` with collapsed sidebar),
+unhovered state recovers 72px of room (`153px` vs `81px`), allowing both
+`This Mac ⌄` (`74px`) and `harness ⌄` (`71px`, total `74 + 6 + 71 = 151px ≤ 153px`)
+to fit without `...` truncation. -/
+theorem unhovered_slot_recovers_full_room :
+    slotTextRoom 184 false 1 = 153 ∧
+    (slotChipWidths (slotTextRoom 184 false 1) 43 true (some 40) true).devTextMax = 43 ∧
+    (slotChipWidths (slotTextRoom 184 false 1) 43 true (some 40) true).pickTextMax = 40 := by
+  native_decide
+
+/-- Left inset of the top instrument strip (`stripLeftInset`).
+Accounts for traffic lights (`88px`), sidebar toggle (`24px`), collapsed history
+button (`28px`), optional titlebar update button (`26px`), and `14px` clearance. -/
+def stripLeftInset (sidebarW : Nat) ( settingsOpen : Bool) (hasUpdate : Bool) : Nat :=
+  let history := if settingsOpen || sidebarW == 0 then 28 else 0
+  let updates := if !settingsOpen && hasUpdate then 26 else 0
+  (88 + 24 + history + updates + 14) - Nat.min (88 + 24 + history + updates + 14) sidebarW
+
+/-- Theorem: When the sidebar is closed (`sidebarW = 0`) and the titlebar update
+button (`🔄`, ending at `x = 88 + 24 + 28 + 26 = 166px`) is visible, the first
+slot starts at `x = 180px > 166px`, never overlapping the update button. -/
+theorem update_button_never_overlaps_first_slot :
+    stripLeftInset 0 false true = 180 ∧ stripLeftInset 0 false true > 166 := by
+  native_decide
+
 end Nano.StripMenu

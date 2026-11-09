@@ -340,7 +340,7 @@ fn focused(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// (`render_chat_split`, shell/chat_split.rs).
 fn panes(c: *ui.Context, a: *App, k: theme.Colors, s: *tabs.Split) void {
     const across = s.axis == .horizontal;
-    var box = ui.div(c).grow().wFull().h(0).clip();
+    var box = ui.div(c).grow().wFull().h(0);
     box = if (across) box.row() else box.column();
     defer box.end();
     const total: f32 = if (across) a.view.chrome.chat_width else a.view.chrome.height;
@@ -554,10 +554,13 @@ fn keys(c: *ui.Context, a: *App) void {
         a.view.strip.menu = null;
         a.redraw();
     }
-    // The first ⌘W's question: Escape dismisses it, and nothing closes.
+    // The first ⌘W's question: Escape dismisses it, Enter confirms close without archiving.
     if (a.view.close_choice and c.shortcut(.{ .key = S.escape })) {
         a.view.close_choice = false;
         a.redraw();
+    }
+    if (a.view.close_choice and c.shortcut(.{ .key = S.enter })) {
+        a.chooseCloseArchiving(false);
     }
     if (c.shortcut(.{ .key = 'w', .cmd = true })) a.closeByShortcut();
     // Close without archiving (⌥⌘W, rebindable): never asks, never archives.

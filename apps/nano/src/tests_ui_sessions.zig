@@ -63,7 +63,7 @@ test "All sessions keeps independent workspaces in the same project and counts p
     h.a.newWorkspaceSession();
     h.a.openChat("chat-b", null);
     h.a.splitPane(.horizontal);
-    h.a.newTab(); // A panel tab, not another workspace.
+    h.a.addChatTab(false); // A panel tab, not another workspace.
     const rows = try sessions.sessions(&h.a, testing.allocator);
     defer testing.allocator.free(rows);
     try testing.expectEqual(@as(usize, 2), rows.len);

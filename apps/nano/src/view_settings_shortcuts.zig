@@ -79,7 +79,7 @@ fn header(c: *ui.Context, a: *App, k: theme.Colors) void {
     const r = ui.div(c).row().wFull().gap(24);
     defer r.end();
     {
-        const left = ui.div(c).column().grow().w(0);
+        const left = ui.div(c).column().wFull();
         defer left.end();
         set.header(c, k, "Keyboard shortcuts", null);
         set.subtitle(c, k, "Click a binding, then press the key combination you want to use. Changes apply immediately and stay on this device.", true);

@@ -380,7 +380,7 @@ test "desktop parity sidebar exposes independent drafts and restores their promp
     defer h.deinit();
     h.a.openChat("synthetic-chat", "synthetic-project");
     try h.a.tabs.isolateWorkspace();
-    h.a.newTab();
+    h.a.addChatTab(false);
     h.a.composer.set("First workspace draft");
     h.a.newWorkspaceSession();
     h.a.composer.set("Second workspace draft");

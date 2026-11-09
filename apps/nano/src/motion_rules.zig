@@ -155,6 +155,82 @@ pub fn skipOffscreenRow(
     return row_bottom < view_top - pad or row_top > view_bottom + pad;
 }
 
+/// Right-side control reservation inside a top-strip slot (`Nano.StripMenu.slotControlsWidth`).
+/// When unhovered (`!hovered`) and `menu_count <= 1`, reserves `0px` instead of `66px`.
+pub fn slotControlsWidth(slot_w: f32, hovered: bool, menu_count: usize) f32 {
+    if (hovered) {
+        return 18 + (if (slot_w >= 220) @as(f32, 24) else 0) + (if (slot_w >= 136) @as(f32, 24) else 0);
+    }
+    if (menu_count > 1) return 18;
+    return 0;
+}
+
+/// Available horizontal room for the slot's title and `🖥 <computer> ⌄ 📁 <folder> ⌄`
+/// chips (`Nano.StripMenu.slotTextRoom`).
+pub fn slotTextRoom(slot_w: f32, hovered: bool, menu_count: usize) f32 {
+    const ctrl = slotControlsWidth(slot_w, hovered, menu_count);
+    const ctrl_reserve: f32 = if (ctrl > 0) 6 + ctrl else 0;
+    return @max(0, slot_w - (7 + 4 + 14 + 6 + ctrl_reserve));
+}
+
+/// Left inset of the top instrument strip (`Nano.StripMenu.stripLeftInset`).
+/// Accounts for traffic lights (`88px`), sidebar toggle (`24px`), collapsed history
+/// button (`28px`), optional titlebar update button (`26px`), and `14px` clearance.
+pub fn stripLeftInset(sidebar_w: f32, side_max: f32, settings_open: bool, has_update: bool) f32 {
+    const side = @max(1, side_max);
+    const collapsed = 1 - std.math.clamp(sidebar_w / side, 0, 1);
+    const history: f32 = if (settings_open) 28 else 28 * collapsed;
+    const updates: f32 = if (!settings_open and has_update) 26 else 0;
+    return @max(0, 88 + 24 + history + updates + 14 - sidebar_w);
+}
+
+pub const CloseSurface = enum { chat, host, files };
+pub const CloseAction = enum {
+    noop,
+    confirm_choice,
+    ask_choice,
+    close_host,
+    close_files,
+    close_pane_tab,
+    close_split_pane,
+    close_tab,
+};
+
+/// `Cmd+W` close target resolution (`Nano.FrameSchedule.decideCloseTarget`).
+pub fn decideCloseTarget(
+    surface: CloseSurface,
+    close_choice_open: bool,
+    pane_tabs: usize,
+    split_panes: usize,
+    has_host: bool,
+    expanded: bool,
+    is_only_new_chat: bool,
+    asks_archive: bool,
+) CloseAction {
+    if (close_choice_open) return .confirm_choice;
+    return switch (surface) {
+        .host => .close_host,
+        .files => .close_files,
+        .chat => if (pane_tabs > 1)
+            .close_pane_tab
+        else if (split_panes > 1)
+            .close_split_pane
+        else if (has_host and !expanded)
+            .close_host
+        else if (is_only_new_chat)
+            .noop
+        else if (asks_archive)
+            .ask_choice
+        else
+            .close_tab,
+    };
+}
+
+pub fn closeRedrawPasses(coalesce_pre_tree: bool, has_archive_side_effect: bool) usize {
+    if (coalesce_pre_tree) return 1;
+    return 1 + @as(usize, if (has_archive_side_effect) 1 else 0) + 1;
+}
+
 test "lean StripMenu kernel: screenshot slot chevron unclipped and conservation cube holds" {
     const shot = slotChipWidths(180, 43, true, 40, true);
     try std.testing.expectEqual(@as(f32, 74), shot.dev_w);
@@ -232,4 +308,20 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expect(!skipOffscreenRow(true, 50, 120, 100, 700, 160));
     try std.testing.expect(skipOffscreenRow(true, 900, 1000, 100, 700, 160));
     try std.testing.expect(!skipOffscreenRow(false, 900, 1000, 100, 700, 160));
+
+    // Unhovered 184px slot recovers 72px of room (`153px`), fitting both `This Mac ⌄` and `harness ⌄`.
+    const room = slotTextRoom(184, false, 1);
+    try std.testing.expectEqual(@as(f32, 153), room);
+    const chips = slotChipWidths(room, 43, true, 40, true);
+    try std.testing.expectEqual(@as(f32, 43), chips.dev_text_max);
+    try std.testing.expectEqual(@as(f32, 40), chips.pick_text_max);
+
+    // Update button (`🔄`, x <= 166) never overlaps the first slot (`x = 180`).
+    try std.testing.expectEqual(@as(f32, 180), stripLeftInset(0, 224, false, true));
+
+    // Cmd+W hierarchy & single-pass coalescing.
+    try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, true));
+    try std.testing.expectEqual(@as(usize, 1), closeRedrawPasses(true, false));
+    try std.testing.expectEqual(CloseAction.confirm_choice, decideCloseTarget(.chat, true, 1, 1, false, false, false, true));
+    try std.testing.expectEqual(CloseAction.close_split_pane, decideCloseTarget(.chat, false, 1, 2, true, false, false, false));
 }

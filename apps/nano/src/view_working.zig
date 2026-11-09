@@ -153,7 +153,7 @@ fn detailLine(c: *ui.Context, k: theme.Colors, label: []const u8, text: []const 
     const row = ui.div(c).row().wFull().gap(7).itemsStart();
     defer row.end();
     ui.text(c, label, kit.style(c, 11, 18, .{ .weight = .medium, .color = k.faint }));
-    const body = ui.div(c).column().grow().w(0);
+    const body = ui.div(c).column().wFull();
     defer body.end();
     ui.text(c, text, kit.style(c, 12, 18, .{ .wrap = true, .color = color }));
 }

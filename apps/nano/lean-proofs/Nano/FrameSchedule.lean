@@ -150,4 +150,75 @@ theorem restart_place_exclusive (u s d : Bool) :
     ¬(restartPlace u s d = .sidebarRow ∧ restartPlace u s d = .titlebar) := by
   cases u <;> cases s <;> cases d <;> decide
 
+/-- `Cmd+W` close target resolution (`decideCloseTarget` in `motion_rules.zig`):
+1. If the archive-on-close dialog (`closeChoiceOpen`) is already open, a second
+   `Cmd+W` immediately confirms closing (`confirmChoice`) instead of stalling.
+2. When focused on `.chat` inside a split (`splitPanes > 1`), `Cmd+W` always
+   closes the focused split pane (`closeSplitPane`), never a background host tab.
+3. When on the last empty new-chat tab (`isOnlyNewChat`), `Cmd+W` is a `.noop`. -/
+inductive CloseSurface where
+  | chat | host | files
+deriving DecidableEq, Repr, BEq
+
+inductive CloseAction where
+  | noop
+  | confirmChoice
+  | askChoice
+  | closeHost
+  | closeFiles
+  | closePaneTab
+  | closeSplitPane
+  | closeTab
+deriving DecidableEq, Repr, BEq
+
+def decideCloseTarget
+    (surface : CloseSurface)
+    (closeChoiceOpen : Bool)
+    (paneTabs : Nat)
+    (splitPanes : Nat)
+    (hasHost : Bool)
+    (expanded : Bool)
+    (isOnlyNewChat : Bool)
+    (asksArchive : Bool) : CloseAction :=
+  if closeChoiceOpen then .confirmChoice
+  else match surface with
+  | .host  => .closeHost
+  | .files => .closeFiles
+  | .chat  =>
+    if paneTabs > 1 then .closePaneTab
+    else if splitPanes > 1 then .closeSplitPane
+    else if hasHost && !expanded then .closeHost
+    else if isOnlyNewChat then .noop
+    else if asksArchive then .askChoice
+    else .closeTab
+
+/-- Synchronous Metal render passes triggered by a native `Cmd+W` menu event.
+Without `in_pre_tree` coalescing (`coalescePreTree = false`), `a.select()` runs
+a synchronous render pass before `restorePanelDraft` adopts the surviving pane's
+draft, followed by optional archive redraw and `closeTab`'s trailing redraw
+(2–3 passes). With `coalescePreTree = true`, all state mutations settle before
+a single trailing `redraw()` (1 pass). -/
+def closeRedrawPasses (coalescePreTree : Bool) (hasArchiveSideEffect : Bool) : Nat :=
+  if coalescePreTree then 1
+  else 1 + (if hasArchiveSideEffect then 1 else 0) + 1
+
+theorem cmd_w_coalesced_single_pass (hasArchiveSideEffect : Bool) :
+    closeRedrawPasses true hasArchiveSideEffect = 1 := by
+  cases hasArchiveSideEffect <;> rfl
+
+theorem cmd_w_uncoalesced_multiple_passes (hasArchiveSideEffect : Bool) :
+    closeRedrawPasses false hasArchiveSideEffect >= 2 := by
+  cases hasArchiveSideEffect <;> decide
+
+theorem cmd_w_second_press_confirms_choice
+    (s : CloseSurface) (pt sp : Nat) (hh ex only ask : Bool) :
+    decideCloseTarget s true pt sp hh ex only ask = .confirmChoice := by
+  rfl
+
+theorem cmd_w_split_pane_takes_precedence_over_host
+    (sp : Nat) (hsp : sp > 1) (hh ex only ask : Bool) :
+    decideCloseTarget .chat false 1 sp hh ex only ask = .closeSplitPane := by
+  unfold decideCloseTarget
+  simp [hsp]
+
 end Nano.FrameSchedule

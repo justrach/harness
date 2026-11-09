@@ -142,7 +142,8 @@ pub fn choose(a: *App, space_id: ?[]const u8) void {
     // Creating a tab or pane copies the outgoing chat's destination, so the
     // explicit choice is applied to the fresh draft afterwards.
     switch (intent) {
-        .new_tab, .new_project => a.newTab(),
+        .new_tab => a.addChatTab(false),
+        .new_project => a.newTab(),
         .split_right => a.splitPane(.horizontal),
         .split_down => a.splitPane(.vertical),
     }

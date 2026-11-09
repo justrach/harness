@@ -277,6 +277,24 @@ pub fn fraction(tokens: ?u64, window: ?u64) ?f32 {
     return @as(f32, @floatFromInt(tokens orelse return null)) / @as(f32, @floatFromInt(w));
 }
 
+/// Live prompt cache hit rate percentage (0..100) for the context window card.
+/// Uses the latest turn's cache-read delta over that turn's input tokens when
+/// available so the percentage updates dynamically on every model turn, falling
+/// back to the snapshot's `cache_read_tokens` vs `tokens` when opening a chat.
+pub fn promptCachePercent(tokens: ?u64, savings: ?tr.Savings, turn_cache_read: ?u64, turn_input: ?u64) ?u64 {
+    if (savings == null and tokens == null) return null;
+    const tok = tokens orelse 0;
+    if (turn_cache_read != null and turn_input != null and turn_input.? > 0) {
+        const c = turn_cache_read.?;
+        const inp = @max(turn_input.?, c);
+        return @min(100, (c * 100 + inp / 2) / inp);
+    }
+    const c = if (savings) |s| s.cache_read_tokens else if (tok > 0) @as(u64, 0) else return null;
+    if (c == 0 or tok == 0) return 0;
+    if (c <= tok) return @min(100, (c * 100 + tok / 2) / tok);
+    return @min(100, (c * 100 + (c + tok) / 2) / (c + tok));
+}
+
 /// The three parts of graff's savings meter: what the context holds now,
 /// then what graff kept out of it. Cache reads stay out.
 pub const SavedPart = enum {

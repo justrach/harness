@@ -192,10 +192,18 @@ pub fn settle(a: *App) void {
         .close_host_tab => |ix| panels.closeTab(a, ix),
         .folder => |pick| {
             focus(a, pick.panel);
-            if (a.selected != null) return;
             const space = if (pick.index) |ix| (if (ix < a.spaces.items.len) a.spaces.items[ix].id else return) else null;
-            if (space == null) a.pickDraftDevice(a.draftDevice());
-            a.select(null, space);
+            if (a.selected) |sel| {
+                const cur_space = if (a.findChat(sel)) |ch| ch.space_id else null;
+                const same_space = if (cur_space) |cs| (if (space) |sp| std.mem.eql(u8, cs, sp) else false) else space == null;
+                if (!same_space) {
+                    a.tabs.setCurrent(null);
+                    a.select(null, space);
+                }
+            } else {
+                if (space == null) a.pickDraftDevice(a.draftDevice());
+                a.select(null, space);
+            }
             a.new_no_project = space == null;
             if (space == null) {
                 if (a.space) |old| a.gpa.free(old);
@@ -205,7 +213,17 @@ pub fn settle(a: *App) void {
         .device => |pick| {
             if (pick.panel != .chat or pick.panel.chat >= chatCount(a)) return;
             focus(a, pick.panel);
-            a.pickDraftDevice(pick.id[0..pick.len]);
+            const wanted = pick.id[0..pick.len];
+            if (a.selected) |sel| {
+                const cur_dev = (if (a.findChat(sel)) |ch| ch.device_id else null) orelse a.device_id orelse "local";
+                if (!std.mem.eql(u8, cur_dev, wanted)) {
+                    a.tabs.setCurrent(null);
+                    a.select(null, null);
+                    a.pickDraftDevice(wanted);
+                }
+            } else {
+                a.pickDraftDevice(wanted);
+            }
         },
         .add_folder => |p| {
             focus(a, p);
@@ -329,7 +347,7 @@ pub fn keys(c: *ui.Context, a: *App) void {
     } else if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
-        newTab(a, active(a));
+        a.newTab();
     } else if (c.shortcut(.{ .key = 'w', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
@@ -465,8 +483,8 @@ pub fn folder(a: *const App, panel: Panel) ?Folder {
     };
     if (chatId(a, pane)) |id| {
         const ch = a.findChat(id) orelse return null;
-        const space = a.findSpace(ch.space_id) orelse return null;
-        return .{ .name = space.name, .changeable = false };
+        const space = a.findSpace(ch.space_id) orelse return .{ .name = "No project", .changeable = true };
+        return .{ .name = space.name, .changeable = true };
     }
     if (a.tabs.layout()) |s| if (pane != s.focus) {
         const draft = s.drafts.items[pane] orelse return .{ .name = "No project", .changeable = true };
@@ -550,10 +568,12 @@ pub fn tabCount(a: *const App, panel: Panel) usize {
 /// flipping on `sidebar_open` at the ⌘B press, so opening the sidebar can
 /// never teleport the lane backwards before the first tween frame.
 pub fn leftInset(a: *const App) f32 {
-    const side = @max(1, a.settings.sidebarWidth());
-    const collapsed = 1 - std.math.clamp(a.view.sidebar_width / side, 0, 1);
-    const history: f32 = if (a.view.settings_open) 28 else 28 * collapsed;
-    return @max(0, 88 + 24 + history + 14 - a.view.sidebar_width);
+    return @import("motion_rules.zig").stripLeftInset(
+        a.view.sidebar_width,
+        a.settings.sidebarWidth(),
+        a.view.settings_open,
+        @import("view_updates.zig").titlebarVisible(a),
+    );
 }
 
 pub const rendering = @import("view_tab_strip_render.zig");

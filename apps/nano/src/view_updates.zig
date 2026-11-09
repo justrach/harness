@@ -386,12 +386,18 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
     }
 }
 
+pub fn titlebarVisible(a: *const App) bool {
+    const ver = appUpdateVersion(a) orelse return false;
+    if (restartPlace(ver, sidebarFits(a), a.updates.restartDismissed()) != .titlebar) return false;
+    if (a.updates.titlebarDismissed()) |d| if (std.mem.eql(u8, d, ver)) return false;
+    return true;
+}
+
 /// The update button in the titlebar's left cluster when the sidebar is
 /// collapsed (`render_update_control` in `crates/ui/src/shell/app_update.rs`).
 pub fn titlebarControl(c: *ui.Context, a: *App, k: theme.Colors) void {
-    const ver = appUpdateVersion(a) orelse return;
-    if (restartPlace(ver, sidebarFits(a), a.updates.restartDismissed()) != .titlebar) return;
-    if (a.updates.titlebarDismissed()) |d| if (std.mem.eql(u8, d, ver)) return;
+    if (!titlebarVisible(a)) return;
+    const ver = appUpdateVersion(a).?;
     ui.div(c).w(4).end();
     ui.key(c, "titlebar-update");
     const ready = a.updates.app_ready or std.mem.eql(u8, ver, "preview");
@@ -477,14 +483,26 @@ fn graffNoticeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
         for (0..shown_count) |i| {
             const line = s.graff_highlights[i][0..s.graff_highlight_lens[i]];
             const w = c.text.width(line, .{ .size = 12 });
-            const n_lines = @max(1.0, @ceil(w / @max(1.0, text_col_w)));
+            const n_lines = @max(1.0, @ceil(w / @max(1.0, text_col_w - 8)));
             est_h += n_lines * 17 + 5;
         }
         if (hidden > 0) est_h += 18;
     }
+    const note = if (can_update)
+        "Installs in the background; open chats keep their current session."
+    else if (from) |f|
+        c.print("New chats use it. Open chats stay on v{s} until you start a new one.", .{f})
+    else
+        "New chats use it.";
+    const note_lines = @max(1.0, @ceil(c.text.width(note, .{ .size = 11 }) / @max(1.0, card_w - 28 - 8)));
+    est_h += (note_lines - 1.0) * 16;
 
     ui.key(c, "graff-notice");
-    const card = ui.div(c).fixed().offset(@max(16, c.size.w - card_w - 16), @max(16, c.size.h - est_h - 16))
+    const card_id = c.peekId(null);
+    const measured_h: ?f32 = if (c.rects.get(card_id)) |r| (if (r.h > 0 and r.h < 600) r.h else null) else null;
+    if (measured_h == null) c.frameIn(0);
+    const card_h = measured_h orelse est_h;
+    const card = ui.div(c).fixed().offset(@max(16, c.size.w - card_w - 16), @max(16, c.size.h - card_h - 16))
         .layer(3).column().w(card_w).p(14).gap(10).rounded(12).border(k.border).borderW(1).bg(k.composer).shadowLg();
     defer card.end();
 
@@ -533,7 +551,7 @@ fn graffNoticeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
                 defer dot_pad.end();
                 kit.dot(c, 5, k.accent);
             }
-            const tbox = ui.div(c).column().grow().w(0);
+            const tbox = ui.div(c).column().w(text_col_w);
             defer tbox.end();
             ui.text(c, line, .{ .size = 12, .line_height = 17, .wrap = true, .color = k.text });
         }
@@ -546,15 +564,9 @@ fn graffNoticeCard(c: *ui.Context, a: *App, k: theme.Colors) void {
 
     // Footnote: what happens to open chats.
     {
-        const note = if (can_update)
-            "Installs in the background; open chats keep their current session."
-        else if (from) |f|
-            c.print("New chats use it. Open chats stay on v{s} until you start a new one.", .{f})
-        else
-            "New chats use it.";
         const foot = ui.div(c).row().wFull().gap(6).itemsStart();
         defer foot.end();
-        const ncol = ui.div(c).column().grow().w(0);
+        const ncol = ui.div(c).column().w(card_w - 28);
         defer ncol.end();
         ui.text(c, note, .{ .size = 11, .line_height = 16, .color = k.muted, .wrap = true });
     }

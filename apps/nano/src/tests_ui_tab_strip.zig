@@ -132,28 +132,29 @@ test "unified strip: split slots own both titles without a second peer header" {
     };
 }
 
-test "unified strip: Cmd T adds inside its panel and restores that panel's draft" {
+test "unified strip: Cmd T opens a new top-level tab and restores the split draft on close" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.a.splitPane(.horizontal);
     h.a.composer.set("A parked synthetic prompt");
     h.press(.{ .key = 't', .cmd = true });
-    const split = h.a.tabs.layout().?;
-    try testing.expectEqual(@as(usize, 2), split.panes.items.len);
-    try testing.expectEqualStrings("a", split.panes.items[0].?);
-    try testing.expectEqual(@as(usize, 2), split.groups[1].count());
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("", h.a.composer.text());
-    h.a.showPaneTab(0);
+    h.a.showTab(0);
     h.t.settle(1);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqualStrings("A parked synthetic prompt", h.a.composer.text());
+    h.a.showTab(1);
     h.a.closeFocused();
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqualStrings("a", h.a.tabs.layout().?.panes.items[0].?);
+    try testing.expectEqualStrings("A parked synthetic prompt", h.a.composer.text());
 }
 
-test "unified strip: a first split retains all original tabs in its first panel" {
+test "unified strip: a first split preserves other top-level tabs independently" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -161,13 +162,12 @@ test "unified strip: a first split retains all original tabs in its first panel"
     h.a.openChat("b", null);
     h.a.splitPane(.horizontal);
     h.t.settle(1);
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[0].count());
     h.a.openChat("a", null);
     h.t.settle(1);
     try testing.expectEqualStrings("a", h.a.selected.?);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
-    try testing.expectEqual(@as(usize, 0), h.a.tabs.layout().?.focus);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
 }
 
 test "unified strip: sidebar new session parks an independent workspace without changing panel tabs" {
@@ -181,7 +181,7 @@ test "unified strip: sidebar new session parks an independent workspace without 
     h.a.composer.set("Right panel draft");
     const original = h.a.tabs.active;
     h.a.newWorkspaceSession();
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("", h.a.composer.text());
     try testing.expectEqualStrings("remote", h.a.draftDevice().?);
@@ -189,7 +189,7 @@ test "unified strip: sidebar new session parks an independent workspace without 
     const independent = h.a.tabs.active;
     h.a.showTab(original);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[0].count());
     try testing.expectEqualStrings("Right panel draft", h.a.composer.text());
     h.a.focusPane(0);
     try testing.expectEqualStrings("Left panel draft", h.a.composer.text());
@@ -237,7 +237,7 @@ test "unified strip: hidden errors take precedence over streaming without steali
     defer h.deinit();
     h.a.splitPane(.horizontal);
     h.a.focusPane(0);
-    h.a.newTab();
+    h.a.addChatTab(false);
     h.a.openChat("b", null);
     try replace(&h.a.sessions,
         \\[{"chatId":"a","status":"errored"},{"chatId":"b","status":"working"}]
@@ -323,7 +323,7 @@ test "strip slot close button closes a tab and then its panel" {
     defer h.deinit();
     h.a.splitPane(.horizontal);
     // Add a second tab in the right pane (pane 1).
-    h.press(.{ .key = 't', .cmd = true });
+    h.a.addChatTab(false);
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[1].count());
@@ -382,4 +382,62 @@ test "Cmd+[ and Cmd+] step single-pane panel tabs and retain loaded transcripts 
     try testing.expectEqualStrings("c", h.a.selected.?);
     _ = h.t.shortcut(.{ .key = 'b', .cmd = true });
     try testing.expectEqual(@as(u8, 1), h.t.ctx.stats.passes);
+}
+
+test "streaming turn with detail lines and mermaid diagram stays visible and updates prompt cache percent" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    h.a.splitPane(.horizontal);
+    h.a.openChat("b", "local-project");
+    try replace(&h.a.sessions,
+        \\[{"chatId":"b","status":"working","startedAt":1700000000000}]
+    );
+    const apply = struct {
+        fn run(t: *@import("transcript.zig").Transcript, s: []const u8) !void {
+            var p = try std.json.parseFromSlice(std.json.Value, testing.allocator, s, .{});
+            defer p.deinit();
+            try t.apply(p.value);
+        }
+    }.run;
+    try apply(&h.a.transcript,
+        \\{"reset":[
+        \\  {"id":"u1","role":"user","parts":[{"id":"p1","kind":"text","text":"hey there"}]},
+        \\  {"id":"a1","role":"assistant","status":"completed","parts":[{"id":"p2","kind":"text","text":"Hey! What can I help you with today?"}]},
+        \\  {"id":"u2","role":"user","parts":[{"id":"p3","kind":"text","text":"can you show it as a mermaid diagram"}]},
+        \\  {"id":"a2","role":"assistant","status":"streaming","parts":[
+        \\    {"id":"r1","kind":"reasoning","text":"Exploring the repository layout and runtime flow before drawing the diagram for the user."},
+        \\    {"id":"tc1","kind":"tool_call","tool":"Bash","status":"running","input":"{\"description\":\"Inspect workspace crates and directories across the repository\"}"}
+        \\  ]}
+        \\],"contextUsage":{"tokens":10000,"window":1000000,"savings":{"handleBytes":0,"compactedTokens":0,"cacheReadTokens":6000}}}
+    );
+    h.t.settle(2);
+    // Detail lines in working-trailer must wrap at pane width, keeping messages visible in the viewport.
+    try testing.expect(h.t.hasText("can you show it as a mermaid diagram"));
+    const prompt_rect = h.t.findText("can you show it as a mermaid diagram") orelse return error.MissingPrompt;
+    try testing.expect(prompt_rect.y >= 0 and prompt_rect.y < 760);
+    const cw = @import("context_window.zig");
+    try testing.expectEqual(@as(?u64, 60), cw.promptCachePercent(
+        h.a.transcript.tokens,
+        h.a.transcript.savings,
+        h.a.transcript.turn_cache_read_tokens,
+        h.a.transcript.turn_input_tokens,
+    ));
+
+    // Stream a Mermaid diagram reply and an updated cacheReadTokens delta (14,400 new cached out of 16,000 input = 90%).
+    try apply(&h.a.transcript,
+        \\{"upsert":[
+        \\  {"entry":{"id":"a2","role":"assistant","status":"completed","parts":[
+        \\    {"id":"m1","kind":"text","text":"Here is the diagram:\n\n```mermaid\ngraph TD\n  ROOT[\"harness/ (repo root)\"] --> APPS[\"apps/\"]\n  APPS --> NANO[\"nano/ — nanoui desktop\"]\n```"}
+        \\  ]}}
+        \\],"contextUsage":{"tokens":16000,"window":1000000,"savings":{"handleBytes":0,"compactedTokens":0,"cacheReadTokens":20400}}}
+    );
+    h.t.settle(2);
+    try testing.expect(h.t.hasText("apps/"));
+    try testing.expectEqual(@as(?u64, 90), cw.promptCachePercent(
+        h.a.transcript.tokens,
+        h.a.transcript.savings,
+        h.a.transcript.turn_cache_read_tokens,
+        h.a.transcript.turn_input_tokens,
+    ));
 }

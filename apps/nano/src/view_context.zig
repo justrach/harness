@@ -200,8 +200,25 @@ fn windowCard(c: *ui.Context, a: *App, k: theme.Colors, b: cw.Breakdown) void {
     }
     legend(c, k, b);
     ui.text(c, cw.statusLine(c.alloc(), b), .{ .system_font = true, .tabular = true, .size = body, .line_height = body * phi, .color = k.faint });
+    if (cw.promptCachePercent(b.tokens, a.transcript.savings, a.transcript.turn_cache_read_tokens, a.transcript.turn_input_tokens)) |pct| {
+        promptCacheRow(c, k, pct, if (a.transcript.savings) |sv| sv.cache_read_tokens else 0);
+    }
     if (a.transcript.savings) |sv| savingsMeter(c, a, k, sv, b);
     ui.text(c, if (b.history == .sealed) "Compacted context is sealed by the provider: size only." else "Split estimated from this chat; total reported by the agent.", .{ .system_font = true, .size = caption, .line_height = caption * phi, .color = k.faint });
+}
+
+fn promptCacheRow(c: *ui.Context, k: theme.Colors, pct: u64, cache_read_tokens: u64) void {
+    ui.key(c, "context-prompt-cache");
+    const row = ui.div(c).row().wFull().itemsCenter();
+    defer row.end();
+    ui.text(c, "Prompt cache", .{ .system_font = true, .size = body, .line_height = body * phi, .color = k.muted });
+    ui.spacer(c);
+    ui.text(c, c.print("{d}%", .{pct}), .{ .system_font = true, .tabular = true, .size = body, .line_height = body * phi, .color = k.text });
+    if (cache_read_tokens > 0) {
+        _ = c.leaf(.{ .width = .{ .px = 4 } }, .none, null);
+        var buf: [16]u8 = undefined;
+        ui.text(c, c.print("({s} cached)", .{cw.compactCount(&buf, cache_read_tokens)}), .{ .system_font = true, .tabular = true, .size = body, .line_height = body * phi, .color = k.faint });
+    }
 }
 
 /// The rolling counter (`rolling_count`), settled: each character a box of

@@ -53,10 +53,7 @@ pub fn strip(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
 /// Identical 56-point picture content for staged, restored and sent refs.
 /// Empty/unavailable read-back stays a file tile, not a raw transport path.
 pub fn picture(c: *ui.Context, k: theme.Colors, key: []const u8, name: []const u8, bytes: []const u8) void {
-    // A full screenshot decoded on the main thread blocks the window
-    // (ImageIO thumbnail) for every key. A 56-point tile does not need
-    // that. Draw the file glyph until a small preview already exists.
-    if (bytes.len > 0 and bytes.len <= 256 * 1024 and (attachments.isImageName(name) or std.mem.endsWith(u8, key, ".jpg"))) {
+    if (bytes.len > 0 and bytes.len <= attachments.max_bytes and (attachments.isImageName(name) or std.mem.endsWith(u8, key, ".jpg"))) {
         if (ui.image(c, .{ .key = key, .bytes = bytes, .max_width = 56, .max_height = 56, .radius = 6, .scale = 1 })) return;
     }
     icons.icon(c, .document, 24, k.muted, 0);

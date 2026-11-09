@@ -30,7 +30,10 @@ fn windowItems(a: *App) [7]nanoui.MenuItem {
 }
 
 fn closeTab(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
     a.closeByShortcut();
+    a.view.in_pre_tree = was;
     a.redraw();
 }
 
@@ -56,18 +59,18 @@ test "native Cmd+W closes a split pane, then a tab, without closing the app wind
     a.newTab();
     a.splitPane(.horizontal);
     try std.testing.expect(a.tabs.layout() != null);
-    const tabs = a.tabs.layout().?.groups[0].count();
+    const tabs = a.tabs.items.items.len;
     const items = windowItems(&a);
     const menu = try nanoui.Menu.create(std.testing.allocator, "Harness", &.{.{ .role = .window_menu, .submenu = &items }});
     defer menu.destroy();
     try std.testing.expect(pressClose(menu));
-    // The original folder tabs remain in the surviving panel, rather than
-    // turning back into old, independent workspaces after closing a split.
-    try std.testing.expectEqual(@as(usize, 1), a.tabs.layout().?.panes.items.len);
-    try std.testing.expectEqual(tabs, a.tabs.layout().?.groups[0].count());
+    // First Cmd+W closes the split pane, leaving the current tab unsplit and
+    // preserving the other top-level tabs.
+    try std.testing.expect(a.tabs.layout() == null);
+    try std.testing.expectEqual(tabs, a.tabs.items.items.len);
     try std.testing.expect(pressClose(menu));
-    try std.testing.expectEqual(tabs - 1, a.tabs.layout().?.groups[0].count());
-    while (a.tabs.layout() != null) try std.testing.expect(pressClose(menu));
+    try std.testing.expectEqual(tabs - 1, a.tabs.items.items.len);
+    while (a.tabs.items.items.len > 1) try std.testing.expect(pressClose(menu));
     // Closing the final tab leaves the new-session canvas, not no window.
     try std.testing.expect(pressClose(menu));
     try std.testing.expectEqual(@as(usize, 1), a.tabs.items.items.len);
