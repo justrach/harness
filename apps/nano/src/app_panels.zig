@@ -167,6 +167,9 @@ pub fn chatChanged(a: *App) void {
     p.w_git = null;
     if (p.diff) |*d| d.arena.deinit();
     p.diff = null;
+    p.diff_loading = false;
+    if (p.diff_error) |e| p.gpa.free(e);
+    p.diff_error = null;
     p.listings.clearRetainingCapacity();
     p.pending_lists.clearRetainingCapacity();
     p.expanded.clearRetainingCapacity();
@@ -295,9 +298,24 @@ fn changedFor(a: *const App, v: std.json.Value) bool {
     return false;
 }
 
+pub const not_git_notice = "This folder is not a Git repository. Working-tree diffs require a Git checkout.";
+
+pub fn friendlyDiffError(e: []const u8) []const u8 {
+    const needle = "not a git repository";
+    if (e.len >= needle.len) {
+        for (0..e.len - needle.len + 1) |i| {
+            if (std.ascii.eqlIgnoreCase(e[i .. i + needle.len], needle)) return not_git_notice;
+        }
+    }
+    return e;
+}
+
 pub fn fetchDiff(a: *App) void {
     const p = &a.panels;
-    const dir = cwd(a) orelse return;
+    const dir = cwd(a) orelse {
+        p.diff_loading = false;
+        return;
+    };
     p.diff_loading = true;
     a.request(requests.getDiff(dir, @tagName(p.scope), if (p.scope == .branch) p.base_ref else null, if (p.scope == .turn) a.selected else null, host(a)), .of(App, a, onDiff));
 }
@@ -323,7 +341,7 @@ fn onDiff(a: *App, _: u64, r: rpc.Reply) void {
             if (p.diff) |*old| old.arena.deinit();
             p.diff = next;
         },
-        .err => |e| p.diff_error = p.gpa.dupe(u8, e) catch null,
+        .err => |e| p.diff_error = p.gpa.dupe(u8, friendlyDiffError(e)) catch null,
         else => {},
     }
     a.redraw();

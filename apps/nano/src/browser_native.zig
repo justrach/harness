@@ -24,9 +24,24 @@ pub const Native = struct {
     visible: bool = false,
     attached: bool = false,
     allow_blank: bool = false,
+    zoom: f64 = 1.0,
     error_text: [512]u8 = undefined,
     error_len: usize = 0,
     rect: ?nanoui.ui.Rect = null,
+
+    pub const min_zoom: f64 = 0.25;
+    pub const max_zoom: f64 = 4.0;
+    pub const zoom_step: f64 = 1.1;
+
+    pub const ZoomDir = enum { in, out, reset };
+
+    pub fn nextZoom(current: f64, dir: ZoomDir) f64 {
+        return switch (dir) {
+            .in => @min(max_zoom, current * zoom_step),
+            .out => @max(min_zoom, current / zoom_step),
+            .reset => 1.0,
+        };
+    }
 
     pub fn create(gpa: std.mem.Allocator, io: std.Io, home: []const u8, events: Events) !*Native {
         const pool = objc.Pool.push();
@@ -54,6 +69,7 @@ pub const Native = struct {
         self.* = .{ .gpa = gpa, .io = io, .home = owned_home, .view = view, .delegate = delegate, .events = events };
         objc.setZig(delegate, self);
         objc.msg(void, view, "setNavigationDelegate:", .{delegate});
+        objc.msg(void, view, "setAllowsBackForwardNavigationGestures:", .{objc.YES});
         objc.msg(void, view, "setHidden:", .{objc.YES});
         return self;
     }
@@ -76,6 +92,7 @@ pub const Native = struct {
         const pool = objc.Pool.push();
         defer pool.pop();
         s.saved_view = generated;
+        objc.msg(void, s.view, "setAllowsBackForwardNavigationGestures:", .{if (generated == null) objc.YES else objc.NO});
         s.allow_blank = false;
         s.error_len = 0;
         const target_url = objc.msg(?objc.Object, objc.class("NSURL"), "URLWithString:", .{objc.nsString(address)}) orelse return;
@@ -130,6 +147,20 @@ pub const Native = struct {
 
     pub fn reload(s: *Native) void {
         _ = objc.msg(?objc.Object, s.view, "reload", .{});
+    }
+
+    pub fn allowsBackForwardGestures(s: *const Native) bool {
+        return objc.msg(objc.BOOL, s.view, "allowsBackForwardNavigationGestures", .{});
+    }
+
+    pub fn setZoom(s: *Native, factor: f64) void {
+        const clamped = std.math.clamp(factor, min_zoom, max_zoom);
+        s.zoom = clamped;
+        objc.msg(void, s.view, "setPageZoom:", .{@as(objc.CGFloat, clamped)});
+    }
+
+    pub fn pageZoom(s: *const Native) f64 {
+        return @floatCast(objc.msg(objc.CGFloat, s.view, "pageZoom", .{}));
     }
 
     fn notify(s: *Native) void {

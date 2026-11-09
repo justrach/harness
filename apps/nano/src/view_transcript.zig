@@ -141,7 +141,9 @@ fn topFade(c: *ui.Context, k: theme.Colors) void {
 }
 
 fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f32, loading: bool, top: f32) Drawn {
-    const col = columnWidth(w);
+    const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
+    const raw_col = columnWidth(w);
+    const col = if (tweening and raw_col < column_w) @floor(raw_col / 8.0) * 8.0 else raw_col;
     // The last row clears the status strip over the composer and the fade
     // band above it (`bottom_clearance + TRANSCRIPT_FADE_BAND + 8`); the
     // composer itself is under the scroll, not over it. Its bar shows
@@ -183,7 +185,8 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // no assistant part has arrived yet.
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
-    const tweening = a.view.sidebar_tween != null or a.view.split_reveal != null;
+    const cull_offscreen = tweening or (a.window != null and !a.offscreen);
+    const cull_pad: f32 = if (tweening) 250 else 600;
     for (entries_, 0..) |*e, i| {
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
@@ -193,9 +196,9 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
         if (prev) |r| if (r.h > 0) {
             e.cached_h = r.h;
         };
-        if (tweening and i + 2 < entries_.len and e.status != .streaming and e.cached_h > 0) {
+        if (cull_offscreen and i + 2 < entries_.len and e.status != .streaming and e.cached_h > 0) {
             if (scroll_rect) |view| if (prev) |r| {
-                if (@import("motion_rules.zig").skipOffscreenRow(tweening, r.y, r.y + r.h, view.y, view.y + view.h, 250)) {
+                if (@import("motion_rules.zig").skipOffscreenRow(true, r.y, r.y + r.h, view.y, view.y + view.h, cull_pad)) {
                     _ = c.leaf(.{ .width = .fill, .height = .{ .px = e.cached_h } }, .none, null);
                     if (e.role == .user) {
                         ticks.append(c.alloc(), .{ .entry = i, .top = r.y - (if (i > 0) @as(f32, 16) else 0) }) catch {};
@@ -500,14 +503,15 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     const fold_id = state.key(at.chat_id, key, "compact-fold");
     const estimate = 12 + @as(f32, @floatFromInt(work.len)) * 32;
     const fold = a.view.tool_ui.fold(a.gpa, fold_id, open, if (a.view.tool_ui.folds.contains(fold_id)) 0 else estimate, c.time, c.reduced_motion);
-    if (!open and !fold.animating(c.time, c.reduced_motion)) return;
+    const is_animating = fold.animating(c.time, c.reduced_motion);
+    if (!open and !is_animating) return;
     var viewport = ui.div(c).column().wFull().clip();
-    if (fold.natural > 0) viewport = viewport.h(fold.height(c.time, c.reduced_motion));
+    if (is_animating and fold.natural > 0) viewport = viewport.h(fold.height(c.time, c.reduced_motion));
     defer viewport.end();
     const body = ui.div(c).column().wFull().pt(12).gap(12);
     defer body.end();
     @import("view_tool_tree.zig").rememberHeight(c, a, fold_id, body.index);
-    if (fold.animating(c.time, c.reduced_motion)) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.frameIn(1.0 / 30.0);
     partRows(c, a, k, e, work, at, false, .{ .part = null });
 }
 

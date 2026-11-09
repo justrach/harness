@@ -19,8 +19,14 @@ const App = @import("app.zig").App;
 pub fn diffs(c: *ui.Context, a: *App, k: theme.Colors) void {
     toolbar(c, a, k);
     const p = &a.panels;
-    if (p.diff_error) |e| return centered(c, k, e);
-    const d = p.diff orelse return centered(c, k, if (p.diff_loading) "Preparing diff…" else "No diff yet");
+    if (p.diff_error) |e| return centered(c, k, panels.friendlyDiffError(e));
+    const d = p.diff orelse {
+        if (p.diff_loading) return centered(c, k, "Preparing diff…");
+        if (a.selected) |sel| if (a.findChat(sel)) |ch| if (ch.source_unavailable) {
+            return centered(c, k, panels.not_git_notice);
+        };
+        return centered(c, k, "No diff yet");
+    };
     summary(c, a, k, d);
     if (d.files.len == 0) return centered(c, k, switch (p.scope) {
         .workingTree => "No uncommitted changes",

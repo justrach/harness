@@ -137,7 +137,8 @@ pub fn view(a: *App, c: *ui.Context) void {
         } else {
             var tween = a.view.sidebar_tween;
             if (tween == null and @abs(a.view.sidebar_width - target_width) > 0.01) {
-                tween = .{ .from = a.view.sidebar_width, .to = target_width, .started = c.time };
+                const start_time = if (a.window != null and !a.offscreen) c.time - (1.0 / 120.0) else c.time;
+                tween = .{ .from = a.view.sidebar_width, .to = target_width, .started = start_time };
             }
             if (tween) |*tw| {
                 if (tw.started == null) tw.started = c.time;
@@ -239,6 +240,7 @@ pub fn view(a: *App, c: *ui.Context) void {
     @import("view_drag.zig").overlay(c, a, popup);
     @import("view_chat_menu.zig").overlays(c, a, popup);
     closeChoice(c, a, popup);
+    @import("view_updates.zig").overlayCard(c, a, popup);
     // Over everything, as the GPUI app's deferred palette (priority 2).
     @import("view_palette.zig").overlay(c, a, popup);
     @import("view_project_setup.zig").overlay(c, a, popup);
@@ -713,6 +715,7 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         icons.icon(c, .@"clock-circle", 16, k.muted, 0);
         if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
     }
+    @import("view_updates.zig").titlebarControl(c, a, k);
 }
 
 /// The title bar's right end, over the panels: the files panel and the

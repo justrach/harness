@@ -66,7 +66,8 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
     const at = c.nodes.items.len;
     ui.richText(c, in.text, in.spans, st);
     const rect = c.rects.get(c.node(@intCast(at)).id) orelse {
-        c.changed = true;
+        const owner = link_owner.?;
+        if (owner.app.window == null or owner.app.offscreen) c.changed = true else c.frameIn(0);
         return;
     };
     const origin = c.rects.get(c.node(area.index).id) orelse return;

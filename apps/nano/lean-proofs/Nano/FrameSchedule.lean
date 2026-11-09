@@ -125,4 +125,29 @@ theorem legacy_key_nav_stalls :
     } = { passes := 2, animating := true, syncWrites := 2, timerKept := false } := by
   native_decide
 
+/-- A settled open fold (`foldAnimating = false`) does not clamp its viewport
+height to a cached height, so changing column width during or after `Cmd+B`
+never triggers a `rememberHeight` second pass. -/
+def foldPassesOf (foldAnimating : Bool) (heightChanged : Bool) (clampWhenSettled : Bool) : Nat :=
+  if heightChanged && (foldAnimating || clampWhenSettled) then 2 else 1
+
+theorem settled_fold_single_pass (heightChanged : Bool) :
+    foldPassesOf false heightChanged false = 1 := by
+  cases heightChanged <;> rfl
+
+/-- Update pill placement (`restartPlace` in `view_updates.zig`):
+never shows in both the sidebar footer and the titlebar simultaneously. -/
+inductive RestartPlace where
+  | none | sidebarRow | titlebar
+deriving DecidableEq, Repr, BEq
+
+def restartPlace (hasUpdate : Bool) (sidebarFits : Bool) (dismissed : Bool) : RestartPlace :=
+  if !hasUpdate || dismissed then .none
+  else if sidebarFits then .sidebarRow
+  else .titlebar
+
+theorem restart_place_exclusive (u s d : Bool) :
+    ¬(restartPlace u s d = .sidebarRow ∧ restartPlace u s d = .titlebar) := by
+  cases u <;> cases s <;> cases d <;> decide
+
 end Nano.FrameSchedule

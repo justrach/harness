@@ -267,7 +267,7 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []con
     var active: usize = 0;
     var archived: usize = 0;
     var archive_height: f32 = 0;
-    var keys: std.StringHashMapUnmanaged(void) = .empty;
+    var keys: std.StringHashMapUnmanaged(bool) = .empty;
     for (a.chats.items, items) |ch, it| if (it.listed) {
         if (ch.archived) {
             if (archived < a.view.archived_limit) archive_height += it.row_h + 2;
@@ -276,10 +276,13 @@ fn contentHeight(c: *ui.Context, a: *App, pins: []const []const u8, items: []con
             active += 1;
             if (grouped) {
                 const key = it.group_key;
-                const open = a.view.groupOpen(c.print("{s}:{s}", .{ by.prefix(), key }), true);
                 const entry = keys.getOrPut(c.alloc(), key) catch continue;
-                if (!entry.found_existing) height += if (open) @as(f32, 46) else 44;
-                if (open) height += it.row_h + 2;
+                if (!entry.found_existing) {
+                    const open = a.view.groupOpen(c.print("{s}:{s}", .{ by.prefix(), key }), true);
+                    entry.value_ptr.* = open;
+                    height += if (open) @as(f32, 46) else 44;
+                }
+                if (entry.value_ptr.*) height += it.row_h + 2;
             } else if (a.view.sessions_open) height += it.row_h + 2;
         }
     };
@@ -304,7 +307,8 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     // between builds before layout. A window-height bound also covers the
     // first layout and a resize without relying on stale viewport rectangles.
     const offset = c.scroll.get(c.node(scroll).id) orelse 0;
-    var window: Window = .{ .top = @max(0, offset - 128), .bottom = offset + c.size.h + 128, .y = 4 };
+    const overscan: f32 = if (a.view.sidebar_tween != null) 0 else 128;
+    var window: Window = .{ .top = @max(0, offset - overscan), .bottom = offset + c.size.h + overscan, .y = 4 };
     const drag = @import("view_drag.zig");
     const moving = drag.moving(a);
     window.eager = moving != null;
@@ -315,8 +319,8 @@ fn lists(c: *ui.Context, a: *App, k: theme.Colors) void {
     const items = prepareItems(c, a, pins, grouped, by);
     if (!window.eager) {
         const bounded = @min(offset, @max(0, contentHeight(c, a, pins, items, grouped, by) - c.size.h));
-        window.top = @max(0, bounded - 128);
-        window.bottom = bounded + c.size.h + 128;
+        window.top = @max(0, bounded - overscan);
+        window.bottom = bounded + c.size.h + overscan;
     }
     const source_pin = if (moving) |id| pinned(pins, id) else null;
     var active: usize = 0;
@@ -1083,6 +1087,7 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         @import("view_sandbox_strip.zig").computers(c, a, k)
     else
         @import("view_sandbox_strip.zig").strip(c, a, k, 0);
+    @import("view_updates.zig").sidebarFooterRows(c, a, k);
     const f = ui.div(c).row().wFull().h(44).px(10).itemsCenter();
     defer f.end();
     {

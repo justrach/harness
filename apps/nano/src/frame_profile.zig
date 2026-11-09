@@ -14,6 +14,9 @@ var last_ms: f64 = 0;
 var until: f64 = 0;
 var passes: u32 = 0;
 var redraws: u32 = 0;
+var last_frame: ?u64 = null;
+var last_passes: u32 = 0;
+var last_redraws: u32 = 0;
 var last_note_buf: [64]u8 = undefined;
 var last_note_len: usize = 0;
 
@@ -70,10 +73,28 @@ pub fn note(a: *App, what: []const u8) void {
 
 pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
     if (!on) return;
-    const pass_count = if (passes > 0) passes else 1;
+    const p = if (passes > 0) passes else 1;
     passes = 0;
-    const redraw_count = redraws;
+    const r = redraws;
     redraws = 0;
+    if (last_frame) |prev| {
+        if (prev == c.frame) {
+            last_passes +|= p;
+            last_redraws +|= r;
+            return;
+        }
+    } else {
+        last_frame = c.frame;
+        last_passes = p;
+        last_redraws = r;
+        return;
+    }
+    const logged_frame = last_frame.?;
+    const pass_count = if (last_passes > 0) last_passes else 1;
+    const redraw_count = last_redraws;
+    last_frame = c.frame;
+    last_passes = p;
+    last_redraws = r;
     const s = c.stats;
     const total = s.build_ms + s.layout_ms + s.paint_ms;
     const watching = a.now < until;
@@ -95,7 +116,7 @@ pub fn frame(a: *App, c: *const @import("nanoui").ui.Context) void {
         "{d:.3} frame=#{d} total={d:.2}ms (build={d:.2} layout={d:.2} paint={d:.2}) passes={d} nodes={d} anim={d} scroll={d} retained={d} redraws={d} tab={d} pane={d} menu={s} act={s}\n",
         .{
             a.now,
-            c.frame,
+            logged_frame,
             total,
             s.build_ms,
             s.layout_ms,

@@ -17,6 +17,7 @@ pub const Browser = struct {
     notice: nanoui.ui.TextBuffer = .{},
     saved_view: ?saved.View = null,
     native: ?*Native = null,
+    zoom: f64 = 1.0,
     body_node: u64 = 0,
     editing: bool = false,
     focus_address: bool = true,
@@ -76,7 +77,21 @@ pub const Browser = struct {
             return;
         };
         b.native = n;
+        if (b.zoom != 1.0) n.setZoom(b.zoom);
         n.navigate(b.url);
+    }
+
+    pub fn applyZoom(b: *Browser, dir: enum { in, out, reset }) void {
+        if (comptime builtin.os.tag == .macos) {
+            const zdir: Native.ZoomDir = switch (dir) {
+                .in => .in,
+                .out => .out,
+                .reset => .reset,
+            };
+            b.zoom = Native.nextZoom(b.zoom, zdir);
+            if (b.native) |n| n.setZoom(b.zoom);
+        }
+        b.app.redraw();
     }
 
     fn nativeChanged(ctx: *anyopaque) void {

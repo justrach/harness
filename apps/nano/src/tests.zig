@@ -121,5 +121,6 @@ test {
     _ = @import("tests_tab_layout.zig");
     _ = @import("project_paths.zig");
     _ = @import("graff_update.zig");
+    _ = @import("view_updates.zig");
     _ = @import("sound.zig");
 }

@@ -57,14 +57,15 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
     const fold_id = state.key(parent, key, "group-fold");
     const initial_height = 2 + @as(f32, @floatFromInt(parts.len)) * rules.row_height + rules.footer_gap + rules.footer_height;
     const fold = a.view.tool_ui.fold(a.gpa, fold_id, open, if (a.view.tool_ui.folds.contains(fold_id)) 0 else initial_height, c.time, c.reduced_motion);
-    if (!open and !fold.animating(c.time, c.reduced_motion)) return;
+    const is_animating = fold.animating(c.time, c.reduced_motion);
+    if (!open and !is_animating) return;
     var viewport = ui.div(c).column().wFull().clip();
-    if (fold.natural > 0) viewport = viewport.h(fold.height(c.time, c.reduced_motion));
+    if (is_animating and fold.natural > 0) viewport = viewport.h(fold.height(c.time, c.reduced_motion));
     defer viewport.end();
     const children = ui.div(c).column().wFull().pt(2);
     defer children.end();
     rememberHeight(c, a, fold_id, children.index);
-    if (fold.animating(c.time, c.reduced_motion)) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.frameIn(1.0 / 30.0);
     for (parts, arrivals) |*p, arrival| {
         ui.key(c, c.print("tool-{s}", .{p.id}));
         rowImpl(c, a, k, e, p, parent, arrival);
@@ -158,14 +159,15 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
     const fold_id = state.key(parent, detail_key, "detail-fold");
     const initial_height = 8 + @as(f32, @floatFromInt(@min(24, std.mem.count(u8, p.invocation, "\n") + @intFromBool(p.invocation.len > 0)) + @min(24, std.mem.count(u8, p.output, "\n") + @intFromBool(p.output.len > 0)) + p.stats.len)) * 18;
     const fold = a.view.tool_ui.fold(a.gpa, fold_id, open, if (a.view.tool_ui.folds.contains(fold_id)) 0 else initial_height, c.time, c.reduced_motion);
-    if (!open and !fold.animating(c.time, c.reduced_motion)) return;
+    const is_animating = fold.animating(c.time, c.reduced_motion);
+    if (!open and !is_animating) return;
     var clip = ui.div(c).column().wFull().clip();
-    if (fold.natural > 0) clip = clip.h(fold.height(c.time, c.reduced_motion));
+    if (is_animating and fold.natural > 0) clip = clip.h(fold.height(c.time, c.reduced_motion));
     defer clip.end();
     const body = ui.div(c).column().wFull().pl(6).gap(4).pb(4);
     defer body.end();
     rememberHeight(c, a, fold_id, body.index);
-    if (fold.animating(c.time, c.reduced_motion)) c.frameIn(1.0 / 30.0);
+    if (is_animating) c.frameIn(1.0 / 30.0);
     if (p.kind == .reasoning) return @import("view_markdown.zig").withLinks(c, k, p.text.items, a, parent);
     if (p.invocation.len > 0) textDetail(c, k, p.invocation, false);
     if (p.diff_new) |new| return transcript_view.editDiff(c, k, p, new);
@@ -184,12 +186,15 @@ fn rowImpl(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *con
 
 pub fn rememberHeight(c: *ui.Context, a: *App, id: u64, index: u32) void {
     const f = a.view.tool_ui.folds.getPtr(id) orelse return;
+    const is_animating = f.animating(c.time, c.reduced_motion);
     if (c.rects.get(c.node(index).id)) |rect| {
         if (@abs(rect.h - f.natural) > 0.5) {
             f.natural = rect.h;
-            c.changed = true;
+            if (is_animating) c.changed = true;
         }
-    } else c.changed = true;
+    } else if (is_animating) {
+        c.changed = true;
+    }
 }
 
 pub fn textDetail(c: *ui.Context, k: theme.Colors, text: []const u8, failed: bool) void {

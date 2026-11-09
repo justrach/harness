@@ -8,6 +8,9 @@ const App = @import("app.zig").App;
 const Browser = @import("app_browser.zig").Browser;
 
 pub fn draw(c: *ui.Context, a: *App, k: theme.Colors, b: *Browser) void {
+    if (c.shortcut(.{ .key = '-', .cmd = true })) b.applyZoom(.out);
+    if (c.shortcut(.{ .key = '=', .cmd = true }) or c.shortcut(.{ .key = '+', .cmd = true, .shift = true })) b.applyZoom(.in);
+    if (c.shortcut(.{ .key = '0', .cmd = true })) b.applyZoom(.reset);
     {
         const bar = ui.div(c).row().wFull().h(38).px(8).gap(4).itemsCenter().border(k.border).borderW(1);
         defer bar.end();

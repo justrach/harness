@@ -158,7 +158,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
         const r = set.row(c, k, true, false);
         defer r.end();
         set.tile(c, k, .refresh);
-        set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), "This build doesn't update itself. Install the latest release to update.", 0);
+        const sub = if (@import("view_updates.zig").appUpdateVersion(a)) |latest|
+            c.print("Update v{s} is available. Install the latest release to update.", .{latest})
+        else
+            "This build doesn't update itself. Install the latest release to update.";
+        set.words(c, k, c.print("Harness v{s}", .{@import("build_info").version}), sub, 0);
     }
     const p = &a.view.devices;
     if (p.failure.items.len > 0) {

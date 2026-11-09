@@ -147,7 +147,7 @@ pub const View = struct {
     close_choice: bool = false,
     /// The sidebar's inline note (`sidebar_notice`) and when it goes; a
     /// click dismisses it sooner.
-    sidebar_notice: [160]u8 = undefined,
+    sidebar_notice: [280]u8 = undefined,
     sidebar_notice_len: usize = 0,
     sidebar_notice_until: ?f64 = null,
     /// The rounded seam's hairline is the column's left border, which
@@ -431,6 +431,8 @@ pub const App = struct {
     view: View = .{},
     /// The newest Harness release, asked of GitHub over HTTP/2.
     release: @import("release.zig").Check,
+    /// Desktop update pills & Codegraff engine update notice (`view_updates.zig`).
+    updates: @import("view_updates.zig").State = .{},
     /// Failed runs' in-chat ChatGPT reconnects (app_reauth.zig).
     reauth: @import("app_reauth.zig").State,
     /// The session footer's Graff worktree action and verdict
@@ -1355,6 +1357,12 @@ pub const App = struct {
         a.account.scope = account.readScope(v.object);
         if (v.object.get("capabilities")) |caps| if (caps == .array) {
             a.caps = queue_mod.readCaps(caps.array.items);
+        };
+        if (v.object.get("version")) |ver_val| if (ver_val == .string) {
+            var notice_buf: [280]u8 = undefined;
+            if (@import("view_updates.zig").olderEngineNotice(&notice_buf, @import("build_info").version, ver_val.string)) |msg| {
+                a.setSidebarNotice(msg, null);
+            }
         };
         const id = v.object.get("deviceId") orelse return;
         if (id != .string) return;

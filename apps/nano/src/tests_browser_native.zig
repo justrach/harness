@@ -36,7 +36,9 @@ test "the native Browser renders a generated page without injecting an app bridg
     defer objc.release(parent);
     native.mount(parent, .{ .x = 0, .y = 38, .w = 520, .h = 500 });
     try testing.expect(native.visible);
+    try testing.expect(native.allowsBackForwardGestures());
     native.navigate("graff-view://html/" ++ id);
+    try testing.expect(!native.allowsBackForwardGestures());
     nanoui.runFor(3);
     try testing.expectEqualStrings("Synthetic page ready", native.title());
     try testing.expect(probe.changes > 0);
@@ -87,8 +89,18 @@ test "the native Browser loads a real localhost HTTP preview without an engine" 
     const address = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/", .{http.server.socket.address.getPort()});
     defer testing.allocator.free(address);
     native.navigate(address);
+    try testing.expect(native.allowsBackForwardGestures());
     nanoui.runFor(3);
     try testing.expect(http.served.load(.acquire));
     try testing.expectEqualStrings("Synthetic localhost preview", native.title());
     try testing.expectEqualStrings(address, native.url());
+    const Native = @import("browser_native.zig").Native;
+    native.setZoom(Native.nextZoom(native.pageZoom(), .out));
+    try testing.expectApproxEqAbs(@as(f64, 0.9090909090909091), native.pageZoom(), 1e-12);
+    native.setZoom(Native.nextZoom(native.pageZoom(), .in));
+    try testing.expectApproxEqAbs(@as(f64, 1.0), native.pageZoom(), 1e-12);
+    native.setZoom(Native.nextZoom(native.pageZoom(), .in));
+    try testing.expectApproxEqAbs(@as(f64, 1.1), native.pageZoom(), 1e-12);
+    native.setZoom(Native.nextZoom(native.pageZoom(), .reset));
+    try testing.expectApproxEqAbs(@as(f64, 1.0), native.pageZoom(), 1e-12);
 }
