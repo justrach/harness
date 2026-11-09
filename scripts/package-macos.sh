@@ -128,6 +128,10 @@ if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # picked files from any folder stay readable, under the hardened runtime
   # (dist/macos/Harness.entitlements).
   codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness-nano"
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP/Contents/MacOS/harness"
+  codesign --force --options runtime --timestamp \
     --entitlements "$ROOT/dist/macos/Harness.entitlements" --sign "$CODESIGN_IDENTITY" "$APP"
 else
   # Ad-hoc signature so the app launches on Apple silicon (Gatekeeper still

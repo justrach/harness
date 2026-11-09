@@ -286,9 +286,9 @@ test "harness is looked for in the override, the app, ~/Applications, then PATH"
     const want = [_][]const u8{
         "/tmp/fake-harness",
         "/Applications/Harness.app/Contents/MacOS/harness",
-        "/Users/synthetic/Applications/Harness.app/Contents/MacOS/harness",
-        "/opt/a/harness",
-        "/usr/local/bin/harness",
+        "/Users/synthetic" ++ std.fs.path.sep_str ++ "Applications/Harness.app/Contents/MacOS/harness",
+        "/opt/a" ++ std.fs.path.sep_str ++ "harness",
+        "/usr/local/bin" ++ std.fs.path.sep_str ++ "harness",
     };
     try testing.expectEqual(want.len, got.len);
     for (want, got) |w, g| try testing.expectEqualStrings(w, g);

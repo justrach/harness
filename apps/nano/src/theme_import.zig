@@ -368,7 +368,7 @@ fn loadTheme(a: Allocator, io: std.Io, path_in: []const u8, root: []const u8, st
 
 /// `Path::starts_with`: whole components.
 fn ensureContained(a: Allocator, path: []const u8, root: []const u8, kind: []const u8) !void {
-    const inside = std.mem.startsWith(u8, path, root) and (path.len == root.len or path[root.len] == '/' or (root.len > 0 and root[root.len - 1] == '/'));
+    const inside = std.mem.startsWith(u8, path, root) and (path.len == root.len or path[root.len] == '/' or path[root.len] == '\\' or (root.len > 0 and (root[root.len - 1] == '/' or root[root.len - 1] == '\\')));
     if (!inside) try fail(a, "{s} {s} resolves outside selected theme root {s}; symlinks are allowed only when their targets remain inside the root", .{ kind, path, root });
 }
 
@@ -1178,9 +1178,18 @@ const testing = std.testing;
 
 /// Every string in `v` with `root` written as $ROOT, for comparing with a
 /// vector.
+fn rootedString(a: Allocator, s: []const u8, root: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, s, root) == null) return s;
+    const replaced = try std.mem.replaceOwned(u8, a, s, root, "$ROOT");
+    for (replaced) |*ch| if (ch.* == '\\') {
+        ch.* = '/';
+    };
+    return replaced;
+}
+
 fn rooted(a: Allocator, v: json.Value, root: []const u8) !json.Value {
     return switch (v) {
-        .string => |s| .{ .string = try std.mem.replaceOwned(u8, a, s, root, "$ROOT") },
+        .string => |s| .{ .string = try rootedString(a, s, root) },
         .array => |arr| blk: {
             var out = json.Array.init(a);
             for (arr.items) |x| try out.append(try rooted(a, x, root));
@@ -1189,7 +1198,7 @@ fn rooted(a: Allocator, v: json.Value, root: []const u8) !json.Value {
         .object => |o| blk: {
             var out: json.ObjectMap = .empty;
             var it = o.iterator();
-            while (it.next()) |e| try out.put(a, try std.mem.replaceOwned(u8, a, e.key_ptr.*, root, "$ROOT"), try rooted(a, e.value_ptr.*, root));
+            while (it.next()) |e| try out.put(a, try rootedString(a, e.key_ptr.*, root), try rooted(a, e.value_ptr.*, root));
             break :blk .{ .object = out };
         },
         else => v,
@@ -1248,8 +1257,7 @@ test "the theme-import vectors compile as the GPUI app's compiler compiles them"
             if (std.fs.path.dirname(e.key_ptr.*)) |d| try tmp.dir.createDirPath(testing.io, d);
             try tmp.dir.writeFile(testing.io, .{ .sub_path = e.key_ptr.*, .data = e.value_ptr.string });
         }
-        const rel = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-        const root = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, rel, a);
+        const root = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
         const entry = o.get("entry").?.string;
         const target = if (entry.len == 0) root else try std.fs.path.join(a, &.{ root, entry });
         const result = compile(a, testing.io, target, .{

@@ -56,7 +56,7 @@ const level_interval_ms = 120;
 /// transcript-done; a repeat this soon after is the same words.
 const duplicate_window_ms = 3000;
 const max_frame = 128 * 1024;
-const helper_rel = "codex-resources/voice/bin/codex-voice-host";
+const helper_rel = "codex-resources" ++ std.fs.path.sep_str ++ "voice" ++ std.fs.path.sep_str ++ "bin" ++ std.fs.path.sep_str ++ "codex-voice-host";
 
 // Finding the runtime.
 
@@ -976,7 +976,7 @@ test "the helper resolves from a standalone install, from 0.159, and not without
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}), a);
+    const base = try tmp.dir.realPathFileAlloc(io, ".", a);
     try tmp.dir.createDirPath(io, "codex");
     var root = try tmp.dir.openDir(io, "codex", .{});
     defer root.close(io);
@@ -997,7 +997,7 @@ test "openDevices names a selection from Codex 0.161" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}), a);
+    const base = try tmp.dir.realPathFileAlloc(io, ".", a);
     try tmp.dir.createDirPath(io, "codex-resources/voice/bin");
     const helper = try std.fs.path.join(a, &.{ base, helper_rel });
     try testing.expectEqual(false, try deviceSelection(a, io, helper));

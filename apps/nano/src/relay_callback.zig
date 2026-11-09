@@ -192,7 +192,19 @@ fn nowMs(io: std.Io) i64 {
 }
 
 /// Whether `fd` has something to read within `ms`.
-fn ready(fd: std.posix.fd_t, ms: i32) bool {
+fn ready(fd: net.Socket.Handle, ms: i32) bool {
+    if (comptime builtin.os.tag == .windows) {
+        const WsaPollFd = extern struct {
+            fd: net.Socket.Handle,
+            events: i16,
+            revents: i16,
+        };
+        const ws = struct {
+            extern "ws2_32" fn WSAPoll(fdarray: [*]WsaPollFd, fds: u32, timeout: c_int) callconv(.winapi) c_int;
+        };
+        var fds = [_]WsaPollFd{.{ .fd = fd, .events = 0x0100, .revents = 0 }};
+        return ws.WSAPoll(&fds, 1, ms) > 0;
+    }
     var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
     const n = std.posix.poll(&fds, ms) catch return false;
     return n > 0;
@@ -201,7 +213,6 @@ fn ready(fd: std.posix.fd_t, ms: i32) bool {
 /// `start`: bind the callback port and wait on a thread of its own. Null
 /// when the port is taken, so the caller relies on pasting the address.
 pub fn start(gpa: Allocator, io: std.Io, port: u16, path: []const u8, landed: Landed) ?*Capture {
-    if (builtin.os.tag == .windows) return null;
     const addr = net.IpAddress.parseIp4("127.0.0.1", port) catch return null;
     var server = addr.listen(io, .{}) catch return null;
     const c = gpa.create(Capture) catch {

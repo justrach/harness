@@ -42,6 +42,7 @@ test "Frosted glass changes the shell live but keeps the writing plane opaque" {
     try testing.expectEqual(@as(f32, 1), t.ctx.theme.surface.a);
     if (!hasTint(&t, @import("theme.zig").colors(true).pill())) std.debug.print("\nglass: missing opaque writing-plane tint {any}\n", .{@import("theme.zig").colors(true).pill()});
     try testing.expect(hasTint(&t, @import("theme.zig").colors(true).pill()));
+    t.theme = t.ctx.theme;
     const p = try t.render(testing.allocator);
     defer p.deinit(testing.allocator);
     //0.2.172's conversation panel is opaque. Probe the actual shell in

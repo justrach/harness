@@ -471,7 +471,7 @@ test "an import installs as the GPUI app's library keeps it; a second takes the 
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "Dusk.json", .data =
         \\{ "name": "Dusk", "type": "dark", "colors": { "editor.background": "#14161c", "foreground": "#d8dee9", "focusBorder": "#88c0d0" } }
     });
-    const root = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}), a);
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
     const src = try std.fs.path.join(a, &.{ root, "Dusk.json" });
     var lib: Library = .{};
     for (0..2) |_| {
