@@ -23,6 +23,30 @@ pub(super) fn session_worktree(reply: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn is_absolute_wire_path(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        || path.starts_with('/')
+        || path.starts_with("\\\\")
+        || matches!(
+            path.as_bytes(),
+            [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic()
+        )
+}
+
+/// Where Graff runs the session: `_meta["graff/cwd"]` when absolute (covers
+/// linked worktrees and switching back to the main checkout), else
+/// [`session_worktree`] for older builds.
+pub(super) fn session_cwd(reply: &Value) -> Option<String> {
+    if let Some(cwd) = reply
+        .pointer("/_meta/graff~1cwd")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty() && is_absolute_wire_path(p))
+    {
+        return Some(cwd.to_owned());
+    }
+    session_worktree(reply)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraffWorktreeAction {
     /// Squash-land `worktree-<name>` onto the main checkout's branch.
@@ -207,5 +231,41 @@ mod tests {
         let legacy = json!({"sessionId": "s", "cwd": "/r/.graff/worktrees/b"});
         assert_eq!(session_worktree(&legacy).as_deref(), Some("/r/.graff/worktrees/b"));
         assert_eq!(session_worktree(&json!({"sessionId": "s", "cwd": "/r"})), None);
+    }
+
+    #[test]
+    fn reads_session_cwd_from_graff_cwd_meta_or_falls_back_to_worktree() {
+        let linked = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {"graff/cwd": "/r-feature", "graff/worktree": null}
+        });
+        assert_eq!(session_cwd(&linked).as_deref(), Some("/r-feature"));
+
+        let main_checkout = json!({
+            "sessionUpdate": "session_info_update",
+            "_meta": {"graff/cwd": "/r", "graff/worktree": null}
+        });
+        assert_eq!(session_cwd(&main_checkout).as_deref(), Some("/r"));
+
+        let win_drive = json!({"_meta": {"graff/cwd": r"C:\r-feature"}});
+        assert_eq!(session_cwd(&win_drive).as_deref(), Some(r"C:\r-feature"));
+        let win_unc = json!({"_meta": {"graff/cwd": r"\\server\share\repo"}});
+        assert_eq!(
+            session_cwd(&win_unc).as_deref(),
+            Some(r"\\server\share\repo")
+        );
+
+        let relative = json!({"_meta": {"graff/cwd": "relative/path"}});
+        assert_eq!(session_cwd(&relative), None);
+        let drive_relative = json!({"_meta": {"graff/cwd": "C:relative"}});
+        assert_eq!(session_cwd(&drive_relative), None);
+        let empty = json!({"_meta": {"graff/cwd": ""}});
+        assert_eq!(session_cwd(&empty), None);
+
+        let fallback = json!({"_meta": {"graff/worktree": {"path": "/r/.graff/worktrees/a"}}});
+        assert_eq!(
+            session_cwd(&fallback).as_deref(),
+            Some("/r/.graff/worktrees/a")
+        );
     }
 }

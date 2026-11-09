@@ -696,6 +696,14 @@ pub enum AgentEvent {
     ReasoningChanged {
         reasoning: Option<ReasoningLevel>,
     },
+    /// The agent switched the session's active working directory mid-run (for
+    /// example, Graff `workspace use` emitting `session_info_update` with
+    /// `_meta["graff/cwd"]`). Re-roots `show_image` and workspace state, not
+    /// the transcript.
+    #[serde(rename_all = "camelCase")]
+    SessionCwdChanged {
+        cwd: String,
+    },
     Error {
         message: String,
     },
