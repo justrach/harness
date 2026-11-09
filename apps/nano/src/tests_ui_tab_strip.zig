@@ -132,29 +132,28 @@ test "unified strip: split slots own both titles without a second peer header" {
     };
 }
 
-test "unified strip: Cmd T opens a new top-level tab and restores the split draft on close" {
+test "unified strip: Cmd T adds inside its panel and restores that panel's draft" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
     h.a.splitPane(.horizontal);
     h.a.composer.set("A parked synthetic prompt");
     h.press(.{ .key = 't', .cmd = true });
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
-    try testing.expect(h.a.tabs.layout() == null);
+    const split = h.a.tabs.layout().?;
+    try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+    try testing.expectEqualStrings("a", split.panes.items[0].?);
+    try testing.expectEqual(@as(usize, 2), split.groups[1].count());
     try testing.expectEqualStrings("", h.a.composer.text());
-    h.a.showTab(0);
+    h.a.showPaneTab(0);
     h.t.settle(1);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqualStrings("A parked synthetic prompt", h.a.composer.text());
-    h.a.showTab(1);
     h.a.closeFocused();
     h.t.settle(1);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
     try testing.expectEqualStrings("a", h.a.tabs.layout().?.panes.items[0].?);
-    try testing.expectEqualStrings("A parked synthetic prompt", h.a.composer.text());
 }
 
-test "unified strip: a first split preserves other top-level tabs independently" {
+test "unified strip: a first split retains all original tabs in its first panel" {
     var h: Harness = undefined;
     try h.init(true);
     defer h.deinit();
@@ -162,12 +161,13 @@ test "unified strip: a first split preserves other top-level tabs independently"
     h.a.openChat("b", null);
     h.a.splitPane(.horizontal);
     h.t.settle(1);
-    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[0].count());
+    try testing.expectEqual(@as(usize, 1), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
     h.a.openChat("a", null);
     h.t.settle(1);
     try testing.expectEqualStrings("a", h.a.selected.?);
-    try testing.expectEqual(@as(usize, 0), h.a.tabs.active);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
+    try testing.expectEqual(@as(usize, 0), h.a.tabs.layout().?.focus);
 }
 
 test "unified strip: sidebar new session parks an independent workspace without changing panel tabs" {
@@ -181,7 +181,7 @@ test "unified strip: sidebar new session parks an independent workspace without 
     h.a.composer.set("Right panel draft");
     const original = h.a.tabs.active;
     h.a.newWorkspaceSession();
-    try testing.expectEqual(@as(usize, 3), h.a.tabs.items.items.len);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
     try testing.expect(h.a.tabs.layout() == null);
     try testing.expectEqualStrings("", h.a.composer.text());
     try testing.expectEqualStrings("remote", h.a.draftDevice().?);
@@ -189,7 +189,7 @@ test "unified strip: sidebar new session parks an independent workspace without 
     const independent = h.a.tabs.active;
     h.a.showTab(original);
     try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
-    try testing.expectEqual(@as(usize, 1), h.a.tabs.layout().?.groups[0].count());
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
     try testing.expectEqualStrings("Right panel draft", h.a.composer.text());
     h.a.focusPane(0);
     try testing.expectEqualStrings("Left panel draft", h.a.composer.text());
@@ -440,4 +440,32 @@ test "streaming turn with detail lines and mermaid diagram stays visible and upd
         h.a.transcript.turn_cache_read_tokens,
         h.a.transcript.turn_input_tokens,
     ));
+}
+
+test "session hierarchy nests all tabs under the session in sidebar and shows side-by-side tab pills in top strip" {
+    var h: Harness = undefined;
+    try h.init(true);
+    defer h.deinit();
+    // Open a second tab in the session ("Beta"), then split right ("New tab").
+    h.a.newTab();
+    h.a.openChat("b", null);
+    h.a.splitPane(.horizontal);
+    h.t.settle(1);
+    // Top strip: left pane has 2 tabs ("Alpha" and "Beta") and shows both as real tab pills!
+    try testing.expect(h.topText("Alpha") != null);
+    try testing.expect(h.topText("Beta") != null);
+    try testing.expect(h.topText("New tab") != null);
+    // Sidebar: Session 0 shows its parent header and all 3 tabs indented underneath it.
+    var side_alpha = false;
+    var side_beta = false;
+    var side_new = false;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (node.rect.x < h.a.view.sidebar_width and node.rect.y < 240) {
+            if (std.mem.eql(u8, tx.str, "Alpha")) side_alpha = true;
+            if (std.mem.eql(u8, tx.str, "Beta")) side_beta = true;
+            if (std.mem.eql(u8, tx.str, "New tab")) side_new = true;
+        },
+        else => {},
+    };
+    try testing.expect(side_alpha and side_beta and side_new);
 }

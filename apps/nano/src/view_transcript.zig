@@ -496,7 +496,7 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
             const active = e.status == .streaming and for (work) |p| {
                 if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
             } else false;
-            @import("view_tool_rows.zig").title(c, k, tools.label(lb, work), active, h.hovered());
+            @import("view_tool_rows.zig").title(c, k, workLabel(c, lb, work), active, h.hovered());
         }
     }
     const state = @import("tool_ui_state.zig");
@@ -508,11 +508,80 @@ fn workLine(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: 
     var viewport = ui.div(c).column().wFull().clip();
     if (is_animating and fold.natural > 0) viewport = viewport.h(fold.height(c.time, c.reduced_motion));
     defer viewport.end();
-    const body = ui.div(c).column().wFull().pt(12).gap(12);
+    const body = ui.div(c).column().wFull().pt(8).gap(12);
     defer body.end();
     @import("view_tool_tree.zig").rememberHeight(c, a, fold_id, body.index);
     if (is_animating) c.frameIn(1.0 / 30.0);
-    partRows(c, a, k, e, work, at, false, .{ .part = null });
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    workRows(c, a, k, e, work, at);
+}
+
+fn workLabel(c: *ui.Context, lb: []u8, work: []const tr.Part) []const u8 {
+    var has_tools = false;
+    for (work) |p| if (p.kind == .tool) {
+        has_tools = true;
+        break;
+    };
+    if (!has_tools) return tools.label(lb, work);
+    var filtered = std.ArrayList(tr.Part).empty;
+    for (work) |p| if (p.kind == .tool) {
+        filtered.append(c.alloc(), p) catch return tools.label(lb, work);
+    };
+    return tools.label(lb, filtered.items);
+}
+
+fn workRows(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, work: []const tr.Part, at: At) void {
+    const buf = c.alloc().alloc(tools.Run, work.len) catch {
+        ui.text(c, "Unable to render reply: out of memory", .{ .size = 12, .color = k.danger });
+        return;
+    };
+    const runs = tools.runs(buf, work);
+    var tool_run_count: usize = 0;
+    var has_non_reasoning = false;
+    for (work) |p| {
+        if (p.kind != .reasoning) has_non_reasoning = true;
+    }
+    for (runs) |r| {
+        if (!r.group) continue;
+        for (work[r.start..r.end]) |p| {
+            if (p.kind == .tool) {
+                tool_run_count += 1;
+                break;
+            }
+        }
+    }
+    for (runs) |r| {
+        const p = &work[r.start];
+        ui.key(c, c.print("run-{s}-{s}", .{ e.id, p.id }));
+        if (!r.group) {
+            part(c, a, k, e, p, at, .{ .part = null });
+            continue;
+        }
+        var tool_parts = std.ArrayList(tr.Part).empty;
+        for (work[r.start..r.end]) |item| {
+            if (item.kind == .tool) tool_parts.append(c.alloc(), item) catch return;
+        }
+        if (tool_parts.items.len == 0) {
+            if (!has_non_reasoning) {
+                const thoughts = ui.div(c).column().wFull().pl(28).gap(6);
+                defer thoughts.end();
+                for (work[r.start..r.end]) |*tp| {
+                    if (tp.kind == .reasoning and tp.text.items.len > 0) {
+                        @import("view_markdown.zig").withLinks(c, k, tp.text.items, a, at.chat_id);
+                    }
+                }
+            }
+            continue;
+        }
+        if (e.status == .streaming and tool_run_count == 1) {
+            for (tool_parts.items, 0..) |*tp, idx| {
+                ui.key(c, c.print("work-tool-{s}-{s}", .{ e.id, tp.id }));
+                treeRow(c, a, k, e, tp, idx + 1 == tool_parts.items.len, at.chat_id);
+            }
+        } else {
+            group(c, a, k, e, tool_parts.items, false, at.chat_id);
+        }
+    }
 }
 
 /// The current desktop renders expanded results in the task tree itself.

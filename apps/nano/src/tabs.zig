@@ -360,6 +360,11 @@ pub const Tabs = struct {
         t.noteShown();
     }
 
+    pub fn hasIsolatedWorkspaces(t: *const Tabs) bool {
+        for (t.splits.items) |other| if (other != null) return true;
+        return false;
+    }
+
     /// Give an independent workspace a structural boundary even before its
     /// first split, so split() cannot migrate neighboring workspaces into it.
     pub fn isolateWorkspace(t: *Tabs) !void {
@@ -369,6 +374,26 @@ pub const Tabs = struct {
         try s.panes.append(t.gpa, null);
         try s.shares.append(t.gpa, 1);
         try s.drafts.append(t.gpa, null);
+        if (!t.hasIsolatedWorkspaces() and t.items.items.len > 1) {
+            const group = &s.groups[0];
+            try group.items.ensureTotalCapacity(t.gpa, t.items.items.len);
+            for (t.items.items, t.drafts.items, 0..) |chat, draft, ix| {
+                const stamp = if (ix < t.shown.items.len) t.shown.items[ix] else 0;
+                group.items.appendAssumeCapacity(if (ix == t.active) .{ .shown = stamp } else .{ .chat = chat, .draft = draft, .shown = stamp });
+            }
+            group.active = t.active;
+            const chat = t.items.items[t.active];
+            const draft = t.drafts.items[t.active];
+            t.items.items.len = 1;
+            t.drafts.items.len = 1;
+            t.splits.items.len = 1;
+            t.shown.items.len = 1;
+            t.items.items[0] = chat;
+            t.drafts.items[0] = draft;
+            t.splits.items[0] = null;
+            t.shown.items[0] = t.bumpShown();
+            t.active = 0;
+        }
         t.splits.items[t.active] = s;
     }
 
@@ -494,13 +519,42 @@ pub const Tabs = struct {
     /// then the same size, the new one a new chat with focus. Nothing at
     /// the cap or across an existing split's axis (`split_chat`).
     pub fn split(t: *Tabs, axis: Axis) !bool {
-        const slot = &t.splits.items[t.active];
+        var slot = &t.splits.items[t.active];
         if (slot.* == null) {
             var s: Split = .{ .axis = axis };
             errdefer s.deinit(t.gpa);
             try s.panes.append(t.gpa, null);
             try s.shares.append(t.gpa, 1);
             try s.drafts.append(t.gpa, null);
+            // A first split moves the existing folder tabs into its original
+            // panel. They are not separate workspaces that hide the split when
+            // selected. Legacy snapshots with other splits remain reachable.
+            var flat = true;
+            for (t.splits.items) |other| if (other != null) {
+                flat = false;
+                break;
+            };
+            if (flat and t.items.items.len > 1) {
+                const group = &s.groups[0];
+                try group.items.ensureTotalCapacity(t.gpa, t.items.items.len);
+                for (t.items.items, t.drafts.items, 0..) |chat, draft, ix| {
+                    const stamp = if (ix < t.shown.items.len) t.shown.items[ix] else 0;
+                    group.items.appendAssumeCapacity(if (ix == t.active) .{ .shown = stamp } else .{ .chat = chat, .draft = draft, .shown = stamp });
+                }
+                group.active = t.active;
+                const chat = t.items.items[t.active];
+                const draft = t.drafts.items[t.active];
+                t.items.items.len = 1;
+                t.drafts.items.len = 1;
+                t.splits.items.len = 1;
+                t.shown.items.len = 1;
+                t.items.items[0] = chat;
+                t.drafts.items[0] = draft;
+                t.splits.items[0] = null;
+                t.shown.items[0] = t.bumpShown();
+                t.active = 0;
+                slot = &t.splits.items[0];
+            }
             slot.* = s;
         }
         const s = &slot.*.?;
@@ -819,16 +873,16 @@ test "a dragged chat moves into its new pane, out of every other place" {
     try testing.expect(t.canSplit(.vertical));
     try testing.expect(try t.split(.horizontal));
     try testing.expect(!t.canSplit(.vertical));
-    // Splitting only splits the active tab; moving "a" from tab 0 into tab 1's
-    // second pane clears tab 0 without disturbing tab 1's first pane ("b").
+    // The first split folds the original tabs into panel0. Moving its
+    // inactive "a" into panel1 clears only that old slot, not focused "b".
     t.detach("a");
     t.setCurrent("a");
     try testing.expectEqualStrings("a", t.current().?);
-    try testing.expectEqual(@as(usize, 2), t.items.items.len);
-    try testing.expect(t.items.items[0] == null);
+    try testing.expectEqual(@as(usize, 1), t.items.items.len);
     const layout_state = t.layout().?;
+    try testing.expect(layout_state.groups[0].items.items[0].chat == null);
     try testing.expectEqualStrings("b", layout_state.panes.items[0].?);
     const found = t.find("a").?;
-    try testing.expectEqual(@as(usize, 1), found.tab);
+    try testing.expectEqual(@as(usize, 0), found.tab);
     try testing.expect(found.pane == null and found.panel_tab == null);
 }

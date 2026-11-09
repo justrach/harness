@@ -97,7 +97,7 @@ pub fn chatgpt(c: *ui.Context, a: *App, k: theme.Colors) void {
 fn chatgptCard(c: *ui.Context, a: *App, k: theme.Colors, row: accounts.Chatgpt) void {
     const p = &a.view.accounts;
     var buf: [512]u8 = undefined;
-    switch (graffRow(c, a, k, false, "chatgpt-new", "ChatGPT", c.print("{s}", .{row.status(&buf)}), row == .ready)) {
+    switch (graffRow(c, a, k, true, "chatgpt-new", "ChatGPT", c.print("{s}", .{row.status(&buf)}), row == .ready)) {
         .sign_in => login.begin(a, .graff, "chatgpt-new"),
         .sign_out => page.signOutGraff(a, "chatgpt-new"),
         .none => {},

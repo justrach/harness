@@ -547,15 +547,17 @@ test "a new pane starts with an empty prompt; each pane and tab keeps its own" {
     // ⌘W: the left pane's prompt comes back with it.
     h.press(.{ .key = 'w', .cmd = true });
     try testing.expectEqualStrings("hey there", h.a.composer.text());
-    // Choosing another top-level tab restores its draft.
-    h.a.showTab(0);
+    // The original folder tabs now belong to the surviving panel; choosing
+    // one must restore its draft without reverting to a separate workspace.
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.groups[0].count());
+    h.a.showPaneTab(0);
     h.t.settle(1);
     try testing.expectEqualStrings("", h.a.composer.text());
     h.a.composer.set("about alpha");
-    h.a.showTab(1);
+    h.a.showPaneTab(1);
     h.t.settle(1);
     try testing.expectEqualStrings("hey there", h.a.composer.text());
-    h.a.showTab(0);
+    h.a.showPaneTab(0);
     h.t.settle(1);
     try testing.expectEqualStrings("about alpha", h.a.composer.text());
 }
@@ -612,7 +614,7 @@ test "the composer has the keys after ⌘D, ⌘[ and ⌘]: nothing typed is lost
     typeKeys(&h, "s");
     try testing.expectEqualStrings("rights", h.a.composer.text());
     h.press(.{ .key = '[', .cmd = true });
-    h.a.showTab(0);
+    h.a.showPaneTab(0);
     h.t.settle(1);
     typeKeys(&h, "on alpha");
     try testing.expectEqualStrings("on alpha", h.a.composer.text());

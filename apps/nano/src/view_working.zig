@@ -134,10 +134,6 @@ pub fn trailer(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, t
         const detail = if (p.text.items.len > 0) p.text.items else p.chip;
         detailLine(c, k, "Now", c.print("{s} · {s}", .{ p.chip, preview(&buf, detail, 160) }), k.muted);
     }
-    if (live.thought) |thought| {
-        var buf: [192]u8 = undefined;
-        detailLine(c, k, "Thinking", c.print("{s}", .{preview(&buf, thought, 160)}), k.muted);
-    }
     if (live.plan) |step| {
         var buf: [192]u8 = undefined;
         detailLine(c, k, "Plan", c.print("{s}", .{preview(&buf, step, 160)}), k.faint);

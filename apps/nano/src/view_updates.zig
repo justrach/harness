@@ -222,6 +222,17 @@ pub fn appUpdateVersion(a: *const App) ?[]const u8 {
     return if (graff_update.newer(latest, current)) latest else null;
 }
 
+/// Staged app update version ready to restart into (`app_restart_version` in
+/// `crates/ui/src/shell/app_update.rs`). Unstaged GitHub releases use the
+/// titlebar indicator instead of crowding the sidebar footer.
+pub fn appRestartVersion(a: *const App) ?[]const u8 {
+    if (a.env) |env| {
+        if (env.get("HARNESS_DEV_APP_UPDATE")) |v| if (std.mem.eql(u8, v, "1")) return "preview";
+    }
+    if (!a.updates.app_ready) return null;
+    return appUpdateVersion(a);
+}
+
 pub fn sidebarFits(a: *const App) bool {
     return a.view.sidebar_open and !a.view.settings_open and !a.settings.get(.sidebar_task_view);
 }
@@ -273,8 +284,8 @@ pub fn openExternalUrl(url: []const u8) void {
 /// Height contributed to the sidebar footer by any active update pills.
 pub fn sidebarFooterExtraHeight(a: *const App) f32 {
     var h: f32 = 0;
-    if (graffVisible(a)) h += 30;
-    if (restartPlace(appUpdateVersion(a), sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row) h += 30;
+    if (graffVisible(a)) h += 34;
+    if (restartPlace(appRestartVersion(a), sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row) h += 34;
     return h;
 }
 
@@ -287,13 +298,19 @@ pub fn sidebarFooterRows(c: *ui.Context, a: *App, k: theme.Colors) void {
     a.updates.release();
     if (was_dirty) c.changed = true;
 
-    if (graffVisible(a)) {
+    const show_graff = graffVisible(a);
+    const restart_ver = appRestartVersion(a);
+    const show_app = restartPlace(restart_ver, sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row;
+    if (!show_graff and !show_app) return;
+
+    const wrap = ui.div(c).column().wFull().pt(6).pb(2);
+    defer wrap.end();
+    _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null);
+    if (show_graff) {
         sidebarGraffRow(c, a, k);
     }
-    if (appUpdateVersion(a)) |ver| {
-        if (restartPlace(ver, sidebarFits(a), a.updates.restartDismissed()) == .sidebar_row) {
-            sidebarAppUpdateRow(c, a, k, ver);
-        }
+    if (show_app) {
+        if (restart_ver) |ver| sidebarAppUpdateRow(c, a, k, ver);
     }
 }
 
@@ -388,7 +405,9 @@ fn sidebarAppUpdateRow(c: *ui.Context, a: *App, k: theme.Colors, ver: []const u8
 
 pub fn titlebarVisible(a: *const App) bool {
     const ver = appUpdateVersion(a) orelse return false;
-    if (restartPlace(ver, sidebarFits(a), a.updates.restartDismissed()) != .titlebar) return false;
+    if (appRestartVersion(a)) |rver| {
+        if (restartPlace(rver, sidebarFits(a), a.updates.restartDismissed()) != .titlebar) return false;
+    }
     if (a.updates.titlebarDismissed()) |d| if (std.mem.eql(u8, d, ver)) return false;
     return true;
 }

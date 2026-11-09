@@ -46,6 +46,58 @@ pub fn draw(c: *ui.Context, a: *App, k: theme.Colors) void {
 }
 
 fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32) void {
+    if (target == .chat and width >= 200) {
+        if (a.tabs.layout()) |s| {
+            const pane = target.chat;
+            const g = &s.groups[pane];
+            const tab_n = g.count();
+            if (tab_n > 1) {
+                ui.key(c, c.print("instrument-slot-group-{d}", .{ix}));
+                const group_row = ui.div(c).row().size(width, chrome.tab_height).gap(3).itemsCenter();
+                defer group_row.end();
+                const group_hot = group_row.hovered();
+                const inactive_n: f32 = @floatFromInt(tab_n - 1);
+                const inactive_w = @min(132, @max(68, (width - 3 * inactive_n) * 0.34 / inactive_n));
+                const active_w = @max(140, width - inactive_n * (inactive_w + 3));
+                for (0..tab_n) |t_ix| {
+                    if (t_ix == g.active) {
+                        slotBox(c, a, k, target, ix, active_w, group_hot);
+                    } else {
+                        inactiveTabPill(c, a, k, ix, pane, t_ix, g.items.items[t_ix].chat, inactive_w);
+                    }
+                }
+                return;
+            }
+        }
+    }
+    slotBox(c, a, k, target, ix, width, false);
+}
+
+fn inactiveTabPill(c: *ui.Context, a: *App, k: theme.Colors, slot_ix: usize, pane: usize, tab_ix: usize, chat_id: ?[]const u8, pill_w: f32) void {
+    ui.key(c, c.print("instrument-slot-{d}-tab-{d}", .{ slot_ix, tab_ix }));
+    const ch = if (chat_id) |cid| a.findChat(cid) else null;
+    const t_name = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
+    var pill = ui.div(c).row().size(pill_w, chrome.tab_height).px(7).gap(5).itemsCenter().rounded(6).bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover).clip().control();
+    pill = tip.on(pill, k, .{ .text = t_name, .look = .tab });
+    defer pill.end();
+    const pill_hot = pill.hovered();
+    icons.icon(c, .@"chat-round-line", 13, k.muted, 0);
+    kit.ellipsisText(c, t_name, .{ .size = 11.5, .line_height = 14, .color = k.muted }, @max(0, pill_w - (if (pill_hot) @as(f32, 44) else 26)));
+    var pill_closed = false;
+    if (pill_hot) {
+        const spacer = ui.div(c).row().grow();
+        spacer.end();
+        if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 10, .tip = .{ .text = "Close tab" } })) {
+            pill_closed = true;
+            strip.queue(a, .{ .close_panel_tab = .{ .pane = pane, .tab = tab_ix } });
+        }
+    }
+    if (!pill_closed and pill.clicked()) {
+        strip.queue(a, .{ .panel_tab = .{ .pane = pane, .tab = tab_ix } });
+    }
+}
+
+fn slotBox(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize, width: f32, group_hot: bool) void {
     ui.key(c, c.print("instrument-slot-{d}", .{ix}));
     const on = strip.same(strip.active(a), target);
     const name = strip.title(a, target);
@@ -55,7 +107,7 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
     var box = ui.div(c).row().size(width, chrome.tab_height).pl(7).pr(4).gap(6).itemsCenter().rounded(6).clip().control();
     box = tip.on(if (on) box.bg(k.ink(if (k.dark) 0.16 else 0.10)) else box.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover), k, .{ .text = tooltip, .look = .tab });
     defer box.end();
-    const hot = box.hovered();
+    const hot = box.hovered() or group_hot;
     const show_controls = hot or c.focus == c.node(box.index).id;
     const menu_count = strip.tabCount(a, target);
     var handled = false;
@@ -67,7 +119,7 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
     {
         const text = ui.div(c).column().grow().w(0).clip();
         defer text.end();
-        const room = @import("motion_rules.zig").slotTextRoom(width, show_controls, menu_count);
+        const room = @import("motion_rules.zig").slotTextRoom(width, show_controls, if (target == .chat) 1 else menu_count);
         kit.ellipsisText(c, name, .{ .size = 12, .line_height = 14, .color = if (on) k.text else k.muted }, room);
         const meta = ui.div(c).row().h(14).wFull().gap(6).itemsCenter().clip();
         defer meta.end();
@@ -136,11 +188,11 @@ fn slot(c: *ui.Context, a: *App, k: theme.Colors, target: strip.Panel, ix: usize
             a.newTab();
         }
     }
-    if (menu_count > 1 or show_controls) {
+    if ((target != .chat and menu_count > 1) or show_controls) {
         ui.key(c, "slot-menu");
         const button = ui.div(c).row().h(18).minW(18).px(3).gap(2).center().rounded(4).hover(k.ink(0.10)).control();
         defer button.end();
-        if (menu_count > 1) ui.text(c, c.print("{d}", .{menu_count}), .{ .size = 11, .color = k.muted });
+        if (target != .chat and menu_count > 1) ui.text(c, c.print("{d}", .{menu_count}), .{ .size = 11, .color = k.muted });
         icons.icon(c, .@"alt-arrow-down", 11, k.muted, 0);
         if (button.clicked()) {
             handled = true;
@@ -198,25 +250,26 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         const ch = if (chat) |id| a.findChat(id) else null;
         const label = if (ch) |v| @import("view_sidebar.zig").chatLabel(v) else "New tab";
         ui.key(c, c.print("panel-tab-{d}", .{ix}));
-        const cap = ui.div(c).row().size(width, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).hover(if (ix == selected) .transparent else k.hover).clip().control();
+        var cap = ui.div(c).row().size(width, chrome.tab_height).px(8).gap(6).itemsCenter().rounded(6).clip().control();
+        if (ix != selected) cap = cap.bg(k.ink(if (k.dark) 0.06 else 0.04)).hover(k.hover);
         defer cap.end();
         const hot = cap.hovered();
-        icons.icon(c, .@"chat-round-line", 14, k.muted, 0);
+        icons.icon(c, .@"chat-round-line", 14, if (ix == selected) k.text else k.muted, 0);
         {
             const labels = ui.div(c).column().grow().w(0).clip();
             defer labels.end();
             kit.ellipsisText(c, label, .{ .size = 12, .line_height = 14, .color = if (ix == selected) k.text else k.muted }, @max(0, width - 58));
-            if (hot) if (ch) |chat_row| {
+            if (ch) |chat_row| {
                 const meta = ui.div(c).row().gap(6).h(12).itemsCenter();
                 defer meta.end();
                 if (chat_row.branch) |branch| kit.ellipsisText(c, branch, .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, (width - 58) * 0.45));
                 const mark = icons.harnessMark(chat_row.harness orelse "graff");
                 icons.icon(c, mark.name, 12, mark.brand orelse k.muted, 0);
                 kit.ellipsisText(c, chat_row.model orelse chat_row.harness orelse "Graff", .{ .size = 10, .line_height = 12, .color = k.muted }, @max(0, (width - 58) * 0.5 - 15));
-            };
+            }
         }
         var handled = false;
-        if (hot) {
+        if (hot or (n > 1 and ix == selected)) {
             if (kit.iconButton(c, k, .close, .{ .size = 16, .radius = 4, .icon = 11, .tip = .{ .text = "Close tab" } })) {
                 handled = true;
                 if (group != null) {
@@ -231,9 +284,7 @@ fn single(c: *ui.Context, a: *App, k: theme.Colors, left: f32) void {
         if (kit.secondaryClicked(cap)) strip.open(a, .panel, .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 }, c.rects.get(c.node(cap.index).id));
     }
     ui.key(c, "panel-add-tab");
-    if (lane.hovered()) {
-        if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab" } })) a.newTab();
-    } else ui.div(c).size(24, 24).end();
+    if (kit.iconButton(c, k, .plus, .{ .icon = 14, .tip = .{ .text = "New tab", .look = .tab } })) a.newTab();
     // Device is its own fixed trailing lane, never a tab's suffix.
     devicePicker(c, a, k);
 }

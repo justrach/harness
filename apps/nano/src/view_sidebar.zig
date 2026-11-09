@@ -38,130 +38,220 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
     footer(c, a, k);
 }
 
-const OpenRow = struct {
+const SessionTab = struct {
     ws: usize,
     pane: ?usize = null,
     tab: ?usize = null,
     chat_id: ?[]const u8 = null,
     active: bool = false,
+    flat: bool = false,
 };
 
-/// Multi-panel workspaces, split panes (⌘D), panel tabs (⌘T), and unsent
-/// drafts shown at the top of the ⌘B sidebar.
+const OpenSession = struct {
+    ws: usize,
+    title_chat_id: ?[]const u8 = null,
+    active: bool = false,
+    tabs: []const SessionTab,
+};
+
+/// Open workspace sessions (`⊞`) and all of their corresponding tabs nested
+/// underneath each session at the top of the ⌘B sidebar.
 fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
-    var rows: std.ArrayList(OpenRow) = .empty;
-    if (a.tabs.items.items.len == 1) {
-        if (a.tabs.splits.items[0]) |split| {
-            if (split.panes.items.len > 1) {
-                for (0..split.panes.items.len) |pane_ix| {
-                    const cid = if (pane_ix == split.focus) a.selected else split.panes.items[pane_ix];
-                    rows.append(c.alloc(), .{
-                        .ws = 0,
-                        .pane = pane_ix,
-                        .chat_id = cid,
-                        .active = pane_ix == split.focus,
-                    }) catch return;
-                }
-            } else if (split.groups[0].items.items.len > 1) {
-                const g = &split.groups[0];
-                for (0..g.items.items.len) |pt_ix| {
-                    const cid = if (pt_ix == g.active) a.selected else g.items.items[pt_ix].chat;
-                    rows.append(c.alloc(), .{
-                        .ws = 0,
-                        .pane = 0,
-                        .tab = pt_ix,
-                        .chat_id = cid,
-                        .active = pt_ix == g.active,
-                    }) catch return;
-                }
+    var sessions: std.ArrayList(OpenSession) = .empty;
+    const isolated = a.tabs.hasIsolatedWorkspaces();
+    if (!isolated) {
+        if (a.tabs.items.items.len > 1) {
+            var stabs: std.ArrayList(SessionTab) = .empty;
+            var primary: ?[]const u8 = a.selected;
+            for (a.tabs.items.items, 0..) |id, t_ix| {
+                const cid = if (t_ix == a.tabs.active) a.selected else id;
+                if (primary == null and cid != null) primary = cid;
+                stabs.append(c.alloc(), .{
+                    .ws = 0,
+                    .tab = t_ix,
+                    .chat_id = cid,
+                    .active = t_ix == a.tabs.active,
+                    .flat = true,
+                }) catch return;
             }
+            sessions.append(c.alloc(), .{
+                .ws = 0,
+                .title_chat_id = primary,
+                .active = true,
+                .tabs = stabs.items,
+            }) catch return;
         }
     } else {
-        for (a.tabs.items.items, 0..) |id, ix| {
-            if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
-                const project = a.workspaceProject(ix) orelse continue;
-                if (!std.mem.eql(u8, project, filter)) continue;
-            };
-            if (a.tabs.splits.items[ix]) |split| {
-                if (split.panes.items.len > 1) {
-                    for (0..split.panes.items.len) |pane_ix| {
-                        const cid = if (ix == a.tabs.active and pane_ix == split.focus) a.selected else split.panes.items[pane_ix];
-                        rows.append(c.alloc(), .{
-                            .ws = ix,
+        for (a.tabs.items.items, 0..) |id, ws| {
+            if (a.tabs.items.items.len > 1) {
+                if (a.view.filter) |filter| if (a.findSpace(filter) != null) {
+                    const project = a.workspaceProject(ws) orelse continue;
+                    if (!std.mem.eql(u8, project, filter)) continue;
+                };
+            }
+            var stabs: std.ArrayList(SessionTab) = .empty;
+            const active_cid: ?[]const u8 = if (ws == a.tabs.active) a.selected else id;
+            if (a.tabs.splits.items[ws]) |split| {
+                for (0..split.panes.items.len) |pane_ix| {
+                    const g = &split.groups[pane_ix];
+                    const pane_cid = if (ws == a.tabs.active and pane_ix == split.focus)
+                        a.selected
+                    else if (pane_ix == split.focus)
+                        id
+                    else
+                        split.panes.items[pane_ix];
+                    if (g.items.items.len > 1) {
+                        for (0..g.items.items.len) |pt_ix| {
+                            const cid = if (pt_ix == g.active) pane_cid else g.items.items[pt_ix].chat;
+                            stabs.append(c.alloc(), .{
+                                .ws = ws,
+                                .pane = pane_ix,
+                                .tab = pt_ix,
+                                .chat_id = cid,
+                                .active = ws == a.tabs.active and pane_ix == split.focus and pt_ix == g.active,
+                            }) catch return;
+                        }
+                    } else {
+                        stabs.append(c.alloc(), .{
+                            .ws = ws,
                             .pane = pane_ix,
-                            .chat_id = cid,
-                            .active = ix == a.tabs.active and pane_ix == split.focus,
+                            .chat_id = pane_cid,
+                            .active = ws == a.tabs.active and pane_ix == split.focus,
                         }) catch return;
                     }
-                    continue;
                 }
+            } else {
+                stabs.append(c.alloc(), .{
+                    .ws = ws,
+                    .chat_id = active_cid,
+                    .active = ws == a.tabs.active,
+                }) catch return;
             }
-            const singleton = if (a.tabs.splits.items[ix]) |split|
+            if (a.tabs.items.items.len == 1 and stabs.items.len <= 1) continue;
+            const singleton = if (a.tabs.splits.items[ws]) |split|
                 split.panes.items.len == 1 and split.groups[0].items.items.len == 1
             else
                 true;
             if (singleton) if (id) |chat_id| if (a.findChat(chat_id)) |chat| {
                 if (!chat.archived and listed(a, chat)) continue;
             };
-            rows.append(c.alloc(), .{
-                .ws = ix,
-                .chat_id = if (ix == a.tabs.active) a.selected else id,
-                .active = ix == a.tabs.active,
+            sessions.append(c.alloc(), .{
+                .ws = ws,
+                .title_chat_id = active_cid,
+                .active = ws == a.tabs.active,
+                .tabs = stabs.items,
             }) catch return;
         }
     }
-    if (rows.items.len == 0) return;
+    if (sessions.items.len == 0) return;
     ui.key(c, "sidebar-open-workspaces");
-    const list = ui.div(c).column().wFull().maxH(240).px(8).pt(6).gap(2).scrollY();
+    const list = ui.div(c).column().wFull().maxH(260).px(8).pt(6).gap(2).scrollY();
     defer list.end();
-    if (a.tabs.items.items.len == 1 and rows.items.len > 1) {
-        const h = ui.div(c).row().px(4).pb(2);
-        defer h.end();
-        ui.text(c, c.print("Tabs · {d}", .{rows.items.len}), .{ .size = 11, .line_height = 18, .color = k.muted.alpha(0.8) });
-    }
-    for (rows.items, 0..) |r, idx| {
-        const title = if (r.chat_id) |chat_id| (if (a.findChat(chat_id)) |chat| chatLabel(chat) else "New session") else "New session";
-        ui.key(c, c.print("workspace-session-{d}", .{idx}));
-        var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).clip().control();
-        if (r.active) {
-            row = row.bg(if (k.is_harp) k.active else k.selected);
-            if (k.is_harp) row = row.border(k.border_strong).borderW(0.5).shadows(&.{.{ .color = .{ .a = if (k.dark) 0.16 else 0.06 }, .blur = 2, .y = 1 }});
-        } else {
-            row = row.hover(k.hover.alpha(0.45));
-        }
-        defer row.end();
-        const hovered = row.hovered();
-        var closed = false;
+    for (sessions.items, 0..) |sess, idx| {
+        const title = if (sess.title_chat_id) |chat_id| (if (a.findChat(chat_id)) |chat| chatLabel(chat) else "New session") else "New session";
+        const multi_tabs = sess.tabs.len > 1;
         {
-            const mark = ui.div(c).row().size(20, 20).center();
-            defer mark.end();
-            if (hovered and rows.items.len > 1 and (r.pane != null or r.tab != null)) {
-                const close_btn = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.12));
-                defer close_btn.end();
-                if (close_btn.clicked()) {
-                    closed = true;
-                    if (r.ws != a.tabs.active) a.showTab(r.ws);
-                    if (r.tab) |t| {
-                        @import("view_tab_strip.zig").queue(a, .{ .close_panel_tab = .{ .pane = r.pane orelse 0, .tab = t } });
-                    } else if (r.pane) |p| {
-                        @import("view_tab_strip.zig").queue(a, .{ .close = .{ .chat = p } });
+            ui.key(c, c.print("workspace-session-{d}", .{idx}));
+            var row = ui.div(c).row().wFull().h(32).px(8).gap(7).itemsCenter().rounded(7).clip().control();
+            if (sess.active and !multi_tabs) {
+                row = row.bg(if (k.is_harp) k.active else k.selected);
+                if (k.is_harp) row = row.border(k.border_strong).borderW(0.5).shadows(&.{.{ .color = .{ .a = if (k.dark) 0.16 else 0.06 }, .blur = 2, .y = 1 }});
+            } else if (sess.active and multi_tabs) {
+                row = row.bg(k.ink(if (k.dark) 0.07 else 0.04)).hover(k.hover.alpha(0.45));
+            } else {
+                row = row.hover(k.hover.alpha(0.45));
+            }
+            defer row.end();
+            const hovered = row.hovered();
+            var closed = false;
+            {
+                const mark = ui.div(c).row().size(20, 20).center();
+                defer mark.end();
+                if (hovered and !multi_tabs and sessions.items.len > 1) {
+                    const close_btn = ui.div(c).row().size(18, 18).center().rounded(4).hover(k.wash(0.12));
+                    defer close_btn.end();
+                    if (close_btn.clicked()) {
+                        closed = true;
+                        @import("view_tab_strip.zig").queue(a, .{ .close_global_tab = sess.ws });
+                    }
+                    icons.icon(c, .close, 12, k.muted, 0);
+                } else {
+                    icons.icon(c, .widget, 14, if (sess.active) k.text else k.muted, 0);
+                }
+            }
+            const badge_room: f32 = if (multi_tabs) 28 else 0;
+            kit.ellipsisText(c, title, .{ .size = 13, .weight = if (multi_tabs) theme.ui_medium_weight else .regular, .line_height = kit.measured(13 * 1.618), .color = k.text }, @max(0, widthOf(a) - 2 * 8 - 2 * 8 - 20 - 7 - 22 - 7 - badge_room));
+            if (multi_tabs) {
+                const spacer = ui.div(c).row().grow();
+                spacer.end();
+                const pill = ui.div(c).row().h(18).minW(18).px(5).center().rounded(9).bg(k.ink(if (k.dark) 0.12 else 0.07));
+                defer pill.end();
+                ui.text(c, c.print("{d}", .{sess.tabs.len}), .{ .size = 10.5, .weight = theme.ui_medium_weight, .color = k.muted });
+            }
+            if (!closed and row.clicked()) {
+                if (sess.ws != a.tabs.active) a.showTab(sess.ws);
+            }
+        }
+        if (multi_tabs) {
+            const tree = ui.div(c).column().wFull().pl(16).pr(2).pt(1).pb(3).gap(1);
+            defer tree.end();
+            for (sess.tabs, 0..) |t, t_ix| {
+                const tab_title = if (t.chat_id) |cid| (if (a.findChat(cid)) |chat| chatLabel(chat) else "New tab") else "New tab";
+                ui.key(c, c.print("workspace-session-{d}-tab-{d}", .{ idx, t_ix }));
+                const trow_wrap = ui.div(c).row().wFull().h(28).itemsCenter();
+                defer trow_wrap.end();
+                // Vertical tree guide rail connecting the tab to its parent Session.
+                const rail = ui.div(c).row().w(10).hFull().center();
+                ui.div(c).size(1.5, if (t_ix + 1 == sess.tabs.len) 18 else 28).rounded(1).bg(if (t.active) k.text.alpha(0.55) else k.border_strong.alpha(0.65)).end();
+                rail.end();
+                var trow = ui.div(c).row().grow().w(0).h(28).px(7).gap(6).itemsCenter().rounded(6).clip().control();
+                if (t.active) {
+                    trow = trow.bg(if (k.is_harp) k.active else k.selected);
+                    if (k.is_harp) trow = trow.border(k.border_strong).borderW(0.5).shadows(&.{.{ .color = .{ .a = if (k.dark) 0.16 else 0.06 }, .blur = 2, .y = 1 }});
+                } else {
+                    trow = trow.hover(k.hover.alpha(0.45));
+                }
+                defer trow.end();
+                const thovered = trow.hovered();
+                var tclosed = false;
+                {
+                    const tmark = ui.div(c).row().size(18, 18).center();
+                    defer tmark.end();
+                    if (thovered) {
+                        const close_btn = ui.div(c).row().size(16, 16).center().rounded(4).hover(k.wash(0.12));
+                        defer close_btn.end();
+                        if (close_btn.clicked()) {
+                            tclosed = true;
+                            if (t.flat) {
+                                @import("view_tab_strip.zig").queue(a, .{ .close_global_tab = t.tab orelse 0 });
+                            } else {
+                                if (t.ws != a.tabs.active) a.showTab(t.ws);
+                                if (t.tab) |pt| {
+                                    @import("view_tab_strip.zig").queue(a, .{ .close_panel_tab = .{ .pane = t.pane orelse 0, .tab = pt } });
+                                } else if (t.pane) |p| {
+                                    @import("view_tab_strip.zig").queue(a, .{ .close = .{ .chat = p } });
+                                }
+                            }
+                        }
+                        icons.icon(c, .close, 11, k.muted, 0);
+                    } else {
+                        icons.icon(c, .@"chat-round-line", 13, if (t.active) k.text else k.muted, 0);
                     }
                 }
-                icons.icon(c, .close, 12, k.muted, 0);
-            } else if (r.pane != null and a.tabs.items.items.len == 1) {
-                ui.text(c, c.print("{d}", .{idx + 1}), .{ .size = 11, .color = k.muted.alpha(0.7) });
-            } else {
-                icons.icon(c, .widget, 14, k.muted, 0);
+                kit.ellipsisText(c, tab_title, .{ .size = 12.5, .line_height = kit.measured(12.5 * 1.5), .color = if (t.active) k.text else k.muted }, @max(0, widthOf(a) - 16 - 16 - 10 - 14 - 18 - 6 - 18));
+                if (!tclosed and trow.clicked()) {
+                    if (t.flat) {
+                        a.showTab(t.tab orelse 0);
+                    } else {
+                        if (t.ws != a.tabs.active) a.showTab(t.ws);
+                        if (t.pane) |p| {
+                            a.focusPane(p);
+                            a.view.strip.focused = .{ .chat = p };
+                        }
+                        if (t.tab) |pt| a.showPaneTab(pt);
+                    }
+                }
             }
-        }
-        kit.ellipsisText(c, title, .{ .size = 13, .line_height = kit.measured(13 * 1.618), .color = k.text }, @max(0, widthOf(a) - 2 * 8 - 2 * 8 - 20 - 7 - 22 - 7));
-        if (!closed and row.clicked()) {
-            if (r.ws != a.tabs.active) a.showTab(r.ws);
-            if (r.pane) |p| {
-                a.focusPane(p);
-                a.view.strip.focused = .{ .chat = p };
-            }
-            if (r.tab) |t| a.showPaneTab(t);
         }
     }
 }

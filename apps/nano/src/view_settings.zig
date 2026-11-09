@@ -159,6 +159,7 @@ fn navRow(c: *ui.Context, k: theme.Colors, s: Section, selected: bool) bool {
 
 /// The open section's page.
 pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
+    c.scroll_scene_ok = false;
     {
         // GPUI's settings rail: shown while the page scrolls (`popover::rail`),
         // with a nanoui that has overlay bars (justrach/nanoui#21).
@@ -239,7 +240,7 @@ pub fn fieldLabel(c: *ui.Context, k: theme.Colors, label: []const u8) void {
 /// box pads by its width.
 pub fn card(c: *ui.Context, k: theme.Colors) ui.Div {
     space(c, 24);
-    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell).clip();
+    return ui.div(c).column().wFull().p(1).rounded(12).border(k.border).borderW(1).bg(if (k.frosted) k.card else k.shell);
 }
 
 /// `card_row`: 20 by 14 inside, a line above all but the first.

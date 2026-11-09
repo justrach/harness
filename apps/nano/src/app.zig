@@ -954,22 +954,15 @@ pub const App = struct {
     /// "+", ⌘T: a new chat in a tab of its own, with the picks of the one
     /// left and an empty prompt.
     pub fn newTab(a: *App) void {
-        var d = drafts.canvas(a) catch return;
-        const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
-        const focus_pane = if (a.tabs.layout()) |s| s.focus else null;
-        a.tabs.park(a.tabs.active, focus_pane, d);
-        a.tabs.newTab();
-        a.view.strip.focused = .{ .chat = 0 };
-        a.view.strip.expanded = null;
-        a.view.strip.menu = null;
-        a.view.strip.pending_folder = null;
-        a.select(null, null);
-        drafts.adopt(a, fresh);
+        a.addChatTab(false);
     }
 
     pub fn addChatTab(a: *App, append: bool) void {
         var d = drafts.canvas(a) catch return;
         const fresh = a.freshPanelDraft(d) catch return d.deinit(a.gpa);
+        if (a.tabs.layout() == null and a.tabs.hasIsolatedWorkspaces()) {
+            a.tabs.isolateWorkspace() catch {};
+        }
         if (a.tabs.layout() != null) {
             const inserted = if (append) a.tabs.appendPaneTab(d) else a.tabs.newPaneTab(d);
             inserted catch {
@@ -982,6 +975,9 @@ pub const App = struct {
             a.tabs.park(a.tabs.active, null, d);
             a.tabs.newTab();
         }
+        a.view.strip.expanded = null;
+        a.view.strip.menu = null;
+        a.view.strip.pending_folder = null;
         a.select(null, null);
         drafts.adopt(a, fresh);
     }

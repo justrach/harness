@@ -545,6 +545,7 @@ pub const Store = struct {
         // The session uses the migrated choices even if the first write fails;
         // the next launch retries the copy from the still-shared document.
         s.apply(body);
+        if (!compactDefaultApplied(body)) s.prefs.transcript_compact_mode = true;
         s.fresh = false;
         const own = s.path orelse return;
         const tmp = std.fmt.allocPrint(a, "{s}.nano-tmp", .{own}) catch return;

@@ -188,7 +188,7 @@ pub fn view(a: *App, c: *ui.Context) void {
             if (k.is_harp) {
                 const wrap = ui.div(c).row().pt(sidebar.titlebar_h + 8).pr(8).pb(8).hFull().wFull();
                 defer wrap.end();
-                const card = ui.div(c).column().grow().w(0).hFull().p(1).rounded(10).border(k.border).borderW(1).bg(k.background);
+                const card = ui.div(c).column().grow().w(0).hFull().p(1).rounded(10).border(k.border).borderW(1).bg(k.background).clip();
                 defer card.end();
                 settings_view.page(c, a, k);
             } else {
