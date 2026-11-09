@@ -69,29 +69,12 @@ pub fn build(b: *std.Build) void {
         .{ .name = "themes_json", .module = themes_json },
     };
 
-    // Every release mode ships stripped; ReleaseSafe is the shipped one.
-    const lean_release = optimize != .debug;
-    const no_unwind = lean_release and target.result.os.tag != .windows;
-    const app_mod = b.createModule(.{
+    const exe = b.addExecutable(.{ .name = "harness-nano", .root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .strip = lean_release,
-        .link_libc = true,
-        .unwind_tables = if (lean_release) .none else null,
-        .omit_frame_pointer = if (lean_release) true else null,
-        .error_tracing = if (lean_release) false else null,
+        .strip = optimize != .debug,
         .imports = imports,
-    });
-    const exe = b.addExecutable(.{ .name = "harness-nano", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/entry.zig"),
-        .target = target,
-        .optimize = if (optimize == .safe) .small else optimize,
-        .strip = lean_release,
-        .link_libc = true,
-        .unwind_tables = if (no_unwind) .none else null,
-        .omit_frame_pointer = if (lean_release) true else null,
-        .imports = &.{.{ .name = "nano", .module = app_mod }},
     }) });
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
