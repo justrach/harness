@@ -564,7 +564,7 @@ pub fn default_registry() -> HarnessRegistry {
             id: HarnessId::Graff,
             name: "graff".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,

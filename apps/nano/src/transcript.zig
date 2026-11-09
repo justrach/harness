@@ -63,6 +63,7 @@ pub const Entry = struct {
     role: Role,
     status: EntryStatus,
     parts: std.ArrayList(Part) = .empty,
+    cached_h: f32 = 0,
 
     fn deinit(e: *Entry, gpa: Allocator) void {
         gpa.free(e.id);

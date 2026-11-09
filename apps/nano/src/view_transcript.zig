@@ -35,8 +35,9 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
     const col = columnWidth(mainWidth(c, a));
     // The first row sits 64 points down the window, under the title bar.
     // Rows settle at the bottom, over the composer, until they fill it.
-    ui.scroll(c, .{ .grow = 1, .width = .fill, .padding = .{ .top = 64 - sidebar.titlebar_h, .bottom = 24 + 8 + 10 }, .align_items = .center, .justify = .end, .follow_end = true });
+    const scroll = c.open(.{ .grow = 1, .width = .fill, .padding = .{ .top = 64 - sidebar.titlebar_h, .bottom = 24 + 8 + 10 }, .align_items = .center, .justify = .end, .follow_end = true, .scroll = true, .direction = .column }, null);
     defer ui.end(c);
+    const scroll_rect = c.rects.get(c.node(scroll).id);
     const body = ui.div(c).column().w(col);
     defer body.end();
     const entries = a.transcript.entries.items;
@@ -46,9 +47,22 @@ pub fn transcript(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.text(c, if (a.w_doc.id != null) "Loading…" else "Nothing here yet.", .{ .size = 13, .color = k.faint });
         return;
     }
+    const streaming = entries[entries.len - 1].status == .streaming;
     for (entries, 0..) |*e, i| {
-        ui.key(c, c.print("entry-{s}", .{e.id}));
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = if (e.role == .user) 16 else 8 } }, .none, null);
+        ui.key(c, c.print("entry-{s}", .{e.id}));
+        const prev = c.rects.get(c.peekId(null));
+        if (prev) |r| if (r.h > 0) {
+            e.cached_h = r.h;
+        };
+        if (streaming and i + 2 < entries.len and e.status != .streaming and e.cached_h > 0) {
+            if (scroll_rect) |view| if (prev) |r| {
+                if (r.y + r.h < view.y - 600 or r.y > view.y + view.h + 600) {
+                    _ = c.leaf(.{ .width = .fill, .height = .{ .px = e.cached_h } }, .none, null);
+                    continue;
+                }
+            };
+        }
         switch (e.role) {
             .user => user(c, k, e, col),
             .assistant => assistant(c, a, k, e, i + 1 == entries.len),
