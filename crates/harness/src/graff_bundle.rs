@@ -412,6 +412,27 @@ pub fn maybe_check_soon() {
     });
 }
 
+fn missing_nanocua_in(home: &Path) -> bool {
+    cfg!(target_os = "macos")
+        && !home
+            .join("Applications/nanocua.app/Contents/MacOS/nanocua")
+            .is_file()
+}
+
+fn stable_already_current(
+    managed: &Path,
+    home: Option<&Path>,
+    latest: &[u64],
+) -> Option<UpdateOutcome> {
+    if home.is_some_and(missing_nanocua_in) {
+        return None;
+    }
+    let current = version_of(managed)?;
+    (current.as_slice() >= latest).then(|| UpdateOutcome::AlreadyCurrent {
+        version: display_version(&current),
+    })
+}
+
 /// Check CodeGraff's latest stable GitHub release before fetching any assets.
 /// GitHub's `/releases/latest` excludes prereleases, so an automatic update
 /// never silently changes the user to a beta channel.
@@ -422,12 +443,9 @@ pub async fn check_and_update_managed() -> anyhow::Result<UpdateOutcome> {
     }
     let client = release_client()?;
     let (tag, latest) = latest_stable_release(&client).await?;
-    if let Some(current) = version_of(&managed)
-        && current >= latest
-    {
-        return Ok(UpdateOutcome::AlreadyCurrent {
-            version: display_version(&current),
-        });
+    let home = crate::executable::home_dir();
+    if let Some(outcome) = stable_already_current(&managed, home.as_deref(), &latest) {
+        return Ok(outcome);
     }
     let outcome = install_release(&client, &tag, false, false).await?;
     if matches!(outcome, UpdateOutcome::Updated { .. }) {
@@ -528,62 +546,15 @@ async fn install_release(
                 work.join(GRAFF_EXE)
             };
             anyhow::ensure!(binary.is_file(), "{asset} has no graff binary");
-            let fetched = version_of(&binary)
-                .ok_or_else(|| anyhow::anyhow!("the downloaded graff didn't run"))?;
-            if beta {
-                anyhow::ensure!(
-                    installed_beta_tag(&binary).as_deref() == Some(tag.as_str()),
-                    "downloaded graff version does not match {tag}"
-                );
-            }
-            // Recheck after the download so overlapping manual and automatic
-            // updates cannot replace a newer managed copy with an older one.
-            let current = version_of(&managed);
-            let old_beta = installed_beta_tag(&managed);
-            if !beta
-                && !allow_channel_switch
-                && let Some(old_beta) = old_beta.as_deref()
-            {
-                return Ok(UpdateOutcome::AlreadyCurrent {
-                    version: old_beta.to_string(),
-                });
-            }
-            if beta
-                && current_is_at_least_target(
-                    current.as_deref(),
-                    old_beta.as_deref(),
-                    &fetched,
-                    Some(&tag),
-                )
-            {
-                if let Some(old_beta) = old_beta {
-                    return Ok(UpdateOutcome::AlreadyCurrent { version: old_beta });
-                }
-                anyhow::bail!(
-                    "the installed stable Graff is at least as new as the available beta"
-                );
-            }
-            if !beta
-                && current_is_at_least_target(
-                    current.as_deref(),
-                    old_beta.as_deref(),
-                    &fetched,
-                    None,
-                )
-            {
-                return Ok(UpdateOutcome::AlreadyCurrent {
-                    version: display_version(current.as_deref().unwrap_or(&fetched)),
-                });
-            }
-            install_file(&binary, &managed)?;
-            Ok(UpdateOutcome::Updated {
-                from: current.as_deref().map(display_version),
-                to: if beta {
-                    tag.clone()
-                } else {
-                    display_version(&fetched)
-                },
-            })
+            let home = crate::executable::home_dir();
+            install_unpacked_release(
+                &binary,
+                &managed,
+                home.as_deref(),
+                &tag,
+                beta,
+                allow_channel_switch,
+            )
         })();
         let _ = std::fs::remove_dir_all(&work);
         result
@@ -595,6 +566,80 @@ async fn install_release(
         crate::codedb_bundle::maybe_check_soon();
     }
     Ok(outcome)
+}
+
+fn install_unpacked_release(
+    binary: &Path,
+    managed: &Path,
+    home: Option<&Path>,
+    tag: &str,
+    beta: bool,
+    allow_channel_switch: bool,
+) -> anyhow::Result<UpdateOutcome> {
+    let fetched =
+        version_of(binary).ok_or_else(|| anyhow::anyhow!("the downloaded graff didn't run"))?;
+    if beta {
+        anyhow::ensure!(
+            installed_beta_tag(binary).as_deref() == Some(tag),
+            "downloaded graff version does not match {tag}"
+        );
+    }
+    // Recheck after the download so overlapping manual and automatic
+    // updates cannot replace a newer managed copy with an older one.
+    let current = version_of(managed);
+    let old_beta = installed_beta_tag(managed);
+    if !beta
+        && !allow_channel_switch
+        && let Some(old_beta) = old_beta.as_deref()
+    {
+        return Ok(UpdateOutcome::AlreadyCurrent {
+            version: old_beta.to_string(),
+        });
+    }
+    if beta
+        && current_is_at_least_target(current.as_deref(), old_beta.as_deref(), &fetched, Some(tag))
+    {
+        if let Some(old_beta) = old_beta {
+            return Ok(UpdateOutcome::AlreadyCurrent { version: old_beta });
+        }
+        anyhow::bail!("the installed stable Graff is at least as new as the available beta");
+    }
+    if !beta && current_is_at_least_target(current.as_deref(), old_beta.as_deref(), &fetched, None)
+    {
+        // Even when graff itself is current, an install updated before nanocua
+        // handling existed still needs the app from the unpacked tarball (#1819).
+        if let (Some(home), Some(dir)) = (home, binary.parent()) {
+            let apps = home.join("Applications");
+            let installed = if missing_nanocua_in(home) {
+                crate::nanocua_bundle::install(dir, &apps)
+            } else {
+                crate::nanocua_bundle::seed(dir, &apps)
+            };
+            if let Err(error) = installed {
+                tracing::warn!(%error, "could not install nanocua");
+            }
+        }
+        return Ok(UpdateOutcome::AlreadyCurrent {
+            version: display_version(current.as_deref().unwrap_or(&fetched)),
+        });
+    }
+    install_file(binary, managed)?;
+    // The computer-use app graff ships beside itself. It has its own
+    // uses, so failing to place it doesn't undo graff's update.
+    if !beta
+        && let (Some(home), Some(dir)) = (home, binary.parent())
+        && let Err(error) = crate::nanocua_bundle::install(dir, &home.join("Applications"))
+    {
+        tracing::warn!(%error, "could not install nanocua");
+    }
+    Ok(UpdateOutcome::Updated {
+        from: current.as_deref().map(display_version),
+        to: if beta {
+            tag.to_string()
+        } else {
+            display_version(&fetched)
+        },
+    })
 }
 
 fn expected_sha(sums: &str, asset: &str) -> Option<String> {
@@ -814,5 +859,133 @@ mod tests {
                 0o755
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fake_graff(path: &Path, version_line: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fake_nanocua(dir: &Path, version: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let macos = dir.join("nanocua.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::write(
+            dir.join("nanocua.app/Contents/Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>{version}</string></dict></plist>"#
+            ),
+        )
+        .unwrap();
+        let exe = macos.join("nanocua");
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn current_managed_graff_still_installs_missing_nanocua() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let managed = home.join(".harness/bin/graff");
+        fake_graff(&managed, "graff 0.302.71");
+
+        // Managed graff is already at 0.302.71, but ~/Applications/nanocua.app is missing:
+        // the pre-download check must not short-circuit as AlreadyCurrent (#1819).
+        assert!(missing_nanocua_in(&home));
+        assert_eq!(
+            stable_already_current(&managed, Some(&home), &[0, 302, 71]),
+            None
+        );
+
+        let unpacked = dir.path().join("unpacked");
+        let unpacked_graff = unpacked.join("graff");
+        fake_graff(&unpacked_graff, "graff 0.302.71");
+        fake_nanocua(&unpacked, "0.302.71");
+
+        let outcome = install_unpacked_release(
+            &unpacked_graff,
+            &managed,
+            Some(&home),
+            "v0.302.71",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            UpdateOutcome::AlreadyCurrent {
+                version: "0.302.71".into()
+            }
+        );
+        assert!(
+            home.join("Applications/nanocua.app/Contents/MacOS/nanocua")
+                .is_file()
+        );
+        assert!(!missing_nanocua_in(&home));
+        assert_eq!(
+            stable_already_current(&managed, Some(&home), &[0, 302, 71]),
+            Some(UpdateOutcome::AlreadyCurrent {
+                version: "0.302.71".into()
+            })
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stable_update_installs_nanocua_while_beta_leaves_applications_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let managed = home.join(".harness/bin/graff");
+        fake_graff(&managed, "graff 0.302.70");
+
+        let beta_unpacked = dir.path().join("beta");
+        let beta_graff = beta_unpacked.join("graff");
+        fake_graff(&beta_graff, "graff 0.302.72-beta.4.1");
+        fake_nanocua(&beta_unpacked, "0.302.72");
+        let beta_outcome = install_unpacked_release(
+            &beta_graff,
+            &managed,
+            Some(&home),
+            "v0.302.72-beta.4.1",
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(matches!(beta_outcome, UpdateOutcome::Updated { .. }));
+        assert!(
+            !home.join("Applications/nanocua.app").exists(),
+            "beta channel does not overwrite ~/Applications/nanocua.app"
+        );
+
+        let stable_unpacked = dir.path().join("stable");
+        let stable_graff = stable_unpacked.join("graff");
+        fake_graff(&stable_graff, "graff 0.302.73");
+        fake_nanocua(&stable_unpacked, "0.302.73");
+        let stable_outcome = install_unpacked_release(
+            &stable_graff,
+            &managed,
+            Some(&home),
+            "v0.302.73",
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            stable_outcome,
+            UpdateOutcome::Updated {
+                from: Some("0.302.72".into()),
+                to: "0.302.73".into(),
+            }
+        );
+        assert!(
+            home.join("Applications/nanocua.app/Contents/MacOS/nanocua")
+                .is_file()
+        );
     }
 }

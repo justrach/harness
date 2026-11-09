@@ -18,13 +18,21 @@ fn prepare_inner() -> std::io::Result<()> {
     if contents.file_name().is_none_or(|name| name != "Contents") {
         return Ok(());
     }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(());
+    };
+    // The computer-use app graff's agents connect to. It has its own uses, so
+    // failing to place it doesn't stop graff being installed.
+    if let Err(error) = harness_adapters::nanocua_bundle::seed(
+        &contents.join("Resources"),
+        &home.join("Applications"),
+    ) {
+        tracing::warn!(%error, "could not install bundled nanocua");
+    }
     let bundled = contents.join("Resources/bin/graff");
     if !bundled.is_file() {
         return Ok(());
     }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Ok(());
-    };
     let managed = home.join(".harness/bin/graff");
     let should_copy = match (version(&bundled), version(&managed)) {
         (_, None) => true,
