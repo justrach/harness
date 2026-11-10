@@ -17,6 +17,34 @@ pub fn none(method: []const u8) Request(Empty) {
     return .{ .method = method, .params = rpc.empty };
 }
 
+// ── bots ─────────────────────────────────────────────────────────────
+
+/// One change to the user's bots (`BotAction`). Which fields count depends
+/// on the action: `text` is the job, the instruction, a memory entry or the
+/// about text.
+pub const BotAction = struct {
+    action: []const u8,
+    bot: ?[]const u8 = null,
+    routine: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    when: ?[]const u8 = null,
+    project: ?[]const u8 = null,
+    primary: ?bool = null,
+};
+
+pub fn botAction(p: BotAction) Request(BotAction) {
+    return .{ .method = "BotAction", .params = p };
+}
+
+pub fn botDetail(bot: []const u8) Request(struct { bot: []const u8 }) {
+    return .{ .method = "BotDetail", .params = .{ .bot = bot } };
+}
+
+/// One run of a bot in its standing chat: a message, or one of its routines.
+pub fn runBot(bot: []const u8, message: ?[]const u8, routine: ?[]const u8) Request(struct { bot: []const u8, message: ?[]const u8, routine: ?[]const u8 }) {
+    return .{ .method = "RunBot", .params = .{ .bot = bot, .message = message, .routine = routine } };
+}
+
 // ── chats ────────────────────────────────────────────────────────────
 
 pub const Config = struct {

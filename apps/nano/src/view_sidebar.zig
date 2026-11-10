@@ -35,6 +35,8 @@ pub fn sidebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         openWorkspaces(c, a, k);
         lists(c, a, k);
     }
+    // Contacts, not chats in a folder: shown on every project filter.
+    @import("view_bots.zig").group(c, a, k);
     footer(c, a, k);
 }
 
@@ -291,6 +293,8 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
 /// shows its own results in their place: view_sidebar_search.zig.)
 fn listed(a: *const App, chat: workspace.Chat) bool {
     if (chat.parent_chat_id != null) return false;
+    // A bot's standing chat is its row in the Bots group, not a second one here.
+    if (a.bots.ofChat(chat.id) != null) return false;
     if (chat.space_id) |sid| if (a.findSpace(sid) == null) return false;
     // A filter on a project that's gone shows them all, as its label does.
     if (a.view.filter) |f| if (a.findSpace(f) != null) if (chat.space_id == null or !std.mem.eql(u8, chat.space_id.?, f)) return false;
@@ -366,7 +370,9 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
         for (a.sessions.items) |s| session_map.put(gpa, s.chat_id, s) catch {};
     }
     for (a.chats.items, 0..) |ch, idx| {
-        if (ch.parent_chat_id != null) {
+        // A subagent's chat, or a bot's standing chat (its row is in the
+        // Bots group): not a session row.
+        if (ch.parent_chat_id != null or a.bots.ofChat(ch.id) != null) {
             out[idx] = .{};
             continue;
         }
@@ -1254,7 +1260,10 @@ fn sessionRow(c: *ui.Context, a: *App, k: theme.Colors, ch: workspace.Chat) void
     const drag = @import("view_drag.zig");
     const it = r.interaction();
     if (it.pressed and c.input.pressed) drag.press(c, a, ch.id, it.rect);
-    if (r.clicked() and !selected and !drag.dragging(a)) a.openChatInTab(ch.id);
+    if (r.clicked() and !drag.dragging(a)) {
+        // A Bots page sits in the chat's place: its own row brings it back.
+        if (selected) @import("bots.zig").close(a) else a.openChatInTab(ch.id);
+    }
 }
 
 fn statusSlot(c: *ui.Context, k: theme.Colors, mark: workspace.Mark) void {

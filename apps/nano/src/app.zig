@@ -452,6 +452,8 @@ pub const App = struct {
     settings: @import("settings.zig").Store,
     /// Settings › MCP servers, kept between visits.
     mcp: @import("view_settings_mcp.zig").Mcp,
+    /// graff Bots: the user's standing roles, and the page shown for them.
+    bots: @import("bots.zig").Bots,
     /// The workspace's scope, the Harness account and the Codegraff
     /// sign-in, for the account badge's menu (app_account.zig).
     account: account.Account = .{},
@@ -488,6 +490,7 @@ pub const App = struct {
             .tabs = .init(gpa),
             .settings = .{ .gpa = gpa, .io = io },
             .mcp = .init(gpa),
+            .bots = .init(gpa),
             .transcript = .{ .gpa = gpa },
             .harnesses = .init(gpa),
             .models = .init(gpa),
@@ -546,6 +549,7 @@ pub const App = struct {
         a.cloud_sandboxes.deinit();
         a.settings.deinit();
         a.mcp.deinit(a.gpa);
+        a.bots.deinit(a.gpa);
         a.view.deinit(a.gpa);
         question.deinit(a);
         queue_mod.deinit(a);
@@ -712,6 +716,7 @@ pub const App = struct {
         if (a.w_devices.id == null) a.w_devices = .{ .id = a.send_(requests.none("WatchDevices"), .of(App, a, onDevices)) };
         if (a.w_spaces.id == null) a.w_spaces = .{ .id = a.send_(requests.none("WatchSpaces"), .of(App, a, onSpaces)) };
         if (a.w_chats.id == null) a.w_chats = .{ .id = a.send_(requests.none("WatchChats"), .of(App, a, onChats)) };
+        @import("bots.zig").connected(a);
         if (a.w_sessions.id == null) a.w_sessions = .{ .id = a.send_(requests.none("WatchSessions"), .of(App, a, onSessions)) };
     }
 
@@ -1594,6 +1599,8 @@ pub const App = struct {
         a.view.focus_composer = true;
         // Another chat closes the Write page; its draft stays the old one's.
         a.view.write_open = false;
+        // And a Bots page, which sits in the chat's place.
+        a.bots.page = .none;
         @import("app_panes.zig").select(a, chat_id);
         a.notice_len = 0;
         queue_mod.stop(a);

@@ -44,6 +44,9 @@ test {
     _ = @import("view_settings_appearance.zig");
     _ = @import("view_drag.zig");
     _ = @import("view_settings_mcp.zig");
+    _ = @import("bots.zig");
+    _ = @import("view_bots.zig");
+    _ = @import("tests_ui_bots.zig");
     _ = @import("runners.zig");
     _ = @import("view_settings_github_ci.zig");
     _ = @import("view_settings_archived.zig");
