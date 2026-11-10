@@ -783,9 +783,10 @@ pub const Store = struct {
         switch (mode) {
             .zen => {
                 s.setText("sidebarOrganization", Organization.in_one_list.key());
-                s.set(.sidebar_show_harness, false);
+                s.set(.sidebar_show_harness, true);
+                s.set(.sidebar_show_project_icon, true);
                 s.set(.sidebar_show_branch, false);
-                s.set(.sidebar_show_project_icon, false);
+                s.set(.sidebar_show_project_label, false);
             },
             .developer => {
                 s.setText("sidebarOrganization", Organization.by_project.key());

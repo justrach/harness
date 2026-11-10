@@ -87,6 +87,13 @@ pub fn cases(gpa: std.mem.Allocator) ![]Case {
         // The project isn't a git checkout: no PR to watch or merge, answered.
         try case(gpa, "watch a branch's pull request", r.watchChangeRequest(.{ .cwd = dir, .branch = "main" }), true),
         try case(gpa, "merge a branch's pull request", r.mergeChangeRequest(.{ .cwd = dir, .branch = "main", .number = 90 }), false),
+        // Agent CLI update lifecycle (`harness-updates-v1`).
+        try case(gpa, "watch agent CLI updates", r.watchHarnessUpdates("host-parity"), true),
+        try case(gpa, "check agent CLI updates", r.checkHarnessUpdates("claude-code", "host-parity"), false),
+        try case(gpa, "apply an agent CLI update", r.applyHarnessUpdate("claude-code", "host-parity"), false),
+        try case(gpa, "cancel an agent CLI update", r.cancelHarnessUpdate("claude-code", "host-parity"), false),
+        try case(gpa, "dismiss an agent CLI update", r.dismissHarnessUpdate("claude-code", "2.1.322", "host-parity"), false),
+        try case(gpa, "set agent CLI auto-update policy", r.setHarnessUpdatePolicy("claude-code", true, "host-parity"), false),
     };
     return gpa.dupe(Case, &list);
 }

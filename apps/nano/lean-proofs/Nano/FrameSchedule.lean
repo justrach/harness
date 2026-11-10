@@ -975,4 +975,263 @@ theorem presets_govern_all_parts (part : MovingPart) :
     (HierarchyProfile.ofMode .developer).partEnabled part = true := by
   cases part <;> decide
 
+/-! ## Split-Pane Question, Tool Header & Session Footer Containment -/
+
+/-- Maximum width allotted to the single-line question preview inside a transcript
+`Question` chip (`view_question.zig:chip`), clamping the desktop `420px` ceiling to
+`col - fixedChrome` so narrow split panes never clip the pill at the divider. -/
+def questionChipTextCap (col fixedChrome cap : Nat) : Nat :=
+  min cap (col - fixedChrome)
+
+theorem question_chip_fits_column (col fixedChrome cap : Nat) (h : fixedChrome ≤ col) :
+    fixedChrome + questionChipTextCap col fixedChrome cap ≤ col ∧
+    questionChipTextCap col fixedChrome cap ≤ cap := by
+  unfold questionChipTextCap
+  omega
+
+theorem question_chip_preserves_wide_cap (col fixedChrome cap : Nat) (h : fixedChrome + cap ≤ col) :
+    questionChipTextCap col fixedChrome cap = cap := by
+  unfold questionChipTextCap
+  omega
+
+/-- Maximum scroll-body height for the docked agent-question wizard (`view_question.zig:panel`),
+reserving `chromeReserve` for header, text input, action footer, and pane breathing room. -/
+def questionPanelMaxBodyHeight (paneH chromeReserve minH maxH : Nat) : Nat :=
+  max minH (min maxH (paneH - chromeReserve))
+
+theorem question_panel_body_bounded (paneH chromeReserve minH maxH : Nat) (h : minH ≤ maxH) :
+    minH ≤ questionPanelMaxBodyHeight paneH chromeReserve minH maxH ∧
+    questionPanelMaxBodyHeight paneH chromeReserve minH maxH ≤ maxH := by
+  unfold questionPanelMaxBodyHeight
+  omega
+
+theorem question_panel_clears_chrome
+    (paneH chromeReserve minH maxH : Nat)
+    (_hbound : minH ≤ maxH)
+    (hroom : minH + chromeReserve ≤ paneH) :
+    questionPanelMaxBodyHeight paneH chromeReserve minH maxH + chromeReserve ≤ paneH := by
+  unfold questionPanelMaxBodyHeight
+  omega
+
+/-- Maximum width allotted to a folded tool-group or compact work-line title
+(`view_tool_tree.zig:group`, `view_transcript.zig:workLine`). -/
+def toolGroupTitleCap (col chevronChrome minCap : Nat) : Nat :=
+  max minCap (col - chevronChrome)
+
+theorem tool_group_title_fits_column
+    (col chevronChrome minCap : Nat)
+    (h : minCap + chevronChrome ≤ col) :
+    chevronChrome + toolGroupTitleCap col chevronChrome minCap ≤ col := by
+  unfold toolGroupTitleCap
+  omega
+
+/-- Progressive width budget for git checkout, branch, and worktree action chips
+inside an open chat's session footer (`view_session_footer.zig:session`).
+Guarantees no icon (`28px`) or chip minimum (`34px`) is ever sliced mid-glyph
+against the right-hand context indicator (`45%`) in narrow split panes. -/
+structure SessionFooterLayout where
+  pad             : Nat
+  showCheckout    : Bool
+  checkoutTextMax : Nat
+  showBranch      : Bool
+  branchTextMax   : Nat
+  showActions     : Bool
+deriving DecidableEq, Repr, BEq
+
+def sessionFooterFromInner (pad inner : Nat) : SessionFooterLayout :=
+  if inner < 28 then
+    { pad := 0, showCheckout := false, checkoutTextMax := 0, showBranch := false, branchTextMax := 0, showActions := false }
+  else if inner < 60 then
+    let textMax := if inner >= 54 then min 126 (inner - 34) else 0
+    { pad := pad, showCheckout := true, checkoutTextMax := textMax, showBranch := false, branchTextMax := 0, showActions := false }
+  else if inner < 132 then
+    let bMax := if inner >= 86 then min 126 (inner - 32 - 34) else 0
+    { pad := pad, showCheckout := true, checkoutTextMax := 0, showBranch := true, branchTextMax := bMax, showActions := false }
+  else
+    let each := (inner - 4) / 2
+    let textMax := min 126 (each - 34)
+    { pad := pad, showCheckout := true, checkoutTextMax := textMax, showBranch := true, branchTextMax := textMax, showActions := inner >= 360 }
+
+def sessionFooterLayout (slotW : Nat) : SessionFooterLayout :=
+  let pad := if slotW >= 200 then 10 else if slotW >= 36 then 4 else 0
+  sessionFooterFromInner pad (slotW - 2 * pad)
+
+/-- Minimum horizontal width required to draw `l`'s visible icons and pads without clipping an icon. -/
+def sessionFooterIconFloor (l : SessionFooterLayout) : Nat :=
+  let cW := if l.showCheckout then (if l.checkoutTextMax > 0 then 34 else 28) else 0
+  let bW := if l.showBranch then (if l.branchTextMax > 0 then 34 else 28) else 0
+  let gap := if l.showCheckout && l.showBranch then 4 else 0
+  let pads := if l.showCheckout || l.showBranch then 2 * l.pad else 0
+  pads + cW + gap + bW
+
+/-- Maximum horizontal width consumed by `l`'s pads, checkout chip, gap, and branch chip. -/
+def sessionFooterMaxLabelsWidth (l : SessionFooterLayout) : Nat :=
+  let cW := if l.showCheckout then (if l.checkoutTextMax > 0 then 34 + l.checkoutTextMax else 28) else 0
+  let bW := if l.showBranch then (if l.branchTextMax > 0 then 34 + l.branchTextMax else 28) else 0
+  let gap := if l.showCheckout && l.showBranch then 4 else 0
+  let pads := if l.showCheckout || l.showBranch then 2 * l.pad else 0
+  pads + cW + gap + bW
+
+theorem session_footer_inner_fits (pad inner : Nat) :
+    sessionFooterIconFloor (sessionFooterFromInner pad inner) ≤ 2 * pad + inner ∧
+    sessionFooterMaxLabelsWidth (sessionFooterFromInner pad inner) ≤ 2 * pad + inner := by
+  unfold sessionFooterFromInner
+  by_cases h1 : inner < 28
+  · simp [h1, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+  · by_cases h2 : inner < 60
+    · by_cases h2a : inner >= 54
+      · have hpos : 0 < min 126 (inner - 34) := by omega
+        simp [h1, h2, h2a, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+        omega
+      · simp [h1, h2, h2a, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+        omega
+    · by_cases h3 : inner < 132
+      · by_cases h3a : inner >= 86
+        · have hpos : 0 < min 126 (inner - 32 - 34) := by omega
+          simp [h1, h2, h3, h3a, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+          omega
+        · simp [h1, h2, h3, h3a, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+          omega
+      · have hpos : 0 < min 126 ((inner - 4) / 2 - 34) := by omega
+        simp [h1, h2, h3, hpos, sessionFooterIconFloor, sessionFooterMaxLabelsWidth]
+        omega
+
+theorem session_footer_never_overflows_slot (slotW : Nat) :
+    sessionFooterIconFloor (sessionFooterLayout slotW) ≤ slotW ∧
+    sessionFooterMaxLabelsWidth (sessionFooterLayout slotW) ≤ slotW := by
+  unfold sessionFooterLayout
+  by_cases h200 : slotW >= 200
+  · simp only [h200, ↓reduceIte]
+    have hfit := session_footer_inner_fits 10 (slotW - 2 * 10)
+    omega
+  · by_cases h36 : slotW >= 36
+    · simp only [h200, h36, ↓reduceIte]
+      have hfit := session_footer_inner_fits 4 (slotW - 2 * 4)
+      omega
+    · simp only [h200, h36, ↓reduceIte]
+      have hfit := session_footer_inner_fits 0 (slotW - 2 * 0)
+      omega
+
+theorem session_footer_wide_preserves_full_labels (slotW : Nat) (h : slotW ≥ 380) :
+    let l := sessionFooterLayout slotW
+    l.showCheckout = true ∧
+    l.checkoutTextMax = 126 ∧
+    l.showBranch = true ∧
+    l.branchTextMax = 126 ∧
+    l.showActions = true := by
+  unfold sessionFooterLayout sessionFooterFromInner
+  have h1 : slotW >= 200 := by omega
+  have h2 : ¬(slotW - 20 < 28) := by omega
+  have h3 : ¬(slotW - 20 < 60) := by omega
+  have h4 : ¬(slotW - 20 < 132) := by omega
+  have h5 : min 126 ((slotW - 20 - 4) / 2 - 34) = 126 := by omega
+  have h6 : decide (slotW - 20 ≥ 360) = true := by
+    rw [decide_eq_true_eq]
+    omega
+  simp [h1, h2, h3, h4, h5, h6]
+
+/-! ## Zeron Sidebar Titlebar Cluster, Smooth Disclosure & Agent-Update Island -/
+
+/-- Zeron sidebar titlebar cluster layout (`[◧]` at `88..112`, followed inside the
+sidebar header by `[←]`, `[→]`, `[+]`, and trailing `[⋯]`). -/
+structure SidebarTitlebarLayout where
+  toggleEnd : Nat
+  backX     : Nat
+  fwdX      : Nat
+  newX      : Nat
+  moreX     : Nat
+deriving DecidableEq, Repr, BEq
+
+def sidebarTitlebarLayout (sideW : Nat) : SidebarTitlebarLayout :=
+  let groupGap := if sideW >= 240 then 8 else 4
+  let toggleEnd := 88 + 24
+  let backX := toggleEnd + groupGap
+  let fwdX := backX + 24 + 2
+  let newX := fwdX + 24 + groupGap
+  let rightMargin := if sideW >= 240 then 8 else 4
+  let moreX := max (newX + 24 + 2) (sideW - rightMargin - 24)
+  { toggleEnd, backX, fwdX, newX, moreX }
+
+theorem sidebar_titlebar_disjoint_and_bounded (sideW : Nat) (h : sideW ≥ 224) :
+    let l := sidebarTitlebarLayout sideW
+    l.toggleEnd < l.backX ∧
+    l.backX + 24 < l.fwdX ∧
+    l.fwdX + 24 < l.newX ∧
+    l.newX + 24 < l.moreX ∧
+    l.moreX + 24 ≤ sideW := by
+  unfold sidebarTitlebarLayout
+  by_cases h240 : sideW >= 240
+  · simp [h240]
+    omega
+  · simp [h240]
+    omega
+
+/-- Smooth sidebar disclosure opacity percentage `35 + 65 * revealPct / 100`
+(`render_sidebar_disclosure_body` in Zeron `shell/spaces.rs`). -/
+def disclosureOpacityPct (revealPct : Nat) : Nat :=
+  let r := min 100 revealPct
+  35 + (65 * r) / 100
+
+theorem disclosure_opacity_bounded_and_endpoints :
+    disclosureOpacityPct 0 = 35 ∧
+    disclosureOpacityPct 100 = 100 ∧
+    ∀ r, 35 ≤ disclosureOpacityPct r ∧ disclosureOpacityPct r ≤ 100 := by
+  refine ⟨by decide, by decide, ?_⟩
+  intro r
+  simp only [disclosureOpacityPct]
+  omega
+
+/-- Zeron Agent-Update Island staged progress curve (`stage(reveal, lo, hi)` in
+`shell/harness_updates.rs`), modeled in integer percent `[0, 100]`. -/
+def updateStagePct (revealPct loPct hiPct : Nat) : Nat :=
+  if hiPct ≤ loPct then
+    if revealPct ≥ hiPct then 100 else 0
+  else if revealPct ≤ loPct then
+    0
+  else if revealPct ≥ hiPct then
+    100
+  else
+    ((revealPct - loPct) * 100) / (hiPct - loPct)
+
+theorem update_stage_bounded (revealPct loPct hiPct : Nat) :
+    updateStagePct revealPct loPct hiPct ≤ 100 := by
+  unfold updateStagePct
+  split
+  · split <;> omega
+  · split
+    · omega
+    · split
+      · omega
+      · exact Nat.div_le_of_le_mul (by omega)
+
+theorem update_stage_endpoints (loPct hiPct : Nat) (h : loPct < hiPct) :
+    updateStagePct loPct loPct hiPct = 0 ∧
+    updateStagePct hiPct loPct hiPct = 100 := by
+  unfold updateStagePct
+  have hle : ¬(hiPct ≤ loPct) := by omega
+  simp [hle]
+
+/-- Zeron Agent-Update Island target `[width, height]` (`render_harness_update_card`
+in `shell/harness_updates.rs`):
+- Collapsed chip: `(min compactW maxW, 38)`
+- Expanded card: `(min 360 maxW, 36 + 1 + min (64 * rows) 224)` (`3.5` visible rows max). -/
+def updateIslandTarget (expanded : Bool) (compactW maxW rows : Nat) : Nat × Nat :=
+  if !expanded then
+    (min compactW maxW, 38)
+  else
+    (min 360 maxW, 36 + 1 + min (64 * rows) 224)
+
+theorem update_island_fits_bounds (expanded : Bool) (compactW maxW rows : Nat) :
+    (updateIslandTarget expanded compactW maxW rows).1 ≤ maxW ∧
+    (updateIslandTarget expanded compactW maxW rows).2 ≤ 261 := by
+  unfold updateIslandTarget
+  cases expanded <;> simp <;> omega
+
+theorem update_island_expands_taller (compactW maxW rows : Nat) (hrows : rows ≥ 1) :
+    (updateIslandTarget false compactW maxW rows).2 <
+    (updateIslandTarget true compactW maxW rows).2 := by
+  unfold updateIslandTarget
+  simp
+  omega
+
 end Nano.FrameSchedule

@@ -330,9 +330,9 @@ test "desktop issues project picker, model picker, reopenClosedTab shortcuts and
     try h.init();
     defer h.deinit();
 
-    // #794: Top search trigger and bottom new-workspace button have distinct tooltips.
-    const more = h.a.view.more_anchor orelse return error.MissingMoreButton;
-    h.t.moveTo(more.x - 19, more.y + more.h / 2);
+    // #794: Search trigger and bottom new-workspace button have distinct tooltips.
+    const search_btn = h.a.view.search_anchor orelse return error.MissingSearchButton;
+    h.t.moveTo(search_btn.x + search_btn.w / 2, search_btn.y + search_btn.h / 2);
     h.t.advance(0.4);
     try testing.expectEqualStrings("Search sessions", h.t.tooltipText() orelse return error.MissingSearchTooltip);
     h.t.moveTo(600, 400);

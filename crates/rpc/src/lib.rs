@@ -328,6 +328,14 @@ pub mod methods {
     /// Request one managed-host update, deferred until no chats or terminals
     /// are active. Never fall back to ApplyUpdate on an older host.
     pub const QUEUE_UPDATE: &str = "QueueUpdate";
+
+    // Independently-installed agent CLI updates (ControlRpc, relay-forwardable).
+    pub const WATCH_HARNESS_UPDATES: &str = "WatchHarnessUpdates";
+    pub const CHECK_HARNESS_UPDATES: &str = "CheckHarnessUpdates";
+    pub const APPLY_HARNESS_UPDATE: &str = "ApplyHarnessUpdate";
+    pub const CANCEL_HARNESS_UPDATE: &str = "CancelHarnessUpdate";
+    pub const DISMISS_HARNESS_UPDATE: &str = "DismissHarnessUpdate";
+    pub const SET_HARNESS_UPDATE_POLICY: &str = "SetHarnessUpdatePolicy";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -545,7 +553,10 @@ mod tests {
             .await
             .unwrap();
         // Let the producer run well past the consumer queue before reading.
-        client.call("Echo", serde_json::json!("sync")).await.unwrap();
+        client
+            .call("Echo", serde_json::json!("sync"))
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let mut seen = Vec::new();
         while let Some(v) = items.recv().await {
@@ -563,7 +574,10 @@ mod tests {
             .subscribe("Count", serde_json::json!({"n": 5000}))
             .await
             .unwrap();
-        client.call("Echo", serde_json::json!("sync")).await.unwrap();
+        client
+            .call("Echo", serde_json::json!("sync"))
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let mut seen = Vec::new();
         while let Some(v) = items.recv().await {

@@ -77,6 +77,13 @@ pub fn canvas(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     _ = c.leaf(.{ .height = .{ .px = 24 } }, .none, null);
     composer.docked(c, a, k);
+    const agent_updates = @import("agent_updates.zig");
+    if (agent_updates.hasVisible(a)) {
+        _ = c.leaf(.{ .height = .{ .px = 46 } }, .none, null);
+        const host = ui.div(c).row().wFull().h(0);
+        defer host.end();
+        @import("view_agent_updates.zig").island(c, a, k, pane_w, pane_h);
+    }
 }
 
 const phi: f32 = 1.618;

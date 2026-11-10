@@ -42,7 +42,7 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
         arrival.next = arrivals[i + 1].connector;
     };
     {
-        const h = kit.pressFeedback(ui.div(c).row().h(26).gap(6).pr(4).itemsCenter().rounded(4).control().hover(k.wash(0.04)));
+        const h = kit.pressFeedback(ui.div(c).row().wFull().h(26).gap(6).pr(4).itemsCenter().rounded(4).clip().control().hover(k.wash(0.04)));
         defer h.end();
         if (h.clicked()) a.view.toggleGroup(a.gpa, key, open);
         const slot = ui.div(c).row().size(22, 18).center();
@@ -52,7 +52,11 @@ pub fn group(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, parts
         const active = e.status == .streaming and for (parts) |p| {
             if (p.kind == .reasoning or (p.kind == .tool and !p.resolved)) break true;
         } else false;
-        chrome.title(c, k, tools.label(buf, parts), active, h.hovered());
+        const col_est = @import("view_composer.zig").dockedWidth(transcript_view.paneWidth(c, a), transcript_view.column_w);
+        const max_title_w = if (c.rects.get(c.node(h.index).id)) |hr| @import("motion_rules.zig").toolGroupTitleCap(hr.w, 28, 8) else @import("motion_rules.zig").toolGroupTitleCap(col_est, 28, 8);
+        const title_slot = ui.div(c).row().grow().w(0).clip();
+        defer title_slot.end();
+        chrome.title(c, k, tools.label(buf, parts), active, h.hovered(), max_title_w);
     }
     const fold_id = state.key(parent, key, "group-fold");
     const initial_height = 2 + @as(f32, @floatFromInt(parts.len)) * rules.row_height + rules.footer_gap + rules.footer_height;

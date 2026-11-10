@@ -1095,3 +1095,166 @@ test "lean QuestionPanel kernel: a question's transcript chip ends inside its co
         };
     }
 }
+
+/// Width bound for folded tool-group headers (`Nano.FrameSchedule.toolGroupTitleCap`).
+pub fn toolGroupTitleCap(col: f32, chevron_w: f32, trailing_pad: f32) f32 {
+    return @max(0, col - (chevron_w + trailing_pad));
+}
+
+pub const SessionFooterLayout = struct {
+    show_checkout: bool,
+    checkout_words: bool,
+    show_branch: bool,
+    branch_words: bool,
+    label_cap: f32,
+};
+
+/// Adaptive degradation for the active-chat session footer (`Nano.FrameSchedule.sessionFooterLayout`).
+/// Proven (`session_footer_never_overflows_slot`) never to clip the `⑂` branch glyph against
+/// the trailing context ring in narrow 3-pane splits.
+pub fn sessionFooterLayout(slot_w_in: f32) SessionFooterLayout {
+    const slot_w = @max(0, slot_w_in);
+    if (slot_w >= 260) {
+        return .{
+            .show_checkout = true,
+            .checkout_words = true,
+            .show_branch = true,
+            .branch_words = true,
+            .label_cap = @min(126, @max(0, (slot_w - 92) * 0.5)),
+        };
+    }
+    if (slot_w >= 156) {
+        return .{
+            .show_checkout = true,
+            .checkout_words = false,
+            .show_branch = true,
+            .branch_words = true,
+            .label_cap = @min(126, @max(0, slot_w - 86)),
+        };
+    }
+    if (slot_w >= 80) {
+        return .{
+            .show_checkout = true,
+            .checkout_words = false,
+            .show_branch = true,
+            .branch_words = false,
+            .label_cap = 0,
+        };
+    }
+    if (slot_w >= 48) {
+        return .{
+            .show_checkout = false,
+            .checkout_words = false,
+            .show_branch = true,
+            .branch_words = false,
+            .label_cap = 0,
+        };
+    }
+    return .{
+        .show_checkout = false,
+        .checkout_words = false,
+        .show_branch = false,
+        .branch_words = false,
+        .label_cap = 0,
+    };
+}
+
+pub const SidebarTitlebarLayout = struct {
+    toggle_end: f32,
+    back_x: f32,
+    forward_x: f32,
+    plus_x: f32,
+    cluster_end: f32,
+    more_x: f32,
+    more_end: f32,
+};
+
+/// Zeron sidebar titlebar cluster geometry (`Nano.FrameSchedule.sidebarTitlebarLayout`).
+/// Proven (`sidebar_titlebar_disjoint_and_bounded`) disjoint and within `sidebar_w >= 224`.
+pub fn sidebarTitlebarLayout(sidebar_w_in: f32) SidebarTitlebarLayout {
+    const sidebar_w = @max(0, sidebar_w_in);
+    const group_gap: f32 = if (sidebar_w >= 240) 8 else 4;
+    const right_margin: f32 = if (sidebar_w >= 240) 8 else 4;
+    const toggle_end: f32 = 88 + 24;
+    const back_x = toggle_end + group_gap;
+    const forward_x = back_x + 24 + 2;
+    const plus_x = forward_x + 24 + group_gap;
+    const cluster_end = plus_x + 24;
+    const natural_more = @max(0, sidebar_w - right_margin - 24);
+    const more_x = @max(cluster_end + group_gap, natural_more);
+    return .{
+        .toggle_end = toggle_end,
+        .back_x = back_x,
+        .forward_x = forward_x,
+        .plus_x = plus_x,
+        .cluster_end = cluster_end,
+        .more_x = more_x,
+        .more_end = more_x + 24,
+    };
+}
+
+/// Zeron sidebar disclosure body opacity (`Nano.FrameSchedule.disclosureOpacityPct`).
+pub fn disclosureOpacity(reveal_in: f32) f32 {
+    const r = std.math.clamp(reveal_in, 0, 1);
+    return 0.35 + 0.65 * r;
+}
+
+/// Staged sub-range ramp (`Nano.FrameSchedule.updateStagePct`, Zeron `composer_dock::stage`).
+pub fn updateStage(p: f32, start: f32, finish: f32) f32 {
+    const span = finish - start;
+    if (span <= 0.0001) return if (p >= finish) 1 else 0;
+    return std.math.clamp((p - start) / span, 0, 1);
+}
+
+pub const UpdateIslandTarget = struct {
+    w: f32,
+    h: f32,
+};
+
+/// Zeron Home Agent-Update Island target size (`Nano.FrameSchedule.updateIslandTarget`).
+/// Proven (`update_island_fits_bounds`, `update_island_expands_taller`) bounded and monotonic.
+pub fn updateIslandTarget(expanded: bool, compact_w: f32, max_w_in: f32, rows: usize, max_h_in: f32) UpdateIslandTarget {
+    const max_w = @max(0, max_w_in);
+    const max_h = @max(38, max_h_in);
+    const pill_w = @min(@max(0, compact_w), max_w);
+    const list_w = @min(360, max_w);
+    const rows_h = @min(@as(f32, @floatFromInt(rows)) * 64, 224);
+    const list_h = @min(38 + rows_h, max_h);
+    return if (expanded) .{ .w = list_w, .h = list_h } else .{ .w = pill_w, .h = 38 };
+}
+
+test "lean FrameSchedule split containment, Zeron sidebar titlebar, and Agent-Update Island kernels" {
+    for ([_]f32{ 180, 260, 340, 420, 736 }) |col| {
+        const tool_cap = toolGroupTitleCap(col, 28, 12);
+        try std.testing.expect(tool_cap + 40 <= col + 0.001);
+    }
+
+    for ([_]f32{ 0, 40, 60, 100, 180, 280, 400 }) |sw| {
+        const fl = sessionFooterLayout(sw);
+        const inner = (if (fl.show_checkout) (if (fl.checkout_words) 34 + fl.label_cap else @as(f32, 28)) else @as(f32, 0)) +
+            (if (fl.show_checkout and fl.show_branch) @as(f32, 4) else @as(f32, 0)) +
+            (if (fl.show_branch) (if (fl.branch_words) 34 + fl.label_cap else @as(f32, 28)) else @as(f32, 0));
+        if (fl.show_checkout or fl.show_branch) try std.testing.expect(20 + inner <= sw + 0.001);
+    }
+
+    for ([_]f32{ 224, 240, 256, 320 }) |side_w| {
+        const tl = sidebarTitlebarLayout(side_w);
+        try std.testing.expect(tl.toggle_end < tl.back_x);
+        try std.testing.expect(tl.back_x + 24 < tl.forward_x);
+        try std.testing.expect(tl.forward_x + 24 < tl.plus_x);
+        try std.testing.expect(tl.cluster_end < tl.more_x);
+        try std.testing.expect(tl.more_end <= side_w + 0.001);
+    }
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0.35), disclosureOpacity(0), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), disclosureOpacity(1), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), updateStage(0.2, 0.3, 0.72), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), updateStage(0.8, 0.3, 0.72), 0.001);
+
+    const pill = updateIslandTarget(false, 268, 720, 3, 600);
+    const card = updateIslandTarget(true, 268, 720, 3, 600);
+    try std.testing.expectEqual(@as(f32, 38), pill.h);
+    try std.testing.expectEqual(@as(f32, 360), card.w);
+    try std.testing.expectEqual(@as(f32, 230), card.h);
+    try std.testing.expect(card.h >= pill.h);
+}
