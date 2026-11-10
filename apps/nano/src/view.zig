@@ -113,17 +113,6 @@ pub fn view(a: *App, c: *ui.Context) void {
     if (!a.offscreen and c.time < a.view.resize_until) c.frameIn(1.0 / 120.0);
     a.syncPeers();
     a.view.in_pre_tree = false;
-    if (a.view.menus.overview.open and !a.view.settings_open) {
-        @import("view_sessions.zig").page(c, a, k);
-        @import("view_palette.zig").overlay(c, a, surfaces.popup(k));
-        @import("view_chat_menu.zig").overlays(c, a, surfaces.popup(k));
-        @import("view_project_setup.zig").overlay(c, a, surfaces.popup(k));
-        @import("view_open_chooser.zig").overlay(c, a, surfaces.popup(k));
-        @import("view_setup.zig").overlay(c, a, k);
-        @import("app_browser.zig").syncNative(a, c);
-        @import("frame_profile.zig").frame(a, c);
-        return;
-    }
     {
         const root = ui.div(c).row().sizeFull().bg(k.shell);
         defer root.end();
@@ -278,7 +267,7 @@ pub fn view(a: *App, c: *ui.Context) void {
 pub fn menuKeepsKeys(a: *const App) bool {
     const v = &a.view;
     return v.project_setup.open or v.open_chooser.open or v.strip.menu != null or v.more_menu or v.filter_menu or v.space_menu or v.checkout_menu or v.ref_menu or v.chat_menu.open or
-        v.menus.ctx_at != null or v.menus.overview.open or v.palette.open or a.picker != .none;
+        v.menus.ctx_at != null or v.palette.open or a.picker != .none;
 }
 
 /// A press lands on the window's root unless something nearer takes focus,
@@ -505,12 +494,6 @@ fn keys(c: *ui.Context, a: *App) void {
     }
     const palette_had_keys = a.view.palette.open;
     palette.keys(c, a);
-    // All sessions is a full route, not a sheet over a live composer.
-    // Closing its history palette must not also close the overview.
-    if (a.view.menus.overview.open and !a.view.settings_open) {
-        if (!palette_had_keys) @import("view_sessions.zig").keys(c, a);
-        return;
-    }
     if (a.picker != .none) @import("view_picker.zig").keys(c, a);
     // A dialog has the keys; else an open header menu takes Escape, the
     // arrows and Return.

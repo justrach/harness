@@ -99,7 +99,6 @@ pub const Prefs = struct {
     archive_on_close_chosen: bool = false,
     escape_stops_active_agent: bool = false,
     transcript_compact_mode: bool = true,
-    sidebar_task_view: bool = false,
     pause_animations_in_background: bool = false,
     /// The Write page starts in the interface sans; Aa offers a serif.
     write_sans: bool = true,
@@ -135,7 +134,6 @@ pub const Flag = enum {
     archive_on_close_chosen,
     escape_stops_active_agent,
     transcript_compact_mode,
-    sidebar_task_view,
     pause_animations_in_background,
     write_sans,
     sidebar_compact,

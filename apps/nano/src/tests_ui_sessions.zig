@@ -1,8 +1,7 @@
-//! Synthetic release172 overview/history/project-footer regression coverage.
+//! Synthetic dashboard-removal, history, workspace and project-footer coverage.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const App = @import("app.zig").App;
-const sessions = @import("view_sessions.zig");
 const palette = @import("view_palette.zig");
 const testing = std.testing;
 
@@ -44,18 +43,35 @@ const Harness = struct {
     }
 };
 
-test "overview sizing and attention order follow the desktop's pure rules" {
-    try testing.expectEqual(@as(usize, 1), sessions.columns(699));
-    try testing.expectEqual(@as(usize, 2), sessions.columns(700));
-    try testing.expectEqual(@as(usize, 3), sessions.columns(1000));
-    try testing.expectEqual(@as(f32, 365), sessions.cardWidth(1200));
-    try testing.expectEqual(sessions.Section.needs, sessions.section(.errored));
-    try testing.expectEqual(sessions.Section.needs, sessions.section(.awaiting_input));
-    try testing.expectEqual(sessions.Section.done, sessions.section(.completed));
-    try testing.expect(sessions.priority(.awaiting_input) < sessions.priority(.working));
+test "dashboard removal drops runtime state and the persisted preference" {
+    try testing.expect(!@hasField(@import("view_sidebar_menus.zig").State, "overview"));
+    try testing.expect(!@hasField(@import("settings.zig").Prefs, "sidebar_task_view"));
+    try testing.expect(std.meta.stringToEnum(@import("settings.zig").Flag, "sidebar_task_view") == null);
+
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.settings.apply(
+        \\{"sidebarTaskView":true,"openTabs":["chat-a","chat-b"]}
+    );
+    try testing.expect(@import("view_updates.zig").sidebarFits(&h.a));
+    try testing.expectEqual(@as(usize, 2), h.a.settings.open_tabs.items.len);
+    try testing.expectEqualStrings("chat-a", h.a.settings.open_tabs.items[0]);
+    try testing.expectEqualStrings("chat-b", h.a.settings.open_tabs.items[1]);
 }
 
-test "All sessions keeps independent workspaces in the same project and counts panel tabs" {
+test "dashboard removal keeps Appearance free of Task view" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    h.a.settings.section = .appearance;
+    @import("view_settings.zig").open(&h.a);
+    h.t.settle(0.3);
+    try testing.expect(h.t.hasText("Compact mode"));
+    try testing.expect(!h.t.hasText("Task view"));
+}
+
+test "independent workspaces in the same project retain their panel tabs" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -64,14 +80,15 @@ test "All sessions keeps independent workspaces in the same project and counts p
     h.a.openChat("chat-b", null);
     h.a.splitPane(.horizontal);
     h.a.addChatTab(false); // A panel tab, not another workspace.
-    const rows = try sessions.sessions(&h.a, testing.allocator);
-    defer testing.allocator.free(rows);
-    try testing.expectEqual(@as(usize, 2), rows.len);
-    try testing.expectEqualStrings("synthetic-alpha", rows[0].title);
-    try testing.expectEqualStrings(rows[0].title, rows[1].title);
-    try testing.expectEqual(@as(usize, 2), rows[1].panels);
-    try testing.expectEqual(@as(usize, 3), rows[1].tabs);
-    try testing.expectEqualStrings("chat-b", rows[1].chat.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("chat-a", h.a.tabs.items.items[0].?);
+    const split = h.a.tabs.layout().?;
+    try testing.expectEqual(@as(usize, 2), split.panes.items.len);
+    try testing.expectEqual(@as(usize, 3), split.groups[0].count() + split.groups[1].count());
+    h.a.showTab(0);
+    try testing.expectEqualStrings("chat-a", h.a.selected.?);
+    h.a.showTab(1);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.layout().?.panes.items.len);
 }
 
 test "project header creates an independent session in that project" {
@@ -86,10 +103,8 @@ test "project header creates an independent session in that project" {
     try testing.expect(h.a.selected == null);
     try testing.expectEqualStrings("project-a", h.a.space.?);
     try testing.expect(!h.a.new_no_project);
-    const rows = try sessions.sessions(&h.a, testing.allocator);
-    defer testing.allocator.free(rows);
-    try testing.expectEqual(@as(usize, 2), rows.len);
-    try testing.expectEqualStrings("chat-a", rows[0].chat.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("chat-a", h.a.tabs.items.items[0].?);
 }
 
 test "chat history contains only conversations across project filters including archived" {
@@ -118,27 +133,20 @@ test "chat history contains only conversations across project filters including 
     try testing.expectEqual(palette.Navigation.preserve_tabs, h.a.view.palette.navigation);
 }
 
-test "overview unmounts the composer and history Escape does not also close the route" {
+test "chat history Escape preserves the draft and returns input to the composer" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
-    h.a.composer.set("Synthetic draft survives overview");
-    sessions.open(&h.a);
-    h.t.settle(0.3);
-    try testing.expect(h.t.hasText("All sessions"));
-    try testing.expect(h.t.hasText("Earlier"));
-    try testing.expect(!h.t.hasText("Build something new"));
-    h.t.typeText("must not enter the hidden composer");
-    try testing.expectEqualStrings("Synthetic draft survives overview", h.a.composer.text());
+    h.a.composer.set("Synthetic draft");
     palette.toggle(&h.a, .chat_history);
     h.t.settle(0.3);
+    try testing.expect(h.t.hasText("Chat history"));
+    try testing.expect(!h.t.hasText("All sessions"));
     h.press(.{ .key = ui.Shortcut.escape });
     try testing.expect(!h.a.view.palette.open);
-    try testing.expect(h.a.view.menus.overview.open);
-    h.press(.{ .key = ui.Shortcut.escape });
-    try testing.expect(!h.a.view.menus.overview.open);
-    try testing.expect(h.t.hasText("Build something new"));
-    try testing.expectEqualStrings("Synthetic draft survives overview", h.a.composer.text());
+    try testing.expectEqualStrings("Synthetic draft", h.a.composer.text());
+    h.t.typeText(" survives history");
+    try testing.expectEqualStrings("Synthetic draft survives history", h.a.composer.text());
 }
 
 test "draft footer shows real project selection and hides it in plain chat" {

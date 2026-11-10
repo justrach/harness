@@ -282,7 +282,7 @@ pub fn appRestartVersion(a: *const App) ?[]const u8 {
 }
 
 pub fn sidebarFits(a: *const App) bool {
-    return a.view.sidebar_open and !a.view.settings_open and !a.settings.get(.sidebar_task_view);
+    return a.view.sidebar_open and !a.view.settings_open;
 }
 
 pub fn graffVisible(a: *const App) bool {

@@ -204,7 +204,6 @@ pub fn activate(a: *App, e: Entry) void {
             var buf: [256]u8 = undefined;
             const own = buf[0..@min(id.len, buf.len)];
             @memcpy(own, id[0..own.len]);
-            @import("view_sessions.zig").close(a);
             if (replace) a.replaceCurrent(own) else a.openChatInTab(own);
         },
     }
@@ -252,7 +251,7 @@ pub fn overlay(c: *ui.Context, a: *App, k: theme.Colors) void {
     const list = entries(a, c.alloc(), query) catch return;
     p.active = @min(p.active, list.len -| 1);
     const history = p.navigation == .chat_history;
-    const footer = history and a.view.sidebar_open and !a.view.settings_open and !a.view.menus.overview.open;
+    const footer = history and a.view.sidebar_open and !a.view.settings_open;
     const w = @min(if (history) @as(f32, 420) else 560, c.size.w - 32);
     ui.key(c, "command-palette-scrim");
     var scrim = ui.div(c).fixed().offset(0, 0).size(c.size.w, c.size.h).layer(8);
