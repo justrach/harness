@@ -62,6 +62,7 @@ pub fn footer(c: *ui.Context, a: *App, k: theme.Colors, w: f32) void {
     const row = ui.div(c).row().w(w).h(height).px(10).gap(4).itemsCenter().clip();
     defer row.end();
     @import("view_composer.zig").chip(c, a, k);
+    @import("view_composer.zig").followUpChip(c, a, k);
     {
         const slot = ui.div(c).row().grow().w(0).hFull().itemsCenter().clip();
         defer slot.end();

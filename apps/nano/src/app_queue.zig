@@ -112,9 +112,67 @@ pub fn queueMessage(a: *App, text: []const u8) void {
 /// Settings › Shortcuts' choice (`FollowUpBehavior`, `followUpBehavior`).
 pub const FollowUp = enum { queue, steer };
 
+/// True when `model` is a GPT-6.0+ model (`gpt-6*`, `gpt-6.0`, `gpt-6.1-sol`,
+/// `gpt-6-astra`, `chatgpt-new/gpt-6.1-sol`, `codex/gpt-6-sol`, `gpt-7*`, …).
+pub fn isGpt6PlusModel(model: ?[]const u8) bool {
+    const raw = model orelse return false;
+    var bare = raw;
+    if (std.mem.lastIndexOfAny(u8, raw, "/:")) |sep| bare = raw[sep + 1 ..];
+    const rest = if (bare.len >= 4 and std.ascii.eqlIgnoreCase(bare[0..4], "gpt-"))
+        bare[4..]
+    else if (bare.len >= 3 and std.ascii.eqlIgnoreCase(bare[0..3], "gpt"))
+        bare[3..]
+    else
+        return false;
+    var i: usize = 0;
+    var major: u32 = 0;
+    while (i < rest.len and std.ascii.isDigit(rest[i])) : (i += 1) {
+        major = major *| 10 +| (rest[i] - '0');
+    }
+    if (i == 0 or major < 6) return false;
+    if (i == rest.len) return true;
+    return switch (rest[i]) {
+        '.', '-', '_', ':', ' ' => true,
+        else => false,
+    };
+}
+
+/// Codex and GPT-6.0+ models steer mid-turn by default; other models queue.
+pub fn defaultFollowUpFor(harness: []const u8, model: ?[]const u8) FollowUp {
+    if (isGpt6PlusModel(model)) return .steer;
+    if (model == null and std.mem.eql(u8, harness, "codex")) return .steer;
+    return .queue;
+}
+
+pub fn activeModelId(a: *const App) ?[]const u8 {
+    const t = a.target();
+    if (t.model) |m| return m;
+    if (std.mem.eql(u8, a.models_for, t.harness) and a.models.items.len > 0) return a.models.items[0].id;
+    if (a.view.model_picker.catalogs.get(t.harness)) |cat| {
+        if (cat.models.items.len > 0) return cat.models.items[0].id;
+    }
+    return null;
+}
+
+pub fn defaultFollowUp(a: *const App) FollowUp {
+    const t = a.target();
+    return defaultFollowUpFor(t.harness, activeModelId(a));
+}
+
 pub fn followUpBehavior(a: *const App) FollowUp {
-    const v = a.settings.text("followUpBehavior") orelse return .queue;
-    return if (std.mem.eql(u8, v, "steer")) .steer else .queue;
+    const v = a.settings.text("followUpBehavior") orelse return defaultFollowUp(a);
+    if (std.mem.eql(u8, v, "steer")) return .steer;
+    if (std.mem.eql(u8, v, "queue")) return .queue;
+    return defaultFollowUp(a);
+}
+
+pub fn setFollowUpBehavior(a: *App, f: FollowUp) void {
+    a.settings.setText("followUpBehavior", @tagName(f));
+    a.redraw();
+}
+
+pub fn toggleFollowUp(a: *App) void {
+    setFollowUpBehavior(a, opposite(followUpBehavior(a)));
 }
 
 pub fn opposite(f: FollowUp) FollowUp {
@@ -150,6 +208,44 @@ test "follow-ups steer only when they can, as follow_up.rs decides" {
     try t.expect(steerUnavailable(true, true, false, true, true) == null);
 }
 
+test "Codex and GPT-6.0+ models default to Steer; older and non-GPT models default to Queue" {
+    const t = std.testing;
+    try t.expect(isGpt6PlusModel("gpt-6"));
+    try t.expect(isGpt6PlusModel("gpt-6.0"));
+    try t.expect(isGpt6PlusModel("gpt-6.1-sol"));
+    try t.expect(isGpt6PlusModel("gpt-6-astra"));
+    try t.expect(isGpt6PlusModel("gpt-6-sol"));
+    try t.expect(isGpt6PlusModel("chatgpt-new/gpt-6.1-sol"));
+    try t.expect(isGpt6PlusModel("codex/gpt-6-sol"));
+    try t.expect(isGpt6PlusModel("openai:gpt-6.2"));
+    try t.expect(isGpt6PlusModel("gpt-7"));
+    try t.expect(!isGpt6PlusModel(null));
+    try t.expect(!isGpt6PlusModel(""));
+    try t.expect(!isGpt6PlusModel("gpt-5.6-sol"));
+    try t.expect(!isGpt6PlusModel("gpt-5.4"));
+    try t.expect(!isGpt6PlusModel("gpt-4o"));
+    try t.expect(!isGpt6PlusModel("claude-opus-5"));
+    try t.expect(!isGpt6PlusModel("grok-4.7"));
+
+    try t.expectEqual(FollowUp.steer, defaultFollowUpFor("graff", "gpt-6.1-sol"));
+    try t.expectEqual(FollowUp.steer, defaultFollowUpFor("graff", "chatgpt-new/gpt-6.1-sol"));
+    try t.expectEqual(FollowUp.steer, defaultFollowUpFor("codex", "gpt-6-sol"));
+    try t.expectEqual(FollowUp.steer, defaultFollowUpFor("codex", null));
+    try t.expectEqual(FollowUp.queue, defaultFollowUpFor("graff", "gpt-5.6-sol"));
+    try t.expectEqual(FollowUp.queue, defaultFollowUpFor("graff", "claude-opus-5"));
+    try t.expectEqual(FollowUp.queue, defaultFollowUpFor("graff", null));
+    try t.expectEqual(FollowUp.queue, defaultFollowUpFor("codex", "gpt-5.6-sol"));
+
+    var a: App = .init(t.allocator, t.io, 1);
+    defer a.deinit();
+    a.new_model = try t.allocator.dupe(u8, "gpt-6.1-sol");
+    try t.expectEqual(FollowUp.steer, followUpBehavior(&a));
+    toggleFollowUp(&a);
+    try t.expectEqual(FollowUp.queue, followUpBehavior(&a));
+    toggleFollowUp(&a);
+    try t.expectEqual(FollowUp.steer, followUpBehavior(&a));
+}
+
 /// "With text: …" under the Queue | Steer switch (`follow_up_hint`).
 pub fn followUpHint(on_enter: bool, mac: bool) []const u8 {
     if (on_enter) return if (mac)
@@ -164,16 +260,40 @@ test "the follow-up hint tracks the send profile (follow_up_hint_tracks_the_comp
     try std.testing.expectEqualStrings("With text: Ctrl+Alt+Enter uses the opposite behaviour. Empty composer: no action.", followUpHint(false, false));
 }
 
+pub fn harnessSteersMidTurn(a: *const App, harness: []const u8) bool {
+    for (a.harnesses.items) |x| {
+        if (std.mem.eql(u8, x.id, harness)) return x.steers_mid_turn;
+    }
+    if (a.harnesses.items.len > 0) return false;
+    return std.mem.eql(u8, harness, "graff") or
+        std.mem.eql(u8, harness, "codex") or
+        std.mem.eql(u8, harness, "claude-code") or
+        std.mem.eql(u8, harness, "pi");
+}
+
+pub fn targetSteersMidTurn(a: *const App) bool {
+    if (a.device_id != null and host(a) != null) return false;
+    return harnessSteersMidTurn(a, a.target().harness);
+}
+
+pub fn rowCanSteer(a: *const App, r: @import("queue.zig").Row) bool {
+    return a.caps.actions and host(a) == null and r.gate == .none and a.queue_edit == null and r.attachments == 0 and targetSteersMidTurn(a);
+}
+
+/// Steers an already-queued row into the active turn without interrupting.
+pub fn steerRowNow(a: *App, row: []const u8) void {
+    const chat = a.selected orelse return;
+    a.request(requests.steerQueuedNow(chat, row, host(a)), .of(App, a, onSteered));
+}
+
 /// Whether the open chat's run would take a steer now, and if not, why.
 pub fn steerBlocker(a: *const App, has_text: bool, has_attachments: bool) ?[]const u8 {
     const chat_id = a.selected orelse return steerUnavailable(false, has_text, has_attachments, false, false);
     const ch = a.findChat(chat_id);
     // The agent list is this device's: it speaks for a chat hosted here.
-    const local = if (ch) |c| (if (c.device_id) |d| (if (a.device_id) |mine| std.mem.eql(u8, d, mine) else false) else false) else false;
-    const harness = if (ch) |c| c.harness else null;
-    const steps = local and if (harness) |h| for (a.harnesses.items) |x| {
-        if (std.mem.eql(u8, x.id, h)) break x.steers_mid_turn;
-    } else false else false;
+    const local = if (ch) |c| (if (c.device_id) |d| (if (a.device_id) |mine| std.mem.eql(u8, d, mine) else false) else true) else false;
+    const harness = if (ch) |c| (c.harness orelse "graff") else null;
+    const steps = local and if (harness) |h| harnessSteersMidTurn(a, h) else false;
     return steerUnavailable(queues(a), has_text, has_attachments, a.caps.actions and host(a) == null, steps);
 }
 

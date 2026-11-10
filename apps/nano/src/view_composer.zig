@@ -413,6 +413,33 @@ pub fn chip(c: *ui.Context, a: *App, k: theme.Colors) void {
     if (suffix_text) |sfx| kit.rollText(c, "composer-effort-suffix", sfx, .{ .size = 12, .line_height = 12 * 1.618, .weight = theme.ui_medium_weight, .color = k.muted.alpha(0.7) });
 }
 
+/// Follow-up mode switch in the composer footer: shows whether a message
+/// sent during a live turn will Steer or Queue, and toggles on click.
+pub fn followUpChip(c: *ui.Context, a: *App, k: theme.Colors) void {
+    const queue_mod = @import("app_queue.zig");
+    if (!queue_mod.targetSteersMidTurn(a)) return;
+    const mode = queue_mod.followUpBehavior(a);
+    const is_steer = mode == .steer;
+    const hint = if (is_steer)
+        "Follow-ups steer into the active turn. Click to queue for the next turn"
+    else
+        "Follow-ups wait in the queue until the turn finishes. Click to steer immediately";
+    ui.key(c, "composer-follow-up-chip");
+    var b = ui.div(c).row().h(20).px(8).gap(5).itemsCenter().rounded(6).hover(k.hover);
+    b = @import("view_tooltip.zig").on(b, k, .{ .text = hint });
+    defer b.end();
+    const hot = b.hovered();
+    const color = if (hot) k.text.alpha(0.85) else if (is_steer) k.text.alpha(0.78) else k.muted.alpha(0.7);
+    icons.icon(c, if (is_steer) .@"fast-tier" else .@"queue-drag-handle", 12, color, 0);
+    ui.text(c, if (is_steer) "Steer" else "Queue", .{
+        .size = 12,
+        .line_height = 12 * 1.618,
+        .weight = theme.ui_medium_weight,
+        .color = color,
+    });
+    if (b.clicked()) queue_mod.toggleFollowUp(a);
+}
+
 /// The selected model's maker mark, or the catalog's first model's when
 /// none is picked, as the label resolves it.
 fn chipMaker(a: *App) ?icons.Name {

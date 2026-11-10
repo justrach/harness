@@ -600,8 +600,8 @@ pub fn default_registry() -> HarnessRegistry {
         ],
     }));
     // graff over ACP (`graff acp`), registered first so it leads the picker.
-    // Turn-boundary steering. Per-model effort comes from the live catalog;
-    // session/new does not yet advertise thought_level.
+    // Step-boundary steering via `_session/steering`. Per-model effort comes
+    // from the live catalog; session/new does not yet advertise thought_level.
     let graff_draft_subagents = registry.graff_draft_subagents.clone();
     let graff_compact_at = registry.graff_compact_at.clone();
     registry.register_lazy(
@@ -609,7 +609,7 @@ pub fn default_registry() -> HarnessRegistry {
             id: HarnessId::Graff,
             name: "graff".into(),
             supports_steering: true,
-            steering_mode: SteeringMode::TurnBoundary,
+            steering_mode: SteeringMode::StepBoundary,
             reasoning_levels: vec![
                 ReasoningLevel::Low,
                 ReasoningLevel::Medium,
@@ -1002,6 +1002,17 @@ mod tests {
         // cheap; CLI discovery is deferred to models()/run()).
         let codex = registry.resolve(HarnessId::Codex).unwrap();
         assert_eq!(codex.id(), HarnessId::Codex);
+        let graff = registry.resolve(HarnessId::Graff).unwrap();
+        assert_eq!(graff.id(), HarnessId::Graff);
+        assert_eq!(graff.steering_mode(), SteeringMode::StepBoundary);
+        assert!(
+            registry
+                .descriptors()
+                .iter()
+                .find(|d| d.id == HarnessId::Graff)
+                .unwrap()
+                .steers_mid_turn()
+        );
         // Grok resolves through the shared ACP harness; its descriptor must
         // mirror the resolved harness (descriptor-stability rule).
         let grok = registry.resolve(HarnessId::Grok).unwrap();

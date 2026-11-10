@@ -376,7 +376,19 @@ pub const Store = struct {
 
     pub fn setText(s: *Store, key: []const u8, value: []const u8) void {
         s.remember(key, .{ .string = value });
+        if (std.mem.eql(u8, key, "followUpBehavior")) {
+            s.writeMany(&.{
+                .{ .key = key, .value = .{ .string = value } },
+                .{ .key = followup_default_key, .value = .{ .bool = true } },
+            });
+            return;
+        }
         s.write(key, .{ .string = value });
+    }
+
+    pub fn clearText(s: *Store, key: []const u8) void {
+        _ = s.doc.orderedRemove(key);
+        s.write(key, .null);
     }
 
     pub fn setNumber(s: *Store, key: []const u8, value: f64) void {
@@ -663,6 +675,14 @@ pub const Store = struct {
             .string, .integer, .float => s.remember(e.key_ptr.*, e.value_ptr.*),
             else => {},
         };
+        // Pre-GPT-6.0+ files wrote `"followUpBehavior": "queue"` as the
+        // struct default; drop that unchosen default so Codex / GPT-6.0+
+        // models steer by default until the user picks a mode explicitly.
+        if (!followUpDefaultApplied(body)) {
+            if (s.text("followUpBehavior")) |v| if (std.mem.eql(u8, v, "queue")) {
+                _ = s.doc.orderedRemove("followUpBehavior");
+            };
+        }
     }
 
     pub fn get(s: *const Store, comptime flag: Flag) bool {
@@ -808,6 +828,16 @@ const WriteEntry = struct { key: []const u8, value: json.Value };
 
 /// The GPUI app's marker that compact mode's new default was applied.
 const compact_default_key = "transcriptCompactDefaultApplied";
+const followup_default_key = "followUpGpt6DefaultApplied";
+
+fn followUpDefaultApplied(body: []const u8) bool {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const v = json.parseFromSliceLeaky(json.Value, arena.allocator(), body, .{}) catch return true;
+    if (v != .object) return true;
+    const m = v.object.get(followup_default_key) orelse return false;
+    return m == .bool and m.bool;
+}
 
 /// Whether the file `body` already had compact mode's default applied.
 fn compactDefaultApplied(body: []const u8) bool {
