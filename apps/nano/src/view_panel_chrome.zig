@@ -38,8 +38,9 @@ pub fn join(c: *ui.Context, k: theme.Colors, panel_width: f32, selected_left: f3
     if (right - left < 20) return;
     // GPUI shadows the selected cap as well as the body. Keep this outside
     // the cap's clip and before every opaque fill; title layout is untouched.
+    const shadow_bottom = if (flush_left or flush_right) foot + chrome.body_radius else foot - r;
     ui.key(c, "panel-selected-cap-shadow");
-    ui.div(c).absolute().offset(left, top).size(right - left, foot - r - top).rounded(10)
+    ui.div(c).absolute().offset(left, top).size(right - left, shadow_bottom - top).rounded(10)
         .shadows(if (k.dark) &dark_shadow else &light_shadow).end();
     {
         // Only the top half of the rounded box: the shoulder, not a second
@@ -55,15 +56,19 @@ pub fn join(c: *ui.Context, k: theme.Colors, panel_width: f32, selected_left: f3
     const mask_left = if (flush_left) @as(f32, 0) else @max(chrome.body_radius, left - 14);
     const mask_right = if (flush_right) panel_width - 2 else @min(panel_width - chrome.body_radius, right + 14);
     if (mask_right > mask_left) {
-        ui.div(c).absolute().offset(mask_left, 0).size(mask_right - mask_left, 14).bg(k.background).end();
+        ui.div(c).absolute().offset(mask_left, 0).size(mask_right - mask_left, if (flush_left or flush_right) @as(f32, 22) else 14).bg(k.background).end();
     }
     if (flush_left) {
-        // First tab and body have the same straight leading edge.
-        ui.div(c).absolute().offset(left + 1, foot).size(@min(chrome.body_radius, right - left - 2), chrome.body_radius + 1).bg(k.background).end();
+        // First tab and body have the same straight leading edge: fill `x = left`
+        // with `k.background` across the `foot - r .. foot + body_radius` join
+        // before stroking the semi-transparent `edge(k)` hairline so the 1pt
+        // border column never reveals `k.shell` or steps inward by 1pt.
+        ui.div(c).absolute().offset(left, foot - r).size(@min(chrome.body_radius + 1, right - left - 1), r + chrome.body_radius + 1).bg(k.background).end();
         ui.div(c).absolute().offset(left, foot - r).size(1, r + chrome.body_radius + 1).bg(edge(k)).end();
     } else shoulder(c, k, left - r, foot - r, true);
     if (flush_right) {
-        ui.div(c).absolute().offset(right - chrome.body_radius, foot).size(chrome.body_radius - 1, chrome.body_radius + 1).bg(k.background).end();
+        const w = @min(chrome.body_radius + 1, right - left - 1);
+        ui.div(c).absolute().offset(right - w, foot - r).size(w, r + chrome.body_radius + 1).bg(k.background).end();
         ui.div(c).absolute().offset(right - 1, foot - r).size(1, r + chrome.body_radius + 1).bg(edge(k)).end();
     } else shoulder(c, k, right - 1, foot - r, false);
 }
@@ -107,6 +112,35 @@ test "selected panel cap carries both surface shadows before its opaque fill" {
             }
         }
     }
+}
+
+test "flush-left selected tab cap backs its outer 1pt border column with k.background across the body join" {
+    const testing = @import("std").testing;
+    const Fixture = struct {
+        fn draw(dark: *bool, c: *ui.Context) void {
+            const k = theme.colors(dark.*);
+            const plane = body(c, k).absolute().offset(20, 60).size(400, 200);
+            defer plane.end();
+            join(c, k, 400, 0, 220);
+        }
+    };
+    var dark = false;
+    var t: ui.Tester = undefined;
+    try t.init(testing.allocator, .init(&dark, Fixture.draw), .{ .width = 480, .height = 300, .dark = dark });
+    defer t.deinit();
+    t.settle(0.1);
+    const k = theme.colors(dark);
+    var bg_join: ?usize = null;
+    var edge_join: ?usize = null;
+    for (t.ctx.nodes.items, 0..) |node, i| {
+        if (@abs(node.rect.x - 20) < 0.1 and @abs(node.rect.y - (60 - chrome.shoulder)) < 0.1 and @abs(node.rect.h - (chrome.shoulder + chrome.body_radius + 1)) < 0.1) {
+            if (node.style.background) |bg| {
+                if (@import("std").meta.eql(bg, k.background) and node.rect.w >= chrome.body_radius) bg_join = i;
+                if (@import("std").meta.eql(bg, edge(k)) and @abs(node.rect.w - 1) < 0.1) edge_join = i;
+            }
+        }
+    }
+    try testing.expect(bg_join != null and edge_join != null and bg_join.? < edge_join.?);
 }
 
 const shoulder_fill_l_svg =

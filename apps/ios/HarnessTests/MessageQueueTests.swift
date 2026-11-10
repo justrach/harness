@@ -12,6 +12,9 @@ final class MessageQueueTests: XCTestCase {
         XCTAssertNil(MessageQueue.editedText("  \n", hasAttachments: false))
         XCTAssertEqual(MessageQueue.editedText(" updated ", hasAttachments: true), "updated")
         XCTAssertEqual(MessageQueue.editedText(" updated ", hasAttachments: false), "updated")
+        XCTAssertTrue(MessageQueue.defaultSteersNow(harness: "codex", model: "gpt-5.4"))
+        XCTAssertTrue(MessageQueue.defaultSteersNow(harness: "graff", model: "gpt-6.1-sol"))
+        XCTAssertFalse(MessageQueue.defaultSteersNow(harness: "claude-code", model: "claude-opus-4-6"))
     }
 
     func testTerminalEditFailuresRetainBothDraftsAndAllowLocalRecovery() {

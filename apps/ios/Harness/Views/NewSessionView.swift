@@ -413,7 +413,15 @@ struct NewSessionView: View {
             TraitPickerSheet(reasoning: Binding(
                 get: { reasoning },
                 set: { storedReasoning = $0 ?? "" }
-            ), levels: selectedModel.reasoningLevels)
+            ), levels: selectedModel.reasoningLevels,
+               modelLabel: selectedModel.label,
+               onOpenModelPicker: {
+                   showTraitPicker = false
+                   Task { @MainActor in
+                       try? await Task.sleep(nanoseconds: 180_000_000)
+                       showPicker = true
+                   }
+               })
         }
         .sheet(item: $showOptionPicker) { option in
             ModelOptionPickerSheet(option: option, choiceId: Binding(
@@ -489,18 +497,21 @@ struct NewSessionView: View {
                 },
                 onRemoveAttachment: { id in attachments.removeAll { $0.id == id } }
             ) {
-                // Model + trait chips, split like the desktop's footer pickers
-                // (they ride right of the shell's attach button).
-                ComposerChip(label: selectedModel.label, badgeHarness: runHarness) {
-                    focused = false
-                    showPicker = true
-                }
-                if let reasoning {
-                    ComposerChip(label: ReasoningSlider.label(reasoning, levels: selectedModel.reasoningLevels)) {
+                // Zeron-style unified model + thinking-tier capsule, keeping
+                // independent button accessibility identities for both parts.
+                ZeronModelTierPill(
+                    modelLabel: selectedModel.label,
+                    badgeHarness: runHarness,
+                    reasoningLabel: reasoning.map { ReasoningSlider.label($0, levels: selectedModel.reasoningLevels) },
+                    onTapModel: {
+                        focused = false
+                        showPicker = true
+                    },
+                    onTapReasoning: {
                         focused = false
                         showTraitPicker = true
                     }
-                }
+                )
                 ForEach(selectedModel.options) { option in
                     ComposerChip(label: selectedChoice(for: option).label) {
                         focused = false
@@ -819,6 +830,90 @@ struct ComposerChip: View {
     }
 }
 
+/// Zeron-style unified `[ (mark) GPT-6.1-Sol  High ]` capsule in the composer
+/// toolbar row: tapping the model name opens the model sheet, and tapping the
+/// muted thinking-tier label opens the compact Thinking Tier slider card.
+struct ZeronModelTierPill: View {
+    let modelLabel: String
+    var badgeHarness: String?
+    var reasoningLabel: String?
+    let onTapModel: () -> Void
+    let onTapReasoning: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onTapModel) {
+                HStack(spacing: 6) {
+                    if let badgeHarness {
+                        HarnessBadge(harness: badgeHarness, size: 15)
+                    }
+                    Text(modelLabel)
+                        .font(Theme.sans(13, weight: .medium))
+                        .foregroundStyle(Theme.text.opacity(0.92))
+                        .lineLimit(1)
+                    if reasoningLabel == nil {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textFaint)
+                    }
+                }
+                .padding(.leading, 13)
+                .padding(.trailing, reasoningLabel == nil ? 13 : 6)
+                .frame(height: 40)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(ChipPressButtonStyle())
+
+            if let reasoningLabel {
+                Button(action: onTapReasoning) {
+                    HStack(spacing: 4) {
+                        Text(reasoningLabel)
+                            .font(Theme.sans(13, weight: .medium))
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Theme.textFaint)
+                    }
+                    .padding(.leading, 4)
+                    .padding(.trailing, 13)
+                    .frame(height: 40)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(ChipPressButtonStyle())
+            }
+        }
+        .background(ink(0.08), in: Capsule())
+        .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+    }
+}
+
+/// Steer vs Queue follow-up toggle chip in the composer toolbar row (#787).
+struct ComposerSteerChip: View {
+    let steersNow: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: steersNow ? "bolt.fill" : "clock")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(steersNow ? Theme.accent : Theme.textMuted)
+                Text(steersNow ? "Steer" : "Queue")
+                    .font(Theme.sans(13, weight: .medium))
+                    .foregroundStyle(steersNow ? Theme.text.opacity(0.92) : Theme.textMuted)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .background(ink(0.08), in: Capsule())
+            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+        }
+        .buttonStyle(ChipPressButtonStyle())
+        .accessibilityIdentifier("composer-steer-mode")
+    }
+}
+
 // MARK: - Model picker sheet
 
 /// Detent bottom sheet in the t3 settings-sheet layout: one scrolling list of
@@ -1043,13 +1138,23 @@ struct TraitPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var reasoning: String?
     let levels: [String]
+    var modelLabel: String? = nil
+    var onOpenModelPicker: (() -> Void)? = nil
+    var fastActive: Bool? = nil
+    var onToggleFast: (() -> Void)? = nil
     @State private var initialReasoning: String?
     /// The level under the thumb while it moves; `reasoning` takes it once the thumb settles.
     @State private var shown: String?
 
-    init(reasoning: Binding<String?>, levels: [String]) {
+    init(reasoning: Binding<String?>, levels: [String],
+         modelLabel: String? = nil, onOpenModelPicker: (() -> Void)? = nil,
+         fastActive: Bool? = nil, onToggleFast: (() -> Void)? = nil) {
         self._reasoning = reasoning
         self.levels = levels
+        self.modelLabel = modelLabel
+        self.onOpenModelPicker = onOpenModelPicker
+        self.fastActive = fastActive
+        self.onToggleFast = onToggleFast
         self._initialReasoning = State(initialValue: reasoning.wrappedValue)
         self._shown = State(initialValue: reasoning.wrappedValue)
     }
@@ -1058,18 +1163,60 @@ struct TraitPickerSheet: View {
 
     var body: some View {
         NavigationStack {
-            // The desktop's reasoning step: a slider from Faster to Deeper (ReasoningSlider), the level's
-            // name above it and its hint below.
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Text(ReasoningSlider.title(levels))
+            // Zeron-style compact Thinking Tier card: bold tier title at top-left,
+            // tappable model subtitle (`GPT-6.1-Sol ›`) right below it to switch
+            // models, optional fast-tier bolt toggle at top-right, and the capsule slider.
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(shown.map { ReasoningSlider.label($0, levels: levels) } ?? "Model default")
+                            .font(Theme.sans(20, weight: .bold))
+                            .foregroundStyle(Theme.text)
+                            .contentTransition(.numericText())
+                        if let modelLabel, !modelLabel.isEmpty {
+                            if let onOpenModelPicker {
+                                Button(action: onOpenModelPicker) {
+                                    HStack(spacing: 4) {
+                                        Text(modelLabel)
+                                            .font(Theme.sans(14, weight: .medium))
+                                            .foregroundStyle(Theme.textMuted)
+                                            .lineLimit(1)
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(Theme.textFaint)
+                                    }
+                                    .padding(.vertical, 2)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("trait-picker-model-switch")
+                            } else {
+                                Text(modelLabel)
+                                    .font(Theme.sans(14, weight: .medium))
+                                    .foregroundStyle(Theme.textMuted)
+                            }
+                        } else {
+                            Text(ReasoningSlider.title(levels))
+                                .font(Theme.sans(13))
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                    }
                     Spacer()
-                    Text(shown.map { ReasoningSlider.label($0, levels: levels) } ?? "Model default")
-                        .foregroundStyle(Theme.textMuted)
-                        .contentTransition(.numericText())
+                    if let onToggleFast {
+                        let isFast = fastActive == true
+                        Button(action: onToggleFast) {
+                            Image(systemName: isFast ? "bolt.fill" : "bolt")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(isFast ? Theme.accent : Theme.textMuted)
+                                .frame(width: 34, height: 34)
+                                .background(isFast ? Theme.accent.opacity(0.14) : ink(0.06),
+                                            in: RoundedRectangle(cornerRadius: 9))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Fast mode")
+                        .accessibilityIdentifier("trait-picker-fast-toggle")
+                    }
                 }
-                .font(Theme.sans(15))
-                .foregroundStyle(Theme.text)
                 if ReasoningSlider.hasSlider(levels) {
                     VStack(spacing: 8) {
                         ReasoningTrack(levels: levels, selection: $shown) { reasoning = $0 }

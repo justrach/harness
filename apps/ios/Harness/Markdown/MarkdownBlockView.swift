@@ -397,6 +397,6 @@ struct TableBlockView: View {
         return SelectableMarkdownText(runs: runs, weight: weight == .bold ? .bold : .regular,
                                       alignment: textAlignment)
             .padding(12)
-            .frame(minWidth: 48, maxWidth: .infinity, alignment: alignment)
+            .frame(minWidth: 112, maxWidth: .infinity, alignment: alignment)
     }
 }

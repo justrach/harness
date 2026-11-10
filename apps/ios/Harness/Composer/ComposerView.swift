@@ -346,6 +346,7 @@ struct ComposerView: View {
     @State private var showModelPicker = false
     @State private var showTraitPicker = false
     @State private var showOptionPicker: ModelOptionInfo?
+    @State private var steerOverride: Bool? = nil
     /// The draft open on the full-height Write page.
     @State private var showWrite = false
     /// The model picker opened from the Write page's dock (a sheet over it).
@@ -573,13 +574,15 @@ struct ComposerView: View {
                    !branch.isEmpty {
                     BranchContextChip(branch: branch)
                 }
-                ComposerChip(label: currentModel.label, badgeHarness: harness) {
-                    showModelPicker = true
-                }
-                if let currentReasoning {
-                    ComposerChip(label: ReasoningSlider.label(currentReasoning, levels: currentModel.reasoningLevels)) {
-                        showTraitPicker = true
-                    }
+                ZeronModelTierPill(
+                    modelLabel: currentModel.label,
+                    badgeHarness: harness,
+                    reasoningLabel: currentReasoning.map { ReasoningSlider.label($0, levels: currentModel.reasoningLevels) },
+                    onTapModel: { showModelPicker = true },
+                    onTapReasoning: { showTraitPicker = true }
+                )
+                ComposerSteerChip(steersNow: effectiveSteersNow) {
+                    steerOverride = !effectiveSteersNow
                 }
                 ForEach(currentModel.options) { option in
                     ComposerChip(label: currentChoice(for: option).label) {
@@ -630,7 +633,15 @@ struct ComposerView: View {
                     get: { currentReasoning },
                     set: { writeConfig(model: chat.config?.model, reasoning: $0) }
                 ),
-                levels: currentModel.reasoningLevels
+                levels: currentModel.reasoningLevels,
+                modelLabel: currentModel.label,
+                onOpenModelPicker: {
+                    showTraitPicker = false
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 180_000_000)
+                        showModelPicker = true
+                    }
+                }
             )
         }
         .sheet(item: $showOptionPicker) { option in
@@ -1087,13 +1098,18 @@ struct ComposerView: View {
         }
     }
 
+    private var effectiveSteersNow: Bool {
+        steerOverride ?? MessageQueue.defaultSteersNow(harness: harness, model: currentModel.id)
+    }
+
     private func deliver(content: String, paths: [String]) {
-        // All active-turn messages wait in the shared queue.
+        // Active-turn messages steer into the live turn on Codex / GPT-6.0+ or
+        // when toggled to Steer, and wait in the queue otherwise (#787).
         if runLive {
             let queueText = model.hostSupportsCleanQueueAttachmentText(chat)
                 ? MessageQueue.visibleText(content, attachments: paths)
                 : content
-            store.enqueueMessage(text: queueText, attachments: paths, holdForTurnEnd: true)
+            store.enqueueMessage(text: queueText, attachments: paths, holdForTurnEnd: !effectiveSteersNow)
         } else {
             store.sendRun(prompt: content, chat: chat, attachments: paths)
         }
