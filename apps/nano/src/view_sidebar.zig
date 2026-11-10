@@ -367,10 +367,11 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
     const gpa = c.alloc();
     const out = gpa.alloc(ChatItem, a.chats.items.len) catch return &.{};
     const filter_space: ?[]const u8 = if (a.view.filter) |f| (if (a.findSpace(f) != null) f else null) else null;
+    const last_activity = a.settings.lastActivity();
     const l = Look.of(a);
     const show_updated = a.settings.get(.sidebar_show_updated);
     var session_map: std.StringHashMapUnmanaged(workspace.Session) = .empty;
-    if (grouped and a.sessions.items.len > 8) {
+    if ((grouped or last_activity != .all) and a.sessions.items.len > 8) {
         session_map.ensureTotalCapacity(gpa, @intCast(a.sessions.items.len)) catch {};
         for (a.sessions.items) |s| session_map.put(gpa, s.chat_id, s) catch {};
     }
@@ -389,6 +390,14 @@ fn prepareItems(c: *ui.Context, a: *App, pins: []const []const u8, grouped: bool
         };
         const row_h = contextHeight(l.label, l.branch and ch.branch != null, show_updated, l.harness or l.icon);
         const is_pinned = !ch.archived and pinned(pins, ch.id) != null;
+        if (!ch.archived and !is_pinned and last_activity != .all) {
+            const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);
+            const mark = workspace.markOf(ch, sess, by.now);
+            if (mark == .idle and !last_activity.matches(@max(ch.timeMs(), ch.calledMs()), by.now)) {
+                out[idx] = .{};
+                continue;
+            }
+        }
         var gkey: []const u8 = "";
         if (grouped and !ch.archived and !is_pinned) {
             const sess = if (a.sessions.items.len > 8) session_map.get(ch.id) else workspace.sessionOf(a.sessions.items, ch.id);

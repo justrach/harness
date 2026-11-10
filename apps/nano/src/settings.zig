@@ -244,6 +244,52 @@ pub const Sort = enum {
     }
 };
 
+/// How far back the sidebar shows recent sessions (`sidebarLastActivity`).
+pub const LastActivity = enum {
+    d1,
+    d3,
+    d7,
+    d30,
+    all,
+
+    pub fn key(o: LastActivity) []const u8 {
+        return switch (o) {
+            .d1 => "1d",
+            .d3 => "3d",
+            .d7 => "7d",
+            .d30 => "30d",
+            .all => "all",
+        };
+    }
+
+    pub fn label(o: LastActivity) []const u8 {
+        return switch (o) {
+            .d1 => "1d",
+            .d3 => "3d",
+            .d7 => "7d",
+            .d30 => "30d",
+            .all => "All",
+        };
+    }
+
+    pub fn windowMs(o: LastActivity) ?i64 {
+        const day_ms: i64 = 24 * 60 * 60 * 1000;
+        return switch (o) {
+            .d1 => 1 * day_ms,
+            .d3 => 3 * day_ms,
+            .d7 => 7 * day_ms,
+            .d30 => 30 * day_ms,
+            .all => null,
+        };
+    }
+
+    pub fn matches(o: LastActivity, chat_ms: i64, now_ms: i64) bool {
+        const window = o.windowMs() orelse return true;
+        if (chat_ms <= 0 or now_ms <= 0) return true;
+        return now_ms -| chat_ms <= window;
+    }
+};
+
 /// A new install shows less (`UiSettings::first_run`): a turn's tool steps
 /// fold into one line and sidebar rows drop branch names. Both stay one
 /// toggle away, and an existing settings file keeps what it chose.
@@ -748,6 +794,10 @@ pub const Store = struct {
 
     pub fn sort(s: *const Store) Sort {
         return fromKey(Sort, s.text("sidebarSort"), .last_updated);
+    }
+
+    pub fn lastActivity(s: *const Store) LastActivity {
+        return fromKey(LastActivity, s.text("sidebarLastActivity"), .all);
     }
 
     /// The sidebar's project filter (`spaceFilter`): a space's id, or all.
