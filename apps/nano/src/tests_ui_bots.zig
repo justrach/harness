@@ -208,9 +208,9 @@ test "a bot's page: its routines, its memory, and a message that starts its chat
     try testing.expect(h.t.hasText("Due 04:10 · did not run"));
     try testing.expect(h.t.containsText("Routines run only while Harness is open. Last checked 08:06."));
     try testing.expect(h.t.hasText("No marketing adjectives."));
-    // Shared, and edited on the primary bot only.
+    // Shared, and edited on the main bot only.
     try testing.expect(h.t.hasText("Alex. Pacific time."));
-    try testing.expect(h.t.containsText("Edit it on your primary bot."));
+    try testing.expect(h.t.containsText("Edit it on your main bot."));
     h.snap("bots-page");
 
     try h.t.clickText("Forget");
@@ -240,8 +240,10 @@ test "a bot's page: its routines, its memory, and a message that starts its chat
     try h.t.clickText("ada");
     h.t.settle(1);
     try testing.expectEqual(bots.Page.bot, h.a.bots.page);
-    try testing.expect(h.t.containsText("Primary"));
-    try h.t.clickText("Ask ada…");
+    try testing.expect(h.t.hasText("Main bot · every project"));
+    // Nothing started yet: the page says how work gets started.
+    try testing.expect(h.t.containsText("Nothing right now. Ask ada for something in any project"));
+    try h.t.clickText("Ask ada for anything, in any project…");
     h.t.typeText("draft the notes for 0.4");
     h.t.settle(1);
     try h.t.clickText("Send");
@@ -355,4 +357,82 @@ test "bots are off until turned on in Settings, and off draws nothing" {
     try testing.expect(!h.t.hasText("Needs you"));
     // A bot's standing chat is an ordinary chat while bots are off.
     try testing.expect(h.t.hasText("triage"));
+}
+
+/// The main bot `ada` with its thread, and two chats that thread started:
+/// one working in comet, one finished and unread in atlas.
+const work_chats =
+    \\[{"id":"a","deviceId":"d","title":"Sketch the onboarding flow","archived":false,"spaceId":"s-comet","lastMessageAt":"2027-01-15T05:00:00Z","lastSeenAt":"2027-01-15T06:00:00Z"},
+    \\ {"id":"c-ada","deviceId":"d","title":"ada","archived":false,"lastMessageAt":"2027-01-15T07:00:00Z","lastSeenAt":"2027-01-15T07:30:00Z"},
+    \\ {"id":"c-notes","deviceId":"d","title":"notes","archived":false,"spaceId":"s-comet","lastMessageAt":"2027-01-15T07:10:00Z","lastSeenAt":"2027-01-15T07:30:00Z"},
+    \\ {"id":"w-fix","deviceId":"d","title":"Fix login test","archived":false,"spaceId":"s-comet","parentChatId":"c-ada","lastPromptAt":"2027-01-15T08:00:00Z"},
+    \\ {"id":"w-bump","deviceId":"d","title":"Bump deps","archived":false,"spaceId":"s-atlas","parentChatId":"c-ada","lastPromptAt":"2027-01-15T06:30:00Z","lastMessageAt":"2027-01-15T06:50:00Z","lastMessagePreview":"Bumped two. One needs a major version; left it."}]
+;
+
+const work_state = std.fmt.comptimePrint(
+    \\{{"enabled":true,"nowMs":{d},"lastCheckMs":{d},"about":"Alex.","bots":[
+    \\ {{"name":"ada","job":"Keep my work moving across my projects.","primary":true,"chat":"c-ada","routines":[]}},
+    \\ {{"name":"notes","job":"Draft release notes","project":"/repo/comet","chat":"c-notes","routines":[
+    \\   {{"id":"r1","instruction":"Draft the release notes","atMs":{d},"intervalMs":21600000,"runs":11}}]}}]}}
+, .{ now_ms, now_ms, now_ms + 112 * min });
+
+test "the main bot: what it started in any project, under it, on its page and in the catch-up" {
+    var h: Harness = undefined;
+    try h.init("{\"BotsState\":" ++ work_state ++ ",\"BotDetail\":{\"memory\":\"\",\"log\":\"\"},\"Mutate\":{\"ok\":true}}");
+    defer h.deinit();
+    inline for (.{ .{ work_chats, &h.a.chats }, .{ "[{\"chatId\":\"w-fix\",\"status\":\"working\",\"updatedAt\":\"2027-01-15T08:06:00Z\"}]", &h.a.sessions } }) |l| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, l[0], .{});
+        defer parsed.deinit();
+        try l[1].replace(parsed.value);
+    }
+    h.t.settle(2);
+
+    // The main bot first, with what it started under it: each chat once,
+    // with its project, and not among the sessions.
+    const ada = h.t.findText("ada").?;
+    const notes = h.t.findText("notes").?;
+    const fix = h.t.findText("Fix login test").?;
+    const bump = h.t.findText("Bump deps").?;
+    try testing.expect(ada.y < fix.y and fix.y < bump.y and bump.y < notes.y);
+    try testing.expect(h.t.hasText("1 going"));
+    try testing.expect(h.t.hasText("atlas"));
+    for ([_][]const u8{ "Fix login test", "Bump deps" }) |title| {
+        var rows: usize = 0;
+        for (h.t.ctx.nodes.items) |node| switch (node.content) {
+            .text => |text| rows += @intFromBool(std.mem.eql(u8, text.str, title)),
+            else => {},
+        };
+        try testing.expectEqual(@as(usize, 1), rows);
+    }
+    // One thing to read: the finished chat in atlas.
+    try testing.expect(h.t.hasText("1 to look at"));
+    h.snap("bots-main-group");
+
+    // Its page: in progress, scheduled and completed, across projects.
+    bots.openBot(&h.a, "ada");
+    h.t.settle(2);
+    for ([_][]const u8{ "Main bot · every project", "In progress", "Scheduled", "Completed", "Working", "Its own routines" }) |want| try testing.expect(h.t.hasText(want));
+    try testing.expect(h.t.hasText("notes · Every 6 hours · Draft the release notes"));
+    try testing.expect(h.t.hasText("in 1h 52m"));
+    try testing.expect(!h.t.hasText("No project"));
+    h.snap("bots-main-page");
+
+    // The catch-up names the work and where it is, and reads that chat.
+    bots.openInbox(&h.a);
+    h.t.settle(2);
+    try testing.expect(h.t.hasText("Bump deps · atlas"));
+    try testing.expect(h.t.hasText("Started by ada."));
+    try testing.expect(h.t.containsText("Bumped two."));
+    try h.t.clickText("Mark read");
+    h.t.settle(1);
+    try testing.expect(has(h.sent("Mutate"), "\"chatId\":\"w-bump\""));
+    try h.t.clickText("Open");
+    h.t.settle(1);
+    try testing.expectEqual(bots.Page.none, h.a.bots.page);
+    try testing.expectEqualStrings("w-bump", h.a.selected.?);
+
+    // A row under the main bot opens the chat it is.
+    try h.t.clickText("Fix login test");
+    h.t.settle(1);
+    try testing.expectEqualStrings("w-fix", h.a.selected.?);
 }

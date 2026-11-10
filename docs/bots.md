@@ -72,21 +72,66 @@ It does not say why: the engine cannot tell a closed lid from a quit.
 Schedules are graff's: a delay (`30m`, once) or `@every` and a period. There
 are no weekday or clock times.
 
-## The primary bot
+## The main bot
 
-One bot can be primary. Its standing text lists your other bots and tells it
-to say whose job a request is and wait for your yes. The `run_bot` MCP tool,
-called with no project, puts the turn into the named bot's standing chat, so
-a handoff lands where that bot's other work is.
+One bot is the main bot (graff's `primary`; codegraff ADR 0335): the one
+thread you keep for every project. Turning Bots on makes one, named `main`,
+when the device has none. You can change its job, or make another bot the
+main one on that bot's page.
 
-The wait for a yes is an instruction to a model, not something the engine
-enforces. A chat that asks before running tools asks before `run_bot` too.
+You ask it for something in any project. It starts that piece of work as an
+ordinary chat in the project it belongs to, tells you in one line what it
+started, and ends its turn. It asks you only when it cannot tell which
+project you mean. It starts work with the Harness tools every graff chat
+has (`list_projects`, `create_chat`, `read_chat`, `send_message`).
+
+**It hears back.** When a chat the main bot's thread started finishes a
+turn, stops on a question, or fails, the engine puts one message into the
+main bot's thread: which chat, in which project, and its last words. The
+main bot then tells you what came back. (`crates/engine/src/bots_reports.rs`)
+
+- Only a turn nobody typed is reported. If you open that chat and work in it
+  yourself, those turns are yours.
+- A report starts a turn of the main bot, and that turn can start more
+  work. So that this cannot run on by itself: work you asked for is step 1,
+  work started while the main bot was answering a report is a step further,
+  and nothing past step 3 is reported (the third report says it is the
+  last). One chat is reported at most four times an hour, and at most
+  twenty reports go out in ten minutes. What is not reported still shows in
+  the catch-up.
+- Nothing is kept on disk for this. An engine that restarts does not report
+  what ended before it started; the catch-up still shows it.
+
+A chat it starts records the main bot's chat as its parent, and that is the
+whole record of its work:
+
+- **Under its row** in the Bots group: the chats it started that are still
+  going or have something to read, with the project each is in.
+- **On its page**: In progress, Scheduled (every bot's routines, soonest
+  first) and Completed.
+- **In the catch-up**: a chat it started that stopped on a question, failed,
+  or finished unread, named by what it is and where.
+
+A chat the main bot started is not listed among a project's sessions.
+
+Your other bots are helpers: each keeps one job, and the main bot hands a
+request to the one whose job it is with the `run_bot` MCP tool, which puts
+the turn into that bot's standing chat.
+
+What the main bot is told is text given to a model. The engine does not
+stop it from working in its own thread, and does not make it ask before a
+step that cannot be undone. A started chat's approvals are its own: one that
+asks before running tools asks there, and the catch-up shows it.
 
 ## Limits
 
 - Bots are on the device whose graff home holds them. A project on another
   device is not offered to a new bot, and there is no queue for a device that
   is offline.
+- The main bot starts work in projects Harness already knows. For a folder
+  that is not a project it has to be told the path.
+- Work the main bot started is found under the main bot, not in the
+  project's session list.
 - Bots kept in one project's `.graff/bots` are not in the Bots group. The
   `list_bots` and `run_bot` MCP tools still reach them by project.
 - A graff from before per-user bots answers "update graff", under the switch
