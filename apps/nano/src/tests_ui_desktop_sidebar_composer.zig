@@ -610,4 +610,39 @@ test "zen mode flattens sidebar and footer hierarchy while developer mode restor
     try testing.expectEqual(settings.Organization.by_project, h.a.settings.organization());
     try testing.expect(h.t.hasText("New worktree"));
     try testing.expect(h.t.hasText("From main"));
+
+    // 1-click sidebar footer pill switches straight from Dev -> Zen and Zen -> Dev.
+    const dev_pill = textNode(&h.t, "Dev") orelse return error.NoSidebarModePill;
+    const pill_rect = h.t.ctx.node(h.t.ctx.node(dev_pill).parent).rect;
+    h.t.click(pill_rect.x + pill_rect.w / 2, pill_rect.y + pill_rect.h / 2);
+    h.t.settle(0.3);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
+    try testing.expect(h.t.hasText("Zen"));
+    try testing.expect(!h.t.hasText("New worktree"));
+
+    // Cmd+Shift+M toggles back to Developer mode in one shortcut, and again back to Zen.
+    try testing.expect(h.t.shortcut(.{ .key = 'm', .cmd = true, .shift = true }));
+    h.t.settle(0.3);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.developer, h.a.settings.uiMode());
+    try testing.expect(h.t.hasText("New worktree"));
+    try testing.expect(h.t.shortcut(.{ .key = 'm', .cmd = true, .shift = true }));
+    h.t.settle(0.3);
+    try testing.expectEqual(@import("motion_rules.zig").UiMode.zen, h.a.settings.uiMode());
+
+    // Individual moving parts can be turned on and off independently while keeping Zen's flat list.
+    h.a.settings.toggleMovingPart(.git_checkout_chrome);
+    h.t.settle(0.3);
+    try testing.expect(h.a.settings.hierarchyProfile().shows_git_checkout_chrome);
+    try testing.expect(h.a.settings.hierarchyProfile().flat_session_list);
+    try testing.expect(h.t.hasText("New worktree"));
+    h.a.settings.toggleMovingPart(.git_checkout_chrome);
+    h.t.settle(0.3);
+    try testing.expect(!h.a.settings.hierarchyProfile().shows_git_checkout_chrome);
+    try testing.expect(!h.t.hasText("New worktree"));
+
+    // Command palette preserves 4 idle actions and surfaces mode/part switches when queried.
+    const pal = @import("palette.zig");
+    try testing.expectEqual(@as(usize, 4), pal.actionsFor("", true).len);
+    try testing.expect(pal.actionsFor("zen", true).len >= 1);
+    try testing.expect(pal.actionsFor("rail", true).len >= 1);
 }

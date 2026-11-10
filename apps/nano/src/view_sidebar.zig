@@ -1323,6 +1323,29 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
     }
     ui.spacer(c);
     {
+        const dev = a.settings.uiMode() == .developer;
+        ui.key(c, "sidebar-ui-mode-pill");
+        var pill = tip.on(
+            ui.div(c).row().h(26).px(8).gap(5).itemsCenter().rounded(6)
+                .bg(if (dev) k.ink(0.08) else .transparent)
+                .border(if (dev) k.muted.alpha(0.35) else k.muted.alpha(0.22)).borderW(1)
+                .hover(k.hover),
+            k,
+            .{ .text = "Click to switch Zen / Developer mode (⇧⌘M) · Right-click to customize", .delay = tip.quick },
+        );
+        defer pill.end();
+        icons.icon(c, if (dev) .terminal else .@"magic-stick-3", 13, if (dev) k.text else k.muted, 0);
+        ui.text(c, if (dev) "Dev" else "Zen", .{ .size = 11.5, .line_height = 14, .weight = if (dev) .semibold else theme.ui_medium_weight, .color = if (dev) k.text else k.muted });
+        if (pill.clicked()) {
+            a.settings.toggleUiMode();
+            a.redraw();
+        } else if (kit.secondaryClicked(pill)) {
+            @import("view_sidebar_menus.zig").openView(a);
+            a.redraw();
+        }
+    }
+    ui.div(c).w(6).end();
+    {
         ui.key(c, "chat-history");
         const history = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).hover(k.hover), k, .{ .text = "Chat history", .delay = tip.quick });
         defer history.end();

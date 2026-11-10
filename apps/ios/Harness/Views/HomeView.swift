@@ -41,19 +41,24 @@ struct HomeView: View {
         .flatMap(HomeGroupBy.init(rawValue:))?.rawValue ?? HomeGroupBy.status.rawValue
     @State private var activityWindow: HomeActivityWindow = .all
     @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     @AppStorage("homeCollapsedGroups") private var collapsedGroupsRaw = ""
 
-    private var uiMode: HomeUiMode {
-        HomeUiMode(rawValue: uiModeRaw) ?? HomeUiState.initial.mode
+    private var hierarchyProfile: HomeHierarchyProfile {
+        HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw)
     }
 
-    private var hierarchyProfile: HomeHierarchyProfile {
-        HomeHierarchyProfile.ofMode(uiMode)
+    private var uiMode: HomeUiMode {
+        hierarchyProfile.effectiveMode
     }
 
     private func sendUiEvent(_ event: HomeUiEvent) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         withAnimation(Motion.resort) {
-            uiModeRaw = HomeListControls.stepUiState(HomeUiState(mode: uiMode), event).mode.rawValue
+            let target = HomeListControls.stepUiState(HomeUiState(mode: uiMode), event).mode
+            let preset = HomeListControls.applyPreset(target)
+            uiModeRaw = preset.modeRaw
+            uiPartOverridesRaw = preset.overridesRaw
         }
     }
     // Not persisted: a filter left on across launches reads as lost sessions.
@@ -709,11 +714,12 @@ struct HomeView: View {
         let showFilters = hierarchyProfile.showsMultiAxisFilters
         let hasProjectScope = selectedSpace != nil || projectlessSelected
         ScrollView(.horizontal, showsIndicators: false) {
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 6) {
+            GlassEffectContainer(spacing: 5) {
+                HStack(spacing: 5) {
                     if showFilters || hasProjectScope { projectMenu.fixedSize() }
                     if showFilters && showsGrouping { groupPill }
                     uiModePill
+                    customizePartsMenu
                 }
             }
         }
@@ -721,39 +727,44 @@ struct HomeView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Experience mode switcher (`FrameSchedule.lean`: `UiMode.zen` default for
+    /// 1-tap Experience mode switcher (`FrameSchedule.lean`: `UiMode.zen` default for
     /// a calm flat list, `UiMode.developer` for multi-level filters & git chrome).
+    /// Tap once to flip instantly; hold (or tap the sliders pill beside it) to toggle individual parts.
     private var uiModePill: some View {
-        Menu {
-            Section("Experience mode") {
-                Button {
-                    sendUiEvent(.setMode(.zen))
-                } label: {
-                    if uiMode == .zen {
-                        Label("Zen (Simple)", systemImage: "checkmark")
-                    } else {
-                        Label("Zen (Simple)", systemImage: "sparkles")
-                    }
-                }
-                Button {
-                    sendUiEvent(.setMode(.developer))
-                } label: {
-                    if uiMode == .developer {
-                        Label("Developer (Full hierarchy)", systemImage: "checkmark")
-                    } else {
-                        Label("Developer (Full hierarchy)", systemImage: "terminal")
-                    }
-                }
-            }
+        Button {
+            sendUiEvent(.toggleMode)
         } label: {
-            HomeControlPill(symbol: uiMode.symbol, title: uiMode.pillTitle,
-                            active: uiMode == .developer)
+            HomeModeTogglePill(mode: uiMode)
         }
         .buttonStyle(.plain)
         .fixedSize()
+        .contextMenu {
+            HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+        }
         .accessibilityLabel("Experience mode")
         .accessibilityValue(uiMode.label)
+        .accessibilityHint("Tap to switch between Zen and Developer mode, or hold to customize individual controls")
         .accessibilityIdentifier("home-ui-mode")
+    }
+
+    /// 1-tap menu for turning individual hierarchy parts on and off independently.
+    private var customizePartsMenu: some View {
+        let customized = !uiPartOverridesRaw.isEmpty
+        return Menu {
+            HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 13, weight: customized ? .semibold : .medium))
+                .foregroundStyle(customized ? Theme.text : Theme.textMuted)
+                .frame(width: Theme.chipHeight, height: Theme.chipHeight)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .frame(minHeight: Theme.hitTarget)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Customize view controls")
+        .accessibilityIdentifier("home-customize-parts")
     }
 
     /// Scopes the session list to one project. Rows are Buttons, not a Picker:

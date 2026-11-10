@@ -648,6 +648,10 @@ fn keys(c: *ui.Context, a: *App) void {
         }
     }
     if (c.shortcut(.{ .key = 'j', .cmd = true, .shift = true })) strip.nextAttention(a);
+    if (c.shortcut(.{ .key = 'm', .cmd = true, .shift = true })) {
+        a.settings.toggleUiMode();
+        a.redraw();
+    }
     for (0..@min(strip.count(a), 6)) |ix| {
         if (c.shortcut(.{ .key = @as(u21, '1') + @as(u21, @intCast(ix)), .cmd = true, .alt = true })) {
             const chats = strip.chatCount(a);
@@ -833,6 +837,16 @@ fn titlebar(c: *ui.Context, a: *App, k: theme.Colors) void {
         defer history.end();
         icons.icon(c, .@"clock-circle", 16, k.muted, 0);
         if (history.clicked()) strip.open(a, .history, strip.active(a), c.rects.get(c.node(history.index).id));
+        ui.div(c).w(4).end();
+        const dev = a.settings.uiMode() == .developer;
+        ui.key(c, "titlebar-ui-mode-pill");
+        if (kit.iconButton(c, k, if (dev) .terminal else .@"magic-stick-3", .{
+            .on = dev,
+            .tip = .{ .text = "Toggle Zen / Developer mode (⇧⌘M)" },
+        })) {
+            a.settings.toggleUiMode();
+            a.redraw();
+        }
     }
     @import("view_updates.zig").titlebarControl(c, a, k);
 }

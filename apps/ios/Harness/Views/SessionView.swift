@@ -38,6 +38,8 @@ struct SessionView: View {
     @State private var windowMidX: CGFloat = 0
     /// This device is an iPhone Duo (DuoChat): chips, diff card, status pill, two-line title.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
+    @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     /// The side the system's vertical bar stands on (the Duo's cover display), and the content's safe area.
     @State private var verticalBarEdge: HorizontalEdge?
     @State private var contentSafeInsets = EdgeInsets()
@@ -144,6 +146,29 @@ struct SessionView: View {
             .accessibilityIdentifier("session-navigation-controls")
             if showAuxiliary, !pillShows(chat) {
                 SessionStatusIndicators(current: chat.id, chats: chats, maxVisible: maxVisible)
+            } else if !showAuxiliary {
+                let mode = HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw).effectiveMode
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(Motion.resort) {
+                        let preset = HomeListControls.applyPreset(mode.flipped)
+                        uiModeRaw = preset.modeRaw
+                        uiPartOverridesRaw = preset.overridesRaw
+                    }
+                } label: {
+                    Image(systemName: mode.symbol)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundStyle(mode == .developer ? Theme.text : Theme.textMuted)
+                        .frame(width: 28, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .contextMenu {
+                    HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+                }
+                .accessibilityLabel("Toggle Zen or Developer mode")
+                .accessibilityValue(mode.label)
+                .accessibilityIdentifier("session-ui-mode")
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { headerWidth = $0 }

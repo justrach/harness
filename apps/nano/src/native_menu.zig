@@ -18,11 +18,13 @@ pub fn install(app: *nanoui.App, a: *App) !void {
     });
 }
 
-fn viewItems(a: *App) [5]nanoui.MenuItem {
+fn viewItems(a: *App) [7]nanoui.MenuItem {
     return .{
         .{ .label = "Bigger Text", .accelerator = "Cmd+=", .click = .of(a, zoomIn) },
         .{ .label = "Smaller Text", .accelerator = "Cmd+-", .click = .of(a, zoomOut) },
         .{ .label = "Actual Size", .accelerator = "Cmd+0", .click = .of(a, resetZoom) },
+        .separator,
+        .{ .label = "Toggle Zen / Developer Mode", .accelerator = "Cmd+Shift+M", .click = .of(a, toggleUiMode) },
         .separator,
         .{ .role = .toggle_full_screen },
     };
@@ -60,6 +62,14 @@ fn resetZoom(a: *App, _: ItemArg) void {
     const was = a.view.in_pre_tree;
     a.view.in_pre_tree = true;
     a.resetZoom();
+    a.view.in_pre_tree = was;
+    a.redraw();
+}
+
+fn toggleUiMode(a: *App, _: ItemArg) void {
+    const was = a.view.in_pre_tree;
+    a.view.in_pre_tree = true;
+    a.settings.toggleUiMode();
     a.view.in_pre_tree = was;
     a.redraw();
 }

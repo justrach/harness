@@ -920,4 +920,59 @@ theorem zen_mode_eliminates_moving_parts :
     movingPartsCount (HierarchyProfile.ofMode .zen) < movingPartsCount (HierarchyProfile.ofMode .developer) := by
   decide
 
+/-- Individual UI moving parts that can each be toggled on and off independently
+on top of the `Zen` / `Developer` master presets. -/
+inductive MovingPart where
+  | openWorkspacesTree
+  | multiAxisFilters
+  | rowTechBadges
+  | gitCheckoutChrome
+  | promptRail
+  | actionToolbar
+  | groupedSections
+deriving DecidableEq, Repr, BEq
+
+def HierarchyProfile.partEnabled (p : HierarchyProfile) : MovingPart → Bool
+  | .openWorkspacesTree => p.showsOpenWorkspacesTree
+  | .multiAxisFilters   => p.showsMultiAxisFilters
+  | .rowTechBadges      => p.showsRowTechBadges
+  | .gitCheckoutChrome  => p.showsGitCheckoutChrome
+  | .promptRail         => p.showsPromptRail
+  | .actionToolbar      => p.showsActionToolbar
+  | .groupedSections    => !p.flatSessionList
+
+def HierarchyProfile.togglePart (p : HierarchyProfile) : MovingPart → HierarchyProfile
+  | .openWorkspacesTree => { p with showsOpenWorkspacesTree := !p.showsOpenWorkspacesTree }
+  | .multiAxisFilters   => { p with showsMultiAxisFilters   := !p.showsMultiAxisFilters }
+  | .rowTechBadges      => { p with showsRowTechBadges      := !p.showsRowTechBadges }
+  | .gitCheckoutChrome  => { p with showsGitCheckoutChrome  := !p.showsGitCheckoutChrome }
+  | .promptRail         => { p with showsPromptRail         := !p.showsPromptRail }
+  | .actionToolbar      => { p with showsActionToolbar      := !p.showsActionToolbar }
+  | .groupedSections    => { p with flatSessionList         := !p.flatSessionList }
+
+/-- Any enabled moving part classifies the effective indicator as `.developer`;
+when all moving parts are off (`HierarchyProfile.ofMode .zen`), the indicator is `.zen`. -/
+def HierarchyProfile.effectiveMode (p : HierarchyProfile) : UiMode :=
+  if p == HierarchyProfile.ofMode .zen then .zen else .developer
+
+theorem toggle_part_involutive (p : HierarchyProfile) (part : MovingPart) :
+    (p.togglePart part).togglePart part = p := by
+  cases p
+  cases part <;> simp [HierarchyProfile.togglePart]
+
+theorem toggle_part_flips_target (p : HierarchyProfile) (part : MovingPart) :
+    (p.togglePart part).partEnabled part = !(p.partEnabled part) := by
+  cases p
+  cases part <;> simp [HierarchyProfile.togglePart, HierarchyProfile.partEnabled]
+
+theorem toggle_part_orthogonal (p : HierarchyProfile) (a b : MovingPart) (hne : a ≠ b) :
+    (p.togglePart a).partEnabled b = p.partEnabled b := by
+  cases p
+  cases a <;> cases b <;> first | contradiction | rfl
+
+theorem presets_govern_all_parts (part : MovingPart) :
+    (HierarchyProfile.ofMode .zen).partEnabled part = false ∧
+    (HierarchyProfile.ofMode .developer).partEnabled part = true := by
+  cases part <;> decide
+
 end Nano.FrameSchedule

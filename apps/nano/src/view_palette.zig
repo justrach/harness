@@ -193,6 +193,14 @@ pub fn activate(a: *App, e: Entry) void {
         .new_project => @import("app_open_chooser.zig").open(a, .new_project),
         .settings => @import("view_settings.zig").open(a),
         .theme => unreachable,
+        .ui_mode => |m| {
+            a.settings.applyUiMode(m);
+            a.redraw();
+        },
+        .toggle_part => |part| {
+            a.settings.toggleMovingPart(part);
+            a.redraw();
+        },
         .external => |i| if (i < p.external.items.len) {
             const x = p.external.items[i];
             importExternal(a, &.{.{ .source = x.source, .id = x.id }});
@@ -547,6 +555,11 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                     .light => .sun,
                     .dark => .moon,
                 },
+                .ui_mode => |m| switch (m) {
+                    .zen => .@"magic-stick-3",
+                    .developer => .terminal,
+                },
+                .toggle_part => .tuning,
                 else => unreachable,
             };
             icons.icon(c, glyph, 16, k.muted, 0);
@@ -555,6 +568,7 @@ fn row(c: *ui.Context, a: *App, k: theme.Colors, e: Entry, lit: bool, query: []c
                 .new_chat => shortcuts.badge(&buf, comboFor(a, "newSession")),
                 .new_project => shortcuts.badge(&buf, comboFor(a, "newProject")),
                 .settings => shortcuts.badge(&buf, "mod-,"),
+                .ui_mode => shortcuts.badge(&buf, "mod-shift-m"),
                 else => null,
             };
             {

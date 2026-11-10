@@ -74,9 +74,14 @@ struct NewSessionView: View {
     private var space: Space? { effectiveDestination.space(in: model.spaces) }
 
     @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
+
+    private var hierarchyProfile: HomeHierarchyProfile {
+        HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw)
+    }
 
     private var showsGitChrome: Bool {
-        HomeHierarchyProfile.ofMode(HomeUiMode(rawValue: uiModeRaw) ?? .zen).showsGitCheckoutChrome
+        hierarchyProfile.showsGitCheckoutChrome
     }
 
     private var deviceId: String? {
@@ -314,6 +319,27 @@ struct NewSessionView: View {
             }
             // Bare text on the bar, not a glass capsule.
             .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .topBarTrailing) {
+                let mode = hierarchyProfile.effectiveMode
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(Motion.resort) {
+                        let preset = HomeListControls.applyPreset(mode.flipped)
+                        uiModeRaw = preset.modeRaw
+                        uiPartOverridesRaw = preset.overridesRaw
+                    }
+                } label: {
+                    Image(systemName: mode.symbol)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(mode == .developer ? Theme.text : Theme.textMuted)
+                }
+                .contextMenu {
+                    HomeExperienceMenuContent(uiModeRaw: $uiModeRaw, uiPartOverridesRaw: $uiPartOverridesRaw)
+                }
+                .accessibilityLabel("Toggle Zen or Developer mode")
+                .accessibilityValue(mode.label)
+                .accessibilityIdentifier("new-session-ui-mode")
+            }
         }
         .sheet(isPresented: $showHostPicker) {
             SessionHostPickerSheet(selectedDeviceId: deviceId) { selectedHostId = $0 }

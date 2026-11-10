@@ -839,6 +839,42 @@ pub fn stepUiState(s: UiState, e: UiEvent) UiState {
     };
 }
 
+pub const MovingPart = enum {
+    open_workspaces_tree,
+    multi_axis_filters,
+    row_tech_badges,
+    git_checkout_chrome,
+    prompt_rail,
+    action_toolbar,
+    grouped_sections,
+
+    pub const all = std.enums.values(MovingPart);
+
+    pub fn key(p: MovingPart) []const u8 {
+        return switch (p) {
+            .open_workspaces_tree => "zenPart.openWorkspacesTree",
+            .multi_axis_filters => "zenPart.multiAxisFilters",
+            .row_tech_badges => "zenPart.rowTechBadges",
+            .git_checkout_chrome => "zenPart.gitCheckoutChrome",
+            .prompt_rail => "zenPart.promptRail",
+            .action_toolbar => "zenPart.actionToolbar",
+            .grouped_sections => "zenPart.groupedSections",
+        };
+    }
+
+    pub fn label(p: MovingPart) []const u8 {
+        return switch (p) {
+            .open_workspaces_tree => "Open workspaces",
+            .multi_axis_filters => "Project & status filters",
+            .row_tech_badges => "Row agent & branch badges",
+            .git_checkout_chrome => "Git & branch footer",
+            .prompt_rail => "Prompt rail",
+            .action_toolbar => "Actions bar",
+            .grouped_sections => "Project groups",
+        };
+    }
+};
+
 pub const HierarchyProfile = struct {
     shows_open_workspaces_tree: bool,
     shows_multi_axis_filters: bool,
@@ -869,6 +905,40 @@ pub const HierarchyProfile = struct {
                 .flat_session_list = false,
             },
         };
+    }
+
+    pub fn partEnabled(p: HierarchyProfile, part: MovingPart) bool {
+        return switch (part) {
+            .open_workspaces_tree => p.shows_open_workspaces_tree,
+            .multi_axis_filters => p.shows_multi_axis_filters,
+            .row_tech_badges => p.shows_row_tech_badges,
+            .git_checkout_chrome => p.shows_git_checkout_chrome,
+            .prompt_rail => p.shows_prompt_rail,
+            .action_toolbar => p.shows_action_toolbar,
+            .grouped_sections => !p.flat_session_list,
+        };
+    }
+
+    pub fn setPart(p: HierarchyProfile, part: MovingPart, on: bool) HierarchyProfile {
+        var next = p;
+        switch (part) {
+            .open_workspaces_tree => next.shows_open_workspaces_tree = on,
+            .multi_axis_filters => next.shows_multi_axis_filters = on,
+            .row_tech_badges => next.shows_row_tech_badges = on,
+            .git_checkout_chrome => next.shows_git_checkout_chrome = on,
+            .prompt_rail => next.shows_prompt_rail = on,
+            .action_toolbar => next.shows_action_toolbar = on,
+            .grouped_sections => next.flat_session_list = !on,
+        }
+        return next;
+    }
+
+    pub fn togglePart(p: HierarchyProfile, part: MovingPart) HierarchyProfile {
+        return p.setPart(part, !p.partEnabled(part));
+    }
+
+    pub fn effectiveMode(p: HierarchyProfile) UiMode {
+        return if (std.meta.eql(p, ofMode(.zen))) .zen else .developer;
     }
 };
 
@@ -907,4 +977,15 @@ test "lean UiMode state machine: default is zen, toggle is involutive, and zen f
     try std.testing.expectEqual(@as(usize, 0), movingPartsCount(zen));
     try std.testing.expectEqual(@as(usize, 6), movingPartsCount(dev));
     try std.testing.expect(movingPartsCount(zen) < movingPartsCount(dev));
+
+    for (MovingPart.all) |part| {
+        try std.testing.expect(!zen.partEnabled(part));
+        try std.testing.expect(dev.partEnabled(part));
+        try std.testing.expectEqual(zen, zen.togglePart(part).togglePart(part));
+        try std.testing.expect(zen.togglePart(part).partEnabled(part));
+        for (MovingPart.all) |other| if (other != part) {
+            try std.testing.expectEqual(zen.partEnabled(other), zen.togglePart(part).partEnabled(other));
+            try std.testing.expectEqual(dev.partEnabled(other), dev.togglePart(part).partEnabled(other));
+        };
+    }
 }

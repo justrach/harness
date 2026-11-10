@@ -328,10 +328,11 @@ struct ComposerView: View {
     /// iPhone Duo: Stop lives in the status pill (DuoChat), so Send never turns into Stop.
     @AppStorage(DuoChat.foldableKey) private var duoChat = false
     @AppStorage(HomeUiMode.storageKey) private var uiModeRaw = HomeUiMode.zen.rawValue
+    @AppStorage(HomeMovingPart.overridesStorageKey) private var uiPartOverridesRaw = ""
     let questionClosedAtMs: Int64?
 
     private var showsGitChrome: Bool {
-        HomeHierarchyProfile.ofMode(HomeUiMode(rawValue: uiModeRaw) ?? .zen).showsGitCheckoutChrome
+        HomeHierarchyProfile.resolved(baseModeRaw: uiModeRaw, overridesRaw: uiPartOverridesRaw).showsGitCheckoutChrome
     }
 
     // What was typed and not sent comes back with the chat (DraftStore).

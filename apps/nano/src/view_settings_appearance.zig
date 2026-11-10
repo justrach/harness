@@ -85,8 +85,25 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
             const r = set.row(c, k, true, false);
             defer r.end();
             set.tile(c, k, .widget);
-            words(c, k, "Developer mode", "Show open workspace trees, project groups, git worktree/branch controls, prompt rail, and action toolbars. Off keeps Zen mode (a single flat list).", 32);
+            words(c, k, "Developer mode (⇧⌘M)", "Turn every hierarchy layer on at once, or return to Zen mode (all off). Individual controls below can also be switched on or off independently.", 32);
             if (switch_(c, k, a.settings.uiMode() == .developer, 0)) a.settings.toggleUiMode();
+        }
+        {
+            const motion = @import("motion_rules.zig");
+            const profile = a.settings.hierarchyProfile();
+            const items = [_]struct { part: motion.MovingPart, icon: icons.Name, title: []const u8, desc: []const u8 }{
+                .{ .part = .open_workspaces_tree, .icon = .@"split-columns", .title = "Open workspaces tree", .desc = "Show open workspace sessions and nested split panes above the session list." },
+                .{ .part = .git_checkout_chrome, .icon = .@"git-branch", .title = "Git & branch controls", .desc = "Show local/worktree checkout pickers, branch selectors, and pull request footer chips." },
+                .{ .part = .prompt_rail, .icon = .list, .title = "Prompt rail", .desc = "Show the right-margin jump rail for navigating long conversations by prompt." },
+                .{ .part = .action_toolbar, .icon = .@"action-play", .title = "Actions toolbar", .desc = "Show project build, test, and run buttons in the session header." },
+            };
+            for (items) |it| {
+                const r = set.row(c, k, true, false);
+                defer r.end();
+                set.tile(c, k, it.icon);
+                words(c, k, it.title, it.desc, 32);
+                if (switch_(c, k, profile.partEnabled(it.part), 0)) a.settings.toggleMovingPart(it.part);
+            }
         }
     }
     caption(c, k, "Motion");

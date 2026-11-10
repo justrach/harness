@@ -751,7 +751,7 @@ pub const Store = struct {
     /// Live disk-backed stores (`s.path != null`) default to `.zen` ("for normies"),
     /// while in-memory test stores (`s.path == null`) default to `.developer` unless
     /// explicitly switched with `applyUiMode`.
-    pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
+    pub fn baseUiMode(s: *const Store) @import("motion_rules.zig").UiMode {
         const rules = @import("motion_rules.zig");
         if (s.text("uiMode")) |raw| {
             if (std.mem.eql(u8, raw, "zen")) return .zen;
@@ -761,10 +761,24 @@ pub const Store = struct {
     }
 
     pub fn hierarchyProfile(s: *const Store) @import("motion_rules.zig").HierarchyProfile {
-        return @import("motion_rules.zig").HierarchyProfile.ofMode(s.uiMode());
+        const rules = @import("motion_rules.zig");
+        var p = rules.HierarchyProfile.ofMode(s.baseUiMode());
+        for (rules.MovingPart.all) |part| {
+            if (s.text(part.key())) |raw| {
+                if (std.mem.eql(u8, raw, "on")) p = p.setPart(part, true);
+                if (std.mem.eql(u8, raw, "off")) p = p.setPart(part, false);
+            }
+        }
+        return p;
+    }
+
+    pub fn uiMode(s: *const Store) @import("motion_rules.zig").UiMode {
+        return s.hierarchyProfile().effectiveMode();
     }
 
     pub fn applyUiMode(s: *Store, mode: @import("motion_rules.zig").UiMode) void {
+        const rules = @import("motion_rules.zig");
+        for (rules.MovingPart.all) |part| s.clearText(part.key());
         s.setText("uiMode", mode.key());
         switch (mode) {
             .zen => {
@@ -778,6 +792,19 @@ pub const Store = struct {
                 s.set(.sidebar_show_harness, true);
                 s.set(.sidebar_show_branch, true);
             },
+        }
+    }
+
+    pub fn toggleMovingPart(s: *Store, part: @import("motion_rules.zig").MovingPart) void {
+        const next = !s.hierarchyProfile().partEnabled(part);
+        s.setText(part.key(), if (next) "on" else "off");
+        switch (part) {
+            .grouped_sections => s.setText("sidebarOrganization", if (next) Organization.by_project.key() else Organization.in_one_list.key()),
+            .row_tech_badges => {
+                s.set(.sidebar_show_harness, next);
+                s.set(.sidebar_show_branch, next);
+            },
+            else => {},
         }
     }
 

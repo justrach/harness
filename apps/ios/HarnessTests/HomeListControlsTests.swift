@@ -158,4 +158,33 @@ final class HomeListControlsTests: XCTestCase {
         XCTAssertEqual(dev.movingPartsCount, 6)
         XCTAssertLessThan(zen.movingPartsCount, dev.movingPartsCount)
     }
+
+    func testMovingPartTogglesAreInvolutiveOrthogonalAndResetByMasterPreset() {
+        for mode in HomeUiMode.allCases {
+            let base = HomeHierarchyProfile.ofMode(mode)
+            for part in HomeMovingPart.allCases {
+                let flipped = base.togglingPart(part)
+                XCTAssertEqual(flipped.partEnabled(part), !base.partEnabled(part))
+                XCTAssertEqual(flipped.togglingPart(part), base)
+                for other in HomeMovingPart.allCases where other != part {
+                    XCTAssertEqual(flipped.partEnabled(other), base.partEnabled(other))
+                }
+            }
+        }
+
+        // Start in Zen (all off), turn on only Git & branch in composer, and verify the Home list stays flat.
+        let overrides = HomeListControls.toggleMovingPart(.gitCheckoutChrome, baseModeRaw: "zen", overridesRaw: "")
+        let hybrid = HomeHierarchyProfile.resolved(baseModeRaw: "zen", overridesRaw: overrides)
+        XCTAssertTrue(hybrid.showsGitCheckoutChrome)
+        XCTAssertTrue(hybrid.flatSessionList)
+        XCTAssertFalse(hybrid.showsMultiAxisFilters)
+        XCTAssertFalse(hybrid.showsRowTechBadges)
+        XCTAssertEqual(hybrid.effectiveMode, .developer)
+
+        // Applying the Zen preset clears overrides and restores all-off Zen mode.
+        let reset = HomeListControls.applyPreset(.zen)
+        let restored = HomeHierarchyProfile.resolved(baseModeRaw: reset.modeRaw, overridesRaw: reset.overridesRaw)
+        XCTAssertEqual(restored, HomeHierarchyProfile.ofMode(.zen))
+        XCTAssertEqual(restored.effectiveMode, .zen)
+    }
 }
