@@ -134,6 +134,9 @@ asks before running tools asks there, and the catch-up shows it.
   project's session list.
 - Bots kept in one project's `.graff/bots` are not in the Bots group. The
   `list_bots` and `run_bot` MCP tools still reach them by project.
+- The main bot needs graff 0.302.74.62 or later. With an older graff the
+  primary bot is told only to say which bot a request is for and wait for a
+  yes: it starts no chats in projects, and the engine has nothing to report.
 - A graff from before per-user bots answers "update graff", under the switch
   in Settings when that is where it was asked. An engine from before bots has
   no Bots group and no card.
