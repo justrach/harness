@@ -691,14 +691,16 @@ struct HomeView: View {
     /// choice used to sit alone in the nav bar as "All", the grouping alone on
     /// this row as "Time". At large text sizes the pair stacks.
     @ViewBuilder private func listControls(showsGrouping: Bool) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                projectMenu
-                if showsGrouping { groupPill }
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                projectMenu
-                if showsGrouping { groupPill }
+        GlassEffectContainer(spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    projectMenu
+                    if showsGrouping { groupPill }
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    projectMenu
+                    if showsGrouping { groupPill }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -929,11 +931,11 @@ struct HomeView: View {
         ChatRow(chat: chat, showLocation: true) {
             open(.chat(chat.id))
         }
-        .listRowBackground(selectedChatId == chat.id
-            ? AnyView(RoundedRectangle(cornerRadius: ChatRow.washRadius, style: .continuous)
-                .fill(Theme.elementActive)
-                .padding(.horizontal, Theme.gutter - ChatRow.insetH))
-            : AnyView(Color.clear))
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: ChatRow.washRadius, style: .continuous)
+                .fill(selectedChatId == chat.id ? Theme.elementActive : Color.clear)
+                .padding(.horizontal, Theme.gutter - ChatRow.insetH)
+        )
         .listRowSeparator(.hidden)
         // The row pads its content by insetH, so the avatar and text sit on the 24pt gutter.
         .listRowInsets(EdgeInsets(top: 1, leading: Theme.gutter - ChatRow.insetH,
@@ -1007,7 +1009,7 @@ struct ChatRow: View {
                 content(indicator: indicator, sendState: sendState,
                         reservesPullRequest: pullRequest != nil)
             }
-            .buttonStyle(PressWashButtonStyle(cornerRadius: ChatRow.washRadius))
+            .buttonStyle(PressWashButtonStyle(cornerRadius: ChatRow.washRadius, scale: 0.985))
             if let pullRequest {
                 PullRequestBadge(summary: pullRequest)
                     .padding(.trailing, 8)
@@ -1044,7 +1046,7 @@ struct ChatRow: View {
         let badge = sendState.flatMap(sendBadge)
         let unread = indicator == .completed && badge == nil
         return HStack(alignment: .top, spacing: 12) {
-            AgentAvatar(harness: chat.config?.harness, size: Theme.rowAvatar)
+            AgentAvatar(harness: chat.config?.harness, spaceId: chat.spaceId, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 3) {
                 // Line 1: the session name, and its time or status in the corner.
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -1145,12 +1147,16 @@ struct ChatRow: View {
 /// Sessions with no agent recorded yet get a neutral mark.
 struct AgentAvatar: View {
     let harness: String?
+    var spaceId: String? = nil
     var size: CGFloat = Theme.rowAvatar
 
     var body: some View {
         ZStack {
             Circle().fill(ink(0.06))
-            Circle().strokeBorder(hairline(0.06), lineWidth: 0.5)
+            Circle().strokeBorder(
+                spaceId.map { Theme.projectTint($0).opacity(0.32) } ?? hairline(0.06),
+                lineWidth: spaceId != nil ? 1.5 : 0.5
+            )
             if let harness {
                 HarnessBadge(harness: harness, size: size * 0.46, neutral: Theme.text)
             } else {

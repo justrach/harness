@@ -78,9 +78,10 @@ struct ComposerShell<Chips: View>: View {
     }
 
     /// One animatable shape for background/glass/hairline: capsule-radius
-    /// collapsed (46pt tall pill), 20pt card expanded (t3's 999↔20 morph).
+    /// collapsed (46pt tall pill), 22pt card expanded (concentric with 44pt
+    /// inner circles; `FrameSchedule.lean`: `composer_expanded_radius_22_is_concentric`).
     private var surfaceShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: expanded && !singleLine ? 20 : 24)
+        RoundedRectangle(cornerRadius: expanded && !singleLine ? 22 : 24, style: .continuous)
     }
 
     // Switching between VStack/HStack via AnyLayout (rather than an if/else
@@ -184,14 +185,9 @@ struct ComposerShell<Chips: View>: View {
         .padding(.vertical, expanded && !singleLine ? 12 : 5)
         // Pure native Liquid Glass (`FrameSchedule.lean`:
         // `native_glass_preserves_specular_refraction`): no interior opaque fill
-        // and no unfocused gray stroke over the glass rim.
+        // and no stroke over the glass rim.
         .glassEffect(.regular.interactive(), in: surfaceShape)
         .shadow(color: .black.opacity(0.08), radius: 10, y: 3)
-        .overlay {
-            if focused {
-                surfaceShape.strokeBorder(Theme.accent.opacity(0.45), lineWidth: 1)
-            }
-        }
         // The whole glass surface focuses the editor, not just the TextField's
         // own text box: the collapsed pill is mostly padding, and a tap that
         // misses the text box falls through to the transcript underneath —
@@ -245,7 +241,7 @@ struct ComposerShell<Chips: View>: View {
                 .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94))
         .offset(x: 8, y: -8)
         .transition(.opacity)
         .accessibilityLabel("Write in full screen")
@@ -263,7 +259,7 @@ struct ComposerShell<Chips: View>: View {
                 .glassEffect(.regular.interactive(), in: Circle())
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleButtonStyle(scale: 0.94))
         .disabled(busy)
         .accessibilityLabel("Attach photos")
     }
@@ -308,7 +304,7 @@ struct ComposerShell<Chips: View>: View {
                         in: Circle())
             .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressScaleButtonStyle(scale: 0.92))
         .accessibilityLabel(showStop && !hasContent ? "Stop response" : sendLabel)
         .accessibilityIdentifier("composer-send")
         .disabled(!buttonActive)

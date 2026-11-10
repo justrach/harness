@@ -177,11 +177,11 @@ struct NewSessionView: View {
                 Theme.bg
                 VStack(spacing: 16) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(Theme.surface)
                             .frame(width: 48, height: 48)
                             .overlay(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
                                     .strokeBorder(Theme.border, lineWidth: 1)
                             )
                         HarnessBadge(harness: runHarness, size: 22)
@@ -212,9 +212,8 @@ struct NewSessionView: View {
                                                 .lineLimit(1)
                                         }
                                         .padding(.horizontal, 12)
-                                        .frame(height: 32)
-                                        .background(Theme.surface, in: Capsule())
-                                        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+                                        .frame(height: 34)
+                                        .glassEffect(.regular.interactive(), in: Capsule())
                                     }
                                     .buttonStyle(ChipPressButtonStyle())
                                     .accessibilityIdentifier("new-session-starter-\(starter.id)")
@@ -554,8 +553,7 @@ struct NewSessionView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 40)
-            .background(ink(0.08), in: Capsule())
-            .overlay(Capsule().strokeBorder(hairline(0.08), lineWidth: 1))
+            .glassEffect(.regular.interactive(), in: Capsule())
         }
         .buttonStyle(ChipPressButtonStyle())
     }

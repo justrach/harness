@@ -765,4 +765,37 @@ theorem native_glass_preserves_specular_refraction :
     preservesNativeGlass nativeGlassConfig = true := by
   rfl
 
+/-- Concentric corner geometry (`ComposerView.swift`, `NewSessionView.swift`):
+When a rounded container of outer radius `outerRadius` wraps a circular button of diameter
+`innerDiameter` (inner radius `innerDiameter / 2`), concentricity requires
+`outerRadius ≥ innerDiameter / 2`. An expanded composer with 44pt circle buttons (`innerRadius = 22`)
+requires `outerRadius ≥ 22` (20pt violates concentricity; 22pt satisfies it). -/
+def isConcentricCorner (outerRadius innerDiameter : Nat) : Bool :=
+  outerRadius ≥ innerDiameter / 2
+
+theorem composer_legacy_radius_20_violates_concentricity :
+    isConcentricCorner 20 44 = false := by
+  decide
+
+theorem composer_expanded_radius_22_is_concentric :
+    isConcentricCorner 22 44 = true ∧ isConcentricCorner 24 44 = true := by
+  decide
+
+/-- Reduced-motion-safe tactile press scale (`Motion.swift`, `SheetUI.swift`):
+Scale in basis points (`10000 = 1.0x`). Under `reduceMotion = true` or `pressed = false`,
+scale is strictly `10000`. Under `reduceMotion = false` and `pressed = true`, scale contracts
+into `[9000, 9900]`. -/
+def pressScaleBP (reduceMotion pressed : Bool) (targetBP : Nat) : Nat :=
+  if reduceMotion || !pressed then 10000
+  else max 9000 (min 9900 targetBP)
+
+theorem press_scale_respects_reduced_motion (pressed : Bool) (targetBP : Nat) :
+    pressScaleBP true pressed targetBP = 10000 := by
+  simp [pressScaleBP]
+
+theorem press_scale_bounded_and_contracting (targetBP : Nat) :
+    9000 ≤ pressScaleBP false true targetBP ∧ pressScaleBP false true targetBP ≤ 9900 := by
+  simp [pressScaleBP]
+  omega
+
 end Nano.FrameSchedule

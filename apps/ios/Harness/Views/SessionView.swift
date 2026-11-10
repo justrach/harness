@@ -115,7 +115,7 @@ struct SessionView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(chat.displayTitle)
-                            .font(Theme.sans(15, weight: .medium))
+                            .font(Theme.sans(16, weight: .semibold))
                             .foregroundStyle(Theme.text)
                             // A Duo wraps a long title to a second line instead of cutting it.
                             .lineLimit(duoChat ? 2 : 1)
