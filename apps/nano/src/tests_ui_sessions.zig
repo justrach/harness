@@ -1,8 +1,7 @@
-//! Synthetic release172 overview/history/project-footer regression coverage.
+//! Synthetic workspace/history/project-footer regression coverage.
 const std = @import("std");
 const ui = @import("nanoui").ui;
 const App = @import("app.zig").App;
-const sessions = @import("view_sessions.zig");
 const palette = @import("view_palette.zig");
 const testing = std.testing;
 
@@ -44,18 +43,7 @@ const Harness = struct {
     }
 };
 
-test "overview sizing and attention order follow the desktop's pure rules" {
-    try testing.expectEqual(@as(usize, 1), sessions.columns(699));
-    try testing.expectEqual(@as(usize, 2), sessions.columns(700));
-    try testing.expectEqual(@as(usize, 3), sessions.columns(1000));
-    try testing.expectEqual(@as(f32, 365), sessions.cardWidth(1200));
-    try testing.expectEqual(sessions.Section.needs, sessions.section(.errored));
-    try testing.expectEqual(sessions.Section.needs, sessions.section(.awaiting_input));
-    try testing.expectEqual(sessions.Section.done, sessions.section(.completed));
-    try testing.expect(sessions.priority(.awaiting_input) < sessions.priority(.working));
-}
-
-test "All sessions keeps independent workspaces in the same project and counts panel tabs" {
+test "independent workspaces in the same project keep their panel tabs" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
@@ -64,14 +52,12 @@ test "All sessions keeps independent workspaces in the same project and counts p
     h.a.openChat("chat-b", null);
     h.a.splitPane(.horizontal);
     h.a.addChatTab(false); // A panel tab, not another workspace.
-    const rows = try sessions.sessions(&h.a, testing.allocator);
-    defer testing.allocator.free(rows);
-    try testing.expectEqual(@as(usize, 2), rows.len);
-    try testing.expectEqualStrings("synthetic-alpha", rows[0].title);
-    try testing.expectEqualStrings(rows[0].title, rows[1].title);
-    try testing.expectEqual(@as(usize, 2), rows[1].panels);
-    try testing.expectEqual(@as(usize, 3), rows[1].tabs);
-    try testing.expectEqualStrings("chat-b", rows[1].chat.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("chat-a", h.a.tabs.items.items[0].?);
+    const layout = h.a.tabs.layout().?;
+    try testing.expectEqual(@as(usize, 2), layout.panes.items.len);
+    try testing.expectEqual(@as(usize, 3), layout.groups[0].count() + layout.groups[1].count());
+    try testing.expectEqualStrings("chat-b", layout.panes.items[0].?);
 }
 
 test "project header creates an independent session in that project" {
@@ -86,10 +72,8 @@ test "project header creates an independent session in that project" {
     try testing.expect(h.a.selected == null);
     try testing.expectEqualStrings("project-a", h.a.space.?);
     try testing.expect(!h.a.new_no_project);
-    const rows = try sessions.sessions(&h.a, testing.allocator);
-    defer testing.allocator.free(rows);
-    try testing.expectEqual(@as(usize, 2), rows.len);
-    try testing.expectEqualStrings("chat-a", rows[0].chat.?);
+    try testing.expectEqual(@as(usize, 2), h.a.tabs.items.items.len);
+    try testing.expectEqualStrings("chat-a", h.a.tabs.items.items[0].?);
 }
 
 test "chat history contains only conversations across project filters including archived" {
@@ -118,27 +102,17 @@ test "chat history contains only conversations across project filters including 
     try testing.expectEqual(palette.Navigation.preserve_tabs, h.a.view.palette.navigation);
 }
 
-test "overview unmounts the composer and history Escape does not also close the route" {
+test "chat history Escape returns to the composer without changing its draft" {
     var h: Harness = undefined;
     try h.init();
     defer h.deinit();
-    h.a.composer.set("Synthetic draft survives overview");
-    sessions.open(&h.a);
-    h.t.settle(0.3);
-    try testing.expect(h.t.hasText("All sessions"));
-    try testing.expect(h.t.hasText("Earlier"));
-    try testing.expect(!h.t.hasText("Build something new"));
-    h.t.typeText("must not enter the hidden composer");
-    try testing.expectEqualStrings("Synthetic draft survives overview", h.a.composer.text());
+    h.a.composer.set("Synthetic draft survives history");
     palette.toggle(&h.a, .chat_history);
     h.t.settle(0.3);
     h.press(.{ .key = ui.Shortcut.escape });
     try testing.expect(!h.a.view.palette.open);
-    try testing.expect(h.a.view.menus.overview.open);
-    h.press(.{ .key = ui.Shortcut.escape });
-    try testing.expect(!h.a.view.menus.overview.open);
     try testing.expect(h.t.hasText("Build something new"));
-    try testing.expectEqualStrings("Synthetic draft survives overview", h.a.composer.text());
+    try testing.expectEqualStrings("Synthetic draft survives history", h.a.composer.text());
 }
 
 test "draft footer shows real project selection and hides it in plain chat" {

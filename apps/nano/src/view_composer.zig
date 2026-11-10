@@ -147,7 +147,10 @@ pub fn pill(c: *ui.Context, a: *App, k: theme.Colors, w: f32, shape: Shape, corn
     defer box.end();
     // The whole writing plane focuses the input, including its padding.
     // Picker controls keep their own focus when they open.
-    if (box.clicked() and a.picker == .none and !a.view.write_open) a.view.focus_composer = true;
+    if (box.clicked() and a.picker == .none and !a.view.write_open) {
+        a.view.focus_composer = true;
+        c.selection.clear();
+    }
     if (c.rects.get(c.node(box.index).id)) |r| a.view.composer_anchor = r else if (a.window == null) c.animationFrame();
     if (shape == .expanded) attachmentStrip(c, a, k, w);
     {
@@ -248,8 +251,12 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
     attachments.paste(c, a);
     const field_id = c.peekId(null);
     keepFocus(c, a, field_id);
+    const prev_edit = c.edits.get(field_id);
+    const prev_caret: ?usize = if (prev_edit) |e| e.caret else null;
+    const prev_anchor: ?usize = if (prev_edit) |e| e.anchor else null;
     const viewport = transcript_view.paneHeight(c, a) orelse c.size.h;
     const max_lines: u16 = @intFromFloat(@max(1, @min(11, @floor(viewport * 0.35 / 22.75))));
+    const field_index: u32 = @intCast(c.nodes.items.len);
     const r = ui.textField(c, &a.composer, .{
         .placeholder = placeholder,
         .width = .fill,
@@ -264,7 +271,22 @@ fn input(c: *ui.Context, a: *App, k: theme.Colors, shape: Shape) void {
         .caret = message_caret,
         .caret_color = k.accent,
     });
+    c.node(field_index).style.scroll_bar = false;
+    _ = c.scrollbars.remove(field_id);
     _ = c.anims.remove(field_id);
+    if (c.edits.get(field_id)) |e| {
+        const clicked_field = c.input.pressed and c.input.button == .left and !c.input.secondary and !c.right_press and c.hot == field_id;
+        const moved_selection = prev_caret != null and (e.caret != prev_caret.? or e.anchor != prev_anchor.?);
+        if (clicked_field or r.changed or moved_selection) c.selection.clear();
+    }
+    if (r.focused and c.shortcut(.{ .key = 'a', .cmd = true })) {
+        if (c.edits.getPtr(field_id)) |e| {
+            e.anchor = 0;
+            e.caret = a.composer.text().len;
+            c.selection.clear();
+            c.changed = true;
+        }
+    }
     // "Send messages with" (Settings › Shortcuts): Enter sends, or starts a
     // new line and ⌘↩ sends (`composerSendBehavior`).
     a.view.composer_caret = r.caret;
@@ -329,7 +351,10 @@ fn recall(c: *ui.Context, a: *App, id: u64) void {
     if (!history.wantsStep(&a.prompt_nav, text, delta, f.caret, f.anchor, f.marked != null)) return;
     _ = c.shortcut(s);
     const next = a.prompt_nav.step(a.gpa, a.transcript.entries.items, text, delta) catch return;
-    if (next) |t| a.composer.set(t);
+    if (next) |t| {
+        a.composer.set(t);
+        c.selection.clear();
+    }
 }
 
 /// The composer has the keys after the window moves to another chat, pane

@@ -212,6 +212,8 @@ pub const Tabs = struct {
     /// Not saved: after a restart (`clearShown`), only the active tab is
     /// marked, so closing it falls back to its neighbour.
     shown: std.ArrayList(u64) = .empty,
+    /// Recently closed chat IDs (LIFO) for Reopen closed tab (⌘⇧T).
+    closed: std.ArrayList([]u8) = .empty,
     next_shown: u64 = 0,
     active: usize = 0,
 
@@ -240,6 +242,27 @@ pub const Tabs = struct {
         for (t.drafts.items) |*d| dropDraft(t.gpa, d);
         t.drafts.deinit(t.gpa);
         t.shown.deinit(t.gpa);
+        for (t.closed.items) |id| t.gpa.free(id);
+        t.closed.deinit(t.gpa);
+    }
+
+    pub fn rememberClosed(t: *Tabs, id: ?[]const u8) void {
+        const chat = id orelse return;
+        if (chat.len == 0) return;
+        var i = t.closed.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, t.closed.items[i], chat)) {
+                t.gpa.free(t.closed.orderedRemove(i));
+            }
+        }
+        const copy = t.gpa.dupe(u8, chat) catch return;
+        t.closed.append(t.gpa, copy) catch t.gpa.free(copy);
+    }
+
+    pub fn popClosed(t: *Tabs) ?[]u8 {
+        if (t.closed.items.len == 0) return null;
+        return t.closed.pop();
     }
 
     pub fn bumpShown(t: *Tabs) u64 {
@@ -411,6 +434,7 @@ pub const Tabs = struct {
     pub fn close(t: *Tabs, i: usize) void {
         if (i >= t.items.items.len) return;
         if (t.items.items.len == 1) {
+            t.rememberClosed(t.items.items[0]);
             if (t.splits.items[0]) |*s| if (s.panes.items.len == 1 and s.groups[0].items.items.len <= 1) {
                 s.deinit(t.gpa);
                 t.splits.items[0] = null;
@@ -418,7 +442,10 @@ pub const Tabs = struct {
             dropDraft(t.gpa, &t.drafts.items[0]);
             return t.setCurrent(null);
         }
-        if (t.items.orderedRemove(i)) |id| t.gpa.free(id);
+        if (t.items.orderedRemove(i)) |id| {
+            t.rememberClosed(id);
+            t.gpa.free(id);
+        }
         if (t.splits.orderedRemove(i)) |s| {
             var x = s;
             x.deinit(t.gpa);
@@ -465,6 +492,13 @@ pub const Tabs = struct {
         while (i > 0) {
             i -= 1;
             if (t.items.items[i]) |have| if (std.mem.eql(u8, have, id)) t.close(i);
+        }
+        var ci = t.closed.items.len;
+        while (ci > 0) {
+            ci -= 1;
+            if (std.mem.eql(u8, t.closed.items[ci], id)) {
+                t.gpa.free(t.closed.orderedRemove(ci));
+            }
         }
     }
 
@@ -558,7 +592,10 @@ pub const Tabs = struct {
     pub fn closePane(t: *Tabs) bool {
         const s = t.layout() orelse return false;
         if (s.panes.items.len < 2) return false;
-        if (t.items.items[t.active]) |id| t.gpa.free(id);
+        if (t.items.items[t.active]) |id| {
+            t.rememberClosed(id);
+            t.gpa.free(id);
+        }
         const even = s.isEven();
         const closed = s.focus;
         s.groups[closed].deinit(t.gpa);
@@ -632,7 +669,10 @@ pub const Tabs = struct {
         const s = t.layout() orelse return false;
         const group = &s.groups[s.focus];
         if (group.items.items.len <= 1) return false;
-        if (t.items.items[t.active]) |id| t.gpa.free(id);
+        if (t.items.items[t.active]) |id| {
+            t.rememberClosed(id);
+            t.gpa.free(id);
+        }
         const closed = group.active;
         _ = group.items.orderedRemove(closed);
         var stamps: [64]u64 = undefined;

@@ -22,7 +22,6 @@ const inset: f32 = 4;
 
 /// What the open menus remember between frames.
 pub const State = struct {
-    overview: @import("view_sessions.zig").State = .{},
     query: ui.TextBuffer = .{},
     /// The project menu's highlighted row: its rows, then New project.
     active: usize = 0,

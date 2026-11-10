@@ -469,4 +469,22 @@ test "session hierarchy nests all tabs under the session in sidebar and shows si
         else => {},
     };
     try testing.expect(side_alpha and side_beta and side_new);
+    // Once the empty workspace becomes an ordinary single-chat workspace for a listed conversation,
+    // it must still appear in the open-workspaces list above the project groups.
+    try replace(&h.a.chats,
+        \\[{"id":"a","deviceId":"local","title":"Alpha","spaceId":"local-project","archived":false},
+        \\ {"id":"b","deviceId":"remote","title":"Beta","spaceId":"remote-project","archived":false},
+        \\ {"id":"c","deviceId":"local","title":"Gamma","spaceId":"local-project","archived":false}]
+    );
+    h.a.openChat("c", "local-project");
+    h.t.settle(1);
+    const project_group = h.t.findText("fieldnotes") orelse return error.NoProjectGroup;
+    var side_gamma_open_ws = false;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |tx| if (node.rect.x < h.a.view.sidebar_width and node.rect.y < project_group.y) {
+            if (std.mem.eql(u8, tx.str, "Gamma")) side_gamma_open_ws = true;
+        },
+        else => {},
+    };
+    try testing.expect(side_gamma_open_ws);
 }

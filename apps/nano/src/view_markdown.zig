@@ -94,6 +94,7 @@ pub fn markdown(c: *ui.Context, colors: theme.Colors, src: []const u8) void {
     const src_in = if (active_streaming) veil_mod.balanceStreamingMarkdown(c.alloc(), src) else src;
     const blocks = md.parse(c.alloc(), src_in, .{ .code = k.accent, .code_bg = k.accent_wash, .link = k.text, .muted = k.muted });
     const col = ui.div(c).column().wFull();
+    c.node(col.index).style.selectable = true;
     defer col.end();
     for (blocks, 0..) |b, i| {
         // Items of a list sit 4 apart (the list's `gap(4)`); other blocks
@@ -127,14 +128,17 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
         current_elem_ix += 1;
         break :blk veil_mod.applyVeil(c.alloc(), in.text.len, in.spans, v_spans, st.color orelse k.text);
     } else in.spans;
-    if (in.links.len == 0 or link_owner == null) return ui.richText(c, in.text, spans, st);
+    if (in.links.len == 0) return ui.richText(c, in.text, spans, st);
     const area = ui.div(c).column().wFull();
     defer area.end();
     const at = c.nodes.items.len;
     ui.richText(c, in.text, spans, st);
     const rect = c.rects.get(c.node(@intCast(at)).id) orelse {
-        const owner = link_owner.?;
-        if (owner.app.window == null or owner.app.offscreen) c.changed = true else c.frameIn(0);
+        if (link_owner) |owner| {
+            if (owner.app.window == null or owner.app.offscreen) c.changed = true else c.frameIn(0);
+        } else {
+            c.changed = true;
+        }
         return;
     };
     const origin = c.rects.get(c.node(area.index).id) orelse return;
@@ -154,8 +158,11 @@ fn rich(c: *ui.Context, in: md.Inline, style: ui.TextStyle) void {
             const action = c.interact(hit.index, .{ .focusable = true });
             const activate = action.clicked or (action.focused and (c.shortcut(.{ .key = ui.Shortcut.enter }) or c.shortcut(.{ .key = ' ' })));
             if (activate) {
-                const owner = link_owner.?;
-                @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
+                if (link_owner) |owner| {
+                    @import("app_browser.zig").openLink(owner.app, owner.parent, link.url);
+                } else {
+                    _ = nanoui.shell.openUrl(link.url);
+                }
                 c.changed = true;
             }
         }
@@ -211,6 +218,12 @@ fn block(c: *ui.Context, b: md.Block, first: bool) void {
             rich(c, in, st);
         },
         .rule => _ = c.leaf(.{ .width = .fill, .height = .{ .px = 1 }, .background = k.border }, .none, null),
+        .math => |in| {
+            ui.key(c, "md-math-block");
+            const box = ui.div(c).row().wFull().px(14).py(10).rounded(8).bg(k.ink(0.03)).justifyCenter();
+            defer box.end();
+            rich(c, in, kit.style(c, 16, 24, .{ .wrap = true }));
+        },
         .code => |code| codeBlock(c, code.lang, code.text),
         .table => |t| table(c, t.header, t.rows),
     }
@@ -221,7 +234,7 @@ fn item(c: *ui.Context, it: @FieldType(md.Block, "item")) void {
     defer r.end();
     {
         // The marker's column, 18 points at least, so wrapped lines hang.
-        const m = ui.div(c).row().minW(18).h(c.text.lineHeight(body)).itemsCenter();
+        const m = ui.div(c).row().minW(18).h(c.text.lineHeight(body)).itemsCenter().control();
         defer m.end();
         if (it.task) |done| {
             icons.icon(c, .check, 13, if (done) k.success else k.muted, 0);
@@ -252,7 +265,7 @@ fn codeBlock(c: *ui.Context, lang: []const u8, src: []const u8) void {
     defer box.end();
     {
         // `CODE_HEADER_HEIGHT` 28 with its `border_b_1`, the hairline under it.
-        const h = ui.div(c).row().wFull().h(28 - 1).pl(12).pr(5).gap(2).itemsCenter().bg(k.code_header);
+        const h = ui.div(c).row().wFull().h(28 - 1).pl(12).pr(5).gap(2).itemsCenter().bg(k.code_header).control();
         defer h.end();
         ui.text(c, if (lang.len > 0) lang else "code", .{ .size = 11, .color = k.muted });
         ui.spacer(c);

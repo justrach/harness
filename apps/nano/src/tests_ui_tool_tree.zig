@@ -73,7 +73,7 @@ test "expanded tree results live beside the command, not in a duplicate list" {
     defer h.deinit();
     try h.click(summary);
     try testing.expect(h.t.hasText("48 passed"));
-    try testing.expect(h.t.hasText("1 failed"));
+    try testing.expect(!h.t.hasText("1 failed"));
     try testing.expect(h.t.hasText("2 matches"));
     try testing.expect(h.t.hasText("2 files"));
     try testing.expect(h.t.hasText("+8"));
@@ -174,4 +174,26 @@ test "opening an edit preserves its structured result and actual arguments" {
     try testing.expect(h.t.hasText("src/parser.zig"));
     try testing.expect(h.t.containsText("editFile"));
     try testing.expect(h.t.hasText("+8"));
+}
+
+test "desktop issues failed tool keeps red title and expandable error details" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    try h.click(summary);
+    try testing.expect(!h.t.hasText("1 failed"));
+    const command = try textRect(&h.t, "zig build check");
+    var red = false;
+    const danger = h.t.ctx.theme.danger;
+    for (h.t.ctx.nodes.items) |node| switch (node.content) {
+        .text => |text| if (std.mem.eql(u8, text.str, "Run") and @abs(node.rect.y - command.y) < 5) {
+            red = std.meta.eql(text.style.color, danger);
+        },
+        else => {},
+    };
+    try testing.expect(red);
+    h.t.click(command.x + 4, command.y + command.h / 2);
+    h.t.settle(1);
+    try testing.expect(h.t.containsText("1 failed"));
+    try testing.expect(h.a.transcript.entries.items[1].parts.items[1].is_error);
 }

@@ -116,9 +116,12 @@ test {
     _ = @import("tests_ui_tool_tree.zig");
     _ = @import("tests_ui_actions_toolbar.zig");
     _ = @import("tests_ui_sessions.zig");
+    _ = @import("tests_desktop_regressions.zig");
+    _ = @import("view_attachment_drop.zig");
     _ = @import("tests_ui_project_setup.zig");
     _ = @import("tests_ui_open_chooser.zig");
     _ = @import("tests_ui_resize.zig");
+    _ = @import("tests_ui_strip_folder_search.zig");
     _ = @import("tests_tab_layout.zig");
     _ = @import("project_paths.zig");
     _ = @import("graff_update.zig");

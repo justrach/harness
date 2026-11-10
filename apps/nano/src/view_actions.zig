@@ -294,7 +294,11 @@ fn field(c: *ui.Context, k: theme.Colors, buf: *ui.TextBuffer, placeholder: []co
     const f = ui.div(c).column().wFull().px(12).py(8).rounded(8).bg(k.ink(0.04)).border(k.border).borderW(1).minW(0);
     const sized = if (command) f.h(88) else f;
     defer sized.end();
+    const field_id = c.peekId(null);
+    const field_index: u32 = @intCast(c.nodes.items.len);
     _ = ui.textField(c, buf, .{ .placeholder = placeholder, .width = .fill, .bare = true, .size = 14, .multiline = command, .max_lines = 4 });
+    c.node(field_index).style.scroll_bar = false;
+    _ = c.scrollbars.remove(field_id);
 }
 
 /// The dock under the chat: a tab per run, its output as a log.

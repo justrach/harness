@@ -74,18 +74,11 @@ pub fn page(c: *ui.Context, a: *App, k: theme.Colors) void {
     {
         const cd = card(c, k);
         defer cd.end();
-        {
-            const r = set.row(c, k, true, false);
-            defer r.end();
-            set.tile(c, k, .@"eye-closed");
-            words(c, k, "Compact mode", "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.", 32);
-            if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
-        }
         const r = set.row(c, k, false, false);
         defer r.end();
-        set.tile(c, k, .widget);
-        words(c, k, "Task view", "Show open workspaces in the sidebar, with the All sessions dashboard, instead of your conversations.", 32);
-        if (switch_(c, k, a.settings.get(.sidebar_task_view), 0)) a.settings.toggle(.sidebar_task_view);
+        set.tile(c, k, .@"eye-closed");
+        words(c, k, "Compact mode", "Fold a turn's thinking, tool calls, and narration into one collapsed row — only the reply shows.", 32);
+        if (switch_(c, k, a.settings.get(.transcript_compact_mode), 0)) a.settings.toggle(.transcript_compact_mode);
     }
     caption(c, k, "Motion");
     motionCard(c, a, k);

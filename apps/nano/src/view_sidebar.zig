@@ -107,13 +107,6 @@ fn openWorkspaces(c: *ui.Context, a: *App, k: theme.Colors) void {
             }) catch return;
         }
         if (a.tabs.items.items.len == 1 and stabs.items.len <= 1) continue;
-        const singleton = if (a.tabs.splits.items[ws]) |split|
-            split.panes.items.len == 1 and split.groups[0].items.items.len == 1
-        else
-            true;
-        if (singleton) if (id) |chat_id| if (a.findChat(chat_id)) |chat| {
-            if (!chat.archived and listed(a, chat)) continue;
-        };
         sessions.append(c.alloc(), .{
             .ws = ws,
             .title_chat_id = title_cid,
@@ -280,7 +273,8 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
     // The magnifier, muted, on a wash while the search is open
     // (`render_sidebar_search_trigger`).
     const searching = a.view.search.open;
-    if (kit.iconButton(c, k, .magnifer, .{ .size = 30, .radius = 8, .icon = 16, .color = k.muted, .on = searching }))
+    ui.key(c, "sidebar-search-trigger");
+    if (kit.iconButton(c, k, .magnifer, .{ .size = 30, .radius = 8, .icon = 16, .color = k.muted, .on = searching, .tip = .{ .text = "Search sessions", .delay = tip.quick } }))
         @import("view_sidebar_search.zig").toggle(a);
     {
         const more = tip.on(ui.div(c).row(), k, .{ .text = "Sidebar view options", .delay = tip.quick });
@@ -288,13 +282,6 @@ fn filterRow(c: *ui.Context, a: *App, k: theme.Colors) void {
         if (kit.iconButton(c, k, .@"more-horizontal", .{ .size = 30, .radius = 8, .icon = 16, .color = k.muted.alpha(0.6), .on = a.view.more_menu }))
             if (a.view.more_menu) menus.close(a) else menus.openView(a);
         if (c.rects.get(c.node(more.index).id)) |r| a.view.more_anchor = r;
-    }
-    {
-        ui.key(c, "sidebar-overview");
-        const overview = tip.on(ui.div(c).row().size(24, 24).center().rounded(6).hover(k.hover), k, .{ .text = "All sessions" });
-        defer overview.end();
-        icons.icon(c, .widget, 16, k.muted, 0);
-        if (overview.clicked()) @import("view_sessions.zig").open(a);
     }
 }
 
@@ -720,6 +707,59 @@ fn groups(c: *ui.Context, a: *App, k: theme.Colors, items: []const ChatItem, by:
         rows.flush(c);
     }
     omitted.flush(c);
+}
+
+/// Active sessions in the exact order the sidebar renders them (Pinned, then
+/// grouped or regular non-archived sessions). Used by Jump to session 1..9
+/// and Next/Previous session when fewer than two tabs are open.
+pub fn visibleSessionIds(c: *ui.Context, a: *App) []const []const u8 {
+    const gpa = c.alloc();
+    var out: std.ArrayList([]const u8) = .empty;
+    const pins = visiblePins(a, gpa);
+    const grouped = a.settings.organization() != .in_one_list;
+    const by = Grouping.of(a);
+    const items = prepareItems(c, a, pins, grouped, by);
+    if (pins.len > 0 and a.view.pinned_open) {
+        for (pins) |id| {
+            if (a.findChat(id) != null) out.append(gpa, id) catch {};
+        }
+    }
+    if (grouped) {
+        var keys: std.ArrayList([]const u8) = .empty;
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
+            const key = it.group_key;
+            for (keys.items) |have| {
+                if (std.mem.eql(u8, have, key)) break;
+            } else keys.append(gpa, key) catch {};
+        };
+        if (by.org == .by_status) std.mem.sort([]const u8, keys.items, {}, struct {
+            fn lt(_: void, x: []const u8, y: []const u8) bool {
+                return @backingInt(workspace.StatusGroup.fromKey(x).?) < @backingInt(workspace.StatusGroup.fromKey(y).?);
+            }
+        }.lt);
+        if (by.org == .by_device) if (a.device_id) |me| for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, me)) {
+            std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
+            keys.items[0] = me;
+            break;
+        };
+        for (keys.items, 0..) |key, i| if (std.mem.eql(u8, key, "needs")) {
+            std.mem.copyBackwards([]const u8, keys.items[1 .. i + 1], keys.items[0..i]);
+            keys.items[0] = key;
+            break;
+        };
+        for (keys.items) |key| {
+            const collapse = c.print("{s}:{s}", .{ by.prefix(), key });
+            if (!a.view.groupOpen(collapse, true)) continue;
+            for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned and std.mem.eql(u8, it.group_key, key)) {
+                out.append(gpa, ch.id) catch {};
+            };
+        }
+    } else if (a.view.sessions_open) {
+        for (a.chats.items, items) |ch, it| if (it.listed and !ch.archived and !it.pinned) {
+            out.append(gpa, ch.id) catch {};
+        };
+    }
+    return out.items;
 }
 
 /// How the lists group this frame: the organization, and for "By status"
@@ -1279,10 +1319,16 @@ fn footer(c: *ui.Context, a: *App, k: theme.Colors) void {
         ui.text(c, c.print("{c}", .{account.initial(display)}), .{ .size = 9, .line_height = 13, .weight = .semibold, .mono = true, .color = k.shell });
     }
     ui.spacer(c);
-    @import("view_sessions.zig").historyButton(c, a, k);
+    {
+        ui.key(c, "chat-history");
+        const history = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).hover(k.hover), k, .{ .text = "Chat history", .delay = tip.quick });
+        defer history.end();
+        icons.icon(c, .@"clock-circle", 16, k.muted, 0);
+        if (history.clicked()) @import("view_palette.zig").toggle(a, .chat_history);
+    }
     ui.div(c).w(6).end();
     ui.key(c, "sidebar-session-create");
-    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).border(k.muted.alpha(0.45)).borderW(1).hover(k.hover), k, .{ .text = "New session" });
+    const b = tip.on(ui.div(c).row().size(26, 26).center().rounded(6).border(k.muted.alpha(0.45)).borderW(1).hover(k.hover), k, .{ .text = "New workspace", .delay = tip.quick });
     defer b.end();
     icons.icon(c, .plus, 16, k.muted, 0);
     if (b.clicked()) a.newWorkspaceSession();

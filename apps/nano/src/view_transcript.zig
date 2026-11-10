@@ -168,6 +168,7 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     } else null;
     if (subagent != null) st.justify = .start;
     st.scroll = true;
+    st.selectable = true;
     st.direction = .column;
     // The chat these are, for routing a sign-in: the open one's or a pane's.
     const chat_id: ?[]const u8 = if (subagent) |s| s.parent else if (t == &a.transcript) a.selected else for (a.peers.items) |*p| {
@@ -230,12 +231,13 @@ fn rows(c: *ui.Context, a: *App, k: theme.Colors, t: *const tr.Transcript, w: f3
     // no assistant part has arrived yet.
     _ = loading;
     const scroll_rect = c.rects.get(drawn.box);
-    const cull_offscreen = (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming, a.view.rail.glide != null);
+    const has_selection = c.selection.anchor != null or c.selection.dragging;
+    const cull_offscreen = !has_selection and (!a.offscreen or tweening or resizing) and @import("motion_rules.zig").shouldCullOffscreen(tweening, resizing, streaming, a.view.rail.glide != null);
     const cull_pad: f32 = if (tweening or resizing) 220 else 380;
     for (entries_, 0..) |*e, i| {
         // `top_gap_for`: every entry's first row opens a turn (`SPACE_LG`).
         if (i > 0) _ = c.leaf(.{ .height = .{ .px = 16 } }, .none, null);
-        ui.key(c, c.print("entry-{s}", .{e.id}));
+        ui.key(c, c.print("entry-{s}-{s}", .{ chat_id orelse "", e.id }));
         const entry_id = c.peekId(null);
         const prev = c.rects.get(entry_id);
         if (prev) |r| if (r.h > 0 and e.measured_w > 0) {
@@ -285,6 +287,7 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
     const wrap = ui.div(c).column().wFull().itemsEnd();
     defer wrap.end();
     const hovered = wrap.hovered();
+    if (c.hot == c.node(wrap.index).id) c.cursor_hand = false;
     {
         const bubble = ui.div(c).column().maxW(col * 0.8).bg(k.user_bubble).rounded(16).px(16).py(10).gap(6);
         defer bubble.end();
@@ -292,7 +295,10 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
         for (e.parts.items) |*p| switch (p.kind) {
             .text => {
                 const parsed = attachment_refs.parse(c.alloc(), p.text.items) catch attachment_refs.Parsed{ .text = p.text.items };
-                if (parsed.text.len > 0) ui.text(c, parsed.text, st);
+                if (parsed.text.len > 0) {
+                    ui.key(c, c.print("user-text-{s}-{s}-{x}", .{ chat_id orelse "", p.id, std.hash.Wyhash.hash(0, parsed.text) }));
+                    ui.text(c, parsed.text, st);
+                }
                 for (parsed.paths, 0..) |path, index| {
                     ui.key(c, c.print("user-attachment-{s}-{d}", .{ p.id, index }));
                     sentAttachment(c, a, k, chat_id, path);
@@ -302,7 +308,7 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
             else => {},
         };
     }
-    lane(c, k, e, hovered, true);
+    lane(c, a, k, e, hovered, true);
     return c.rects.get(c.node(wrap.index).id);
 }
 
@@ -311,7 +317,7 @@ fn sentAttachment(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8
     const name = @import("app_attachments.zig").displayName(path);
     const image = attachment_images.get(a, chat_id, path);
     const bytes: []const u8 = if (image) |loaded| attachment_images.tileBytes(loaded) else "";
-    const tile = ui.div(c).column().w(56).gap(2);
+    const tile = ui.div(c).column().w(56).gap(2).control();
     defer tile.end();
     {
         const thumb = ui.div(c).row().size(56, 56).center().rounded(8).border(k.border).bg(k.hover).clip();
@@ -353,10 +359,21 @@ fn underLastRow(c: *ui.Context, a: *const App, row: ?ui.Rect, scroll: ?ui.Rect) 
     return m.x >= pane.x and m.x < pane.x + pane.w and m.y >= r.y + r.h and m.y < c.size.h;
 }
 
+/// GPUI's copied-message check lasts 1.2 seconds. Keep only a stable control
+/// id and a deadline, not a borrowed entry id or a frame-arena string.
+pub const CopyFeedback = struct {
+    button: u64 = 0,
+    until: f64 = 0,
+
+    pub fn active(s: CopyFeedback, button: u64, now: f64) bool {
+        return s.button == button and now < s.until;
+    }
+};
+
 /// Under a message: 32 points held for its time and copy button, shown on
 /// hover (`strip`).
-fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
-    var l = ui.div(c).row().wFull().h(32).pt(8).gap(8).itemsCenter();
+fn lane(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
+    var l = ui.div(c).row().wFull().h(32).pt(8).gap(8).itemsCenter().control();
     if (right) l = l.justifyEnd();
     defer l.end();
     if (!hovered) return;
@@ -364,13 +381,19 @@ fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, righ
         const buf = c.alloc().alloc(u8, 32) catch return;
         ui.text(c, formatTimestamp(buf, e.created_ms, @import("accounts.zig").localOffset(e.created_ms)), .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted.alpha(0.55) });
     }
-    if (kit.iconButton(c, k, .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
+    const button = c.node(l.index).id;
+    const copied = a.view.message_copy.active(button, c.time);
+    if (copied) c.frameIn(@floatCast(a.view.message_copy.until - c.time));
+    if (kit.iconButton(c, k, if (copied) .check else .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
         var text: std.ArrayList(u8) = .empty;
         for (e.parts.items) |*p| if (p.kind == .text) {
             if (text.items.len > 0) text.appendSlice(c.alloc(), "\n\n") catch {};
             text.appendSlice(c.alloc(), p.text.items) catch {};
         };
         c.clipboard.write(c.clipboard.ctx, text.items);
+        a.view.message_copy = .{ .button = button, .until = c.time + 1.2 };
+        c.changed = true;
+        c.frameIn(0);
     }
 }
 
@@ -389,6 +412,7 @@ fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: A
     const col = ui.div(c).column().wFull();
     defer col.end();
     const hovered = col.hovered() or (last and underLastRow(c, a, c.rects.get(c.node(col.index).id), at.scroll));
+    if (c.hot == c.node(col.index).id) c.cursor_hand = false;
     // Its parts 12 apart; the lane right under the last (the row's
     // `strip`, with no gap of its own).
     const parts_box = ui.div(c).column().wFull().gap(12);
@@ -399,7 +423,7 @@ fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: A
         partRows(c, a, k, e, e.parts.items, at, last, answer);
     if (e.status == .streaming and e.parts.items.len == 0) ui.text(c, "Working…", .{ .size = 12, .color = k.muted });
     parts_box.end();
-    if (e.status != .streaming) lane(c, k, e, hovered, false);
+    if (e.status != .streaming) lane(c, a, k, e, hovered, false);
 }
 
 /// The part a finished reply's answer starts at, which a divider heads,
@@ -476,7 +500,7 @@ fn part(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, p: *const 
 /// divider, 12 points over the answer, under a muted "Worked for …" (or
 /// "Final answer") unless compact mode's work line already says it.
 fn answerHeading(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, label: bool) void {
-    const h = ui.div(c).column().wFull().pb(12);
+    const h = ui.div(c).column().wFull().pb(12).control();
     defer h.end();
     if (label) {
         const l = ui.div(c).row().wFull().pt(8).pb(12);
@@ -765,7 +789,7 @@ pub fn noticeChip(c: *ui.Context, k: theme.Colors, label: []const u8, message: [
     // GPUI's edge insets what's inside it; here it's drawn over the box.
     const chip = ui.div(c).column().wFull().rounded(10).px(10 + 1).py(8 + 1).gap(6).border(k.danger.alpha(0.16)).borderW(1).bg(k.danger.alpha(0.05));
     {
-        const h = ui.div(c).row().wFull().gap(8).itemsCenter();
+        const h = ui.div(c).row().wFull().gap(8).itemsCenter().control();
         defer h.end();
         const tile = ui.div(c).row().size(20, 20).center().rounded(6).bg(k.danger.alpha(0.12));
         icons.icon(c, .@"danger-triangle", 12, k.danger_muted.alpha(0.8), 0);
@@ -796,7 +820,7 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
     defer chip.end();
     const p = problem orelse return;
     const id = chat_id orelse return;
-    const r = ui.div(c).row().pt(2);
+    const r = ui.div(c).row().pt(2).control();
     defer r.end();
     // `btn_primary` at px(10) py(5) rounded(7), 12 points.
     const b = ui.div(c).row().px(10).py(5).rounded(7).bg(k.solid);
@@ -809,7 +833,7 @@ fn errorChip(c: *ui.Context, a: *App, k: theme.Colors, chat_id: ?[]const u8, mes
 }
 
 fn attachment(c: *ui.Context, k: theme.Colors, icon: icons.Name, label: []const u8) void {
-    const row = ui.div(c).row().gap(6).itemsCenter();
+    const row = ui.div(c).row().gap(6).itemsCenter().control();
     defer row.end();
     icons.icon(c, icon, 14, k.muted, 0);
     ui.text(c, label, .{ .size = 12, .color = k.muted });

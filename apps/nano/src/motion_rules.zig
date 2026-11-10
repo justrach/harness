@@ -329,6 +329,72 @@ pub fn sidebarActiveOpaqueCard(frosted: bool) bool {
     return !frosted;
 }
 
+/// Multiline editor scrollbar policy (`Nano.FrameSchedule.multilineFieldScrollbar`).
+pub fn multilineFieldScrollbar(focused: bool, caret_visible: bool, has_overflow: bool) bool {
+    _ = focused;
+    _ = caret_visible;
+    _ = has_overflow;
+    return false;
+}
+
+pub const SelectionOwner = enum { none, editor, page };
+pub const SelectionEvent = enum { page_select, editor_select_or_edit, noop_undo_redo, clear_all };
+
+/// Exclusive selection ownership transition (`Nano.FrameSchedule.stepSelectionOwner`).
+pub fn stepSelectionOwner(cur: SelectionOwner, ev: SelectionEvent) SelectionOwner {
+    return switch (ev) {
+        .page_select => .page,
+        .editor_select_or_edit => .editor,
+        .noop_undo_redo => cur,
+        .clear_all => .none,
+    };
+}
+
+pub const CopyTarget = enum { none, editor_slice, page_slice };
+
+/// `Cmd+C` copy target resolution (`Nano.FrameSchedule.decideCopyTarget`).
+pub fn decideCopyTarget(editor_focused: bool, editor_has_range: bool, page_has_text: bool) CopyTarget {
+    if (editor_focused and editor_has_range) return .editor_slice;
+    if (page_has_text) return .page_slice;
+    return .none;
+}
+
+/// Selection survival across scope transitions and unmounted sources (`Nano.FrameSchedule.selectionSurvivesFrame`, `#745`).
+pub fn selectionSurvivesFrame(same_scope: bool, source_mounted: bool) bool {
+    return same_scope and source_mounted;
+}
+
+/// Startup tab restoration fencing (`Nano.FrameSchedule.shouldRestoreSavedTabs`, `#797`).
+pub fn shouldRestoreSavedTabs(tabs_ready: bool, has_selected_chat: bool, single_empty_tab: bool, has_dirty_boot_draft: bool) bool {
+    return !tabs_ready and !has_selected_chat and single_empty_tab and !has_dirty_boot_draft;
+}
+
+/// Restorable tab chat eligibility (`Nano.FrameSchedule.restorableTabChat`, `#797`).
+pub fn restorableTabChat(chat_exists: bool, is_archived: bool, already_open: bool) bool {
+    return chat_exists and !is_archived and !already_open;
+}
+
+/// Sidebar `Open workspaces` visibility (`Nano.FrameSchedule.workspaceVisibleInSidebarFixed`).
+pub fn workspaceVisibleInSidebar(has_multiple_workspaces: bool, is_singleton_listed_chat: bool) bool {
+    _ = is_singleton_listed_chat;
+    return has_multiple_workspaces;
+}
+
+/// Currency-safe inline `$ ... $` delimiter rule (`Nano.FrameSchedule.isInlineMathDelimiterPair`, `#795`).
+pub fn isInlineMathDelimiterPair(
+    in_code_span: bool,
+    open_escaped: bool,
+    close_escaped: bool,
+    space_after_open: bool,
+    space_before_close: bool,
+    alnum_before_open: bool,
+    alnum_after_close: bool,
+) bool {
+    return !in_code_span and !open_escaped and !close_escaped and
+        !space_after_open and !space_before_close and
+        !alnum_before_open and !alnum_after_close;
+}
+
 test "lean StripMenu kernel: screenshot slot chevron unclipped and conservation cube holds" {
     const shot = slotChipWidths(180, 43, true, 40, true);
     try std.testing.expectEqual(@as(f32, 74), shot.dev_w);
@@ -459,4 +525,20 @@ test "lean ScrollFollow and Tween kernels: stickEndScroll quiescence and C0 reta
     try std.testing.expect(billingRank(.credits) < billingRank(.api));
     try std.testing.expect(!retainStoreOk(true, false, false));
     try std.testing.expect(!sidebarActiveOpaqueCard(true));
+    try std.testing.expect(!multilineFieldScrollbar(true, true, true));
+    try std.testing.expectEqual(SelectionOwner.page, stepSelectionOwner(.editor, .page_select));
+    try std.testing.expectEqual(SelectionOwner.editor, stepSelectionOwner(.page, .editor_select_or_edit));
+    try std.testing.expectEqual(SelectionOwner.page, stepSelectionOwner(.page, .noop_undo_redo));
+    try std.testing.expectEqual(CopyTarget.page_slice, decideCopyTarget(false, false, true));
+    try std.testing.expectEqual(CopyTarget.editor_slice, decideCopyTarget(true, true, true));
+    try std.testing.expect(!selectionSurvivesFrame(false, true));
+    try std.testing.expect(!selectionSurvivesFrame(true, false));
+    try std.testing.expect(selectionSurvivesFrame(true, true));
+    try std.testing.expect(!shouldRestoreSavedTabs(false, false, true, true));
+    try std.testing.expect(shouldRestoreSavedTabs(false, false, true, false));
+    try std.testing.expect(!restorableTabChat(true, true, false));
+    try std.testing.expect(restorableTabChat(true, false, false));
+    try std.testing.expect(workspaceVisibleInSidebar(true, true));
+    try std.testing.expect(!isInlineMathDelimiterPair(false, false, false, false, true, false, true));
+    try std.testing.expect(isInlineMathDelimiterPair(false, false, false, false, false, false, false));
 }

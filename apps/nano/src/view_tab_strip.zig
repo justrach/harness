@@ -176,6 +176,7 @@ pub fn settle(a: *App) void {
                         s.deinit(a.gpa);
                         a.tabs.splits.items[a.tabs.active] = null;
                     }
+                    if (closed_id) |x| a.tabs.rememberClosed(x);
                     a.rememberTabs();
                     if (closed_id) |x| a.archiveClosed(x, a.settings.get(.archive_sessions_on_close));
                     a.redraw();
@@ -303,6 +304,19 @@ pub fn open(a: *App, menu: Menu, target: Panel, anchor: ?ui.Rect) void {
     if (menu == .device) a.view.strip.device_anchor = anchor else a.view.strip.anchor = anchor;
     a.redraw();
 }
+
+pub fn toggleProjectPicker(a: *App) void {
+    const state = &a.view.strip;
+    if (state.menu == .folder) {
+        state.menu = null;
+        a.view.focus_composer = true;
+        a.redraw();
+        return;
+    }
+    open(a, .folder, active(a), a.view.space_anchor);
+    state.footer_folder = a.view.space_anchor != null;
+}
+
 /// Workspace focus shortcuts remain available while a folder search owns
 /// text input. Dismiss it before transferring focus, so typing cannot land
 /// in a hidden field or be swallowed by its former menu.
@@ -317,9 +331,32 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
         @import("frame_profile.zig").note(a, "cmd-]");
         a.stepPane(true);
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+    } else if (c.shortcut(.{ .key = '[', .cmd = true, .shift = true })) {
+        const n = a.tabs.items.items.len;
+        if (n > 1) a.showTab((a.tabs.active + n - 1) % n);
+        state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+    } else if (c.shortcut(.{ .key = ']', .cmd = true, .shift = true })) {
+        const n = a.tabs.items.items.len;
+        if (n > 1) a.showTab((a.tabs.active + 1) % n);
+        state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else if (c.shortcut(.{ .key = 'l', .cmd = true })) {
         state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
     } else handled = false;
+    if (!handled) {
+        for (0..8) |slot| {
+            if (c.shortcut(.{ .key = @as(u21, @intCast('1' + slot)), .ctrl = true })) {
+                if (slot < a.tabs.items.items.len) a.showTab(slot);
+                state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+                handled = true;
+                break;
+            }
+        }
+        if (!handled and c.shortcut(.{ .key = '9', .ctrl = true })) {
+            if (a.tabs.items.items.len > 0) a.showTab(a.tabs.items.items.len - 1);
+            state.focused = .{ .chat = if (a.tabs.layout()) |s| s.focus else 0 };
+            handled = true;
+        }
+    }
     if (!handled) {
         const arrows = [_]struct { u21, tabs.Direction }{ .{ ui.Shortcut.left, .left }, .{ ui.Shortcut.right, .right }, .{ ui.Shortcut.up, .up }, .{ ui.Shortcut.down, .down } };
         for (arrows) |arrow| if (c.shortcut(.{ .key = arrow[0], .cmd = true, .alt = true })) {
@@ -341,10 +378,12 @@ pub fn navigationKeys(c: *ui.Context, a: *App) bool {
 pub fn keys(c: *ui.Context, a: *App) void {
     const state = &a.view.strip;
     if (state.menu == null) return;
-    if (c.shortcut(.{ .key = ui.Shortcut.escape })) {
+    const view_mod = @import("view.zig");
+    if (c.shortcut(.{ .key = ui.Shortcut.escape }) or (state.menu == .folder and view_mod.boundShortcut(c, a, "openProjectPicker"))) {
         state.menu = null;
         a.view.focus_composer = true;
-    } else if (c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) {
+        a.redraw();
+    } else if (view_mod.boundShortcut(c, a, "newSession") or c.shortcut(.{ .key = 't', .cmd = true }) or c.shortcut(.{ .key = 'n', .cmd = true })) {
         state.menu = null;
         state.pending_folder = null;
         a.newTab();
@@ -352,10 +391,10 @@ pub fn keys(c: *ui.Context, a: *App) void {
         state.menu = null;
         state.pending_folder = null;
         a.closeByShortcut();
-    } else if (c.shortcut(.{ .key = 'd', .cmd = true })) {
+    } else if (view_mod.boundShortcut(c, a, "splitTerminal") or c.shortcut(.{ .key = 'd', .cmd = true })) {
         state.menu = null;
         splitChoosingFolder(a, .horizontal);
-    } else if (c.shortcut(.{ .key = 'd', .cmd = true, .shift = true })) {
+    } else if (view_mod.boundShortcut(c, a, "splitTerminalDown") or c.shortcut(.{ .key = 'd', .cmd = true, .shift = true })) {
         state.menu = null;
         splitChoosingFolder(a, .vertical);
     } else if (state.rows > 0) {

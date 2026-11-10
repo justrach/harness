@@ -63,6 +63,8 @@ pub const View = struct {
     chrome: @import("panel_chrome.zig").Frame = .{},
     strip: @import("view_tab_strip.zig").State = .{},
     tool_ui: @import("tool_ui_state.zig").State = .{},
+    /// The message footer's transient checkmark, keyed by its mounted control.
+    message_copy: @import("view_transcript.zig").CopyFeedback = .{},
     /// Focus before a pointer press blurs a control in the sliding sidebar.
     sidebar_press_frame: u64 = 0,
     sidebar_press_focus: bool = false,
@@ -208,6 +210,13 @@ pub const View = struct {
     /// Active streaming scroll-glide horizon and last streaming content signature.
     stream_glide_until: f64 = 0,
     stream_sig: u64 = 0,
+    /// Active rendered-selection scope signature and whitespace-origin drag state.
+    selection_scope: u64 = 0,
+    selection_had_text: bool = false,
+    whitespace_drag: struct {
+        active: bool = false,
+        origin: nanoui.ui.Point = .{},
+    } = .{},
 
     pub fn deinit(v: *View, gpa: Allocator) void {
         @import("text_buffer.zig").deinit(&v.settings_search);
@@ -360,6 +369,7 @@ pub const App = struct {
     /// ↑/↓ through the open chat's earlier prompts.
     prompt_nav: @import("prompt_history.zig").Nav = .{},
     attachments: @import("app_attachments.zig").State = .{},
+    file_drop: @import("view_attachment_drop.zig").State = .{},
     /// The last error the engine gave, shown under the composer.
     notice: [200]u8 = undefined,
     notice_len: usize = 0,
@@ -498,6 +508,7 @@ pub const App = struct {
         a.engine.deinit();
         a.reap();
         a.attachments.deinit(a.gpa);
+        a.file_drop.deinit(a.gpa);
         @import("app_send_feedback.zig").deinit(a);
         var blobs = a.tool_blobs.valueIterator();
         while (blobs.next()) |value| {
@@ -824,7 +835,13 @@ pub const App = struct {
     /// the current tabs.
     pub fn restoreTabs(a: *App) void {
         if (a.tabs_ready) return;
-        if (a.selected != null or a.tabs.items.items.len != 1 or a.tabs.current() != null) {
+        const dirty_boot_draft = a.composer.text().len > 0 or
+            @import("app_attachments.zig").count(a) > 0 or
+            a.space != null or
+            a.new_no_project or
+            a.new_device != null or
+            a.new_chat_mode;
+        if (a.selected != null or a.tabs.items.items.len != 1 or a.tabs.current() != null or dirty_boot_draft) {
             a.tabs_ready = true;
             return;
         }
@@ -836,7 +853,8 @@ pub const App = struct {
         // chat and stays empty.
         if (a.settings.open_tabs.items.len == 0) {
             const only = active orelse return;
-            if (a.findChat(only) == null) return;
+            const ch = a.findChat(only) orelse return;
+            if (ch.archived) return;
             a.tabs.setCurrent(only);
             a.tabs.clearShown();
             a.select(only, null);
@@ -845,7 +863,8 @@ pub const App = struct {
         var wanted: usize = 0;
         var active_ix: ?usize = null;
         for (a.settings.open_tabs.items) |id| {
-            if (a.findChat(id) == null or a.tabs.find(id) != null) continue;
+            const ch = a.findChat(id) orelse continue;
+            if (ch.archived or a.tabs.find(id) != null) continue;
             if (wanted == 0) a.tabs.setCurrent(id) else {
                 a.tabs.newTab();
                 a.tabs.setCurrent(id);
@@ -1019,7 +1038,7 @@ pub const App = struct {
         drafts.adopt(a, fresh);
     }
 
-    /// Sidebar / All sessions "+": an independent workspace, not another
+    /// Sidebar "+": an independent workspace, not another
     /// tab inside the focused panel. Keep the entire old split and its
     /// focused draft parked together for when that workspace is reopened.
     pub fn newWorkspaceSession(a: *App) void {
@@ -1108,6 +1127,27 @@ pub const App = struct {
         } else if (was_chat and a.selected == null) {
             @import("app_attachments.zig").clear(a);
             a.composer.clear();
+        }
+    }
+
+    /// Reopen the most recently closed chat tab (⌘⇧T).
+    pub fn reopenClosedTab(a: *App) void {
+        while (a.tabs.popClosed()) |id| {
+            defer a.gpa.free(id);
+            if (a.tabs.find(id) != null) continue;
+            const ch = a.findChat(id) orelse continue;
+            if (ch.archived) continue;
+            if (a.selected == null and a.composer.text().len == 0 and @import("app_attachments.zig").count(a) == 0) {
+                a.tabs.setCurrent(id);
+                a.select(id, ch.space_id);
+            } else {
+                a.newTab();
+                a.tabs.setCurrent(id);
+                a.select(id, ch.space_id);
+            }
+            a.rememberTabs();
+            a.redraw();
+            return;
         }
     }
 

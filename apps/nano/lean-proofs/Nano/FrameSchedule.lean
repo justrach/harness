@@ -449,4 +449,193 @@ theorem fixed_filter_keeps_live_or_in_window (m : SidebarMark) :
     keepChatFixed .awaitingInput false = true := by
   cases m <;> decide
 
+/-- Multiline editor scrollbar policy (`view_composer.zig`, `view_write.zig`,
+`view_question.zig`, `view_actions.zig`):
+In `nanoui`, `ui.textField` appends its caret rectangle as a child leaf of the
+`.scroll` container while `c.focus == id`. When `paintScrollbars` sums direct
+child heights (`content_h += cr.h + gap`), the caret leaf inflates `content_h`
+above `r.h` even on a 1-line or auto-growing prompt, painting a floating 4px
+vertical scrollbar thumb whose height and position jump as the caret blinks or
+lines wrap. Disabling `scroll_bar` on multiline text fields (`multilineFieldScrollbar = false`)
+eliminates the phantom bar across all prompt lengths and focus states. -/
+def multilineFieldScrollbar (_focused _caretVisible _hasOverflow : Bool) : Bool :=
+  false
+
+theorem multiline_field_never_paints_phantom_scrollbar (focused caretVisible hasOverflow : Bool) :
+    multilineFieldScrollbar focused caretVisible hasOverflow = false := by
+  rfl
+
+/-- Exclusive selection ownership between editable text fields (`c.edits`) and
+rendered page text (`c.selection`), plus `Cmd+C` copy routing (`view.zig`,
+`view_composer.zig`):
+At most one selection owner (`none`, `editor`, or `page`) is active after
+settling input for a frame. Starting or dragging a page selection collapses the
+editor selection; clicking or moving the caret/selection inside an editor clears
+the page selection; and a no-op Undo/Redo when the undo stack is empty preserves
+the current owner. -/
+inductive SelectionOwner where
+  | none
+  | editor
+  | page
+deriving DecidableEq, Repr, BEq
+
+inductive SelectionEvent where
+  | pageSelect
+  | editorSelectOrEdit
+  | noopUndoRedo
+  | clearAll
+deriving DecidableEq, Repr, BEq
+
+def stepSelectionOwner (cur : SelectionOwner) (ev : SelectionEvent) : SelectionOwner :=
+  match ev with
+  | .pageSelect         => .page
+  | .editorSelectOrEdit => .editor
+  | .noopUndoRedo       => cur
+  | .clearAll           => .none
+
+def hasDualSelection (owner : SelectionOwner) : Bool :=
+  owner == .editor && owner == .page
+
+theorem selection_owner_mutually_exclusive (cur : SelectionOwner) (ev : SelectionEvent) :
+    hasDualSelection (stepSelectionOwner cur ev) = false := by
+  cases cur <;> cases ev <;> rfl
+
+theorem page_selection_preempts_editor (cur : SelectionOwner) :
+    stepSelectionOwner cur .pageSelect = .page := by
+  rfl
+
+theorem editor_selection_preempts_page (cur : SelectionOwner) :
+    stepSelectionOwner cur .editorSelectOrEdit = .editor := by
+  rfl
+
+theorem noop_undo_redo_preserves_page_selection :
+    stepSelectionOwner .page .noopUndoRedo = .page := by
+  rfl
+
+/-- `Cmd+C` copy target resolution (`view.zig:settleSelectionPostTree`):
+Copies the editor slice iff the composer is focused with a non-empty range
+(`editorFocused && editorHasRange`), else copies the rendered page selection iff
+`pageHasText`, else performs no copy. -/
+inductive CopyTarget where
+  | none
+  | editorSlice
+  | pageSlice
+deriving DecidableEq, Repr, BEq
+
+def decideCopyTarget (editorFocused editorHasRange pageHasText : Bool) : CopyTarget :=
+  if editorFocused && editorHasRange then .editorSlice
+  else if pageHasText then .pageSlice
+  else .none
+
+theorem page_selection_copies_when_editor_unfocused_or_collapsed (editorFocused : Bool) :
+    decideCopyTarget editorFocused false true = .pageSlice ∧
+    decideCopyTarget false true true = .pageSlice := by
+  cases editorFocused <;> decide
+
+/-- Whitespace-origin drag snapping (`view.zig:hitLeafIndex` / `findNearestSelectableLeaf`, `#717`):
+When a pointer drag starts or ends in padding/margin outside a selectable text leaf
+(`[leafStart, leafEnd]`), the character offset snaps to `0` above/left of the leaf
+and to `textLen` below/right of the leaf, so dragging from bubble/row padding
+cleanly selects the boundary characters. -/
+def snapWhitespaceOffset (coord leafStart leafEnd textLen : Nat) : Nat :=
+  if coord <= leafStart then 0
+  else if coord >= leafEnd then textLen
+  else textLen / 2
+
+theorem whitespace_before_leaf_snaps_to_start (coord leafStart leafEnd textLen : Nat)
+    (h : coord <= leafStart) :
+    snapWhitespaceOffset coord leafStart leafEnd textLen = 0 := by
+  simp [snapWhitespaceOffset, h]
+
+theorem whitespace_after_leaf_snaps_to_end (coord leafStart leafEnd textLen : Nat)
+    (h1 : ¬ coord <= leafStart) (h2 : coord >= leafEnd) :
+    snapWhitespaceOffset coord leafStart leafEnd textLen = textLen := by
+  simp [snapWhitespaceOffset, h1, h2]
+
+/-- Selection survival across scope transitions and unmounted sources (`#745`):
+A rendered-text selection survives into the next frame iff `sameScope = true`
+(same active tab, chat, settings/write page, and question wizard prompt) AND
+`sourceMounted = true` (its selected nodes still produced non-empty text). -/
+def selectionSurvivesFrame (sameScope sourceMounted : Bool) : Bool :=
+  sameScope && sourceMounted
+
+theorem scope_change_or_unmount_clears_selection (sameScope sourceMounted : Bool) :
+    selectionSurvivesFrame false sourceMounted = false ∧
+    selectionSurvivesFrame sameScope false = false := by
+  cases sameScope <;> cases sourceMounted <;> decide
+
+/-- Startup tab restoration fencing & archived-chat exclusion (`App.restoreTabs`, `#797`):
+1. `shouldRestoreSavedTabs`: asynchronous `onChats` arrival restores saved tabs only
+   once (`!tabsReady`), on a single untouched boot tab (`singleEmptyTab`), when no
+   chat was already selected (`!hasSelectedChat`) and the user has not typed, staged
+   attachments, or picked a project/device on the boot canvas (`!hasDirtyBootDraft`).
+2. `restorableTabChat`: a chat ID in `openTabs` or `tabLayout` is restorable iff it
+   exists in `chats`, is NOT `archived`, and is not already open in another tab. -/
+def shouldRestoreSavedTabs (tabsReady hasSelectedChat singleEmptyTab hasDirtyBootDraft : Bool) : Bool :=
+  !tabsReady && !hasSelectedChat && singleEmptyTab && !hasDirtyBootDraft
+
+def restorableTabChat (chatExists isArchived alreadyOpen : Bool) : Bool :=
+  chatExists && !isArchived && !alreadyOpen
+
+theorem dirty_boot_draft_blocks_tab_restore (tabsReady hasSelectedChat singleEmptyTab : Bool) :
+    shouldRestoreSavedTabs tabsReady hasSelectedChat singleEmptyTab true = false := by
+  cases tabsReady <;> cases hasSelectedChat <;> cases singleEmptyTab <;> rfl
+
+theorem archived_chat_never_restores_into_open_tabs (chatExists alreadyOpen : Bool) :
+    restorableTabChat chatExists true alreadyOpen = false := by
+  cases chatExists <;> cases alreadyOpen <;> rfl
+
+/-- Sidebar `Open workspaces` visibility (`view_sidebar.zig:openWorkspaces`):
+Every open workspace tab is listed in the sidebar tree when workspaces are shown,
+regardless of whether it currently holds a single listed conversation (`isSingletonListedChat`). -/
+def workspaceVisibleInSidebarOld (hasMultipleWorkspaces isSingletonListedChat : Bool) : Bool :=
+  hasMultipleWorkspaces && !isSingletonListedChat
+
+def workspaceVisibleInSidebarFixed (hasMultipleWorkspaces _isSingletonListedChat : Bool) : Bool :=
+  hasMultipleWorkspaces
+
+theorem fixed_sidebar_lists_single_chat_workspaces (isSingletonListedChat : Bool) :
+    workspaceVisibleInSidebarFixed true isSingletonListedChat = true := by
+  rfl
+
+/-- Currency-safe inline `$ ... $` delimiter rule (`markdown.zig:inlineMathEnd`, `#795`):
+An opening `$` and closing `$` pair forms inline math iff:
+- Not inside a code span (`!inCodeSpan`),
+- Not escaped (`!openEscaped`, `!closeEscaped`),
+- Not adjacent to inner whitespace (`!spaceAfterOpen`, `!spaceBeforeClose`),
+- Not adjacent to outer alphanumeric/digit characters (`!alnumBeforeOpen`, `!alnumAfterClose`).
+Consequently, prose currency like `$5 and $10` (where the second `$` has
+`spaceBeforeClose = true` and `alnumAfterClose = true`) is never misparsed as math. -/
+def isInlineMathDelimiterPair
+    (inCodeSpan openEscaped closeEscaped spaceAfterOpen spaceBeforeClose alnumBeforeOpen alnumAfterClose : Bool) : Bool :=
+  !inCodeSpan && !openEscaped && !closeEscaped &&
+  !spaceAfterOpen && !spaceBeforeClose &&
+  !alnumBeforeOpen && !alnumAfterClose
+
+theorem currency_prose_never_parses_as_math
+    (inCodeSpan openEscaped closeEscaped spaceAfterOpen alnumBeforeOpen : Bool) :
+    isInlineMathDelimiterPair inCodeSpan openEscaped closeEscaped spaceAfterOpen true alnumBeforeOpen true = false := by
+  cases inCodeSpan <;> cases openEscaped <;> cases closeEscaped <;>
+    cases spaceAfterOpen <;> cases alnumBeforeOpen <;> rfl
+
+theorem code_span_dollar_never_parses_as_math
+    (openEscaped closeEscaped spaceAfterOpen spaceBeforeClose alnumBeforeOpen alnumAfterClose : Bool) :
+    isInlineMathDelimiterPair true openEscaped closeEscaped spaceAfterOpen spaceBeforeClose alnumBeforeOpen alnumAfterClose = false := by
+  rfl
+
+def desktopRegressionCube : Bool :=
+  multilineFieldScrollbar true true true == false &&
+  hasDualSelection (stepSelectionOwner .editor .pageSelect) == false &&
+  hasDualSelection (stepSelectionOwner .page .editorSelectOrEdit) == false &&
+  decideCopyTarget false false true == .pageSlice &&
+  selectionSurvivesFrame false true == false &&
+  selectionSurvivesFrame true false == false &&
+  shouldRestoreSavedTabs false false true true == false &&
+  restorableTabChat true true false == false &&
+  workspaceVisibleInSidebarFixed true true == true &&
+  isInlineMathDelimiterPair false false false false true false true == false
+
+theorem desktop_regression_cube_holds : desktopRegressionCube = true := by
+  decide
+
 end Nano.FrameSchedule

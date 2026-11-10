@@ -156,6 +156,7 @@ fn buildGroup(a: *App, saved: SavedPane) !tabs.PanelTabs {
 
 fn duplicateChat(a: *App, id: ?[]const u8) ?[]u8 {
     const chat = id orelse return null;
-    if (a.findChat(chat) == null) return null;
+    const ch = a.findChat(chat) orelse return null;
+    if (ch.archived) return null;
     return a.gpa.dupe(u8, chat) catch null;
 }

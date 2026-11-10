@@ -94,6 +94,11 @@ pub const Browser = struct {
         b.app.redraw();
     }
 
+    pub fn reload(b: *Browser) void {
+        if (comptime builtin.os.tag == .macos) if (b.native) |n| n.reload();
+        b.app.redraw();
+    }
+
     fn nativeChanged(ctx: *anyopaque) void {
         const b: *Browser = @ptrCast(@alignCast(ctx));
         const n = b.native orelse return;
@@ -112,6 +117,10 @@ pub const Browser = struct {
 /// link never falls through to an OS opener or a privileged URL scheme.
 pub fn openLink(a: *App, parent: []const u8, url: []const u8) void {
     if (!web.allowedNavigation(url)) return;
+    if (!builtin.is_test and a.window != null and !a.offscreen) {
+        _ = nanoui.shell.openUrl(url);
+        return;
+    }
     open(a, parent, url, null);
 }
 
