@@ -63,6 +63,8 @@ pub const View = struct {
     chrome: @import("panel_chrome.zig").Frame = .{},
     strip: @import("view_tab_strip.zig").State = .{},
     tool_ui: @import("tool_ui_state.zig").State = .{},
+    /// The message footer's transient checkmark, keyed by its mounted control.
+    message_copy: @import("view_transcript.zig").CopyFeedback = .{},
     /// Focus before a pointer press blurs a control in the sliding sidebar.
     sidebar_press_frame: u64 = 0,
     sidebar_press_focus: bool = false,

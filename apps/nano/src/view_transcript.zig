@@ -302,7 +302,7 @@ fn user(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, col: f32, 
             else => {},
         };
     }
-    lane(c, k, e, hovered, true);
+    lane(c, a, k, e, hovered, true);
     return c.rects.get(c.node(wrap.index).id);
 }
 
@@ -353,9 +353,20 @@ fn underLastRow(c: *ui.Context, a: *const App, row: ?ui.Rect, scroll: ?ui.Rect) 
     return m.x >= pane.x and m.x < pane.x + pane.w and m.y >= r.y + r.h and m.y < c.size.h;
 }
 
+/// GPUI's copied-message check lasts 1.2 seconds. Keep only a stable control
+/// id and a deadline, not a borrowed entry id or a frame-arena string.
+pub const CopyFeedback = struct {
+    button: u64 = 0,
+    until: f64 = 0,
+
+    pub fn active(s: CopyFeedback, button: u64, now: f64) bool {
+        return s.button == button and now < s.until;
+    }
+};
+
 /// Under a message: 32 points held for its time and copy button, shown on
 /// hover (`strip`).
-fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
+fn lane(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, hovered: bool, right: bool) void {
     var l = ui.div(c).row().wFull().h(32).pt(8).gap(8).itemsCenter();
     if (right) l = l.justifyEnd();
     defer l.end();
@@ -364,13 +375,19 @@ fn lane(c: *ui.Context, k: theme.Colors, e: *const tr.Entry, hovered: bool, righ
         const buf = c.alloc().alloc(u8, 32) catch return;
         ui.text(c, formatTimestamp(buf, e.created_ms, @import("accounts.zig").localOffset(e.created_ms)), .{ .size = 12, .line_height = 12 * 1.618, .color = k.muted.alpha(0.55) });
     }
-    if (kit.iconButton(c, k, .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
+    const button = c.node(l.index).id;
+    const copied = a.view.message_copy.active(button, c.time);
+    if (copied) c.frameIn(@floatCast(a.view.message_copy.until - c.time));
+    if (kit.iconButton(c, k, if (copied) .check else .copy, .{ .size = 24, .radius = 6, .icon = 14 })) {
         var text: std.ArrayList(u8) = .empty;
         for (e.parts.items) |*p| if (p.kind == .text) {
             if (text.items.len > 0) text.appendSlice(c.alloc(), "\n\n") catch {};
             text.appendSlice(c.alloc(), p.text.items) catch {};
         };
         c.clipboard.write(c.clipboard.ctx, text.items);
+        a.view.message_copy = .{ .button = button, .until = c.time + 1.2 };
+        c.changed = true;
+        c.frameIn(0);
     }
 }
 
@@ -399,7 +416,7 @@ fn assistant(c: *ui.Context, a: *App, k: theme.Colors, e: *const tr.Entry, at: A
         partRows(c, a, k, e, e.parts.items, at, last, answer);
     if (e.status == .streaming and e.parts.items.len == 0) ui.text(c, "Working…", .{ .size = 12, .color = k.muted });
     parts_box.end();
-    if (e.status != .streaming) lane(c, k, e, hovered, false);
+    if (e.status != .streaming) lane(c, a, k, e, hovered, false);
 }
 
 /// The part a finished reply's answer starts at, which a divider heads,
